@@ -11,6 +11,23 @@ import (
 	"strings"
 )
 
+// bufferedConn wraps a net.Conn with a buffered reader and implements CloseWrite.
+type bufferedConn struct {
+	net.Conn
+	r io.Reader
+}
+
+func (b *bufferedConn) Read(p []byte) (int, error) {
+	return b.r.Read(p)
+}
+
+func (b *bufferedConn) CloseWrite() error {
+	if cw, ok := b.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
 // ServeHTTPProxy accepts connections and handles HTTP CONNECT proxy requests.
 // Each CONNECT request is forwarded either directly or through an upstream SOCKS5 proxy.
 func ServeHTTPProxy(ctx context.Context, listener net.Listener, upstream string, log *slog.Logger) {
@@ -35,23 +52,6 @@ func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer
 		}
 		go handleHTTPProxy(conn, dialer, log)
 	}
-}
-
-// bufferedConn wraps a net.Conn with a buffered reader and implements CloseWrite.
-type bufferedConn struct {
-	net.Conn
-	r io.Reader
-}
-
-func (b *bufferedConn) Read(p []byte) (int, error) {
-	return b.r.Read(p)
-}
-
-func (b *bufferedConn) CloseWrite() error {
-	if cw, ok := b.Conn.(interface{ CloseWrite() error }); ok {
-		return cw.CloseWrite()
-	}
-	return nil
 }
 
 // handleHTTPProxy handles a single HTTP CONNECT proxy connection.

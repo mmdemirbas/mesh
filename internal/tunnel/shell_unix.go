@@ -3,6 +3,7 @@
 package tunnel
 
 import (
+	"context"
 	"encoding/binary"
 	"io"
 	"log/slog"
@@ -16,7 +17,7 @@ import (
 )
 
 // handleSession handles an SSH session channel, which includes PTY allocation and shell execution.
-func handleSession(newChan ssh.NewChannel, shellCommand []string, log *slog.Logger) {
+func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, log *slog.Logger) {
 	if len(shellCommand) == 0 {
 		newChan.Reject(ssh.Prohibited, "shell execution disabled")
 		return
@@ -114,12 +115,14 @@ func handleSession(newChan ssh.NewChannel, shellCommand []string, log *slog.Logg
 					args = shellCommand[1:]
 				}
 
-				cmd = exec.Command(name, args...)
+				// Utilize context to enforce reaping on daemon exit
+				cmd = exec.CommandContext(ctx, name, args...)
+
 				if pts != nil {
 					cmd.Stdin = pts
 					cmd.Stdout = pts
 					cmd.Stderr = pts
-					// Set controlling terminal
+					// Set controlling terminal and unique process group
 					cmd.SysProcAttr = &syscall.SysProcAttr{
 						Setctty: true,
 						Setsid:  true,
@@ -128,6 +131,17 @@ func handleSession(newChan ssh.NewChannel, shellCommand []string, log *slog.Logg
 					cmd.Stdin = ch
 					cmd.Stdout = ch
 					cmd.Stderr = ch
+					cmd.SysProcAttr = &syscall.SysProcAttr{
+						Setpgid: true, // Assign process group even without PTY
+					}
+				}
+
+				// Broad target SIGKILL to the entire process group if context is canceled
+				cmd.Cancel = func() error {
+					if cmd.Process != nil {
+						return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+					}
+					return nil
 				}
 
 				err := cmd.Start()

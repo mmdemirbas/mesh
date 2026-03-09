@@ -23,7 +23,8 @@ func RunStandaloneProxies(ctx context.Context, proxies []config.Proxy, log *slog
 				return
 			}
 			defer ln.Close()
-			go func() { <-ctx.Done(); ln.Close() }()
+			stop := context.AfterFunc(ctx, func() { ln.Close() })
+			defer stop()
 
 			pLog.Info("Standalone proxy listening")
 
@@ -49,7 +50,8 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Relay, log *slog.L
 				return
 			}
 			defer ln.Close()
-			go func() { <-ctx.Done(); ln.Close() }()
+			stop := context.AfterFunc(ctx, func() { ln.Close() })
+			defer stop()
 
 			rLog.Info("TCP relay listening")
 

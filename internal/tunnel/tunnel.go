@@ -66,7 +66,6 @@ func (s *SSHServer) Run(ctx context.Context) error {
 				}
 			}
 
-			// Auth failed: consume a token (or block)
 			if err := limiter.Wait(context.Background()); err != nil {
 				return nil, err
 			}
@@ -83,7 +82,8 @@ func (s *SSHServer) Run(ctx context.Context) error {
 	defer listener.Close()
 	s.log.Info("SSH server listening")
 
-	go func() { <-ctx.Done(); listener.Close() }()
+	stop := context.AfterFunc(ctx, func() { listener.Close() })
+	defer stop()
 
 	for {
 		conn, err := listener.Accept()
@@ -141,7 +141,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 		case "direct-tcpip":
 			go handleDirectTCPIP(newChan, s.log)
 		case "session":
-			go handleSession(newChan, s.cfg.Shell, s.log)
+			go handleSession(ctx, newChan, s.cfg.Shell, s.log)
 		default:
 			newChan.Reject(ssh.UnknownChannelType, "unsupported")
 		}
@@ -211,9 +211,9 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 	}
 
 	// Apply fast crypto tuning similar to mbp-tunnel.sh / ssh-connect.sh
-	sshCfg.Config.Ciphers = []string{"chacha20-poly1305@openssh.com", "aes128-gcm@openssh.com"}
-	sshCfg.Config.KeyExchanges = []string{"curve25519-sha256@libssh.org", "curve25519-sha256"}
-	sshCfg.Config.MACs = []string{"umac-64-etm@openssh.com", "hmac-sha2-256-etm@openssh.com"}
+	sshCfg.Ciphers = []string{"chacha20-poly1305@openssh.com", "aes128-gcm@openssh.com"}
+	sshCfg.KeyExchanges = []string{"curve25519-sha256@libssh.org", "curve25519-sha256"}
+	sshCfg.MACs = []string{"umac-64-etm@openssh.com", "hmac-sha2-256-etm@openssh.com"}
 
 	log := c.log.With("set", fset.Name)
 
@@ -369,7 +369,8 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fw
 		return
 	}
 	defer listener.Close()
-	go func() { <-ctx.Done(); listener.Close() }()
+	stop := context.AfterFunc(ctx, func() { listener.Close() })
+	defer stop()
 
 	acceptAndForward(ctx, listener, func() (net.Conn, error) {
 		return net.DialTimeout("tcp", fwd.Target, 10*time.Second)
@@ -385,7 +386,8 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd
 		return
 	}
 	defer listener.Close()
-	go func() { <-ctx.Done(); listener.Close() }()
+	stop := context.AfterFunc(ctx, func() { listener.Close() })
+	defer stop()
 
 	acceptAndForward(ctx, listener, func() (net.Conn, error) {
 		return client.Dial("tcp", fwd.Target)
@@ -401,7 +403,8 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy 
 		return
 	}
 	defer listener.Close()
-	go func() { <-ctx.Done(); listener.Close() }()
+	stop := context.AfterFunc(ctx, func() { listener.Close() })
+	defer stop()
 
 	switch pxy.Type {
 	case "socks":
@@ -420,7 +423,8 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy c
 		return
 	}
 	defer listener.Close()
-	go func() { <-ctx.Done(); listener.Close() }()
+	stop := context.AfterFunc(ctx, func() { listener.Close() })
+	defer stop()
 
 	// For SOCKS, direct traffic through the SSH tunnel
 	sshDialer := func(network, addr string) (net.Conn, error) {
@@ -510,7 +514,8 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 		req.Reply(true, ssh.Marshal(struct{ Port uint32 }{actualPort}))
 	}
 
-	go func() { <-ctx.Done(); ln.Close() }()
+	stop := context.AfterFunc(ctx, func() { ln.Close() })
+	defer stop()
 
 	for {
 		conn, err := ln.Accept()

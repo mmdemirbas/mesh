@@ -126,11 +126,11 @@ func (c *Config) validate() error {
 		if s.Listen == "" {
 			return fmt.Errorf("servers[%d]: listen is required", i)
 		}
-		if s.HostKey == "" {
-			return fmt.Errorf("servers[%d]: host_key is required", i)
+		if err := requireFile(s.HostKey, "host_key"); err != nil {
+			return fmt.Errorf("servers[%d]: %w", i, err)
 		}
-		if s.AuthorizedKeys == "" {
-			return fmt.Errorf("servers[%d]: authorized_keys is required", i)
+		if err := requireFile(s.AuthorizedKeys, "authorized_keys"); err != nil {
+			return fmt.Errorf("servers[%d]: %w", i, err)
 		}
 	}
 
@@ -138,8 +138,11 @@ func (c *Config) validate() error {
 		if len(conn.Targets) == 0 {
 			return fmt.Errorf("connections[%d] %q: targets is required", i, conn.Name)
 		}
-		if conn.Auth.Key == "" {
-			return fmt.Errorf("connections[%d] %q: auth.key is required", i, conn.Name)
+		if err := requireFile(conn.Auth.Key, "auth.key"); err != nil {
+			return fmt.Errorf("connections[%d] %q: %w", i, conn.Name, err)
+		}
+		if err := requireFile(conn.Auth.KnownHosts, "auth.known_hosts"); err != nil {
+			return fmt.Errorf("connections[%d] %q: %w", i, conn.Name, err)
 		}
 		for j, fset := range conn.Forwards {
 			// Validate connection proxies
@@ -178,6 +181,16 @@ func validateProxies(proxies []Proxy) error {
 		if p.Type != "socks" && p.Type != "http" {
 			return fmt.Errorf("[%d]: type must be 'socks' or 'http'", i)
 		}
+	}
+	return nil
+}
+
+func requireFile(path, field string) error {
+	if path == "" {
+		return fmt.Errorf("%s is required", field)
+	}
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("%s file inaccessible: %w", field, err)
 	}
 	return nil
 }

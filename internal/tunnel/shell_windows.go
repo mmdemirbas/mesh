@@ -3,6 +3,7 @@
 package tunnel
 
 import (
+	"context"
 	"encoding/binary"
 	"log/slog"
 	"os/exec"
@@ -15,7 +16,7 @@ import (
 // handleSession handles an SSH session channel.
 // On Windows natively, PTY allocation via creack/pty is not fully supported in the same way.
 // We reject PTY requests but provide a basic standard pipe fallback to allow basic remote execution.
-func handleSession(newChan ssh.NewChannel, shellCommand []string, log *slog.Logger) {
+func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, log *slog.Logger) {
 	if len(shellCommand) == 0 {
 		newChan.Reject(ssh.Prohibited, "shell execution disabled")
 		return
@@ -48,7 +49,7 @@ func handleSession(newChan ssh.NewChannel, shellCommand []string, log *slog.Logg
 						args = shellCommand[1:]
 					}
 
-					cmd = exec.Command(name, args...)
+					cmd = exec.CommandContext(ctx, name, args...)
 					cmd.Stdin = ch
 					cmd.Stdout = ch
 					cmd.Stderr = ch
