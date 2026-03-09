@@ -1,0 +1,88 @@
+name: all-features-example
+
+# ==============================================================================
+# 1. Standalone Proxies & Relays (No SSH required)
+# ==============================================================================
+# 'proxies': Run standard exit nodes on THIS machine.
+proxies:
+  # SOCKS5 Proxy
+  - { type: socks, bind: "127.0.0.1:1080" }
+  # HTTP Proxy (Optional: forward traffic through an upstream SOCKS proxy)
+  - { type: http,  bind: "127.0.0.1:1081", upstream: "127.0.0.1:1080" }
+
+# 'relays': Simple TCP port forwarding from a local port to a remote IP:PORT.
+# Directly replaces `socat` setups.
+relays:
+  - { bind: "0.0.0.0:4444", target: "192.168.1.50:80" }
+
+
+# ==============================================================================
+# 2. Inbound SSH Servers (Listen for connections)
+# ==============================================================================
+# Act as an SSH daemon. You can define multiple listeners.
+servers:
+  - listen: "0.0.0.0:2222"
+    # The host key identifying this server to clients
+    host_key: ~/.ssh/keys/server/key
+    # The public keys allowed to log in
+    authorized_keys: ~/.ssh/keys/server/authorized_keys
+    # The shell to execute when a client requests an interactive session (PTY).
+    shell: [ "bash", "-l" ]
+
+
+# ==============================================================================
+# 3. Outbound SSH Connections (Dial remote servers)
+# ==============================================================================
+# Act as an SSH client. You can define multiple outbound connections.
+connections:
+  - name: my-vps-tunnel
+
+    # 'targets': A list of fallback URLs to try dialing in order.
+    # Features an automatic 1s mDNS retry and nmap self-healing for .local addresses.
+    targets:
+      - ubuntu@my-vps.local:22  # Try mDNS first
+      - ubuntu@12.34.56.78:22   # Fallback to public IP
+    
+    # How long to wait before attempting to reconnect if the session drops.
+    retry: 10s
+    
+    # Authentication credentials for the target server(s).
+    auth:
+      key: ~/.ssh/keys/client/key
+      known_hosts: ~/.ssh/keys/client/known_hosts
+
+    # --------------------------------------------------------------------------
+    # Forwarding Sets (Parallel SSH Sessions)
+    # --------------------------------------------------------------------------
+    # 'forwards' is a list of sets. Each set establishes its own purely 
+    # independent physical SSH connection beneath the hood.
+    # This maximizes throughput and prevents head-of-line blocking across tasks.
+    forwards:
+      
+      # --- Set A: Port Forwarding (-L / -R) ---
+      - name: port-mappings
+        # 'options' apply QoS diffserv settings to this specific SSH connection
+        options: { ipqos: lowdelay }
+        
+        # 'local' (-L equivalent): Listen locally (8080), forward traffic TO the peer (80).
+        local:
+          - { bind: "127.0.0.1:8080", target: "127.0.0.1:80" }
+        
+        # 'remote' (-R equivalent): Listen on the peer (9090), forward traffic BACK HERE (22).
+        remote:
+          - { bind: "0.0.0.0:9090", target: "127.0.0.1:22" }
+
+      # --- Set B: Dynamic Proxies (-D / Remote -D) ---
+      - name: dynamic-proxies
+        options: { ipqos: throughput }
+        proxies:
+          # 'local' (-D equivalent): Bind a SOCKS/HTTP proxy locally.
+          # Traffic entering this proxy (2080/2081) exits out into the peer's network.
+          local:
+            - { type: socks, bind: "127.0.0.1:2080" }
+            - { type: http,  bind: "127.0.0.1:2081", upstream: "127.0.0.1:2080" }
+          
+          # 'remote' (Reverse -D): Bind a SOCKS/HTTP proxy on the peer.
+          # Traffic entering the peer's proxy (3080) exits out into YOUR local network.
+          remote:
+            - { type: socks, bind: "127.0.0.1:3080" }

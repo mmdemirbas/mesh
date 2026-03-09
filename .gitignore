@@ -1,0 +1,9 @@
+# Binaries
+/bin/
+
+# OS
+.DS_Store
+
+# Local configs
+*.yml
+!configs/example.yml

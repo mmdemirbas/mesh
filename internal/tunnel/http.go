@@ -1,0 +1,127 @@
+package tunnel
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"strings"
+)
+
+// ServeHTTPProxy accepts connections and handles HTTP CONNECT proxy requests.
+// Each CONNECT request is forwarded either directly or through an upstream SOCKS5 proxy.
+func ServeHTTPProxy(ctx context.Context, listener net.Listener, upstream string, log *slog.Logger) {
+	dialer := func(addr string) (net.Conn, error) {
+		if upstream != "" {
+			return dialViaSocks5(net.Dial, upstream, addr)
+		}
+		return net.Dial("tcp", addr)
+	}
+	ServeHTTPProxyWithDialer(ctx, listener, dialer, log)
+}
+
+// ServeHTTPProxyWithDialer accepts connections and uses the provided dialer for upstream targets.
+func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer func(string) (net.Conn, error), log *slog.Logger) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			return
+		}
+		go handleHTTPProxy(conn, dialer, log)
+	}
+}
+
+// handleHTTPProxy handles a single HTTP CONNECT proxy connection.
+func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *slog.Logger) {
+	defer conn.Close()
+
+	br := bufio.NewReader(conn)
+	req, err := http.ReadRequest(br)
+	if err != nil {
+		return
+	}
+
+	if req.Method != http.MethodConnect {
+		resp := &http.Response{
+			StatusCode: http.StatusMethodNotAllowed,
+			ProtoMajor: 1, ProtoMinor: 1,
+			Header: make(http.Header),
+		}
+		resp.Header.Set("Allow", "CONNECT")
+		resp.Write(conn)
+		return
+	}
+
+	target := req.Host
+	if !strings.Contains(target, ":") {
+		target += ":443"
+	}
+
+	remote, err := dialer(target)
+	if err != nil {
+		log.Debug("HTTP CONNECT failed", "target", target, "error", err)
+		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+		return
+	}
+	defer remote.Close()
+
+	conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+	BiCopy(conn, remote)
+}
+
+// dialViaSocks5 connects to target through a SOCKS5 proxy, using baseDialer to reach SOCKS.
+func dialViaSocks5(baseDialer func(string, string) (net.Conn, error), socksAddr, target string) (net.Conn, error) {
+	conn, err := baseDialer("tcp", socksAddr)
+	if err != nil {
+		return nil, fmt.Errorf("socks5 dial: %w", err)
+	}
+
+	conn.Write([]byte{0x05, 0x01, 0x00}) // v5, 1 method, no auth
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	host, portStr, err := net.SplitHostPort(target)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	port := 0
+	fmt.Sscanf(portStr, "%d", &port)
+
+	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}
+	req = append(req, []byte(host)...)
+	req = append(req, byte(port>>8), byte(port&0xff))
+	conn.Write(req)
+
+	resp := make([]byte, 10)
+	if _, err := io.ReadFull(conn, resp[:4]); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if resp[1] != 0x00 {
+		conn.Close()
+		return nil, fmt.Errorf("socks5: connect failed (status %d)", resp[1])
+	}
+
+	switch resp[3] {
+	case 0x01: // IPv4
+		io.ReadFull(conn, resp[:4+2])
+	case 0x03: // Domain
+		io.ReadFull(conn, resp[:1])
+		domain := make([]byte, resp[0]+2)
+		io.ReadFull(conn, domain)
+	case 0x04: // IPv6
+		io.ReadFull(conn, resp[:16+2])
+	}
+
+	return conn, nil
+}
