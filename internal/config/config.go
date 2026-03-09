@@ -36,33 +36,40 @@ type Relay struct {
 
 // Server is an SSH server that accepts incoming connections.
 type Server struct {
-	Listen         string   `yaml:"listen"`
-	HostKey        string   `yaml:"host_key"`
-	AuthorizedKeys string   `yaml:"authorized_keys"`
-	Shell          []string `yaml:"shell"` // Command to run for interactive sessions
+	Listen         string            `yaml:"listen"`
+	HostKey        string            `yaml:"host_key"`
+	AuthorizedKeys string            `yaml:"authorized_keys"`
+	Shell          []string          `yaml:"shell"` // Command to run for interactive sessions
+	Options        map[string]string `yaml:"options"`
 }
 
 // Connection is an outbound SSH connection to a peer or standard sshd.
 type Connection struct {
-	Name     string       `yaml:"name"`
-	Targets  []string     `yaml:"targets"` // Tried in order (fallback)
-	Retry    string       `yaml:"retry"`   // Duration string, e.g. "10s"
-	Auth     AuthCfg      `yaml:"auth"`
-	Forwards []ForwardSet `yaml:"forwards"`
+	Name     string            `yaml:"name"`
+	Targets  []string          `yaml:"targets"` // Tried in order (fallback)
+	Retry    string            `yaml:"retry"`   // Duration string, e.g. "10s"
+	Auth     AuthCfg           `yaml:"auth"`
+	Options  map[string]string `yaml:"options"`
+	Forwards []ForwardSet      `yaml:"forwards"`
 }
 
 // ForwardSet represents a distinct SSH connection for a group of port forwards and proxies.
 type ForwardSet struct {
-	Name    string    `yaml:"name"`
-	Options Options   `yaml:"options"`
-	Remote  []FwdRule `yaml:"remote"`
-	Local   []FwdRule `yaml:"local"`
-	Proxies PxyCfg    `yaml:"proxies"`
+	Name    string            `yaml:"name"`
+	Options map[string]string `yaml:"options"`
+	Remote  []FwdRule         `yaml:"remote"`
+	Local   []FwdRule         `yaml:"local"`
+	Proxies PxyCfg            `yaml:"proxies"`
 }
 
-// Options allows tweaking specific SSH behavior for this forward set.
-type Options struct {
-	IPQoS string `yaml:"ipqos"` // "lowdelay", "throughput", etc.
+// GetOption retrieves a configuration value by key, case-insensitively.
+func GetOption(options map[string]string, key string) string {
+	for k, v := range options {
+		if strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return ""
 }
 
 // AuthCfg configures key-based authentication for a connection.
@@ -152,7 +159,7 @@ func (c *Config) validate() error {
 			return fmt.Errorf("connections[%d] %q: %w", i, conn.Name, err)
 		}
 		for j, fset := range conn.Forwards {
-			if err := validateIPQoS(fset.Options.IPQoS); err != nil {
+			if err := validateIPQoS(GetOption(fset.Options, "IPQoS")); err != nil {
 				return fmt.Errorf("connections[%d] %q forwards[%d] %q: %w", i, conn.Name, j, fset.Name, err)
 			}
 			// Validate connection proxies

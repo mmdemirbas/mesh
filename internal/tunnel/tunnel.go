@@ -116,6 +116,7 @@ func (s *SSHServer) Run(ctx context.Context) error {
 		},
 	}
 	sshCfg.AddHostKey(hostKey)
+	applySSHConfigOptions(&sshCfg.Config, s.cfg.Options)
 
 	listener, err := net.Listen("tcp", s.cfg.Listen)
 	if err != nil {
@@ -262,15 +263,20 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		Timeout:         15 * time.Second,
 	}
 
-	// Apply fast crypto tuning similar to mbp-tunnel.sh / ssh-connect.sh
-	sshCfg.Ciphers = []string{"chacha20-poly1305@openssh.com", "aes128-gcm@openssh.com"}
-	sshCfg.KeyExchanges = []string{"curve25519-sha256@libssh.org", "curve25519-sha256"}
-	sshCfg.MACs = []string{"umac-64-etm@openssh.com", "hmac-sha2-256-etm@openssh.com"}
+	opts := mergeOptions(c.cfg.Options, fset.Options)
+
+	if timeoutStr := config.GetOption(opts, "ConnectTimeout"); timeoutStr != "" {
+		if t, err := strconv.Atoi(timeoutStr); err == nil {
+			sshCfg.Timeout = time.Duration(t) * time.Second
+		}
+	}
+
+	applySSHConfigOptions(&sshCfg.Config, opts)
 
 	// Parse IPQoS for this forward set's connection
-	tosValue, err := ParseIPQoS(fset.Options.IPQoS)
+	tosValue, err := ParseIPQoS(config.GetOption(opts, "IPQoS"))
 	if err != nil {
-		c.log.Error("invalid ipqos", "set", fset.Name, "ipqos", fset.Options.IPQoS, "error", err)
+		c.log.Error("invalid ipqos", "set", fset.Name, "ipqos", config.GetOption(opts, "IPQoS"), "error", err)
 		return
 	}
 
@@ -769,4 +775,37 @@ func BiCopy(a, b io.ReadWriteCloser) {
 		}
 	}()
 	wg.Wait()
+}
+
+// mergeOptions merges two maps, with the child overriding the parent.
+func mergeOptions(parent, child map[string]string) map[string]string {
+	merged := make(map[string]string)
+	for k, v := range parent {
+		merged[k] = v
+	}
+	for k, v := range child {
+		merged[k] = v
+	}
+	return merged
+}
+
+// applySSHConfigOptions applies supported SSH options to the base ssh.Config.
+func applySSHConfigOptions(cfg *ssh.Config, options map[string]string) {
+	if val := config.GetOption(options, "Ciphers"); val != "" {
+		cfg.Ciphers = strings.Split(val, ",")
+	} else if len(cfg.Ciphers) == 0 {
+		cfg.Ciphers = []string{"chacha20-poly1305@openssh.com", "aes128-gcm@openssh.com"}
+	}
+
+	if val := config.GetOption(options, "KexAlgorithms"); val != "" {
+		cfg.KeyExchanges = strings.Split(val, ",")
+	} else if len(cfg.KeyExchanges) == 0 {
+		cfg.KeyExchanges = []string{"curve25519-sha256@libssh.org", "curve25519-sha256"}
+	}
+
+	if val := config.GetOption(options, "MACs"); val != "" {
+		cfg.MACs = strings.Split(val, ",")
+	} else if len(cfg.MACs) == 0 {
+		cfg.MACs = []string{"umac-64-etm@openssh.com", "hmac-sha2-256-etm@openssh.com"}
+	}
 }

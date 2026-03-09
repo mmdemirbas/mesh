@@ -1,6 +1,23 @@
 name: all-features-example
 
 # ==============================================================================
+# Common Options (YAML Anchors)
+# ==============================================================================
+# Define common SSH/SSHD options once and reuse them across different configurations.
+# These map closely to standard OpenSSH client/server configurations.
+x-ssh-options: &ssh_options
+  KexAlgorithms: "curve25519-sha256@libssh.org"
+  Ciphers: "chacha20-poly1305@openssh.com,aes128-gcm@openssh.com"
+  MACs: "umac-64-etm@openssh.com,hmac-sha2-256-etm@openssh.com"
+  ConnectTimeout: "15"
+  TCPKeepAlive: "yes"
+
+x-sshd-options: &sshd_options
+  <<: *ssh_options
+  ClientAliveInterval: "15"
+  ClientAliveCountMax: "3"
+
+# ==============================================================================
 # 1. Standalone Proxies & Relays (No SSH required)
 # ==============================================================================
 # 'proxies': Run standard exit nodes on THIS machine.
@@ -28,6 +45,8 @@ servers:
     authorized_keys: ~/.ssh/keys/server/authorized_keys
     # The shell to execute when a client requests an interactive session (PTY).
     shell: [ "bash", "-l" ]
+    # Apply common SSHD options
+    options: *sshd_options
 
 
 # ==============================================================================
@@ -51,6 +70,9 @@ connections:
       key: ~/.ssh/keys/client/key
       known_hosts: ~/.ssh/keys/client/known_hosts
 
+    # Common SSH options applied to all forwards in this connection.
+    options: *ssh_options
+
     # --------------------------------------------------------------------------
     # Forwarding Sets (Parallel SSH Sessions)
     # --------------------------------------------------------------------------
@@ -61,8 +83,8 @@ connections:
       
       # --- Set A: Port Forwarding (-L / -R) ---
       - name: port-mappings
-        # 'options' apply QoS diffserv settings to this specific SSH connection
-        options: { ipqos: lowdelay }
+        # 'options' overrides or adds to connection-level options (e.g., QoS diffserv)
+        options: { IPQoS: lowdelay }
         
         # 'local' (-L equivalent): Listen locally (8080), forward traffic TO the peer (80).
         local:
@@ -74,7 +96,7 @@ connections:
 
       # --- Set B: Dynamic Proxies (-D / Remote -D) ---
       - name: dynamic-proxies
-        options: { ipqos: throughput }
+        options: { IPQoS: throughput }
         proxies:
           # 'local' (-D equivalent): Bind a SOCKS/HTTP proxy locally.
           # Traffic entering this proxy (2080/2081) exits out into the peer's network.
