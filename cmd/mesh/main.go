@@ -79,7 +79,7 @@ func serveCmd() {
 		Level:      slog.LevelInfo,
 		TimeFormat: "15:04:05.000",
 	})
-	log := slog.New(logHandler)
+	log := slog.New(&padMessageHandler{Handler: logHandler, width: 30})
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -103,7 +103,7 @@ func serveCmd() {
 		Level:      logLevel,
 		TimeFormat: "15:04:05.000",
 	})
-	log = slog.New(logHandler)
+	log = slog.New(&padMessageHandler{Handler: logHandler, width: 30})
 
 	log.Info("mesh starting", "version", version, "name", cfg.Name)
 
@@ -168,6 +168,18 @@ func serveCmd() {
 	// Wait a moment for graceful shutdown of spawned servers/clients
 	wg.Wait()
 	log.Info("mesh gracefully stopped")
+}
+
+type padMessageHandler struct {
+	slog.Handler
+	width int
+}
+
+func (h *padMessageHandler) Handle(ctx context.Context, r slog.Record) error {
+	if len(r.Message) < h.width {
+		r.Message += strings.Repeat(" ", h.width-len(r.Message))
+	}
+	return h.Handler.Handle(ctx, r)
 }
 
 func statusCmd() {

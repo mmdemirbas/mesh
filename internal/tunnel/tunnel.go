@@ -4,6 +4,7 @@ package tunnel
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -146,7 +148,11 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, cfg)
 	if err != nil {
-		s.log.Error("Handshake failed", "remote", conn.RemoteAddr(), "error", err)
+		if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) || strings.Contains(err.Error(), "connection reset by peer") {
+			s.log.Debug("Handshake failed (likely health check/scanner)", "remote", conn.RemoteAddr(), "error", err)
+		} else {
+			s.log.Error("Handshake failed", "remote", conn.RemoteAddr(), "error", err)
+		}
 		conn.Close()
 		return
 	}
