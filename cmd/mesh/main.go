@@ -29,12 +29,12 @@ func main() {
 	}
 
 	switch os.Args[1] {
-	case "serve":
-		serveCmd()
-	case "status":
-		statusCmd()
-	case "stop":
-		stopCmd()
+	case "up":
+		upCmd()
+	case "ps":
+		psCmd()
+	case "down":
+		downCmd()
 	case "version", "-v", "--version":
 		fmt.Printf("mesh %s\n", version)
 	default:
@@ -53,25 +53,25 @@ Usage:
   mesh <command> [arguments]
 
 Commands:
-  serve   Start mesh based on a config file
-  status  Check if a mesh instance is currently running
-  stop    Stop the currently running mesh instance
+  up      Start mesh based on a config file
+  ps      Check if mesh is running and show its active configuration
+  down    Stop the currently running mesh instance
   version Print the mesh version
 
 Examples:
   # Start mesh using a specific configuration file in the background
-  mesh serve -config configs/example.yml &
+  mesh up -config configs/example.yml &
 
-  # Check if the daemon is running
-  mesh status
+  # Check if the daemon is running and view configuration
+  mesh ps -config configs/example.yml
 
   # Gracefully stop the daemon
-  mesh stop
+  mesh down
 `)
 }
 
-func serveCmd() {
-	serveFS := flag.NewFlagSet("serve", flag.ExitOnError)
+func upCmd() {
+	serveFS := flag.NewFlagSet("up", flag.ExitOnError)
 	configPath := serveFS.String("config", "mesh.yml", "Path to config file")
 	serveFS.Parse(os.Args[2:])
 
@@ -182,23 +182,115 @@ func (h *padMessageHandler) Handle(ctx context.Context, r slog.Record) error {
 	return h.Handler.Handle(ctx, r)
 }
 
-func statusCmd() {
+func psCmd() {
+	psFS := flag.NewFlagSet("ps", flag.ExitOnError)
+	configPath := psFS.String("config", "mesh.yml", "Path to config file")
+	psFS.Parse(os.Args[2:])
+
+	const (
+		cReset   = "\033[0m"
+		cBold    = "\033[1m"
+		cRed     = "\033[31m"
+		cGreen   = "\033[32m"
+		cYellow  = "\033[33m"
+		cBlue    = "\033[34m"
+		cMagenta = "\033[35m"
+		cCyan    = "\033[36m"
+		cGray    = "\033[90m"
+	)
+
 	pid, err := readPidFile()
 	if err != nil || pid == 0 {
-		fmt.Println("mesh is not running.")
+		fmt.Printf("%s⨯ mesh is not running.%s\n", cRed, cReset)
 		os.Exit(3) // LSB status code for "program is not running"
 	}
 
-	if checkPid(pid) {
-		fmt.Printf("mesh is running (pid %d).\n", pid)
+	if !checkPid(pid) {
+		fmt.Printf("%s⨯ mesh is dead but pidfile exists (pid %d).%s\n", cRed, pid, cReset)
+		os.Exit(1)
+	}
+
+	fmt.Printf("%s✔ mesh is running (pid %d).%s\n\n", cGreen, pid, cReset)
+
+	cfg, err := config.LoadUnvalidated(*configPath)
+	if err != nil {
+		fmt.Printf("%s⚠ Could not load configuration to show details: %v%s\n", cYellow, err, cReset)
 		os.Exit(0)
 	}
 
-	fmt.Printf("mesh is dead but pidfile exists (pid %d).\n", pid)
-	os.Exit(1)
+	fmt.Printf("%s⚙ Configuration: %s%s%s\n", cBold, cCyan, cfg.Name, cReset)
+	fmt.Println(cGray + strings.Repeat("─", 50) + cReset)
+
+	pad := func(s string, w int) string {
+		if len(s) < w {
+			return s + strings.Repeat(" ", w-len(s))
+		}
+		return s
+	}
+
+	if len(cfg.Proxies) > 0 {
+		fmt.Printf("%s📡 Standalone Proxies%s\n", cBold, cReset)
+		for _, p := range cfg.Proxies {
+			upstream := ""
+			if p.Upstream != "" {
+				upstream = fmt.Sprintf(" %s→%s %s", cGray, cReset, p.Upstream)
+			}
+			fmt.Printf("  %s%s%s %s%s%s%s\n", cBlue, pad(strings.ToUpper(p.Type), 5), cReset, cYellow, p.Bind, cReset, upstream)
+		}
+		fmt.Println()
+	}
+
+	if len(cfg.Relays) > 0 {
+		fmt.Printf("%s🔌 Standalone Relays%s\n", cBold, cReset)
+		for _, r := range cfg.Relays {
+			fmt.Printf("  %s%s%s %s→%s %s%s%s\n", cYellow, pad(r.Bind, 21), cReset, cGray, cReset, cYellow, r.Target, cReset)
+		}
+		fmt.Println()
+	}
+
+	if len(cfg.Servers) > 0 {
+		fmt.Printf("%s🛡️  SSH Servers%s\n", cBold, cReset)
+		for _, s := range cfg.Servers {
+			fmt.Printf("  %slisten%s %s%s%s\n", cGray, cReset, cGreen, s.Listen, cReset)
+		}
+		fmt.Println()
+	}
+
+	if len(cfg.Connections) > 0 {
+		fmt.Printf("%s🚀 Outbound Connections%s\n", cBold, cReset)
+		for _, c := range cfg.Connections {
+			fmt.Printf("  %s%s%s %s(targets: %s)%s\n", cMagenta, c.Name, cReset, cGray, strings.Join(c.Targets, ", "), cReset)
+			for _, fset := range c.Forwards {
+				fmt.Printf("    %s[%s]%s\n", cCyan, fset.Name, cReset)
+				for _, fwd := range fset.Local {
+					fmt.Printf("      %s-L%s %s %s→%s %s%s%s\n", cGreen, cReset, pad(cYellow+fwd.Bind+cReset, 21+len(cYellow)+len(cReset)), cGray, cReset, cYellow, fwd.Target, cReset)
+				}
+				for _, fwd := range fset.Remote {
+					fmt.Printf("      %s-R%s %s %s→%s %s%s%s\n", cBlue, cReset, pad(cYellow+fwd.Bind+cReset, 21+len(cYellow)+len(cReset)), cGray, cReset, cYellow, fwd.Target, cReset)
+				}
+				for _, pxy := range fset.Proxies.Local {
+					upstream := ""
+					if pxy.Upstream != "" {
+						upstream = fmt.Sprintf(" %svia %s%s", cGray, pxy.Upstream, cReset)
+					}
+					fmt.Printf("      %s-D%s %s %s(%s)%s%s\n", cGreen, cReset, pad(cYellow+pxy.Bind+cReset, 21+len(cYellow)+len(cReset)), cGray, pxy.Type, cReset, upstream)
+				}
+				for _, pxy := range fset.Proxies.Remote {
+					upstream := ""
+					if pxy.Upstream != "" {
+						upstream = fmt.Sprintf(" %svia %s%s", cGray, pxy.Upstream, cReset)
+					}
+					fmt.Printf("      %s-R%s %s %s(remote %s)%s%s\n", cBlue, cReset, pad(cYellow+pxy.Bind+cReset, 21+len(cYellow)+len(cReset)), cGray, pxy.Type, cReset, upstream)
+				}
+			}
+		}
+		fmt.Println()
+	}
+
+	os.Exit(0)
 }
 
-func stopCmd() {
+func downCmd() {
 	pid, err := readPidFile()
 	if err != nil || pid == 0 {
 		fmt.Println("mesh is not running.")

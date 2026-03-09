@@ -1,3 +1,3 @@
 - Map the mux containers also
 - Compare flag-by-flag with the existing docker compose configurations
--
+- Allow granular control of connections without restarting the whole app.

@@ -95,8 +95,20 @@ type LogCfg struct {
 	Level string `yaml:"level"` // "debug", "info", "warn", "error"
 }
 
-// Load reads and parses a config file.
+// Load reads, parses, and validates a config file.
 func Load(path string) (*Config, error) {
+	cfg, err := LoadUnvalidated(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// LoadUnvalidated reads and parses a config file without checking for runtime requirements (like file existence).
+func LoadUnvalidated(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
@@ -119,8 +131,8 @@ func Load(path string) (*Config, error) {
 		cfg.Connections[i].Auth.KnownHosts = expandHome(cfg.Connections[i].Auth.KnownHosts)
 	}
 
-	if err := cfg.validate(); err != nil {
-		return nil, err
+	if cfg.Name == "" {
+		cfg.Name = "mesh"
 	}
 
 	return &cfg, nil
