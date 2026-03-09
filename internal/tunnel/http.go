@@ -37,6 +37,23 @@ func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer
 	}
 }
 
+// bufferedConn wraps a net.Conn with a buffered reader and implements CloseWrite.
+type bufferedConn struct {
+	net.Conn
+	r io.Reader
+}
+
+func (b *bufferedConn) Read(p []byte) (int, error) {
+	return b.r.Read(p)
+}
+
+func (b *bufferedConn) CloseWrite() error {
+	if cw, ok := b.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
 // handleHTTPProxy handles a single HTTP CONNECT proxy connection.
 func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *slog.Logger) {
 	defer conn.Close()
@@ -72,7 +89,11 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 	defer remote.Close()
 
 	conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
-	BiCopy(conn, remote)
+	bc := &bufferedConn{
+		Conn: conn,
+		r:    io.MultiReader(br, conn),
+	}
+	BiCopy(bc, remote)
 }
 
 // dialViaSocks5 connects to target through a SOCKS5 proxy, using baseDialer to reach SOCKS.

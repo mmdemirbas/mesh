@@ -197,8 +197,12 @@ func stopCmd() {
 }
 
 func pidFilePath() string {
-	tmpDir := os.TempDir()
-	return filepath.Join(tmpDir, "mesh.pid")
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
+	os.MkdirAll(filepath.Join(dir, "mesh"), 0700)
+	return filepath.Join(dir, "mesh", "mesh.pid")
 }
 
 func writePidFile() error {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 	"golang.org/x/time/rate"
 
 	"github.com/mmdemirbas/mesh/internal/config"
@@ -43,11 +44,22 @@ func (s *SSHServer) Run(ctx context.Context) error {
 		return fmt.Errorf("load authorized keys %s: %w", s.cfg.AuthorizedKeys, err)
 	}
 
-	// Rate limiter: 5 tokens/sec, burst size 5 (limits auth failures)
-	limiter := rate.NewLimiter(5, 5)
+	var (
+		limitersMu sync.Mutex
+		limiters   = make(map[string]*rate.Limiter)
+	)
 
 	sshCfg := &ssh.ServerConfig{
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			ip := conn.RemoteAddr().(*net.TCPAddr).IP.String()
+			limitersMu.Lock()
+			limiter, exists := limiters[ip]
+			if !exists {
+				limiter = rate.NewLimiter(5, 5)
+				limiters[ip] = limiter
+			}
+			limitersMu.Unlock()
+
 			for _, ak := range authorizedKeys {
 				if bytes.Equal(key.Marshal(), ak.Marshal()) {
 					return &ssh.Permissions{}, nil
@@ -178,11 +190,23 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		return
 	}
 
+	var hostKeyCallback ssh.HostKeyCallback
+	if c.cfg.Auth.KnownHosts != "" {
+		hkc, err := knownhosts.New(c.cfg.Auth.KnownHosts)
+		if err != nil {
+			c.log.Error("load known_hosts failed", "file", c.cfg.Auth.KnownHosts, "error", err)
+			return
+		}
+		hostKeyCallback = hkc
+	} else {
+		hostKeyCallback = ssh.InsecureIgnoreHostKey()
+		c.log.Warn("known_hosts is not configured. Vulnerable to MITM attacks.")
+	}
+
 	sshCfg := &ssh.ClientConfig{
-		User: "root",
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		// TODO: proper known_hosts
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		User:            "root",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         15 * time.Second,
 	}
 
@@ -243,25 +267,6 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 
 		log.Info("Connected", "target", target)
 
-		// Start keep-alives since ClientAliveInterval is 15 in the shell scripts
-		go func() {
-			ticker := time.NewTicker(15 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					// Send a keepalive to detect dead connections rapidly
-					_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
-					if err != nil {
-						client.Close() // Force reconnect if keepalive fails
-						return
-					}
-				}
-			}
-		}()
-
 		c.runSession(ctx, client, fset, log)
 		client.Close()
 
@@ -278,6 +283,25 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 	var wg sync.WaitGroup
 	sCtx, sCancel := context.WithCancel(ctx)
 	defer sCancel()
+
+	// Start keep-alives tied to the session context
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sCtx.Done():
+				return
+			case <-ticker.C:
+				if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+					client.Close()
+					return
+				}
+			}
+		}
+	}()
 
 	// Monitor connection
 	wg.Add(1)
