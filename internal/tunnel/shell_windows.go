@@ -3,15 +3,91 @@
 package tunnel
 
 import (
+	"encoding/binary"
 	"log/slog"
+	"os/exec"
+	"sync"
+	"syscall"
 
 	"golang.org/x/crypto/ssh"
 )
 
 // handleSession handles an SSH session channel.
-// On Windows, PTY allocation via creack/pty is not fully supported in the same way.
-// We reject shell requests for now, or just provide a basic fallback.
+// On Windows natively, PTY allocation via creack/pty is not fully supported in the same way.
+// We reject PTY requests but provide a basic standard pipe fallback to allow basic remote execution.
 func handleSession(newChan ssh.NewChannel, shellCommand []string, log *slog.Logger) {
-	log.Warn("Interactive shell/PTY is currently not supported on Windows mesh servers")
-	newChan.Reject(ssh.Prohibited, "interactive shell disabled on windows")
+	if len(shellCommand) == 0 {
+		newChan.Reject(ssh.Prohibited, "shell execution disabled")
+		return
+	}
+
+	ch, reqs, err := newChan.Accept()
+	if err != nil {
+		log.Error("Accept session channel failed", "error", err)
+		return
+	}
+
+	var (
+		cmd      *exec.Cmd
+		cmdStart sync.Once
+	)
+
+	go func() {
+		defer ch.Close()
+		for req := range reqs {
+			switch req.Type {
+			case "pty-req", "window-change":
+				if req.WantReply {
+					req.Reply(false, nil) // Reject PTY since Windows doesn't easily support it natively here
+				}
+			case "shell", "exec":
+				cmdStart.Do(func() {
+					name := shellCommand[0]
+					var args []string
+					if len(shellCommand) > 1 {
+						args = shellCommand[1:]
+					}
+
+					cmd = exec.Command(name, args...)
+					cmd.Stdin = ch
+					cmd.Stdout = ch
+					cmd.Stderr = ch
+
+					err := cmd.Start()
+					if err != nil {
+						log.Error("Start shell failed", "command", shellCommand, "error", err)
+						if req.WantReply {
+							req.Reply(false, nil)
+						}
+						return
+					}
+
+					if req.WantReply {
+						req.Reply(true, nil)
+					}
+
+					go func() {
+						err := cmd.Wait()
+						status := uint32(0)
+						if err != nil {
+							if exiterr, ok := err.(*exec.ExitError); ok {
+								if sys, ok := exiterr.Sys().(syscall.WaitStatus); ok {
+									status = uint32(sys.ExitStatus())
+								}
+							}
+						}
+
+						msg := make([]byte, 4)
+						binary.BigEndian.PutUint32(msg, status)
+						ch.SendRequest("exit-status", false, msg)
+						ch.Close()
+					}()
+				})
+			default:
+				if req.WantReply {
+					req.Reply(false, nil)
+				}
+			}
+		}
+	}()
 }

@@ -234,5 +234,9 @@ func killPid(pid int, sig syscall.Signal) error {
 	if err != nil {
 		return err
 	}
-	return process.Signal(sig)
+	if err := process.Signal(sig); err != nil {
+		// Fallback to Kill if the OS (e.g. Windows) doesn't support the specific signal.
+		return process.Kill()
+	}
+	return nil
 }
