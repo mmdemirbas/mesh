@@ -17,6 +17,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/lmittmann/tint"
 	"github.com/mmdemirbas/mesh/internal/config"
@@ -290,6 +291,10 @@ func psCmd() {
 		return regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(str, "")
 	}
 
+	visibleLen := func(str string) int {
+		return utf8.RuneCountInString(stripANSI(str))
+	}
+
 	colorAddr := func(addr string) string {
 		if addr == "" {
 			return ""
@@ -333,7 +338,6 @@ func psCmd() {
 	arrowLeft := cMagenta + "◀──" + cReset
 
 	if len(cfg.Listeners) > 0 {
-		addHeader(fmt.Sprintf("%s🎧 Listeners%s", cBold, cReset))
 		for _, l := range cfg.Listeners {
 			indicator, st, _ := getComponentInfo(l.Type, l.Bind)
 			if l.Type == "sshd" {
@@ -350,11 +354,12 @@ func psCmd() {
 				// Proxy
 				indicator, st, _ = getComponentInfo("proxy", l.Bind)
 				left := colorAddr(l.Bind) + " " + cBlue + strings.ToUpper(l.Type) + cReset
-				arrow := ""
+				arrow := arrowRight
 				right := ""
 				if l.Target != "" {
-					arrow = arrowRight
 					right = colorAddr(l.Target)
+				} else {
+					right = cGray + "direct" + cReset
 				}
 				addRow("", indicator, left, arrow, right, st)
 			}
@@ -363,7 +368,6 @@ func psCmd() {
 	}
 
 	if len(cfg.Connections) > 0 {
-		addHeader(fmt.Sprintf("%s🚀 Connections%s", cBold, cReset))
 		for _, c := range cfg.Connections {
 			addHeader(fmt.Sprintf("%s%s%s", cMagenta, c.Name, cReset))
 
@@ -442,7 +446,7 @@ func psCmd() {
 			if r.indicator != "" {
 				l += 2 // '⚪ ' indicator plus space
 			}
-			l += len(stripANSI(r.left))
+			l += visibleLen(r.left)
 			if l > maxTotalLeft {
 				maxTotalLeft = l
 			}
@@ -459,7 +463,7 @@ func psCmd() {
 			line += r.left
 
 			if r.arrow != "" || r.right != "" {
-				currentLen := len(stripANSI(line))
+				currentLen := visibleLen(line)
 				padLen := 0
 				if maxTotalLeft > currentLen {
 					padLen = maxTotalLeft - currentLen
@@ -468,7 +472,7 @@ func psCmd() {
 			}
 			rows[i].text = line
 
-			l := len(stripANSI(line))
+			l := visibleLen(line)
 			if l > maxLineLen {
 				maxLineLen = l
 			}
@@ -491,7 +495,7 @@ func psCmd() {
 		line := r.text
 
 		if r.status != "" {
-			lineLen := len(stripANSI(line))
+			lineLen := visibleLen(line)
 			if lineLen < statusPadCol {
 				line += strings.Repeat(" ", statusPadCol-lineLen)
 			} else {
