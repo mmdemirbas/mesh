@@ -1,4 +1,4 @@
-package tunnel
+package proxy
 
 import (
 	"context"
@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net"
 	"time"
+
+	"github.com/mmdemirbas/mesh/internal/netutil"
 )
 
 // ServeSocks accepts connections on listener and handles SOCKS5 for each.
@@ -22,7 +24,7 @@ func ServeSocks(ctx context.Context, listener net.Listener, dialer func(string, 
 			time.Sleep(50 * time.Millisecond) // backoff on transient errors
 			continue
 		}
-		ApplyTCPKeepAlive(conn)
+		netutil.ApplyTCPKeepAlive(conn)
 		go handleSocks5(conn, dialer, log)
 	}
 }
@@ -106,7 +108,7 @@ func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), 
 	if err := socksReply(conn, 0x00); err != nil {
 		return
 	}
-	BiCopy(conn, remote)
+	netutil.BiCopy(conn, remote)
 }
 
 func socksReply(conn net.Conn, status byte) error {

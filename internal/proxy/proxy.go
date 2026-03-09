@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/mmdemirbas/mesh/internal/config"
-	"github.com/mmdemirbas/mesh/internal/tunnel"
+	"github.com/mmdemirbas/mesh/internal/netutil"
 )
 
 // RunStandaloneProxies starts all standalone (always-on) SOCKS/HTTP proxies.
@@ -34,9 +34,9 @@ func RunStandaloneProxies(ctx context.Context, proxies []config.Proxy, log *slog
 
 			switch p.Type {
 			case "socks":
-				tunnel.ServeSocks(ctx, ln, nil, pLog)
+				ServeSocks(ctx, ln, nil, pLog)
 			case "http":
-				tunnel.ServeHTTPProxy(ctx, ln, p.Upstream, pLog)
+				ServeHTTPProxy(ctx, ln, p.Upstream, pLog)
 			}
 		}()
 	}
@@ -70,7 +70,7 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Relay, log *slog.L
 					}
 					continue
 				}
-				tunnel.ApplyTCPKeepAlive(conn)
+				netutil.ApplyTCPKeepAlive(conn)
 
 				go func(c net.Conn) {
 					defer c.Close()
@@ -79,9 +79,9 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Relay, log *slog.L
 						rLog.Debug("Relay dial failed", "error", err)
 						return
 					}
-					tunnel.ApplyTCPKeepAlive(targetConn)
+					netutil.ApplyTCPKeepAlive(targetConn)
 					defer targetConn.Close()
-					tunnel.BiCopy(c, targetConn)
+					netutil.BiCopy(c, targetConn)
 				}(conn)
 			}
 		}()

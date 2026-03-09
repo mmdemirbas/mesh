@@ -1,4 +1,4 @@
-package tunnel
+package proxy
 
 import (
 	"bufio"
@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mmdemirbas/mesh/internal/netutil"
 )
 
 // bufferedConn wraps a net.Conn with a buffered reader and implements CloseWrite.
@@ -35,7 +37,7 @@ func (b *bufferedConn) CloseWrite() error {
 func ServeHTTPProxy(ctx context.Context, listener net.Listener, upstream string, log *slog.Logger) {
 	dialer := func(addr string) (net.Conn, error) {
 		if upstream != "" {
-			return dialViaSocks5(net.Dial, upstream, addr)
+			return DialViaSocks5(net.Dial, upstream, addr)
 		}
 		return net.Dial("tcp", addr)
 	}
@@ -54,7 +56,7 @@ func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer
 			time.Sleep(50 * time.Millisecond) // backoff on transient errors
 			continue
 		}
-		ApplyTCPKeepAlive(conn)
+		netutil.ApplyTCPKeepAlive(conn)
 		go handleHTTPProxy(conn, dialer, log)
 	}
 }
@@ -101,11 +103,11 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 		Conn: conn,
 		r:    io.MultiReader(br, conn),
 	}
-	BiCopy(bc, remote)
+	netutil.BiCopy(bc, remote)
 }
 
-// dialViaSocks5 connects to target through a SOCKS5 proxy, using baseDialer to reach SOCKS.
-func dialViaSocks5(baseDialer func(string, string) (net.Conn, error), socksAddr, target string) (net.Conn, error) {
+// DialViaSocks5 connects to target through a SOCKS5 proxy, using baseDialer to reach SOCKS.
+func DialViaSocks5(baseDialer func(string, string) (net.Conn, error), socksAddr, target string) (net.Conn, error) {
 	conn, err := baseDialer("tcp", socksAddr)
 	if err != nil {
 		return nil, fmt.Errorf("socks5 dial: %w", err)

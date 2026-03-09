@@ -22,6 +22,8 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/mmdemirbas/mesh/internal/config"
+	"github.com/mmdemirbas/mesh/internal/netutil"
+	"github.com/mmdemirbas/mesh/internal/proxy"
 )
 
 // --- SSH Server (accepts incoming connections) ---
@@ -142,7 +144,7 @@ func (s *SSHServer) Run(ctx context.Context) error {
 }
 
 func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.ServerConfig) {
-	ApplyTCPKeepAlive(conn)
+	netutil.ApplyTCPKeepAlive(conn)
 	// Set a generous handshake deadline for high-latency links; always clear it afterward.
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
 	defer conn.SetDeadline(time.Time{})
@@ -316,7 +318,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 				continue
 			}
 		}
-		ApplyTCPKeepAlive(conn)
+		netutil.ApplyTCPKeepAlive(conn)
 
 		sshConn, chans, reqs, err := ssh.NewClientConn(conn, host, sshCfg)
 		if err != nil {
@@ -474,9 +476,9 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy 
 
 	switch pxy.Type {
 	case "socks":
-		ServeSocks(ctx, listener, nil, log) // nil dialer = exit locally
+		proxy.ServeSocks(ctx, listener, nil, log) // nil dialer = exit locally
 	case "http":
-		ServeHTTPProxy(ctx, listener, pxy.Upstream, log) // Upstream dialed locally
+		proxy.ServeHTTPProxy(ctx, listener, pxy.Upstream, log) // Upstream dialed locally
 	}
 }
 
@@ -499,16 +501,16 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy c
 
 	switch pxy.Type {
 	case "socks":
-		ServeSocks(ctx, listener, sshDialer, log)
+		proxy.ServeSocks(ctx, listener, sshDialer, log)
 	case "http":
 		// Wrap the upstream SOCKS or target destination in the SSH dialer
 		httpDialer := func(addr string) (net.Conn, error) {
 			if pxy.Upstream != "" {
-				return dialViaSocks5(sshDialer, pxy.Upstream, addr)
+				return proxy.DialViaSocks5(sshDialer, pxy.Upstream, addr)
 			}
 			return sshDialer("tcp", addr)
 		}
-		ServeHTTPProxyWithDialer(ctx, listener, httpDialer, log)
+		proxy.ServeHTTPProxyWithDialer(ctx, listener, httpDialer, log)
 	}
 }
 
@@ -591,21 +593,23 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 		if err != nil {
 			return
 		}
-		ApplyTCPKeepAlive(conn)
+		netutil.ApplyTCPKeepAlive(conn)
 		go func() {
 			defer conn.Close()
 			origin := conn.RemoteAddr().(*net.TCPAddr)
 			payload := ssh.Marshal(struct {
-				DestAddr, OriginAddr string
-				DestPort, OriginPort uint32
-			}{fwdReq.BindAddr, origin.IP.String(), fwdReq.BindPort, uint32(origin.Port)})
+				DestAddr   string
+				DestPort   uint32
+				OriginAddr string
+				OriginPort uint32
+			}{fwdReq.BindAddr, fwdReq.BindPort, origin.IP.String(), uint32(origin.Port)})
 
 			ch, reqs, err := sshConn.OpenChannel("forwarded-tcpip", payload)
 			if err != nil {
 				return
 			}
 			go ssh.DiscardRequests(reqs)
-			BiCopy(conn, ch)
+			netutil.BiCopy(conn, ch)
 			ch.Close()
 		}()
 	}
@@ -653,7 +657,7 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger) {
 		newChan.Reject(ssh.ConnectionFailed, err.Error())
 		return
 	}
-	ApplyTCPKeepAlive(conn)
+	netutil.ApplyTCPKeepAlive(conn)
 
 	ch, chReqs, err := newChan.Accept()
 	if err != nil {
@@ -661,7 +665,7 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger) {
 		return
 	}
 	go ssh.DiscardRequests(chReqs)
-	BiCopy(ch, conn)
+	netutil.BiCopy(ch, conn)
 	ch.Close()
 	conn.Close()
 }
@@ -676,7 +680,7 @@ func acceptAndForward(ctx context.Context, listener net.Listener, dialer func() 
 			}
 			return
 		}
-		ApplyTCPKeepAlive(conn)
+		netutil.ApplyTCPKeepAlive(conn)
 		go func() {
 			defer conn.Close()
 			target, err := dialer()
@@ -685,7 +689,7 @@ func acceptAndForward(ctx context.Context, listener net.Listener, dialer func() 
 				return
 			}
 			defer target.Close()
-			BiCopy(conn, target)
+			netutil.BiCopy(conn, target)
 		}()
 	}
 }
@@ -745,36 +749,6 @@ func parseTarget(target string) (user, host string) {
 func retryDelay(base time.Duration) time.Duration {
 	jitter := time.Duration(rand.Int63n(int64(base / 4)))
 	return base + jitter
-}
-
-// ApplyTCPKeepAlive enables TCP keep-alive on the connection if it is a *net.TCPConn.
-// For non-TCP connections (e.g. SSH channel wrappers from client.Listen), this is a
-// silent no-op by design — keepalives are managed at the SSH layer for those.
-func ApplyTCPKeepAlive(conn net.Conn) {
-	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		tcpConn.SetKeepAlive(true)
-		tcpConn.SetKeepAlivePeriod(30 * time.Second)
-	}
-}
-
-func BiCopy(a, b io.ReadWriteCloser) {
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		io.Copy(a, b)
-		if c, ok := a.(interface{ CloseWrite() error }); ok {
-			c.CloseWrite()
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		io.Copy(b, a)
-		if c, ok := b.(interface{ CloseWrite() error }); ok {
-			c.CloseWrite()
-		}
-	}()
-	wg.Wait()
 }
 
 // mergeOptions merges two maps, with the child overriding the parent.
