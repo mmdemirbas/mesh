@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mmdemirbas/mesh/internal/config/config",
+  "$ref": "#/$defs/Config",
+  "$defs": {
+    "AuthCfg": {
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "Path to the private SSH key."
+        },
+        "known_hosts": {
+          "type": "string",
+          "description": "Path to the known_hosts file."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "key",
+        "known_hosts"
+      ],
+      "description": "AuthCfg configures key-based authentication for a connection."
+    },
+    "Config": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "A friendly name for this mesh instance. Defaults to \"mesh\"."
+        },
+        "listeners": {
+          "items": {
+            "$ref": "#/$defs/Listener"
+          },
+          "type": "array",
+          "description": "Local server ports to bind (e.g., SOCKS, HTTP proxies, Relays, or an embedded SSH server)."
+        },
+        "connections": {
+          "items": {
+            "$ref": "#/$defs/Connection"
+          },
+          "type": "array",
+          "description": "Outbound SSH connections to other peers, which encapsulate port forwards and proxy rules."
+        },
+        "log": {
+          "$ref": "#/$defs/LogCfg",
+          "description": "Logging configuration."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "Config is the top-level mesh configuration schema."
+    },
+    "Connection": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "A unique identifier for this connection."
+        },
+        "targets": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "A list of target addresses to attempt dialing in order (e.g., [\"user@192.168.1.50:22\", \"user@public-ip:22\"])."
+        },
+        "retry": {
+          "type": "string",
+          "description": "How long to wait before attempting to reconnect if the session drops (e.g., \"10s\")."
+        },
+        "auth": {
+          "$ref": "#/$defs/AuthCfg",
+          "description": "Authentication credentials for the target server(s)."
+        },
+        "options": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Common SSH options applied to all forwards in this connection."
+        },
+        "forwards": {
+          "items": {
+            "$ref": "#/$defs/ForwardSet"
+          },
+          "type": "array",
+          "description": "A list of forwarding sets. Each set establishes its own purely independent physical SSH connection for maximum throughput."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "targets",
+        "retry",
+        "auth"
+      ],
+      "description": "Connection is an outbound SSH connection to a peer or standard SSH server."
+    },
+    "Forward": {
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "forward",
+            "socks",
+            "http"
+          ],
+          "description": "The type of forward. Can be \"forward\", \"socks\", or \"http\". Defaults to \"forward\"."
+        },
+        "bind": {
+          "type": "string",
+          "description": "The address to bind and listen on."
+        },
+        "target": {
+          "type": "string",
+          "description": "Where to connect traffic to (or upstream for proxies). Optional for socks/http."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "bind"
+      ],
+      "description": "Forward is a single unified rule for port forwarding or proxying."
+    },
+    "ForwardSet": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "A unique identifier for this forwarding set."
+        },
+        "options": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Options overrides or adds to connection-level options (e.g., IPQoS)."
+        },
+        "remote": {
+          "items": {
+            "$ref": "#/$defs/Forward"
+          },
+          "type": "array",
+          "description": "Reverse forwards (-R). Listens on the remote peer, traffic exits your local machine."
+        },
+        "local": {
+          "items": {
+            "$ref": "#/$defs/Forward"
+          },
+          "type": "array",
+          "description": "Local forwards (-L). Listens locally, traffic exits the remote peer."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "ForwardSet represents a distinct SSH connection for a group of port forwards and proxies."
+    },
+    "Listener": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Optional friendly name for this listener."
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "socks",
+            "http",
+            "relay",
+            "sshd"
+          ],
+          "description": "The type of listener to create. Can be \"socks\", \"http\", \"relay\", or \"sshd\"."
+        },
+        "bind": {
+          "type": "string",
+          "description": "Local listening address (e.g., \"127.0.0.1:1080\" or \"0.0.0.0:2222\")."
+        },
+        "target": {
+          "type": "string",
+          "description": "The destination address. Required for \"relay\", optional for \"http\" (forces it to act as a tunnel to a specific proxy)."
+        },
+        "host_key": {
+          "type": "string",
+          "description": "Path to the private host key. Required when type=\"sshd\"."
+        },
+        "authorized_keys": {
+          "type": "string",
+          "description": "Path to the authorized_keys file. Required when type=\"sshd\"."
+        },
+        "shell": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Command to execute on SSH session start (e.g., [\"bash\", \"-l\"]). Default drops into a basic shell."
+        },
+        "options": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Additional overrides for the listener."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "type",
+        "bind"
+      ],
+      "description": "Listener represents a local server port (proxy, relay, or sshd)."
+    },
+    "LogCfg": {
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "description": "Log level: \"debug\", \"info\", \"warn\", or \"error\". Defaults to \"info\"."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "LogCfg configures logging behavior."
+    }
+  }
+}

@@ -11,52 +11,78 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the top-level mesh configuration.
+// Config is the top-level mesh configuration schema.
+// It defines local listeners and outbound connections to other mesh nodes or SSH servers.
 type Config struct {
-	Name        string       `yaml:"name"`
-	Listeners   []Listener   `yaml:"listeners"`
-	Connections []Connection `yaml:"connections"`
-	Log         LogCfg       `yaml:"log"`
+	// A friendly name for this mesh instance. Defaults to "mesh".
+	Name string `yaml:"name,omitempty"`
+	// Local server ports to bind (e.g., SOCKS, HTTP proxies, Relays, or an embedded SSH server).
+	Listeners []Listener `yaml:"listeners,omitempty"`
+	// Outbound SSH connections to other peers, which encapsulate port forwards and proxy rules.
+	Connections []Connection `yaml:"connections,omitempty"`
+	// Logging configuration.
+	Log LogCfg `yaml:"log,omitempty"`
 }
 
 // Listener represents a local server port (proxy, relay, or sshd).
 type Listener struct {
-	Name           string            `yaml:"name,omitempty"`
-	Type           string            `yaml:"type"`             // "socks", "http", "relay", "sshd"
-	Bind           string            `yaml:"bind"`             // Where to listen locally
-	Target         string            `yaml:"target,omitempty"` // For relays or http proxies (upstream)
-	HostKey        string            `yaml:"host_key,omitempty"`
-	AuthorizedKeys string            `yaml:"authorized_keys,omitempty"`
-	Shell          []string          `yaml:"shell,omitempty"`
-	Options        map[string]string `yaml:"options,omitempty"`
+	// Optional friendly name for this listener.
+	Name string `yaml:"name,omitempty"`
+	// The type of listener to create. Can be "socks", "http", "relay", or "sshd".
+	Type string `yaml:"type" jsonschema:"enum=socks,enum=http,enum=relay,enum=sshd"`
+	// Local listening address (e.g., "127.0.0.1:1080" or "0.0.0.0:2222").
+	Bind string `yaml:"bind"`
+	// The destination address. Required for "relay", optional for "http" (forces it to act as a tunnel to a specific proxy).
+	Target string `yaml:"target,omitempty"`
+	// Path to the private host key. Required when type="sshd".
+	HostKey string `yaml:"host_key,omitempty"`
+	// Path to the authorized_keys file. Required when type="sshd".
+	AuthorizedKeys string `yaml:"authorized_keys,omitempty"`
+	// Command to execute on SSH session start (e.g., ["bash", "-l"]). Default drops into a basic shell.
+	Shell []string `yaml:"shell,omitempty"`
+	// Additional overrides for the listener.
+	Options map[string]string `yaml:"options,omitempty"`
 }
 
 // Proxy is not needed as a separate type, but if there's any standalone usage,
 // Listener covers it. So we remove Proxy.
 
-// Connection is an outbound SSH connection to a peer or standard sshd.
+// Connection is an outbound SSH connection to a peer or standard SSH server.
 type Connection struct {
-	Name     string            `yaml:"name"`
-	Targets  []string          `yaml:"targets"` // Tried in order (fallback)
-	Retry    string            `yaml:"retry"`   // Duration string, e.g. "10s"
-	Auth     AuthCfg           `yaml:"auth"`
-	Options  map[string]string `yaml:"options"`
-	Forwards []ForwardSet      `yaml:"forwards"`
+	// A unique identifier for this connection.
+	Name string `yaml:"name"`
+	// A list of target addresses to attempt dialing in order (e.g., ["user@192.168.1.50:22", "user@public-ip:22"]).
+	Targets []string `yaml:"targets"`
+	// How long to wait before attempting to reconnect if the session drops (e.g., "10s").
+	Retry string `yaml:"retry"`
+	// Authentication credentials for the target server(s).
+	Auth AuthCfg `yaml:"auth"`
+	// Common SSH options applied to all forwards in this connection.
+	Options map[string]string `yaml:"options,omitempty"`
+	// A list of forwarding sets. Each set establishes its own purely independent physical SSH connection for maximum throughput.
+	Forwards []ForwardSet `yaml:"forwards,omitempty"`
 }
 
 // ForwardSet represents a distinct SSH connection for a group of port forwards and proxies.
 type ForwardSet struct {
-	Name    string            `yaml:"name"`
-	Options map[string]string `yaml:"options"`
-	Remote  []Forward         `yaml:"remote"`
-	Local   []Forward         `yaml:"local"`
+	// A unique identifier for this forwarding set.
+	Name string `yaml:"name"`
+	// Options overrides or adds to connection-level options (e.g., IPQoS).
+	Options map[string]string `yaml:"options,omitempty"`
+	// Reverse forwards (-R). Listens on the remote peer, traffic exits your local machine.
+	Remote []Forward `yaml:"remote,omitempty"`
+	// Local forwards (-L). Listens locally, traffic exits the remote peer.
+	Local []Forward `yaml:"local,omitempty"`
 }
 
 // Forward is a single unified rule for port forwarding or proxying.
 type Forward struct {
-	Type   string `yaml:"type"`   // "forward", "socks" or "http"
-	Bind   string `yaml:"bind"`   // Where to listen
-	Target string `yaml:"target"` // Where to connect (or upstream for proxy)
+	// The type of forward. Can be "forward", "socks", or "http". Defaults to "forward".
+	Type string `yaml:"type,omitempty" jsonschema:"enum=forward,enum=socks,enum=http"`
+	// The address to bind and listen on.
+	Bind string `yaml:"bind"`
+	// Where to connect traffic to (or upstream for proxies). Optional for socks/http.
+	Target string `yaml:"target,omitempty"`
 }
 
 // GetOption retrieves a configuration value by key, case-insensitively.
@@ -71,13 +97,16 @@ func GetOption(options map[string]string, key string) string {
 
 // AuthCfg configures key-based authentication for a connection.
 type AuthCfg struct {
-	Key        string `yaml:"key"`
+	// Path to the private SSH key.
+	Key string `yaml:"key"`
+	// Path to the known_hosts file.
 	KnownHosts string `yaml:"known_hosts"`
 }
 
-// LogCfg configures logging.
+// LogCfg configures logging behavior.
 type LogCfg struct {
-	Level string `yaml:"level"` // "debug", "info", "warn", "error"
+	// Log level: "debug", "info", "warn", or "error". Defaults to "info".
+	Level string `yaml:"level,omitempty" jsonschema:"enum=debug,enum=info,enum=warn,enum=error"`
 }
 
 // Load reads, parses, and validates a config file.

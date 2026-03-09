@@ -773,6 +773,7 @@ func mergeOptions(parent, child map[string]string) map[string]string {
 
 // applySSHConfigOptions applies supported SSH options to the base ssh.Config.
 func applySSHConfigOptions(cfg *ssh.Config, options map[string]string) {
+	// TODO: Do not assume any defaults beyond the actual SSH/SSHD defaults. AND support more options.
 	if val := config.GetOption(options, "Ciphers"); val != "" {
 		cfg.Ciphers = strings.Split(val, ",")
 	} else if len(cfg.Ciphers) == 0 {
