@@ -31,25 +31,25 @@ import (
 
 // SSHServer listens for incoming SSH connections and handles forwarding requests.
 type SSHServer struct {
-	cfg config.Server
+	cfg config.Listener
 	log *slog.Logger
 }
 
-func NewSSHServer(cfg config.Server, log *slog.Logger) *SSHServer {
-	return &SSHServer{cfg: cfg, log: log.With("component", "sshd", "listen", cfg.Listen)}
+func NewSSHServer(cfg config.Listener, log *slog.Logger) *SSHServer {
+	return &SSHServer{cfg: cfg, log: log.With("component", "sshd", "listen", cfg.Bind)}
 }
 
 func (s *SSHServer) Run(ctx context.Context) error {
-	state.Global.Update("server", s.cfg.Listen, state.Starting, "")
+	state.Global.Update("server", s.cfg.Bind, state.Starting, "")
 	hostKey, err := loadSigner(s.cfg.HostKey)
 	if err != nil {
-		state.Global.Update("server", s.cfg.Listen, state.Failed, err.Error())
+		state.Global.Update("server", s.cfg.Bind, state.Failed, err.Error())
 		return fmt.Errorf("load host key %s: %w", s.cfg.HostKey, err)
 	}
 
 	authorizedKeys, err := loadAuthorizedKeys(s.cfg.AuthorizedKeys)
 	if err != nil {
-		state.Global.Update("server", s.cfg.Listen, state.Failed, err.Error())
+		state.Global.Update("server", s.cfg.Bind, state.Failed, err.Error())
 		return fmt.Errorf("load authorized keys %s: %w", s.cfg.AuthorizedKeys, err)
 	}
 
@@ -124,13 +124,13 @@ func (s *SSHServer) Run(ctx context.Context) error {
 	sshCfg.AddHostKey(hostKey)
 	applySSHConfigOptions(&sshCfg.Config, s.cfg.Options)
 
-	listener, err := net.Listen("tcp", s.cfg.Listen)
+	listener, err := net.Listen("tcp", s.cfg.Bind)
 	if err != nil {
-		state.Global.Update("server", s.cfg.Listen, state.Failed, err.Error())
-		return fmt.Errorf("listen %s: %w", s.cfg.Listen, err)
+		state.Global.Update("server", s.cfg.Bind, state.Failed, err.Error())
+		return fmt.Errorf("listen %s: %w", s.cfg.Bind, err)
 	}
 	defer listener.Close()
-	state.Global.Update("server", s.cfg.Listen, state.Listening, "")
+	state.Global.Update("server", s.cfg.Bind, state.Listening, "")
 	s.log.Info("SSH server listening")
 
 	stop := context.AfterFunc(ctx, func() { listener.Close() })
@@ -482,7 +482,7 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd
 
 // runRemoteProxy binds proxy on peer, traffic exits HERE.
 func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy config.Proxy, log *slog.Logger) {
-	log.Info("Proxy remote bind", "type", pxy.Type, "bind", pxy.Bind, "upstream", pxy.Upstream)
+	log.Info("Proxy remote bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
 	listener, err := client.Listen("tcp", pxy.Bind)
 	if err != nil {
 		log.Error("Remote proxy listen failed", "bind", pxy.Bind, "error", err)
@@ -496,13 +496,13 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy 
 	case "socks":
 		proxy.ServeSocks(ctx, listener, nil, log) // nil dialer = exit locally
 	case "http":
-		proxy.ServeHTTPProxy(ctx, listener, pxy.Upstream, log) // Upstream dialed locally
+		proxy.ServeHTTPProxy(ctx, listener, pxy.Target, log) // Target dialed locally
 	}
 }
 
 // runLocalProxy binds proxy here, traffic exits PEER.
 func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy config.Proxy, log *slog.Logger) {
-	log.Info("Proxy local bind", "type", pxy.Type, "bind", pxy.Bind, "upstream", pxy.Upstream)
+	log.Info("Proxy local bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
 	listener, err := net.Listen("tcp", pxy.Bind)
 	if err != nil {
 		log.Error("Local proxy listen failed", "bind", pxy.Bind, "error", err)
@@ -523,8 +523,8 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy c
 	case "http":
 		// Wrap the upstream SOCKS or target destination in the SSH dialer
 		httpDialer := func(addr string) (net.Conn, error) {
-			if pxy.Upstream != "" {
-				return proxy.DialViaSocks5(sshDialer, pxy.Upstream, addr)
+			if pxy.Target != "" {
+				return proxy.DialViaSocks5(sshDialer, pxy.Target, addr)
 			}
 			return sshDialer("tcp", addr)
 		}

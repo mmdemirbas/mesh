@@ -18,27 +18,22 @@ x-sshd-options: &sshd_options
   ClientAliveCountMax: "3"
 
 # ==============================================================================
-# 1. Standalone Proxies & Relays (No SSH required)
+# 1. Listeners (Accept incoming connections and requests)
 # ==============================================================================
-# 'proxies': Run standard exit nodes on THIS machine.
-proxies:
+listeners:
+  # 'proxies': Run standard exit nodes on THIS machine.
   # SOCKS5 Proxy
   - { type: socks, bind: "127.0.0.1:1080" }
   # HTTP Proxy (Optional: forward traffic through an upstream SOCKS proxy)
-  - { type: http,  bind: "127.0.0.1:1081", upstream: "127.0.0.1:1080" }
+  - { type: http,  bind: "127.0.0.1:1081", target: "127.0.0.1:1080" }
 
-# 'relays': Simple TCP port forwarding from a local port to a remote IP:PORT.
-# Directly replaces `socat` setups.
-relays:
-  - { bind: "0.0.0.0:4444", target: "192.168.1.50:80" }
+  # 'relays': Simple TCP port forwarding from a local port to a remote IP:PORT.
+  # Directly replaces `socat` setups.
+  - { type: relay, bind: "0.0.0.0:4444", target: "192.168.1.50:80" }
 
-
-# ==============================================================================
-# 2. Inbound SSH Servers (Listen for connections)
-# ==============================================================================
-# Act as an SSH daemon. You can define multiple listeners.
-servers:
-- listen: "0.0.0.0:2222"
+  # 'servers': Act as an SSH daemon. You can define multiple listeners.
+  - type: sshd
+    bind: "0.0.0.0:2222"
     # The host key identifying this server to clients
     host_key: ~/.ssh/keys/server/key
     # The public keys allowed to log in
@@ -102,7 +97,7 @@ connections:
           # Traffic entering this proxy (2080/2081) exits out into the peer's network.
           local:
             - { type: socks, bind: "127.0.0.1:2080" }
-            - { type: http,  bind: "127.0.0.1:2081", upstream: "127.0.0.1:2080" }
+            - { type: http,  bind: "127.0.0.1:2081", target: "127.0.0.1:2080" }
           
           # 'remote' (Reverse -D): Bind a SOCKS/HTTP proxy on the peer.
           # Traffic entering the peer's proxy (3080) exits out into YOUR local network.

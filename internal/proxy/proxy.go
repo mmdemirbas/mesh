@@ -15,8 +15,11 @@ import (
 
 // RunStandaloneProxies starts all standalone (always-on) SOCKS/HTTP proxies.
 // Each proxy goroutine is tracked via the provided WaitGroup.
-func RunStandaloneProxies(ctx context.Context, proxies []config.Proxy, log *slog.Logger, wg *sync.WaitGroup) {
+func RunStandaloneProxies(ctx context.Context, proxies []config.Listener, log *slog.Logger, wg *sync.WaitGroup) {
 	for _, p := range proxies {
+		if p.Type != "socks" && p.Type != "http" {
+			continue
+		}
 		p := p
 		wg.Add(1)
 		go func() {
@@ -41,7 +44,7 @@ func RunStandaloneProxies(ctx context.Context, proxies []config.Proxy, log *slog
 			case "socks":
 				ServeSocks(ctx, ln, nil, pLog)
 			case "http":
-				ServeHTTPProxy(ctx, ln, p.Upstream, pLog)
+				ServeHTTPProxy(ctx, ln, p.Target, pLog)
 			}
 		}()
 	}
@@ -49,8 +52,11 @@ func RunStandaloneProxies(ctx context.Context, proxies []config.Proxy, log *slog
 
 // RunStandaloneRelays starts raw TCP relays (e.g. replacing socat).
 // Each relay goroutine is tracked via the provided WaitGroup.
-func RunStandaloneRelays(ctx context.Context, relays []config.Relay, log *slog.Logger, wg *sync.WaitGroup) {
+func RunStandaloneRelays(ctx context.Context, relays []config.Listener, log *slog.Logger, wg *sync.WaitGroup) {
 	for _, r := range relays {
+		if r.Type != "relay" {
+			continue
+		}
 		r := r
 		wg.Add(1)
 		go func() {

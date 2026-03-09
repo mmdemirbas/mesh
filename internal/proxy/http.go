@@ -34,10 +34,10 @@ func (b *bufferedConn) CloseWrite() error {
 
 // ServeHTTPProxy accepts connections and handles HTTP CONNECT proxy requests.
 // Each CONNECT request is forwarded either directly or through an upstream SOCKS5 proxy.
-func ServeHTTPProxy(ctx context.Context, listener net.Listener, upstream string, log *slog.Logger) {
+func ServeHTTPProxy(ctx context.Context, listener net.Listener, target string, log *slog.Logger) {
 	dialer := func(addr string) (net.Conn, error) {
-		if upstream != "" {
-			return DialViaSocks5(net.Dial, upstream, addr)
+		if target != "" {
+			return DialViaSocks5(net.Dial, target, addr)
 		}
 		return net.Dial("tcp", addr)
 	}

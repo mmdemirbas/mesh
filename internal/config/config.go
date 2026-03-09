@@ -14,33 +14,28 @@ import (
 // Config is the top-level mesh configuration.
 type Config struct {
 	Name        string       `yaml:"name"`
-	Proxies     []Proxy      `yaml:"proxies"`
-	Relays      []Relay      `yaml:"relays"`
-	Servers     []Server     `yaml:"servers"`
+	Listeners   []Listener   `yaml:"listeners"`
 	Connections []Connection `yaml:"connections"`
 	Log         LogCfg       `yaml:"log"`
 }
 
-// Proxy is a standalone proxy (works without any peer connection).
+// Listener represents a local server port (proxy, relay, or sshd).
+type Listener struct {
+	Name           string            `yaml:"name,omitempty"`
+	Type           string            `yaml:"type"`             // "socks", "http", "relay", "sshd"
+	Bind           string            `yaml:"bind"`             // Where to listen locally
+	Target         string            `yaml:"target,omitempty"` // For relays or http proxies (upstream)
+	HostKey        string            `yaml:"host_key,omitempty"`
+	AuthorizedKeys string            `yaml:"authorized_keys,omitempty"`
+	Shell          []string          `yaml:"shell,omitempty"`
+	Options        map[string]string `yaml:"options,omitempty"`
+}
+
+// Proxy is a connection-scoped proxy defined dynamically inside Forwards.
 type Proxy struct {
-	Type     string `yaml:"type"`               // "socks" or "http"
-	Bind     string `yaml:"bind"`               // Listen address
-	Upstream string `yaml:"upstream,omitempty"` // For HTTP proxy: optional SOCKS upstream
-}
-
-// Relay is a standalone TCP relay (e.g., replaces socat sidecar).
-type Relay struct {
-	Bind   string `yaml:"bind"`   // Where to listen locally
-	Target string `yaml:"target"` // Where to connect to
-}
-
-// Server is an SSH server that accepts incoming connections.
-type Server struct {
-	Listen         string            `yaml:"listen"`
-	HostKey        string            `yaml:"host_key"`
-	AuthorizedKeys string            `yaml:"authorized_keys"`
-	Shell          []string          `yaml:"shell"` // Command to run for interactive sessions
-	Options        map[string]string `yaml:"options"`
+	Type   string `yaml:"type"`             // "socks" or "http"
+	Bind   string `yaml:"bind"`             // Listen address
+	Target string `yaml:"target,omitempty"` // For HTTP proxy: optional SOCKS target
 }
 
 // Connection is an outbound SSH connection to a peer or standard sshd.
@@ -122,9 +117,11 @@ func LoadUnvalidated(path string) (*Config, error) {
 	}
 
 	// Expand ~ in all path fields
-	for i := range cfg.Servers {
-		cfg.Servers[i].HostKey = expandHome(cfg.Servers[i].HostKey)
-		cfg.Servers[i].AuthorizedKeys = expandHome(cfg.Servers[i].AuthorizedKeys)
+	for i := range cfg.Listeners {
+		if cfg.Listeners[i].Type == "sshd" {
+			cfg.Listeners[i].HostKey = expandHome(cfg.Listeners[i].HostKey)
+			cfg.Listeners[i].AuthorizedKeys = expandHome(cfg.Listeners[i].AuthorizedKeys)
+		}
 	}
 	for i := range cfg.Connections {
 		cfg.Connections[i].Auth.Key = expandHome(cfg.Connections[i].Auth.Key)
@@ -143,15 +140,29 @@ func (c *Config) validate() error {
 		c.Name = "mesh"
 	}
 
-	for i, s := range c.Servers {
-		if s.Listen == "" {
-			return fmt.Errorf("servers[%d]: listen is required", i)
+	for i, l := range c.Listeners {
+		if l.Bind == "" {
+			return fmt.Errorf("listeners[%d] %q: bind is required", i, l.Name)
 		}
-		if err := requireFile(s.HostKey, "host_key"); err != nil {
-			return fmt.Errorf("servers[%d]: %w", i, err)
+		if l.Type == "" {
+			return fmt.Errorf("listeners[%d] %q: type is required", i, l.Name)
 		}
-		if err := requireFile(s.AuthorizedKeys, "authorized_keys"); err != nil {
-			return fmt.Errorf("servers[%d]: %w", i, err)
+		switch l.Type {
+		case "sshd":
+			if err := requireFile(l.HostKey, "host_key"); err != nil {
+				return fmt.Errorf("listeners[%d] %q: %w", i, l.Name, err)
+			}
+			if err := requireFile(l.AuthorizedKeys, "authorized_keys"); err != nil {
+				return fmt.Errorf("listeners[%d] %q: %w", i, l.Name, err)
+			}
+		case "relay":
+			if l.Target == "" {
+				return fmt.Errorf("listeners[%d] %q: target is required for relay", i, l.Name)
+			}
+		case "socks", "http":
+			// Ok
+		default:
+			return fmt.Errorf("listeners[%d] %q: unknown type %q", i, l.Name, l.Type)
 		}
 	}
 
@@ -182,21 +193,6 @@ func (c *Config) validate() error {
 				return fmt.Errorf("connections[%d] %q forwards[%d] %q local proxies: %w", i, conn.Name, j, fset.Name, err)
 			}
 		}
-	}
-
-	// Validate standalone relays
-	for i, r := range c.Relays {
-		if r.Bind == "" {
-			return fmt.Errorf("relay[%d]: bind is required", i)
-		}
-		if r.Target == "" {
-			return fmt.Errorf("relay[%d]: target is required", i)
-		}
-	}
-
-	// Validate standalone proxies
-	if err := validateProxies(c.Proxies); err != nil {
-		return fmt.Errorf("standalone proxies: %w", err)
 	}
 
 	// Check for duplicate bind addresses across all components
@@ -251,18 +247,8 @@ func (c *Config) checkDuplicateBinds() error {
 
 		return nil
 	}
-	for i, p := range c.Proxies {
-		if err := check(p.Bind, fmt.Sprintf("proxies[%d]", i)); err != nil {
-			return err
-		}
-	}
-	for i, r := range c.Relays {
-		if err := check(r.Bind, fmt.Sprintf("relays[%d]", i)); err != nil {
-			return err
-		}
-	}
-	for i, s := range c.Servers {
-		if err := check(s.Listen, fmt.Sprintf("servers[%d]", i)); err != nil {
+	for i, l := range c.Listeners {
+		if err := check(l.Bind, fmt.Sprintf("listeners[%d]", i)); err != nil {
 			return err
 		}
 	}

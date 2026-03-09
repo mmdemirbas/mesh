@@ -147,27 +147,31 @@ func upCmd() {
 
 	var wg sync.WaitGroup
 
-	// 1. Standalone proxies
-	if len(cfg.Proxies) > 0 {
-		proxy.RunStandaloneProxies(ctx, cfg.Proxies, log, &wg)
+	// 1. Listeners (proxies, relays, ssh servers)
+	var proxies, relays []config.Listener
+	for _, l := range cfg.Listeners {
+		switch l.Type {
+		case "socks", "http":
+			proxies = append(proxies, l)
+		case "relay":
+			relays = append(relays, l)
+		case "sshd":
+			l := l
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				s := tunnel.NewSSHServer(l, log)
+				if err := s.Run(ctx); err != nil {
+					log.Error("SSH server failed", "listen", l.Bind, "error", err)
+				}
+			}()
+		}
 	}
-
-	// 2. Standalone TCP Relays (e.g. sidecar usage)
-	if len(cfg.Relays) > 0 {
-		proxy.RunStandaloneRelays(ctx, cfg.Relays, log, &wg)
+	if len(proxies) > 0 {
+		proxy.RunStandaloneProxies(ctx, proxies, log, &wg)
 	}
-
-	// 3. SSH servers (accept incoming connections)
-	for _, srv := range cfg.Servers {
-		srv := srv
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			s := tunnel.NewSSHServer(srv, log)
-			if err := s.Run(ctx); err != nil {
-				log.Error("SSH server failed", "listen", srv.Listen, "error", err)
-			}
-		}()
+	if len(relays) > 0 {
+		proxy.RunStandaloneRelays(ctx, relays, log, &wg)
 	}
 
 	// 4. Outbound connections (Multi-set forwards)
@@ -328,46 +332,38 @@ func psCmd() {
 	arrowRight := cCyan + "──▶" + cReset
 	arrowLeft := cMagenta + "◀──" + cReset
 
-	if len(cfg.Proxies) > 0 {
-		addHeader(fmt.Sprintf("%s📡 Standalone Proxies%s", cBold, cReset))
-		for _, p := range cfg.Proxies {
-			indicator, st, _ := getComponentInfo("proxy", p.Bind)
-			left := colorAddr(p.Bind) + " " + cBlue + strings.ToUpper(p.Type) + cReset
-			arrow := ""
-			right := ""
-			if p.Upstream != "" {
-				arrow = arrowRight
-				right = colorAddr(p.Upstream)
+	if len(cfg.Listeners) > 0 {
+		addHeader(fmt.Sprintf("%s🎧 Listeners%s", cBold, cReset))
+		for _, l := range cfg.Listeners {
+			indicator, st, _ := getComponentInfo(l.Type, l.Bind)
+			if l.Type == "sshd" {
+				indicator, st, _ = getComponentInfo("server", l.Bind)
+				left := colorAddr(l.Bind) + " " + cBlue + "sshd" + cReset
+				addRow("", indicator, left, "", "", st)
+			} else if l.Type == "relay" {
+				indicator, st, _ = getComponentInfo("relay", l.Bind)
+				left := colorAddr(l.Bind)
+				arrow := arrowRight
+				right := colorAddr(l.Target)
+				addRow("", indicator, left, arrow, right, st)
+			} else {
+				// Proxy
+				indicator, st, _ = getComponentInfo("proxy", l.Bind)
+				left := colorAddr(l.Bind) + " " + cBlue + strings.ToUpper(l.Type) + cReset
+				arrow := ""
+				right := ""
+				if l.Target != "" {
+					arrow = arrowRight
+					right = colorAddr(l.Target)
+				}
+				addRow("", indicator, left, arrow, right, st)
 			}
-			addRow("", indicator, left, arrow, right, st)
-		}
-		addHeader("")
-	}
-
-	if len(cfg.Relays) > 0 {
-		addHeader(fmt.Sprintf("%s🔌 Standalone Relays%s", cBold, cReset))
-		for _, r := range cfg.Relays {
-			indicator, st, _ := getComponentInfo("relay", r.Bind)
-			left := colorAddr(r.Bind)
-			arrow := arrowRight
-			right := colorAddr(r.Target)
-			addRow("", indicator, left, arrow, right, st)
-		}
-		addHeader("")
-	}
-
-	if len(cfg.Servers) > 0 {
-		addHeader(fmt.Sprintf("%s🛡️  SSH Servers%s", cBold, cReset))
-		for _, s := range cfg.Servers {
-			indicator, st, _ := getComponentInfo("server", s.Listen)
-			left := colorAddr(s.Listen) + " " + cBlue + "listen" + cReset
-			addRow("", indicator, left, "", "", st)
 		}
 		addHeader("")
 	}
 
 	if len(cfg.Connections) > 0 {
-		addHeader(fmt.Sprintf("%s🚀 Outbound Connections%s", cBold, cReset))
+		addHeader(fmt.Sprintf("%s🚀 Connections%s", cBold, cReset))
 		for _, c := range cfg.Connections {
 			addHeader(fmt.Sprintf("%s%s%s", cMagenta, c.Name, cReset))
 
@@ -415,8 +411,8 @@ func psCmd() {
 				for _, pxy := range fset.Proxies.Local {
 					lStr := colorAddr(pxy.Bind) + " " + cBlue + strings.ToUpper(pxy.Type) + cReset
 					rStr := ""
-					if pxy.Upstream != "" {
-						rStr = colorAddr(pxy.Upstream)
+					if pxy.Target != "" {
+						rStr = colorAddr(pxy.Target)
 					} else {
 						rStr = cGray + "tunnel" + cReset
 					}
@@ -424,8 +420,8 @@ func psCmd() {
 				}
 				for _, pxy := range fset.Proxies.Remote {
 					lStr := ""
-					if pxy.Upstream != "" {
-						lStr = colorAddr(pxy.Upstream)
+					if pxy.Target != "" {
+						lStr = colorAddr(pxy.Target)
 					} else {
 						lStr = cGray + "tunnel" + cReset
 					}
