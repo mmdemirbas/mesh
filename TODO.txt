@@ -1,3 +1,10 @@
 - Map the mux containers also
 - Compare flag-by-flag with the existing docker compose configurations
 - Allow granular control of connections without restarting the whole app.
+
+
+- Use consistent naming: upstream -> target
+- Merge proxies, relays, and servers sections into a single section. They all have the type and bind properties in common and both are mandatory. They all need to create a local port. So it makes sense to merge those sections. Support optional name property.
+- After this change, the config is simpler now. There is a listeners part and there is a connections part.
+- Use 'sshd' instead of 'listen' in the status output for the servers.
+- Use 'Listeners' and 'Connections' section names in the status output.

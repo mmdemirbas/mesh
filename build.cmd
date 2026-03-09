@@ -13,6 +13,12 @@ set GOARCH=arm64
 go build -o bin\mesh-darwin-arm64 ./cmd/mesh/
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
+echo 🔨 Building for Linux ARM64 (Linux/ARM64)...
+set GOOS=linux
+set GOARCH=arm64
+go build -o bin\mesh-linux-arm64 ./cmd/mesh/
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+
 echo 🔨 Building for Linux/WSL (Linux/AMD64)...
 set GOOS=linux
 set GOARCH=amd64
