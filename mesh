@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+
+# Find the real path to the script's directory, handling symlinks
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
+
+# Detect OS
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+
+# Detect Architecture
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64) ARCH="amd64" ;;
+  aarch64|arm64) ARCH="arm64" ;;
+  i386|i686) ARCH="386" ;;
+esac
+
+BIN="${DIR}/bin/mesh-${OS}-${ARCH}"
+
+# Fallback to appending .exe for some environments (like Git Bash on Windows)
+if [ ! -x "$BIN" ] && [ -x "${BIN}.exe" ]; then
+  BIN="${BIN}.exe"
+fi
+
+if [ ! -x "$BIN" ]; then
+  echo "Error: Compatible binary not found."
+  echo "Expected to find executable at: $BIN"
+  echo "Please build the project first or download the correct release."
+  exit 1
+fi
+
+exec "$BIN" "$@"
