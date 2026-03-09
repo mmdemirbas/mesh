@@ -24,6 +24,7 @@ import (
 	"github.com/mmdemirbas/mesh/internal/config"
 	"github.com/mmdemirbas/mesh/internal/netutil"
 	"github.com/mmdemirbas/mesh/internal/proxy"
+	"github.com/mmdemirbas/mesh/internal/state"
 )
 
 // --- SSH Server (accepts incoming connections) ---
@@ -39,13 +40,16 @@ func NewSSHServer(cfg config.Server, log *slog.Logger) *SSHServer {
 }
 
 func (s *SSHServer) Run(ctx context.Context) error {
+	state.Global.Update("server", s.cfg.Listen, state.Starting, "")
 	hostKey, err := loadSigner(s.cfg.HostKey)
 	if err != nil {
+		state.Global.Update("server", s.cfg.Listen, state.Failed, err.Error())
 		return fmt.Errorf("load host key %s: %w", s.cfg.HostKey, err)
 	}
 
 	authorizedKeys, err := loadAuthorizedKeys(s.cfg.AuthorizedKeys)
 	if err != nil {
+		state.Global.Update("server", s.cfg.Listen, state.Failed, err.Error())
 		return fmt.Errorf("load authorized keys %s: %w", s.cfg.AuthorizedKeys, err)
 	}
 
@@ -122,9 +126,11 @@ func (s *SSHServer) Run(ctx context.Context) error {
 
 	listener, err := net.Listen("tcp", s.cfg.Listen)
 	if err != nil {
+		state.Global.Update("server", s.cfg.Listen, state.Failed, err.Error())
 		return fmt.Errorf("listen %s: %w", s.cfg.Listen, err)
 	}
 	defer listener.Close()
+	state.Global.Update("server", s.cfg.Listen, state.Listening, "")
 	s.log.Info("SSH server listening")
 
 	stop := context.AfterFunc(ctx, func() { listener.Close() })
@@ -232,6 +238,9 @@ func (c *SSHClient) Run(ctx context.Context) error {
 }
 
 func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) {
+	id := c.cfg.Name + " [" + fset.Name + "]"
+	state.Global.Update("connection", id, state.Starting, "")
+
 	retryInterval := 10 * time.Second
 	if c.cfg.Retry != "" {
 		if d, err := time.ParseDuration(c.cfg.Retry); err == nil {
@@ -241,6 +250,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 
 	signer, err := loadSigner(c.cfg.Auth.Key)
 	if err != nil {
+		state.Global.Update("connection", id, state.Failed, err.Error())
 		c.log.Error("load key failed", "key", c.cfg.Auth.Key, "error", err)
 		return
 	}
@@ -249,6 +259,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 	if c.cfg.Auth.KnownHosts != "" {
 		hkc, err := knownhosts.New(c.cfg.Auth.KnownHosts)
 		if err != nil {
+			state.Global.Update("connection", id, state.Failed, err.Error())
 			c.log.Error("load known_hosts failed", "file", c.cfg.Auth.KnownHosts, "error", err)
 			return
 		}
@@ -278,6 +289,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 	// Parse IPQoS for this forward set's connection
 	tosValue, err := ParseIPQoS(config.GetOption(opts, "IPQoS"))
 	if err != nil {
+		state.Global.Update("connection", id, state.Failed, err.Error())
 		c.log.Error("invalid ipqos", "set", fset.Name, "ipqos", config.GetOption(opts, "IPQoS"), "error", err)
 		return
 	}
@@ -289,8 +301,10 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 			return
 		}
 
+		state.Global.Update("connection", id, state.Connecting, "")
 		target := c.discoverTarget(ctx)
 		if target == "" {
+			state.Global.Update("connection", id, state.Retrying, "no reachable target")
 			log.Warn("No reachable target", "retry_in", retryInterval)
 			select {
 			case <-ctx.Done():
@@ -310,6 +324,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		dialer := net.Dialer{Timeout: sshCfg.Timeout, Control: dialerControlIPQoS(tosValue)}
 		conn, err := dialer.DialContext(ctx, "tcp", host)
 		if err != nil {
+			state.Global.Update("connection", id, state.Retrying, err.Error())
 			log.Error("Dial failed", "target", target, "error", err)
 			select {
 			case <-ctx.Done():
@@ -322,6 +337,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 
 		sshConn, chans, reqs, err := ssh.NewClientConn(conn, host, sshCfg)
 		if err != nil {
+			state.Global.Update("connection", id, state.Retrying, err.Error())
 			log.Error("SSH Handshake failed", "target", target, "error", err)
 			conn.Close()
 			select {
@@ -333,11 +349,13 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		}
 		client := ssh.NewClient(sshConn, chans, reqs)
 
+		state.Global.Update("connection", id, state.Connected, target)
 		log.Info("Connected", "target", target)
 
 		c.runSession(ctx, client, fset, log)
 		client.Close()
 
+		state.Global.Update("connection", id, state.Retrying, "session ended")
 		log.Warn("Session ended, reconnecting", "retry_in", retryInterval)
 		select {
 		case <-ctx.Done():

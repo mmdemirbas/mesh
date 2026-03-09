@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +21,7 @@ import (
 	"github.com/lmittmann/tint"
 	"github.com/mmdemirbas/mesh/internal/config"
 	"github.com/mmdemirbas/mesh/internal/proxy"
+	"github.com/mmdemirbas/mesh/internal/state"
 	"github.com/mmdemirbas/mesh/internal/tunnel"
 )
 
@@ -113,6 +118,18 @@ func upCmd() {
 		defer removePidFile()
 	}
 
+	adminLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err == nil {
+		port := adminLn.Addr().(*net.TCPAddr).Port
+		os.WriteFile(portFilePath(), []byte(strconv.Itoa(port)), 0644)
+		defer os.Remove(portFilePath())
+
+		go http.Serve(adminLn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(state.Global.Snapshot())
+		}))
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -202,7 +219,7 @@ func psCmd() {
 	pid, err := readPidFile()
 	if err != nil || pid == 0 {
 		fmt.Printf("%s⨯ mesh is not running.%s\n", cRed, cReset)
-		os.Exit(3) // LSB status code for "program is not running"
+		os.Exit(3)
 	}
 
 	if !checkPid(pid) {
@@ -212,6 +229,46 @@ func psCmd() {
 
 	fmt.Printf("%s✔ mesh is running (pid %d).%s\n\n", cGreen, pid, cReset)
 
+	var activeState map[string]state.Component
+	if portData, err := os.ReadFile(portFilePath()); err == nil {
+		if resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/", string(portData))); err == nil {
+			defer resp.Body.Close()
+			json.NewDecoder(resp.Body).Decode(&activeState)
+		}
+	}
+
+	getComponentInfo := func(compType, id string) (string, string, state.Component) {
+		if activeState == nil {
+			return "⚪", cGray + "[starting]" + cReset, state.Component{}
+		}
+		comp, ok := activeState[compType+":"+id]
+		if !ok {
+			return "⚪", cGray + "[starting]" + cReset, state.Component{}
+		}
+
+		color := cGray
+		indicator := "⚪"
+		switch comp.Status {
+		case state.Listening, state.Connected:
+			color = cGreen
+			indicator = "🟢"
+		case state.Connecting, state.Retrying:
+			color = cYellow
+			indicator = "🟡"
+		case state.Failed:
+			color = cRed
+			indicator = "🔴"
+		}
+
+		msg := string(comp.Status)
+		if comp.Message != "" {
+			if comp.Status == state.Failed || comp.Status == state.Retrying {
+				msg += " (" + comp.Message + ")"
+			}
+		}
+		return indicator, color + "[" + msg + "]" + cReset, comp
+	}
+
 	cfg, err := config.LoadUnvalidated(*configPath)
 	if err != nil {
 		fmt.Printf("%s⚠ Could not load configuration to show details: %v%s\n", cYellow, err, cReset)
@@ -219,72 +276,225 @@ func psCmd() {
 	}
 
 	fmt.Printf("%s⚙ Configuration: %s%s%s\n", cBold, cCyan, cfg.Name, cReset)
-	fmt.Println(cGray + strings.Repeat("─", 50) + cReset)
+	fmt.Println(cGray + strings.Repeat("─", 80) + cReset)
 
-	pad := func(s string, w int) string {
-		if len(s) < w {
-			return s + strings.Repeat(" ", w-len(s))
-		}
-		return s
+	stripANSI := func(str string) string {
+		return regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(str, "")
 	}
 
-	if len(cfg.Proxies) > 0 {
-		fmt.Printf("%s📡 Standalone Proxies%s\n", cBold, cReset)
-		for _, p := range cfg.Proxies {
-			upstream := ""
-			if p.Upstream != "" {
-				upstream = fmt.Sprintf(" %s→%s %s", cGray, cReset, p.Upstream)
-			}
-			fmt.Printf("  %s%s%s %s%s%s%s\n", cBlue, pad(strings.ToUpper(p.Type), 5), cReset, cYellow, p.Bind, cReset, upstream)
+	colorAddr := func(addr string) string {
+		if addr == "" {
+			return ""
 		}
-		fmt.Println()
+		idx := strings.LastIndex(addr, ":")
+		if idx == -1 {
+			return cCyan + addr + cReset
+		}
+		host := addr[:idx]
+		port := addr[idx+1:]
+
+		atIdx := strings.Index(host, "@")
+		if atIdx != -1 {
+			user := host[:atIdx]
+			host = host[atIdx+1:]
+			return cGray + user + "@" + cReset + cCyan + host + cReset + cGray + ":" + cReset + cMagenta + port + cReset
+		}
+		return cCyan + host + cReset + cGray + ":" + cReset + cMagenta + port + cReset
+	}
+
+	type row struct {
+		isHeader  bool
+		text      string
+		indent    string
+		indicator string
+		left      string
+		arrow     string
+		right     string
+		status    string
+	}
+	var rows []row
+
+	addHeader := func(text string) {
+		rows = append(rows, row{isHeader: true, text: text})
+	}
+	addRow := func(indent, ind, left, arrow, right, st string) {
+		rows = append(rows, row{indent: indent, indicator: ind, left: left, arrow: arrow, right: right, status: st})
+	}
+
+	arrowRight := cCyan + "──▶" + cReset
+	arrowLeft := cMagenta + "◀──" + cReset
+
+	if len(cfg.Proxies) > 0 {
+		addHeader(fmt.Sprintf("%s📡 Standalone Proxies%s", cBold, cReset))
+		for _, p := range cfg.Proxies {
+			indicator, st, _ := getComponentInfo("proxy", p.Bind)
+			left := colorAddr(p.Bind) + " " + cBlue + strings.ToUpper(p.Type) + cReset
+			arrow := ""
+			right := ""
+			if p.Upstream != "" {
+				arrow = arrowRight
+				right = colorAddr(p.Upstream)
+			}
+			addRow("", indicator, left, arrow, right, st)
+		}
+		addHeader("")
 	}
 
 	if len(cfg.Relays) > 0 {
-		fmt.Printf("%s🔌 Standalone Relays%s\n", cBold, cReset)
+		addHeader(fmt.Sprintf("%s🔌 Standalone Relays%s", cBold, cReset))
 		for _, r := range cfg.Relays {
-			fmt.Printf("  %s%s%s %s→%s %s%s%s\n", cYellow, pad(r.Bind, 21), cReset, cGray, cReset, cYellow, r.Target, cReset)
+			indicator, st, _ := getComponentInfo("relay", r.Bind)
+			left := colorAddr(r.Bind)
+			arrow := arrowRight
+			right := colorAddr(r.Target)
+			addRow("", indicator, left, arrow, right, st)
 		}
-		fmt.Println()
+		addHeader("")
 	}
 
 	if len(cfg.Servers) > 0 {
-		fmt.Printf("%s🛡️  SSH Servers%s\n", cBold, cReset)
+		addHeader(fmt.Sprintf("%s🛡️  SSH Servers%s", cBold, cReset))
 		for _, s := range cfg.Servers {
-			fmt.Printf("  %slisten%s %s%s%s\n", cGray, cReset, cGreen, s.Listen, cReset)
+			indicator, st, _ := getComponentInfo("server", s.Listen)
+			left := colorAddr(s.Listen) + " " + cBlue + "listen" + cReset
+			addRow("", indicator, left, "", "", st)
 		}
-		fmt.Println()
+		addHeader("")
 	}
 
 	if len(cfg.Connections) > 0 {
-		fmt.Printf("%s🚀 Outbound Connections%s\n", cBold, cReset)
+		addHeader(fmt.Sprintf("%s🚀 Outbound Connections%s", cBold, cReset))
 		for _, c := range cfg.Connections {
-			fmt.Printf("  %s%s%s %s(targets: %s)%s\n", cMagenta, c.Name, cReset, cGray, strings.Join(c.Targets, ", "), cReset)
+			addHeader(fmt.Sprintf("%s%s%s", cMagenta, c.Name, cReset))
+			addHeader(fmt.Sprintf("  %sTargets:%s", cGray, cReset))
+
+			connectedTargets := make(map[string]bool)
 			for _, fset := range c.Forwards {
-				fmt.Printf("    %s[%s]%s\n", cCyan, fset.Name, cReset)
+				id := c.Name + " [" + fset.Name + "]"
+				_, _, comp := getComponentInfo("connection", id)
+				if (comp.Status == state.Connected || comp.Status == state.Connecting) && comp.Message != "" {
+					connectedTargets[comp.Message] = true
+				}
+			}
+
+			for _, t := range c.Targets {
+				ind := "⚪"
+				if connectedTargets[t] {
+					ind = "🟢"
+				}
+				addRow("    ", ind, colorAddr(t), "", "", "")
+			}
+
+			for _, fset := range c.Forwards {
+				id := c.Name + " [" + fset.Name + "]"
+				indicator, st, _ := getComponentInfo("connection", id)
+
+				left := cCyan + "[" + fset.Name + "]" + cReset
+				addRow("  ", indicator, left, "", "", st)
+
+				ind := "" // Placeholder for alignment of forwarding rules
+				indent := "      "
+
 				for _, fwd := range fset.Local {
-					fmt.Printf("      %s-L%s %s %s→%s %s%s%s\n", cGreen, cReset, pad(cYellow+fwd.Bind+cReset, 21+len(cYellow)+len(cReset)), cGray, cReset, cYellow, fwd.Target, cReset)
+					lStr := colorAddr(fwd.Bind)
+					rStr := colorAddr(fwd.Target)
+					addRow(indent, ind, lStr, arrowRight, rStr, "")
 				}
 				for _, fwd := range fset.Remote {
-					fmt.Printf("      %s-R%s %s %s→%s %s%s%s\n", cBlue, cReset, pad(cYellow+fwd.Bind+cReset, 21+len(cYellow)+len(cReset)), cGray, cReset, cYellow, fwd.Target, cReset)
+					lStr := colorAddr(fwd.Target)
+					rStr := colorAddr(fwd.Bind)
+					addRow(indent, ind, lStr, arrowLeft, rStr, "")
 				}
 				for _, pxy := range fset.Proxies.Local {
-					upstream := ""
+					lStr := colorAddr(pxy.Bind) + " " + cBlue + strings.ToUpper(pxy.Type) + cReset
+					rStr := ""
 					if pxy.Upstream != "" {
-						upstream = fmt.Sprintf(" %svia %s%s", cGray, pxy.Upstream, cReset)
+						rStr = colorAddr(pxy.Upstream)
+					} else {
+						rStr = cGray + "tunnel" + cReset
 					}
-					fmt.Printf("      %s-D%s %s %s(%s)%s%s\n", cGreen, cReset, pad(cYellow+pxy.Bind+cReset, 21+len(cYellow)+len(cReset)), cGray, pxy.Type, cReset, upstream)
+					addRow(indent, ind, lStr, arrowRight, rStr, "")
 				}
 				for _, pxy := range fset.Proxies.Remote {
-					upstream := ""
+					lStr := ""
 					if pxy.Upstream != "" {
-						upstream = fmt.Sprintf(" %svia %s%s", cGray, pxy.Upstream, cReset)
+						lStr = colorAddr(pxy.Upstream)
+					} else {
+						lStr = cGray + "tunnel" + cReset
 					}
-					fmt.Printf("      %s-R%s %s %s(remote %s)%s%s\n", cBlue, cReset, pad(cYellow+pxy.Bind+cReset, 21+len(cYellow)+len(cReset)), cGray, pxy.Type, cReset, upstream)
+					rStr := colorAddr(pxy.Bind) + " " + cBlue + strings.ToUpper(pxy.Type) + cReset
+					addRow(indent, ind, lStr, arrowLeft, rStr, "")
 				}
 			}
 		}
-		fmt.Println()
+		addHeader("")
+	}
+
+	maxTotalLeft := 0
+	for _, r := range rows {
+		if !r.isHeader && r.left != "" && r.arrow != "" {
+			l := len(r.indent)
+			if r.indicator != "" {
+				l += 2 // '⚪ ' indicator plus space
+			}
+			l += len(stripANSI(r.left))
+			if l > maxTotalLeft {
+				maxTotalLeft = l
+			}
+		}
+	}
+
+	maxLineLen := 0
+	for i, r := range rows {
+		if !r.isHeader {
+			line := r.indent
+			if r.indicator != "" {
+				line += r.indicator + " "
+			}
+			line += r.left
+
+			if r.arrow != "" || r.right != "" {
+				currentLen := len(stripANSI(line))
+				padLen := 0
+				if maxTotalLeft > currentLen {
+					padLen = maxTotalLeft - currentLen
+				}
+				line += strings.Repeat(" ", padLen+1) + r.arrow + " " + r.right
+			}
+			rows[i].text = line
+
+			l := len(stripANSI(line))
+			if l > maxLineLen {
+				maxLineLen = l
+			}
+		}
+	}
+
+	statusPadCol := maxLineLen + 1
+
+	// Don't pad out further than 60 characters so short rows don't push statuses too far out
+	if statusPadCol > 60 {
+		statusPadCol = 60
+	}
+
+	for _, r := range rows {
+		if r.isHeader {
+			fmt.Println(r.text)
+			continue
+		}
+
+		line := r.text
+
+		if r.status != "" {
+			lineLen := len(stripANSI(line))
+			if lineLen < statusPadCol {
+				line += strings.Repeat(" ", statusPadCol-lineLen)
+			} else {
+				line += " "
+			}
+			line += r.status
+		}
+		fmt.Println(strings.TrimRight(line, " "))
 	}
 
 	os.Exit(0)
@@ -318,6 +528,18 @@ func downCmd() {
 		time.Sleep(100 * time.Millisecond)
 	}
 	fmt.Println("Warning: process did not exit within 10 seconds.")
+}
+
+func portFilePath() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		dir, err = os.UserHomeDir()
+		if err != nil {
+			dir = os.TempDir()
+		}
+	}
+	os.MkdirAll(filepath.Join(dir, "mesh"), 0700)
+	return filepath.Join(dir, "mesh", "mesh.port")
 }
 
 func pidFilePath() string {

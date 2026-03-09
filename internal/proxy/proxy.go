@@ -10,6 +10,7 @@ import (
 
 	"github.com/mmdemirbas/mesh/internal/config"
 	"github.com/mmdemirbas/mesh/internal/netutil"
+	"github.com/mmdemirbas/mesh/internal/state"
 )
 
 // RunStandaloneProxies starts all standalone (always-on) SOCKS/HTTP proxies.
@@ -21,8 +22,11 @@ func RunStandaloneProxies(ctx context.Context, proxies []config.Proxy, log *slog
 		go func() {
 			defer wg.Done()
 			pLog := log.With("component", "proxy", "type", p.Type, "bind", p.Bind)
+
+			state.Global.Update("proxy", p.Bind, state.Starting, "")
 			ln, err := net.Listen("tcp", p.Bind)
 			if err != nil {
+				state.Global.Update("proxy", p.Bind, state.Failed, err.Error())
 				pLog.Error("Listen failed", "error", err)
 				return
 			}
@@ -30,6 +34,7 @@ func RunStandaloneProxies(ctx context.Context, proxies []config.Proxy, log *slog
 			stop := context.AfterFunc(ctx, func() { ln.Close() })
 			defer stop()
 
+			state.Global.Update("proxy", p.Bind, state.Listening, "")
 			pLog.Info("Standalone proxy listening")
 
 			switch p.Type {
@@ -51,8 +56,11 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Relay, log *slog.L
 		go func() {
 			defer wg.Done()
 			rLog := log.With("component", "relay", "bind", r.Bind, "target", r.Target)
+
+			state.Global.Update("relay", r.Bind, state.Starting, "")
 			ln, err := net.Listen("tcp", r.Bind)
 			if err != nil {
+				state.Global.Update("relay", r.Bind, state.Failed, err.Error())
 				rLog.Error("Listen failed", "error", err)
 				return
 			}
@@ -60,6 +68,7 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Relay, log *slog.L
 			stop := context.AfterFunc(ctx, func() { ln.Close() })
 			defer stop()
 
+			state.Global.Update("relay", r.Bind, state.Listening, "")
 			rLog.Info("TCP relay listening")
 
 			for {
