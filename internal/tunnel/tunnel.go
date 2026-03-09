@@ -80,6 +80,19 @@ func (s *SSHServer) Run(ctx context.Context) error {
 			limitersMu.Lock()
 			entry, exists := limiters[ip]
 			if !exists {
+				if len(limiters) > 10000 {
+					// Aggressive eviction: remove entries older than 2 minutes under pressure
+					for eIP, e := range limiters {
+						if time.Since(e.lastSeen) > 2*time.Minute {
+							delete(limiters, eIP)
+						}
+					}
+					if len(limiters) > 10000 {
+						limitersMu.Unlock()
+						s.log.Warn("Rate limiter map at capacity after eviction, rejecting new IP", "ip", ip, "size", len(limiters))
+						return nil, fmt.Errorf("server under heavy load, connection rejected")
+					}
+				}
 				entry = &limiterEntry{limiter: rate.NewLimiter(5, 5)}
 				limiters[ip] = entry
 			}
@@ -126,12 +139,18 @@ func (s *SSHServer) Run(ctx context.Context) error {
 }
 
 func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.ServerConfig) {
+	ApplyTCPKeepAlive(conn)
+	// Set a generous handshake deadline for high-latency links; always clear it afterward.
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	defer conn.SetDeadline(time.Time{})
+
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, cfg)
 	if err != nil {
 		s.log.Error("Handshake failed", "remote", conn.RemoteAddr(), "error", err)
 		conn.Close()
 		return
 	}
+	conn.SetDeadline(time.Time{})
 	defer sshConn.Close()
 
 	s.log.Info("Client connected", "remote", sshConn.RemoteAddr(), "user", sshConn.User())
@@ -242,6 +261,13 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 	sshCfg.KeyExchanges = []string{"curve25519-sha256@libssh.org", "curve25519-sha256"}
 	sshCfg.MACs = []string{"umac-64-etm@openssh.com", "hmac-sha2-256-etm@openssh.com"}
 
+	// Parse IPQoS for this forward set's connection
+	tosValue, err := ParseIPQoS(fset.Options.IPQoS)
+	if err != nil {
+		c.log.Error("invalid ipqos", "set", fset.Name, "ipqos", fset.Options.IPQoS, "error", err)
+		return
+	}
+
 	log := c.log.With("set", fset.Name)
 
 	for {
@@ -267,7 +293,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 
 		log.Info("Connecting", "target", target)
 
-		dialer := net.Dialer{Timeout: sshCfg.Timeout}
+		dialer := net.Dialer{Timeout: sshCfg.Timeout, Control: dialerControlIPQoS(tosValue)}
 		conn, err := dialer.DialContext(ctx, "tcp", host)
 		if err != nil {
 			log.Error("Dial failed", "target", target, "error", err)
@@ -278,6 +304,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 				continue
 			}
 		}
+		ApplyTCPKeepAlive(conn)
 
 		sshConn, chans, reqs, err := ssh.NewClientConn(conn, host, sshCfg)
 		if err != nil {
@@ -473,6 +500,9 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy c
 	}
 }
 
+// discoverTarget probes each target in order to find the first reachable one.
+// TODO: Avoid double-dial by passing the probed connection through to runForwardSet
+// instead of closing it and re-dialing. This would save a round-trip on high-latency links.
 func (c *SSHClient) discoverTarget(ctx context.Context) string {
 	for _, target := range c.cfg.Targets {
 		_, hostPort := parseTarget(target)
@@ -549,6 +579,7 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 		if err != nil {
 			return
 		}
+		ApplyTCPKeepAlive(conn)
 		go func() {
 			defer conn.Close()
 			origin := conn.RemoteAddr().(*net.TCPAddr)
@@ -610,6 +641,7 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger) {
 		newChan.Reject(ssh.ConnectionFailed, err.Error())
 		return
 	}
+	ApplyTCPKeepAlive(conn)
 
 	ch, chReqs, err := newChan.Accept()
 	if err != nil {
@@ -632,6 +664,7 @@ func acceptAndForward(ctx context.Context, listener net.Listener, dialer func() 
 			}
 			return
 		}
+		ApplyTCPKeepAlive(conn)
 		go func() {
 			defer conn.Close()
 			target, err := dialer()
@@ -662,9 +695,15 @@ func loadAuthorizedKeys(path string) ([]ssh.PublicKey, error) {
 	}
 	var keys []ssh.PublicKey
 	rest := data
+	lineNum := 0
 	for len(rest) > 0 {
+		lineNum++
 		key, _, _, r, err := ssh.ParseAuthorizedKey(rest)
 		if err != nil {
+			// Skip blank/comment lines silently; warn on actual parse failures
+			if len(bytes.TrimSpace(rest)) > 0 && !bytes.HasPrefix(bytes.TrimSpace(rest), []byte("#")) {
+				slog.Warn("Skipping unparsable authorized_keys entry", "file", path, "line", lineNum, "error", err)
+			}
 			break
 		}
 		keys = append(keys, key)
@@ -694,6 +733,16 @@ func parseTarget(target string) (user, host string) {
 func retryDelay(base time.Duration) time.Duration {
 	jitter := time.Duration(rand.Int63n(int64(base / 4)))
 	return base + jitter
+}
+
+// ApplyTCPKeepAlive enables TCP keep-alive on the connection if it is a *net.TCPConn.
+// For non-TCP connections (e.g. SSH channel wrappers from client.Listen), this is a
+// silent no-op by design — keepalives are managed at the SSH layer for those.
+func ApplyTCPKeepAlive(conn net.Conn) {
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	}
 }
 
 func BiCopy(a, b io.ReadWriteCloser) {

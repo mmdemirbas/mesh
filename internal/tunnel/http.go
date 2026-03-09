@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // bufferedConn wraps a net.Conn with a buffered reader and implements CloseWrite.
@@ -49,8 +50,11 @@ func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer
 			if ctx.Err() != nil {
 				return
 			}
-			return
+			log.Debug("HTTP proxy accept error (transient)", "error", err)
+			time.Sleep(50 * time.Millisecond) // backoff on transient errors
+			continue
 		}
+		ApplyTCPKeepAlive(conn)
 		go handleHTTPProxy(conn, dialer, log)
 	}
 }
@@ -89,7 +93,10 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 	}
 	defer remote.Close()
 
-	conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+	if _, err := conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")); err != nil {
+		remote.Close()
+		return
+	}
 	bc := &bufferedConn{
 		Conn: conn,
 		r:    io.MultiReader(br, conn),
@@ -104,7 +111,10 @@ func dialViaSocks5(baseDialer func(string, string) (net.Conn, error), socksAddr,
 		return nil, fmt.Errorf("socks5 dial: %w", err)
 	}
 
-	conn.Write([]byte{0x05, 0x01, 0x00}) // v5, 1 method, no auth
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil { // v5, 1 method, no auth
+		conn.Close()
+		return nil, fmt.Errorf("socks5 greeting write: %w", err)
+	}
 	buf := make([]byte, 2)
 	if _, err := io.ReadFull(conn, buf); err != nil {
 		conn.Close()
@@ -129,7 +139,10 @@ func dialViaSocks5(baseDialer func(string, string) (net.Conn, error), socksAddr,
 	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}
 	req = append(req, []byte(host)...)
 	req = append(req, byte(port>>8), byte(port&0xff))
-	conn.Write(req)
+	if _, err := conn.Write(req); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("socks5 connect write: %w", err)
+	}
 
 	resp := make([]byte, 10)
 	if _, err := io.ReadFull(conn, resp[:4]); err != nil {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"time"
 )
 
 // ServeSocks accepts connections on listener and handles SOCKS5 for each.
@@ -17,8 +18,11 @@ func ServeSocks(ctx context.Context, listener net.Listener, dialer func(string, 
 			if ctx.Err() != nil {
 				return
 			}
-			return
+			log.Debug("SOCKS accept error (transient)", "error", err)
+			time.Sleep(50 * time.Millisecond) // backoff on transient errors
+			continue
 		}
+		ApplyTCPKeepAlive(conn)
 		go handleSocks5(conn, dialer, log)
 	}
 }
@@ -46,7 +50,9 @@ func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), 
 	if _, err := io.ReadFull(conn, buf[:nMethods]); err != nil {
 		return
 	}
-	conn.Write([]byte{0x05, 0x00}) // No auth
+	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil { // No auth
+		return
+	}
 
 	// Request
 	if _, err := io.ReadFull(conn, buf[:4]); err != nil {
@@ -97,10 +103,13 @@ func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), 
 	}
 	defer remote.Close()
 
-	socksReply(conn, 0x00)
+	if err := socksReply(conn, 0x00); err != nil {
+		return
+	}
 	BiCopy(conn, remote)
 }
 
-func socksReply(conn net.Conn, status byte) {
-	conn.Write([]byte{0x05, status, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+func socksReply(conn net.Conn, status byte) error {
+	_, err := conn.Write([]byte{0x05, status, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+	return err
 }

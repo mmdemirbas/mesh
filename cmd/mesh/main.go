@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/lmittmann/tint"
 	"github.com/mmdemirbas/mesh/internal/config"
@@ -199,18 +200,29 @@ func stopCmd() {
 	}
 
 	fmt.Printf("Stopping mesh (pid %d)...\n", pid)
-	// kill -TERM
 	if err := killPid(pid, syscall.SIGTERM); err != nil {
 		fmt.Printf("Error sending SIGTERM: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("Stopped.")
+	// Wait for the process to actually exit (up to 10 seconds)
+	for i := 0; i < 100; i++ {
+		if !checkPid(pid) {
+			removePidFile()
+			fmt.Println("Stopped.")
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	fmt.Println("Warning: process did not exit within 10 seconds.")
 }
 
 func pidFilePath() string {
 	dir, err := os.UserCacheDir()
 	if err != nil {
-		dir = os.TempDir()
+		dir, err = os.UserHomeDir()
+		if err != nil {
+			dir = os.TempDir()
+		}
 	}
 	os.MkdirAll(filepath.Join(dir, "mesh"), 0700)
 	return filepath.Join(dir, "mesh", "mesh.pid")

@@ -2,9 +2,11 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -138,6 +140,11 @@ func (c *Config) validate() error {
 		if len(conn.Targets) == 0 {
 			return fmt.Errorf("connections[%d] %q: targets is required", i, conn.Name)
 		}
+		if conn.Retry != "" {
+			if _, err := time.ParseDuration(conn.Retry); err != nil {
+				return fmt.Errorf("connections[%d] %q: invalid retry duration %q: %w", i, conn.Name, conn.Retry, err)
+			}
+		}
 		if err := requireFile(conn.Auth.Key, "auth.key"); err != nil {
 			return fmt.Errorf("connections[%d] %q: %w", i, conn.Name, err)
 		}
@@ -145,6 +152,9 @@ func (c *Config) validate() error {
 			return fmt.Errorf("connections[%d] %q: %w", i, conn.Name, err)
 		}
 		for j, fset := range conn.Forwards {
+			if err := validateIPQoS(fset.Options.IPQoS); err != nil {
+				return fmt.Errorf("connections[%d] %q forwards[%d] %q: %w", i, conn.Name, j, fset.Name, err)
+			}
 			// Validate connection proxies
 			if err := validateProxies(fset.Proxies.Remote); err != nil {
 				return fmt.Errorf("connections[%d] %q forwards[%d] %q remote proxies: %w", i, conn.Name, j, fset.Name, err)
@@ -179,16 +189,47 @@ func (c *Config) validate() error {
 }
 
 // checkDuplicateBinds detects bind address collisions across all listeners.
+// It normalizes common aliases (localhost → 127.0.0.1) and detects wildcard
+// overlaps (0.0.0.0 or :: conflicts with any specific address on the same port).
 func (c *Config) checkDuplicateBinds() error {
-	seen := make(map[string]string) // bind addr -> description
+	seen := make(map[string]string)      // normalized addr -> description
+	wildPorts := make(map[string]string) // port -> description (for wildcard binds)
+
 	check := func(bind, desc string) error {
 		if bind == "" {
 			return nil
 		}
-		if prev, ok := seen[bind]; ok {
+		normalized := normalizeBind(bind)
+		host, port, err := splitHostPort(normalized)
+		if err != nil {
+			return nil // skip unparsable; will fail at runtime anyway
+		}
+
+		// Check exact duplicate
+		if prev, ok := seen[normalized]; ok {
 			return fmt.Errorf("duplicate bind address %q: used by %s and %s", bind, prev, desc)
 		}
-		seen[bind] = desc
+		seen[normalized] = desc
+
+		// Check wildcard overlap: if this is a wildcard, check if any specific addr uses the same port
+		isWild := host == "0.0.0.0" || host == "::" || host == ""
+		if isWild {
+			if prev, ok := wildPorts[port]; ok {
+				return fmt.Errorf("duplicate bind port %s: wildcard used by %s and %s", port, prev, desc)
+			}
+			wildPorts[port] = desc
+			// Check against all existing specific-address entries on this port
+			for addr, prev := range seen {
+				_, p, _ := splitHostPort(addr)
+				if p == port && addr != normalized {
+					return fmt.Errorf("bind address %q (%s) conflicts with wildcard %q (%s) on port %s", addr, prev, bind, desc, port)
+				}
+			}
+		} else if prev, ok := wildPorts[port]; ok {
+			// A specific address conflicts with an existing wildcard on the same port
+			return fmt.Errorf("bind address %q (%s) conflicts with wildcard (%s) on port %s", bind, desc, prev, port)
+		}
+
 		return nil
 	}
 	for i, p := range c.Proxies {
@@ -223,6 +264,18 @@ func (c *Config) checkDuplicateBinds() error {
 	return nil
 }
 
+// normalizeBind canonicalizes a bind address for comparison.
+func normalizeBind(addr string) string {
+	addr = strings.Replace(addr, "localhost", "127.0.0.1", 1)
+	return addr
+}
+
+// splitHostPort wraps net.SplitHostPort, handling addresses without an explicit host.
+func splitHostPort(addr string) (host, port string, err error) {
+	host, port, err = net.SplitHostPort(addr)
+	return
+}
+
 func validateProxies(proxies []Proxy) error {
 	for i, p := range proxies {
 		if p.Bind == "" {
@@ -231,6 +284,28 @@ func validateProxies(proxies []Proxy) error {
 		if p.Type != "socks" && p.Type != "http" {
 			return fmt.Errorf("[%d]: type must be 'socks' or 'http'", i)
 		}
+	}
+	return nil
+}
+
+// validIPQoSValues is the set of recognized IPQoS names (OpenSSH-compatible).
+var validIPQoSValues = map[string]bool{
+	"lowdelay": true, "throughput": true, "reliability": true, "none": true,
+	"af11": true, "af12": true, "af13": true,
+	"af21": true, "af22": true, "af23": true,
+	"af31": true, "af32": true, "af33": true,
+	"af41": true, "af42": true, "af43": true,
+	"ef":  true,
+	"cs0": true, "cs1": true, "cs2": true, "cs3": true,
+	"cs4": true, "cs5": true, "cs6": true, "cs7": true,
+}
+
+func validateIPQoS(value string) error {
+	if value == "" {
+		return nil
+	}
+	if !validIPQoSValues[strings.ToLower(value)] {
+		return fmt.Errorf("unknown ipqos value %q", value)
 	}
 	return nil
 }
