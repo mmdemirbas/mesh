@@ -38,7 +38,7 @@ relays:
 # ==============================================================================
 # Act as an SSH daemon. You can define multiple listeners.
 servers:
-  - listen: "0.0.0.0:2222"
+- listen: "0.0.0.0:2222"
     # The host key identifying this server to clients
     host_key: ~/.ssh/keys/server/key
     # The public keys allowed to log in

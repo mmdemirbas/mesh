@@ -40,8 +40,6 @@ func main() {
 		psCmd()
 	case "down":
 		downCmd()
-	case "version", "-v", "--version":
-		fmt.Printf("mesh %s\n", version)
 	default:
 		printUsage()
 		os.Exit(1)
@@ -49,30 +47,36 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Print(`mesh - Connection Swiss-Army Knife
-
-A mode-less, cross-platform networking tool acting as an all-in-one replacement 
-for ssh, sshd, autossh, socat, and SOCKS/HTTP proxy servers.
-
-Usage:
-  mesh <command> [arguments]
-
-Commands:
-  up      Start mesh based on a config file
-  ps      Check if mesh is running and show its active configuration
-  down    Stop the currently running mesh instance
-  version Print the mesh version
-
-Examples:
-  # Start mesh using a specific configuration file in the background
-  mesh up -config configs/example.yml &
-
-  # Check if the daemon is running and view configuration
-  mesh ps -config configs/example.yml
-
-  # Gracefully stop the daemon
-  mesh down
-`)
+	const (
+		reset  = "\033[0m"
+		bold   = "\033[1m"
+		blue   = "\033[34m"
+		cyan   = "\033[36m"
+		gray   = "\033[90m"
+		yellow = "\033[33m"
+	)
+	fmt.Println(bold + cyan + "mesh" + reset + " " + gray + version + reset + " - Human-friendly networking tool")
+	fmt.Println()
+	fmt.Println("All-in-one replacement for ssh, sshd, autossh, socat, and SOCKS/HTTP proxy servers.")
+	fmt.Println()
+	fmt.Println(bold + "Usage:" + reset)
+	fmt.Println("  mesh " + cyan + "<command>" + reset + " [arguments]")
+	fmt.Println()
+	fmt.Println(bold + "Commands:" + reset)
+	fmt.Println("  " + blue + "up" + reset + "   Start mesh based on a config file")
+	fmt.Println("  " + blue + "down" + reset + " Stop the currently running mesh instance")
+	fmt.Println("  " + blue + "ps" + reset + "   Check if mesh is running and show its active configuration")
+	fmt.Println()
+	fmt.Println(bold + "Examples:" + reset)
+	fmt.Println("  " + gray + "# Start mesh using a specific configuration file in the background" + reset)
+	fmt.Println("  mesh " + blue + "up" + reset + " " + yellow + "-config" + reset + " configs/example.yml &")
+	fmt.Println()
+	fmt.Println("  " + gray + "# Gracefully stop the daemon" + reset)
+	fmt.Println("  mesh " + blue + "down" + reset)
+	fmt.Println()
+	fmt.Println("  " + gray + "# Check if the daemon is running and view configuration" + reset)
+	fmt.Println("  mesh " + blue + "ps" + reset + " " + yellow + "-config" + reset + " configs/example.yml")
+	fmt.Println()
 }
 
 func upCmd() {
@@ -239,15 +243,15 @@ func psCmd() {
 
 	getComponentInfo := func(compType, id string) (string, string, state.Component) {
 		if activeState == nil {
-			return "⚪", cGray + "[starting]" + cReset, state.Component{}
+			return "⚪️", cGray + "[starting]" + cReset, state.Component{}
 		}
 		comp, ok := activeState[compType+":"+id]
 		if !ok {
-			return "⚪", cGray + "[starting]" + cReset, state.Component{}
+			return "⚪️", cGray + "[starting]" + cReset, state.Component{}
 		}
 
 		color := cGray
-		indicator := "⚪"
+		indicator := "⚪️"
 		switch comp.Status {
 		case state.Listening, state.Connected:
 			color = cGreen
@@ -366,7 +370,6 @@ func psCmd() {
 		addHeader(fmt.Sprintf("%s🚀 Outbound Connections%s", cBold, cReset))
 		for _, c := range cfg.Connections {
 			addHeader(fmt.Sprintf("%s%s%s", cMagenta, c.Name, cReset))
-			addHeader(fmt.Sprintf("  %sTargets:%s", cGray, cReset))
 
 			connectedTargets := make(map[string]bool)
 			for _, fset := range c.Forwards {
@@ -378,22 +381,26 @@ func psCmd() {
 			}
 
 			for _, t := range c.Targets {
-				ind := "⚪"
+				ind := "⚪️"
 				if connectedTargets[t] {
 					ind = "🟢"
 				}
-				addRow("    ", ind, colorAddr(t), "", "", "")
+				addRow("  ", ind, colorAddr(t), "", "", "")
+			}
+
+			if len(c.Forwards) > 0 {
+				addHeader("")
 			}
 
 			for _, fset := range c.Forwards {
 				id := c.Name + " [" + fset.Name + "]"
 				indicator, st, _ := getComponentInfo("connection", id)
 
-				left := cCyan + "[" + fset.Name + "]" + cReset
+				left := cBold + cBlue + "[" + fset.Name + "]" + cReset
 				addRow("  ", indicator, left, "", "", st)
 
 				ind := "" // Placeholder for alignment of forwarding rules
-				indent := "      "
+				indent := "     "
 
 				for _, fwd := range fset.Local {
 					lStr := colorAddr(fwd.Bind)
