@@ -7,3 +7,6 @@
 # Local configs
 *.yml
 !configs/example.yml
+
+# IntelliJ
+.idea/
