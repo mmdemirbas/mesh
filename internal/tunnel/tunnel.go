@@ -403,43 +403,33 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 		client.Close()
 	}()
 
-	// Port forwarding: Remote (-R)
+	// Outbound rules: Remote (-R or remote proxy)
 	for _, fwd := range fset.Remote {
 		fwd := fwd
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c.runRemoteForward(sCtx, client, fwd, log)
+			switch fwd.Type {
+			case "forward":
+				c.runRemoteForward(sCtx, client, fwd, log)
+			default:
+				c.runRemoteProxy(sCtx, client, fwd, log)
+			}
 		}()
 	}
 
-	// Port forwarding: Local (-L)
+	// Inbound rules: Local (-L or local proxy)
 	for _, fwd := range fset.Local {
 		fwd := fwd
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c.runLocalForward(sCtx, client, fwd, log)
-		}()
-	}
-
-	// Connection-scoped proxies: Remote (-R dynamic)
-	for _, pxy := range fset.Proxies.Remote {
-		pxy := pxy
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			c.runRemoteProxy(sCtx, client, pxy, log)
-		}()
-	}
-
-	// Connection-scoped proxies: Local (-D)
-	for _, pxy := range fset.Proxies.Local {
-		pxy := pxy
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			c.runLocalProxy(sCtx, client, pxy, log)
+			switch fwd.Type {
+			case "forward":
+				c.runLocalForward(sCtx, client, fwd, log)
+			default:
+				c.runLocalProxy(sCtx, client, fwd, log)
+			}
 		}()
 	}
 
@@ -447,7 +437,7 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 }
 
 // runRemoteForward (-R equivalent): bind on peer, forward here
-func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fwd config.FwdRule, log *slog.Logger) {
+func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fwd config.Forward, log *slog.Logger) {
 	log.Info("Forward -R", "bind", fwd.Bind, "target", fwd.Target)
 	listener, err := client.Listen("tcp", fwd.Bind)
 	if err != nil {
@@ -464,7 +454,7 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fw
 }
 
 // runLocalForward (-L equivalent): bind here, forward to peer
-func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd config.FwdRule, log *slog.Logger) {
+func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd config.Forward, log *slog.Logger) {
 	log.Info("Forward -L", "bind", fwd.Bind, "target", fwd.Target)
 	listener, err := net.Listen("tcp", fwd.Bind)
 	if err != nil {
@@ -481,7 +471,7 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd
 }
 
 // runRemoteProxy binds proxy on peer, traffic exits HERE.
-func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy config.Proxy, log *slog.Logger) {
+func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy config.Forward, log *slog.Logger) {
 	log.Info("Proxy remote bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
 	listener, err := client.Listen("tcp", pxy.Bind)
 	if err != nil {
@@ -501,7 +491,7 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy 
 }
 
 // runLocalProxy binds proxy here, traffic exits PEER.
-func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy config.Proxy, log *slog.Logger) {
+func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy config.Forward, log *slog.Logger) {
 	log.Info("Proxy local bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
 	listener, err := net.Listen("tcp", pxy.Bind)
 	if err != nil {

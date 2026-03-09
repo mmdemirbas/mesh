@@ -31,12 +31,8 @@ type Listener struct {
 	Options        map[string]string `yaml:"options,omitempty"`
 }
 
-// Proxy is a connection-scoped proxy defined dynamically inside Forwards.
-type Proxy struct {
-	Type   string `yaml:"type"`             // "socks" or "http"
-	Bind   string `yaml:"bind"`             // Listen address
-	Target string `yaml:"target,omitempty"` // For HTTP proxy: optional SOCKS target
-}
+// Proxy is not needed as a separate type, but if there's any standalone usage,
+// Listener covers it. So we remove Proxy.
 
 // Connection is an outbound SSH connection to a peer or standard sshd.
 type Connection struct {
@@ -52,9 +48,15 @@ type Connection struct {
 type ForwardSet struct {
 	Name    string            `yaml:"name"`
 	Options map[string]string `yaml:"options"`
-	Remote  []FwdRule         `yaml:"remote"`
-	Local   []FwdRule         `yaml:"local"`
-	Proxies PxyCfg            `yaml:"proxies"`
+	Remote  []Forward         `yaml:"remote"`
+	Local   []Forward         `yaml:"local"`
+}
+
+// Forward is a single unified rule for port forwarding or proxying.
+type Forward struct {
+	Type   string `yaml:"type"`   // "forward", "socks" or "http"
+	Bind   string `yaml:"bind"`   // Where to listen
+	Target string `yaml:"target"` // Where to connect (or upstream for proxy)
 }
 
 // GetOption retrieves a configuration value by key, case-insensitively.
@@ -71,18 +73,6 @@ func GetOption(options map[string]string, key string) string {
 type AuthCfg struct {
 	Key        string `yaml:"key"`
 	KnownHosts string `yaml:"known_hosts"`
-}
-
-// FwdRule is a single port forwarding rule.
-type FwdRule struct {
-	Bind   string `yaml:"bind"`   // Where to listen
-	Target string `yaml:"target"` // Where to connect
-}
-
-// PxyCfg holds connection-scoped proxies, explicitly separated by side.
-type PxyCfg struct {
-	Remote []Proxy `yaml:"remote"` // Bind on peer, exit through this side
-	Local  []Proxy `yaml:"local"`  // Bind on this side, exit through peer
 }
 
 // LogCfg configures logging.
@@ -126,6 +116,20 @@ func LoadUnvalidated(path string) (*Config, error) {
 	for i := range cfg.Connections {
 		cfg.Connections[i].Auth.Key = expandHome(cfg.Connections[i].Auth.Key)
 		cfg.Connections[i].Auth.KnownHosts = expandHome(cfg.Connections[i].Auth.KnownHosts)
+
+		// Apply default type="forward" for all unified mappings
+		for j := range cfg.Connections[i].Forwards {
+			for k := range cfg.Connections[i].Forwards[j].Remote {
+				if cfg.Connections[i].Forwards[j].Remote[k].Type == "" {
+					cfg.Connections[i].Forwards[j].Remote[k].Type = "forward"
+				}
+			}
+			for k := range cfg.Connections[i].Forwards[j].Local {
+				if cfg.Connections[i].Forwards[j].Local[k].Type == "" {
+					cfg.Connections[i].Forwards[j].Local[k].Type = "forward"
+				}
+			}
+		}
 	}
 
 	if cfg.Name == "" {
@@ -185,12 +189,11 @@ func (c *Config) validate() error {
 			if err := validateIPQoS(GetOption(fset.Options, "IPQoS")); err != nil {
 				return fmt.Errorf("connections[%d] %q forwards[%d] %q: %w", i, conn.Name, j, fset.Name, err)
 			}
-			// Validate connection proxies
-			if err := validateProxies(fset.Proxies.Remote); err != nil {
-				return fmt.Errorf("connections[%d] %q forwards[%d] %q remote proxies: %w", i, conn.Name, j, fset.Name, err)
+			if err := validateForwards(fset.Remote); err != nil {
+				return fmt.Errorf("connections[%d] %q forwards[%d] %q remote: %w", i, conn.Name, j, fset.Name, err)
 			}
-			if err := validateProxies(fset.Proxies.Local); err != nil {
-				return fmt.Errorf("connections[%d] %q forwards[%d] %q local proxies: %w", i, conn.Name, j, fset.Name, err)
+			if err := validateForwards(fset.Local); err != nil {
+				return fmt.Errorf("connections[%d] %q forwards[%d] %q local: %w", i, conn.Name, j, fset.Name, err)
 			}
 		}
 	}
@@ -259,11 +262,6 @@ func (c *Config) checkDuplicateBinds() error {
 					return err
 				}
 			}
-			for k, pxy := range fset.Proxies.Local {
-				if err := check(pxy.Bind, fmt.Sprintf("connections[%d].forwards[%d].proxies.local[%d]", i, j, k)); err != nil {
-					return err
-				}
-			}
 		}
 	}
 	return nil
@@ -281,15 +279,23 @@ func splitHostPort(addr string) (host, port string, err error) {
 	return
 }
 
-func validateProxies(proxies []Proxy) error {
-	for i, p := range proxies {
-		if p.Bind == "" {
+func validateForwards(fwds []Forward) error {
+	for i, f := range fwds {
+		if f.Bind == "" {
 			return fmt.Errorf("[%d]: bind is required", i)
 		}
-		if p.Type != "socks" && p.Type != "http" {
-			return fmt.Errorf("[%d]: type must be 'socks' or 'http'", i)
+		if f.Type != "forward" && f.Type != "socks" && f.Type != "http" {
+			return fmt.Errorf("[%d]: type must be 'forward', 'socks', or 'http'", i)
+		}
+		if f.Type == "forward" && f.Target == "" {
+			return fmt.Errorf("[%d]: target is required for forward type", i)
 		}
 	}
+	// Fallback defaulting is handled during Unmarshal or manually if Type is empty.
+	// Since we changed it to explicit, validate requires Type. But wait, we should apply a default if empty.
+	// We can do that by mutating it, but `validForwards` takes a slice by value so it doesn't mutate strings inside.
+	// It's better to expect `Type` to be populated or return an error, but let's handle defaulting in Unmarshal or here.
+	// To safely default `Type="forward"`, we can do it in `LoadUnvalidated` or here if we pass a pointer/slice reference. Let's do it in `LoadUnvalidated`.
 	return nil
 }
 

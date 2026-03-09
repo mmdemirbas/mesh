@@ -399,34 +399,36 @@ func psCmd() {
 				indent := "     "
 
 				for _, fwd := range fset.Local {
-					lStr := colorAddr(fwd.Bind)
-					rStr := colorAddr(fwd.Target)
-					addRow(indent, ind, lStr, arrowRight, rStr, "")
+					if fwd.Type == "forward" {
+						lStr := colorAddr(fwd.Bind)
+						rStr := colorAddr(fwd.Target)
+						addRow(indent, ind, lStr, arrowRight, rStr, "")
+					} else { // socks, http
+						lStr := colorAddr(fwd.Bind) + " " + cBlue + strings.ToUpper(fwd.Type) + cReset
+						rStr := ""
+						if fwd.Target != "" {
+							rStr = colorAddr(fwd.Target)
+						} else {
+							rStr = cGray + "tunnel" + cReset
+						}
+						addRow(indent, ind, lStr, arrowRight, rStr, "")
+					}
 				}
 				for _, fwd := range fset.Remote {
-					lStr := colorAddr(fwd.Target)
-					rStr := colorAddr(fwd.Bind)
-					addRow(indent, ind, lStr, arrowLeft, rStr, "")
-				}
-				for _, pxy := range fset.Proxies.Local {
-					lStr := colorAddr(pxy.Bind) + " " + cBlue + strings.ToUpper(pxy.Type) + cReset
-					rStr := ""
-					if pxy.Target != "" {
-						rStr = colorAddr(pxy.Target)
-					} else {
-						rStr = cGray + "tunnel" + cReset
+					if fwd.Type == "forward" {
+						lStr := colorAddr(fwd.Target)
+						rStr := colorAddr(fwd.Bind)
+						addRow(indent, ind, lStr, arrowLeft, rStr, "")
+					} else { // socks, http
+						lStr := ""
+						if fwd.Target != "" {
+							lStr = colorAddr(fwd.Target)
+						} else {
+							lStr = cGray + "tunnel" + cReset
+						}
+						rStr := colorAddr(fwd.Bind) + " " + cBlue + strings.ToUpper(fwd.Type) + cReset
+						addRow(indent, ind, lStr, arrowLeft, rStr, "")
 					}
-					addRow(indent, ind, lStr, arrowRight, rStr, "")
-				}
-				for _, pxy := range fset.Proxies.Remote {
-					lStr := ""
-					if pxy.Target != "" {
-						lStr = colorAddr(pxy.Target)
-					} else {
-						lStr = cGray + "tunnel" + cReset
-					}
-					rStr := colorAddr(pxy.Bind) + " " + cBlue + strings.ToUpper(pxy.Type) + cReset
-					addRow(indent, ind, lStr, arrowLeft, rStr, "")
 				}
 			}
 		}
