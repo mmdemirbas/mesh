@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -85,13 +86,23 @@ func serveCmd() {
 		os.Exit(1)
 	}
 
-	if cfg.Log.Level == "debug" {
-		logHandler = tint.NewHandler(os.Stderr, &tint.Options{
-			Level:      slog.LevelDebug,
-			TimeFormat: "15:04:05.000",
-		})
-		log = slog.New(logHandler)
+	var logLevel slog.Level
+	switch strings.ToLower(cfg.Log.Level) {
+	case "debug":
+		logLevel = slog.LevelDebug
+	case "warn":
+		logLevel = slog.LevelWarn
+	case "error":
+		logLevel = slog.LevelError
+	default:
+		logLevel = slog.LevelInfo
 	}
+
+	logHandler = tint.NewHandler(os.Stderr, &tint.Options{
+		Level:      logLevel,
+		TimeFormat: "15:04:05.000",
+	})
+	log = slog.New(logHandler)
 
 	log.Info("mesh starting", "version", version, "name", cfg.Name)
 
@@ -116,12 +127,12 @@ func serveCmd() {
 
 	// 1. Standalone proxies
 	if len(cfg.Proxies) > 0 {
-		proxy.RunStandaloneProxies(ctx, cfg.Proxies, log)
+		proxy.RunStandaloneProxies(ctx, cfg.Proxies, log, &wg)
 	}
 
 	// 2. Standalone TCP Relays (e.g. sidecar usage)
 	if len(cfg.Relays) > 0 {
-		proxy.RunStandaloneRelays(ctx, cfg.Relays, log)
+		proxy.RunStandaloneRelays(ctx, cfg.Relays, log, &wg)
 	}
 
 	// 3. SSH servers (accept incoming connections)

@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os/exec"
 	"sync"
-	"syscall"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -72,9 +71,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 						status := uint32(0)
 						if err != nil {
 							if exiterr, ok := err.(*exec.ExitError); ok {
-								if sys, ok := exiterr.Sys().(syscall.WaitStatus); ok {
-									status = uint32(sys.ExitStatus())
-								}
+								status = uint32(exiterr.ExitCode())
 							}
 						}
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/mmdemirbas/mesh/internal/config"
@@ -12,10 +13,13 @@ import (
 )
 
 // RunStandaloneProxies starts all standalone (always-on) SOCKS/HTTP proxies.
-func RunStandaloneProxies(ctx context.Context, proxies []config.Proxy, log *slog.Logger) {
+// Each proxy goroutine is tracked via the provided WaitGroup.
+func RunStandaloneProxies(ctx context.Context, proxies []config.Proxy, log *slog.Logger, wg *sync.WaitGroup) {
 	for _, p := range proxies {
 		p := p
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			pLog := log.With("component", "proxy", "type", p.Type, "bind", p.Bind)
 			ln, err := net.Listen("tcp", p.Bind)
 			if err != nil {
@@ -39,10 +43,13 @@ func RunStandaloneProxies(ctx context.Context, proxies []config.Proxy, log *slog
 }
 
 // RunStandaloneRelays starts raw TCP relays (e.g. replacing socat).
-func RunStandaloneRelays(ctx context.Context, relays []config.Relay, log *slog.Logger) {
+// Each relay goroutine is tracked via the provided WaitGroup.
+func RunStandaloneRelays(ctx context.Context, relays []config.Relay, log *slog.Logger, wg *sync.WaitGroup) {
 	for _, r := range relays {
 		r := r
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			rLog := log.With("component", "relay", "bind", r.Bind, "target", r.Target)
 			ln, err := net.Listen("tcp", r.Bind)
 			if err != nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net"
 	"os"
 	"strconv"
@@ -44,20 +45,46 @@ func (s *SSHServer) Run(ctx context.Context) error {
 		return fmt.Errorf("load authorized keys %s: %w", s.cfg.AuthorizedKeys, err)
 	}
 
+	type limiterEntry struct {
+		limiter  *rate.Limiter
+		lastSeen time.Time
+	}
 	var (
 		limitersMu sync.Mutex
-		limiters   = make(map[string]*rate.Limiter)
+		limiters   = make(map[string]*limiterEntry)
 	)
+
+	// Periodically evict stale rate limiter entries to prevent unbounded memory growth.
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				limitersMu.Lock()
+				for ip, entry := range limiters {
+					if time.Since(entry.lastSeen) > 10*time.Minute {
+						delete(limiters, ip)
+					}
+				}
+				limitersMu.Unlock()
+			}
+		}
+	}()
 
 	sshCfg := &ssh.ServerConfig{
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			ip := conn.RemoteAddr().(*net.TCPAddr).IP.String()
 			limitersMu.Lock()
-			limiter, exists := limiters[ip]
+			entry, exists := limiters[ip]
 			if !exists {
-				limiter = rate.NewLimiter(5, 5)
-				limiters[ip] = limiter
+				entry = &limiterEntry{limiter: rate.NewLimiter(5, 5)}
+				limiters[ip] = entry
 			}
+			entry.lastSeen = time.Now()
+			limiter := entry.limiter
 			limitersMu.Unlock()
 
 			for _, ak := range authorizedKeys {
@@ -228,7 +255,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(retryInterval):
+			case <-time.After(retryDelay(retryInterval)):
 				continue
 			}
 		}
@@ -247,7 +274,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(retryInterval):
+			case <-time.After(retryDelay(retryInterval)):
 				continue
 			}
 		}
@@ -259,7 +286,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(retryInterval):
+			case <-time.After(retryDelay(retryInterval)):
 				continue
 			}
 		}
@@ -274,7 +301,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(retryInterval):
+		case <-time.After(retryDelay(retryInterval)):
 		}
 	}
 }
@@ -662,8 +689,11 @@ func parseTarget(target string) (user, host string) {
 	return
 }
 
-func isListenAddr(addr string) bool {
-	return strings.HasPrefix(addr, "0.0.0.0:") || strings.HasPrefix(addr, ":")
+// retryDelay returns the base duration plus random jitter up to 25% of base,
+// preventing thundering herd reconnection storms.
+func retryDelay(base time.Duration) time.Duration {
+	jitter := time.Duration(rand.Int63n(int64(base / 4)))
+	return base + jitter
 }
 
 func BiCopy(a, b io.ReadWriteCloser) {

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -109,14 +110,21 @@ func dialViaSocks5(baseDialer func(string, string) (net.Conn, error), socksAddr,
 		conn.Close()
 		return nil, err
 	}
+	if buf[0] != 0x05 || buf[1] != 0x00 {
+		conn.Close()
+		return nil, fmt.Errorf("socks5: server rejected no-auth method (got %#x %#x)", buf[0], buf[1])
+	}
 
 	host, portStr, err := net.SplitHostPort(target)
 	if err != nil {
 		conn.Close()
 		return nil, err
 	}
-	port := 0
-	fmt.Sscanf(portStr, "%d", &port)
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("socks5: invalid port %q: %w", portStr, err)
+	}
 
 	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}
 	req = append(req, []byte(host)...)

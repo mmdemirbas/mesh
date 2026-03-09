@@ -170,6 +170,56 @@ func (c *Config) validate() error {
 		return fmt.Errorf("standalone proxies: %w", err)
 	}
 
+	// Check for duplicate bind addresses across all components
+	if err := c.checkDuplicateBinds(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// checkDuplicateBinds detects bind address collisions across all listeners.
+func (c *Config) checkDuplicateBinds() error {
+	seen := make(map[string]string) // bind addr -> description
+	check := func(bind, desc string) error {
+		if bind == "" {
+			return nil
+		}
+		if prev, ok := seen[bind]; ok {
+			return fmt.Errorf("duplicate bind address %q: used by %s and %s", bind, prev, desc)
+		}
+		seen[bind] = desc
+		return nil
+	}
+	for i, p := range c.Proxies {
+		if err := check(p.Bind, fmt.Sprintf("proxies[%d]", i)); err != nil {
+			return err
+		}
+	}
+	for i, r := range c.Relays {
+		if err := check(r.Bind, fmt.Sprintf("relays[%d]", i)); err != nil {
+			return err
+		}
+	}
+	for i, s := range c.Servers {
+		if err := check(s.Listen, fmt.Sprintf("servers[%d]", i)); err != nil {
+			return err
+		}
+	}
+	for i, conn := range c.Connections {
+		for j, fset := range conn.Forwards {
+			for k, fwd := range fset.Local {
+				if err := check(fwd.Bind, fmt.Sprintf("connections[%d].forwards[%d].local[%d]", i, j, k)); err != nil {
+					return err
+				}
+			}
+			for k, pxy := range fset.Proxies.Local {
+				if err := check(pxy.Bind, fmt.Sprintf("connections[%d].forwards[%d].proxies.local[%d]", i, j, k)); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	return nil
 }
 

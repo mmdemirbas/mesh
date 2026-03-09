@@ -52,7 +52,7 @@ func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), 
 	if _, err := io.ReadFull(conn, buf[:4]); err != nil {
 		return
 	}
-	if buf[0] != 0x05 || buf[1] != 0x01 { // Only CONNECT
+	if buf[0] != 0x05 || buf[1] != 0x01 || buf[2] != 0x00 { // Only CONNECT, RSV must be 0x00
 		socksReply(conn, 0x07)
 		return
 	}
