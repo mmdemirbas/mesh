@@ -302,7 +302,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		}
 
 		state.Global.Update("connection", id, state.Connecting, "")
-		target := c.discoverTarget(ctx)
+		target := c.discoverTarget(ctx, sshCfg.Timeout)
 		if target == "" {
 			state.Global.Update("connection", id, state.Retrying, "no reachable target")
 			log.Warn("No reachable target", "retry_in", retryInterval)
@@ -352,7 +352,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		state.Global.Update("connection", id, state.Connected, target)
 		log.Info("Connected", "target", target)
 
-		c.runSession(ctx, client, fset, log)
+		c.runSession(ctx, client, fset, opts, log)
 		client.Close()
 
 		state.Global.Update("connection", id, state.Retrying, "session ended")
@@ -365,7 +365,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 	}
 }
 
-func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *config.ForwardSet, log *slog.Logger) {
+func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *config.ForwardSet, opts map[string]string, log *slog.Logger) {
 	var wg sync.WaitGroup
 	sCtx, sCancel := context.WithCancel(ctx)
 	defer sCancel()
@@ -409,11 +409,16 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var err error
 			switch fwd.Type {
 			case "forward":
-				c.runRemoteForward(sCtx, client, fwd, log)
+				err = c.runRemoteForward(sCtx, client, fwd, log)
 			default:
-				c.runRemoteProxy(sCtx, client, fwd, log)
+				err = c.runRemoteProxy(sCtx, client, fwd, log)
+			}
+			if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
+				log.Error("Forward failed, aborting session", "error", err)
+				sCancel()
 			}
 		}()
 	}
@@ -424,11 +429,16 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var err error
 			switch fwd.Type {
 			case "forward":
-				c.runLocalForward(sCtx, client, fwd, log)
+				err = c.runLocalForward(sCtx, client, fwd, log)
 			default:
-				c.runLocalProxy(sCtx, client, fwd, log)
+				err = c.runLocalProxy(sCtx, client, fwd, log)
+			}
+			if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
+				log.Error("Forward failed, aborting session", "error", err)
+				sCancel()
 			}
 		}()
 	}
@@ -437,12 +447,12 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 }
 
 // runRemoteForward (-R equivalent): bind on peer, forward here
-func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fwd config.Forward, log *slog.Logger) {
+func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fwd config.Forward, log *slog.Logger) error {
 	log.Info("Forward -R", "bind", fwd.Bind, "target", fwd.Target)
 	listener, err := client.Listen("tcp", fwd.Bind)
 	if err != nil {
 		log.Error("Remote listen failed", "bind", fwd.Bind, "error", err)
-		return
+		return err
 	}
 	defer listener.Close()
 	stop := context.AfterFunc(ctx, func() { listener.Close() })
@@ -451,15 +461,16 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fw
 	acceptAndForward(ctx, listener, func() (net.Conn, error) {
 		return net.DialTimeout("tcp", fwd.Target, 10*time.Second)
 	}, log)
+	return nil
 }
 
 // runLocalForward (-L equivalent): bind here, forward to peer
-func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd config.Forward, log *slog.Logger) {
+func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd config.Forward, log *slog.Logger) error {
 	log.Info("Forward -L", "bind", fwd.Bind, "target", fwd.Target)
 	listener, err := net.Listen("tcp", fwd.Bind)
 	if err != nil {
 		log.Error("Local listen failed", "bind", fwd.Bind, "error", err)
-		return
+		return err
 	}
 	defer listener.Close()
 	stop := context.AfterFunc(ctx, func() { listener.Close() })
@@ -468,15 +479,16 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd
 	acceptAndForward(ctx, listener, func() (net.Conn, error) {
 		return client.Dial("tcp", fwd.Target)
 	}, log)
+	return nil
 }
 
 // runRemoteProxy binds proxy on peer, traffic exits HERE.
-func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy config.Forward, log *slog.Logger) {
+func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy config.Forward, log *slog.Logger) error {
 	log.Info("Proxy remote bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
 	listener, err := client.Listen("tcp", pxy.Bind)
 	if err != nil {
 		log.Error("Remote proxy listen failed", "bind", pxy.Bind, "error", err)
-		return
+		return err
 	}
 	defer listener.Close()
 	stop := context.AfterFunc(ctx, func() { listener.Close() })
@@ -486,17 +498,21 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy 
 	case "socks":
 		proxy.ServeSocks(ctx, listener, nil, log) // nil dialer = exit locally
 	case "http":
-		proxy.ServeHTTPProxy(ctx, listener, pxy.Target, log) // Target dialed locally
+		httpDialer := func(addr string) (net.Conn, error) {
+			return net.DialTimeout("tcp", addr, 10*time.Second) // exits HERE
+		}
+		proxy.ServeHTTPProxyWithDialer(ctx, listener, httpDialer, log)
 	}
+	return nil
 }
 
 // runLocalProxy binds proxy here, traffic exits PEER.
-func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy config.Forward, log *slog.Logger) {
+func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy config.Forward, log *slog.Logger) error {
 	log.Info("Proxy local bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
 	listener, err := net.Listen("tcp", pxy.Bind)
 	if err != nil {
 		log.Error("Local proxy listen failed", "bind", pxy.Bind, "error", err)
-		return
+		return err
 	}
 	defer listener.Close()
 	stop := context.AfterFunc(ctx, func() { listener.Close() })
@@ -520,12 +536,13 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy c
 		}
 		proxy.ServeHTTPProxyWithDialer(ctx, listener, httpDialer, log)
 	}
+	return nil
 }
 
 // discoverTarget probes each target in order to find the first reachable one.
 // TODO: Avoid double-dial by passing the probed connection through to runForwardSet
 // instead of closing it and re-dialing. This would save a round-trip on high-latency links.
-func (c *SSHClient) discoverTarget(ctx context.Context) string {
+func (c *SSHClient) discoverTarget(ctx context.Context, timeout time.Duration) string {
 	for _, target := range c.cfg.Targets {
 		_, hostPort := parseTarget(target)
 		host, _, err := net.SplitHostPort(hostPort)
@@ -533,7 +550,10 @@ func (c *SSHClient) discoverTarget(ctx context.Context) string {
 			host = hostPort
 		}
 
-		dialer := net.Dialer{Timeout: 3 * time.Second}
+		if timeout == 0 {
+			timeout = 3 * time.Second
+		}
+		dialer := net.Dialer{Timeout: timeout}
 		conn, err := dialer.DialContext(ctx, "tcp", hostPort)
 
 		if err != nil && strings.HasSuffix(host, ".local") {
