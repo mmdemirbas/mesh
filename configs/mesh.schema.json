@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/mmdemirbas/mesh/internal/config/config",
-  "$ref": "#/$defs/Config",
+  "$ref": "#/$defs/Root",
   "$defs": {
     "AuthCfg": {
       "properties": {
@@ -63,10 +63,6 @@
         "^x-": {}
       },
       "properties": {
-        "name": {
-          "type": "string",
-          "description": "A friendly name for this mesh instance. Defaults to \"mesh\"."
-        },
         "listeners": {
           "items": {
             "$ref": "#/$defs/Listener"
@@ -276,6 +272,16 @@
       "additionalProperties": false,
       "type": "object",
       "description": "LogCfg configures logging behavior."
+    },
+    "Root": {
+      "type": "object",
+      "patternProperties": {
+        "^x-.*": {}
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/Config"
+      },
+      "description": "A map of services containing mesh configurations."
     }
   }
 }

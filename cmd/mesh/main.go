@@ -33,18 +33,32 @@ import (
 var version = "dev"
 
 func main() {
-	if len(os.Args) < 2 {
+	var configPath string
+	flag.StringVar(&configPath, "f", "", "Path to config file")
+	flag.StringVar(&configPath, "file", "", "Path to config file")
+	flag.Usage = printUsage
+	flag.Parse()
+
+	args := flag.Args()
+	if len(args) < 2 {
 		printUsage()
 		os.Exit(1)
 	}
 
-	switch os.Args[1] {
+	nodeName := args[0]
+	command := args[1]
+
+	if configPath == "" {
+		configPath = getDefaultConfigPath()
+	}
+
+	switch command {
 	case "up":
-		upCmd()
+		upCmd(nodeName, configPath)
 	case "status":
-		statusCmd()
+		statusCmd(nodeName, configPath)
 	case "down":
-		downCmd()
+		downCmd(nodeName)
 	default:
 		printUsage()
 		os.Exit(1)
@@ -65,22 +79,22 @@ func printUsage() {
 	fmt.Println("All-in-one replacement for ssh, sshd, autossh, socat, and SOCKS/HTTP proxy servers.")
 	fmt.Println()
 	fmt.Println(bold + "Usage:" + reset)
-	fmt.Println("  mesh " + cyan + "<command>" + reset + " [arguments]")
+	fmt.Println("  mesh " + yellow + "[-f config.yaml] " + reset + cyan + "<node> <command>" + reset + " [arguments]")
 	fmt.Println()
 	fmt.Println(bold + "Commands:" + reset)
-	fmt.Println("  " + blue + "up" + reset + "     Start mesh based on a config file")
-	fmt.Println("  " + blue + "down" + reset + "   Stop the currently running mesh instance")
-	fmt.Println("  " + blue + "status" + reset + " Check if mesh is running and show its active configuration")
+	fmt.Println("  " + blue + "up" + reset + "     Start the specified mesh node")
+	fmt.Println("  " + blue + "down" + reset + "   Stop the currently running mesh node")
+	fmt.Println("  " + blue + "status" + reset + " Check if the mesh node is running and show its active configuration")
 	fmt.Println()
 	fmt.Println(bold + "Examples:" + reset)
-	fmt.Println("  " + gray + "# Start mesh using a specific configuration file in the background" + reset)
-	fmt.Println("  mesh " + blue + "up" + reset + " " + yellow + "-config" + reset + " configs/example.yml &")
+	fmt.Println("  " + gray + "# Start the 'server' node using the default configuration file" + reset)
+	fmt.Println("  mesh server " + blue + "up" + reset + " &")
 	fmt.Println()
-	fmt.Println("  " + gray + "# Gracefully stop the daemon" + reset)
-	fmt.Println("  mesh " + blue + "down" + reset)
+	fmt.Println("  " + gray + "# Start utilizing a specific configuration file" + reset)
+	fmt.Println("  mesh " + yellow + "-f" + reset + " configs/example.yml server " + blue + "up" + reset)
 	fmt.Println()
-	fmt.Println("  " + gray + "# Check if the daemon is running and view configuration" + reset)
-	fmt.Println("  mesh " + blue + "status" + reset + " " + yellow + "-config" + reset + " configs/example.yml")
+	fmt.Println("  " + gray + "# Gracefully stop the 'server' node" + reset)
+	fmt.Println("  mesh server " + blue + "down" + reset)
 	fmt.Println()
 }
 
@@ -110,10 +124,12 @@ func getDefaultConfigPath() string {
 	return "mesh.yaml"
 }
 
-func upCmd() {
-	serveFS := flag.NewFlagSet("up", flag.ExitOnError)
-	configPath := serveFS.String("config", getDefaultConfigPath(), "Path to config file")
-	serveFS.Parse(os.Args[2:])
+func upCmd(nodeName, configPath string) {
+	pid, err := readPidFile(nodeName)
+	if err == nil && pid != 0 && checkPid(pid) {
+		fmt.Printf("⨯ mesh node %q is already running (pid %d).\n", nodeName, pid)
+		os.Exit(1)
+	}
 
 	logHandler := tint.NewHandler(os.Stderr, &tint.Options{
 		Level:      slog.LevelInfo,
@@ -122,9 +138,9 @@ func upCmd() {
 	log := slog.New(&padMessageHandler{Handler: logHandler, width: 30})
 	slog.SetDefault(log)
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.Load(configPath, nodeName)
 	if err != nil {
-		log.Error("Config load failed", "path", *configPath, "error", err)
+		log.Error("Config load failed", "path", configPath, "error", err)
 		os.Exit(1)
 	}
 
@@ -147,19 +163,19 @@ func upCmd() {
 	log = slog.New(&padMessageHandler{Handler: logHandler, width: 30})
 	slog.SetDefault(log)
 
-	log.Info("mesh starting", "version", version, "name", cfg.Name)
+	log.Info("mesh starting", "version", version, "node", nodeName, "config", configPath)
 
-	if err := writePidFile(); err != nil {
+	if err := writePidFile(nodeName); err != nil {
 		log.Error("Failed to write pidfile", "error", err)
 	} else {
-		defer removePidFile()
+		defer removePidFile(nodeName)
 	}
 
 	adminLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err == nil {
 		port := adminLn.Addr().(*net.TCPAddr).Port
-		os.WriteFile(portFilePath(), []byte(strconv.Itoa(port)), 0644)
-		defer os.Remove(portFilePath())
+		os.WriteFile(portFilePath(nodeName), []byte(strconv.Itoa(port)), 0644)
+		defer os.Remove(portFilePath(nodeName))
 
 		go http.Serve(adminLn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -254,11 +270,7 @@ func (h *padMessageHandler) Handle(ctx context.Context, r slog.Record) error {
 	return h.Handler.Handle(ctx, r)
 }
 
-func statusCmd() {
-	statusFS := flag.NewFlagSet("status", flag.ExitOnError)
-	configPath := statusFS.String("config", getDefaultConfigPath(), "Path to config file")
-	statusFS.Parse(os.Args[2:])
-
+func statusCmd(nodeName, configPath string) {
 	const (
 		cReset   = "\033[0m"
 		cBold    = "\033[1m"
@@ -271,21 +283,21 @@ func statusCmd() {
 		cGray    = "\033[90m"
 	)
 
-	pid, err := readPidFile()
+	pid, err := readPidFile(nodeName)
 	if err != nil || pid == 0 {
-		fmt.Printf("%s⨯ mesh is not running.%s\n", cRed, cReset)
+		fmt.Printf("%s⨯ mesh node %q is not running.%s\n", cRed, nodeName, cReset)
 		os.Exit(3)
 	}
 
 	if !checkPid(pid) {
-		fmt.Printf("%s⨯ mesh is dead but pidfile exists (pid %d).%s\n", cRed, pid, cReset)
+		fmt.Printf("%s⨯ mesh node %q is dead but pidfile exists (pid %d).%s\n", cRed, nodeName, pid, cReset)
 		os.Exit(1)
 	}
 
-	fmt.Printf("%s✔ mesh is running (pid %d).%s\n\n", cGreen, pid, cReset)
+	fmt.Printf("%s✔ mesh node %q is running (pid %d).%s\n\n", cGreen, nodeName, pid, cReset)
 
 	var activeState map[string]state.Component
-	if portData, err := os.ReadFile(portFilePath()); err == nil {
+	if portData, err := os.ReadFile(portFilePath(nodeName)); err == nil {
 		if resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/", string(portData))); err == nil {
 			defer resp.Body.Close()
 			json.NewDecoder(resp.Body).Decode(&activeState)
@@ -331,13 +343,18 @@ func statusCmd() {
 	log := slog.New(&padMessageHandler{Handler: logHandler, width: 30})
 	slog.SetDefault(log)
 
-	cfg, err := config.LoadUnvalidated(*configPath)
+	cfgs, err := config.LoadUnvalidated(configPath)
 	if err != nil {
 		fmt.Printf("%s⚠ Could not load configuration to show details: %v%s\n", cYellow, err, cReset)
 		os.Exit(0)
 	}
+	cfg, ok := cfgs[nodeName]
+	if !ok {
+		fmt.Printf("%s⚠ Node %q not found in config%s\n", cYellow, nodeName, cReset)
+		os.Exit(0)
+	}
 
-	fmt.Printf("%s⚙ Configuration: %s%s%s\n", cBold, cCyan, cfg.Name, cReset)
+	fmt.Printf("%s⚙ Configuration: %s%s%s\n", cBold, cCyan, nodeName, cReset)
 	fmt.Println(cGray + strings.Repeat("─", 80) + cReset)
 
 	stripANSI := func(str string) string {
@@ -718,20 +735,20 @@ func statusCmd() {
 	os.Exit(0)
 }
 
-func downCmd() {
-	pid, err := readPidFile()
+func downCmd(nodeName string) {
+	pid, err := readPidFile(nodeName)
 	if err != nil || pid == 0 {
-		fmt.Println("mesh is not running.")
+		fmt.Printf("mesh node %q is not running.\n", nodeName)
 		return
 	}
 
 	if !checkPid(pid) {
-		fmt.Println("mesh is not running (stale pidfile).")
-		removePidFile()
+		fmt.Printf("mesh node %q is not running (stale pidfile).\n", nodeName)
+		removePidFile(nodeName)
 		return
 	}
 
-	fmt.Printf("Stopping mesh (pid %d)...\n", pid)
+	fmt.Printf("Stopping mesh node %q (pid %d)...\n", nodeName, pid)
 	if err := killPid(pid, syscall.SIGTERM); err != nil {
 		fmt.Printf("Error sending SIGTERM: %v\n", err)
 		os.Exit(1)
@@ -739,7 +756,7 @@ func downCmd() {
 	// Wait for the process to actually exit (up to 10 seconds)
 	for i := 0; i < 100; i++ {
 		if !checkPid(pid) {
-			removePidFile()
+			removePidFile(nodeName)
 			fmt.Println("Stopped.")
 			return
 		}
@@ -748,7 +765,7 @@ func downCmd() {
 	fmt.Println("Warning: process did not exit within 10 seconds.")
 }
 
-func portFilePath() string {
+func portFilePath(nodeName string) string {
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		dir, err = os.UserHomeDir()
@@ -757,10 +774,10 @@ func portFilePath() string {
 		}
 	}
 	os.MkdirAll(filepath.Join(dir, "mesh"), 0700)
-	return filepath.Join(dir, "mesh", "mesh.port")
+	return filepath.Join(dir, "mesh", fmt.Sprintf("mesh-%s.port", nodeName))
 }
 
-func pidFilePath() string {
+func pidFilePath(nodeName string) string {
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		dir, err = os.UserHomeDir()
@@ -769,25 +786,25 @@ func pidFilePath() string {
 		}
 	}
 	os.MkdirAll(filepath.Join(dir, "mesh"), 0700)
-	return filepath.Join(dir, "mesh", "mesh.pid")
+	return filepath.Join(dir, "mesh", fmt.Sprintf("mesh-%s.pid", nodeName))
 }
 
-func writePidFile() error {
+func writePidFile(nodeName string) error {
 	pid := os.Getpid()
 	data := []byte(strconv.Itoa(pid))
-	return os.WriteFile(pidFilePath(), data, 0644)
+	return os.WriteFile(pidFilePath(nodeName), data, 0644)
 }
 
-func readPidFile() (int, error) {
-	data, err := os.ReadFile(pidFilePath())
+func readPidFile(nodeName string) (int, error) {
+	data, err := os.ReadFile(pidFilePath(nodeName))
 	if err != nil {
 		return 0, err
 	}
 	return strconv.Atoi(string(data))
 }
 
-func removePidFile() {
-	os.Remove(pidFilePath())
+func removePidFile(nodeName string) {
+	os.Remove(pidFilePath(nodeName))
 }
 
 func checkPid(pid int) bool {

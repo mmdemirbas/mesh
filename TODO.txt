@@ -14,3 +14,4 @@ USABILITY
 - Support unsupported ssh/sshd options.
 
 - status: Also show clipsync discovered and static peer details (in the same list with a one-word note)
+

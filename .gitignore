@@ -5,8 +5,8 @@
 .DS_Store
 
 # Local configs
-*.yml
-!configs/example.yml
+*.yaml
+!configs/example.yaml
 
 # IntelliJ
 .idea/

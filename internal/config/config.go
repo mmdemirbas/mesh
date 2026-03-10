@@ -15,8 +15,6 @@ import (
 // Config is the top-level mesh configuration schema.
 // It defines local listeners and outbound connections to other mesh nodes or SSH servers.
 type Config struct {
-	// A friendly name for this mesh instance. Defaults to "mesh".
-	Name string `yaml:"name,omitempty"`
 	// Local server ports to bind (e.g., SOCKS, HTTP proxies, Relays, or an embedded SSH server).
 	Listeners []Listener `yaml:"listeners,omitempty"`
 	// Outbound SSH connections to other peers, which encapsulate port forwards and proxy rules.
@@ -140,20 +138,24 @@ type LogCfg struct {
 	Level string `yaml:"level,omitempty" jsonschema:"enum=debug,enum=info,enum=warn,enum=error"`
 }
 
-// Load reads, parses, and validates a config file.
-func Load(path string) (*Config, error) {
-	cfg, err := LoadUnvalidated(path)
+// Load reads, parses, and returns the requested service's validated config.
+func Load(path, serviceName string) (*Config, error) {
+	cfgs, err := LoadUnvalidated(path)
 	if err != nil {
 		return nil, err
 	}
+	cfg, ok := cfgs[serviceName]
+	if !ok {
+		return nil, fmt.Errorf("service %q not found in config", serviceName)
+	}
 	if err := cfg.validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("service %q validation failed: %w", serviceName, err)
 	}
 	return cfg, nil
 }
 
 // LoadUnvalidated reads and parses a config file without checking for runtime requirements (like file existence).
-func LoadUnvalidated(path string) (*Config, error) {
+func LoadUnvalidated(path string) (map[string]*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
@@ -161,30 +163,28 @@ func LoadUnvalidated(path string) (*Config, error) {
 
 	expanded := os.ExpandEnv(string(data))
 
-	var cfg Config
-	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
+	var cfgs map[string]*Config
+	if err := yaml.Unmarshal([]byte(expanded), &cfgs); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	WarnUnsupportedOptions(&cfg)
+	for _, cfg := range cfgs {
+		WarnUnsupportedOptions(cfg)
 
-	// Expand ~ in all path fields
-	for i := range cfg.Listeners {
-		if cfg.Listeners[i].Type == "sshd" {
-			cfg.Listeners[i].HostKey = expandHome(cfg.Listeners[i].HostKey)
-			cfg.Listeners[i].AuthorizedKeys = expandHome(cfg.Listeners[i].AuthorizedKeys)
+		// Expand ~ in all path fields
+		for i := range cfg.Listeners {
+			if cfg.Listeners[i].Type == "sshd" {
+				cfg.Listeners[i].HostKey = expandHome(cfg.Listeners[i].HostKey)
+				cfg.Listeners[i].AuthorizedKeys = expandHome(cfg.Listeners[i].AuthorizedKeys)
+			}
+		}
+		for i := range cfg.Connections {
+			cfg.Connections[i].Auth.Key = expandHome(cfg.Connections[i].Auth.Key)
+			cfg.Connections[i].Auth.KnownHosts = expandHome(cfg.Connections[i].Auth.KnownHosts)
 		}
 	}
-	for i := range cfg.Connections {
-		cfg.Connections[i].Auth.Key = expandHome(cfg.Connections[i].Auth.Key)
-		cfg.Connections[i].Auth.KnownHosts = expandHome(cfg.Connections[i].Auth.KnownHosts)
-	}
 
-	if cfg.Name == "" {
-		cfg.Name = "mesh"
-	}
-
-	return &cfg, nil
+	return cfgs, nil
 }
 
 // WarnUnsupportedOptions traverses the loaded configuration and logs warnings
@@ -226,9 +226,6 @@ func WarnUnsupportedOptions(cfg *Config) {
 }
 
 func (c *Config) validate() error {
-	if c.Name == "" {
-		c.Name = "mesh"
-	}
 
 	for i, l := range c.Listeners {
 		if l.Bind == "" {

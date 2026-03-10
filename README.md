@@ -43,42 +43,45 @@ To enable rich autocompletion, hover documentation, and validation in standard I
 **Listeners Array**
 Consolidates all your local inbound services. Valid types include `socks`, `http`, `relay`, and `sshd`.
 ```yaml
-listeners:
-  - { type: socks, bind: "127.0.0.1:1080" }
-  - { type: http,  bind: "127.0.0.1:1081", target: "127.0.0.1:1080" }
-  - { type: sshd,  bind: "0.0.0.0:2222", host_key: ~/.ssh/keys/key, authorized_keys: ~/.ssh/keys/auth }
+myservice:
+  listeners:
+    - { type: socks, bind: "127.0.0.1:1080" }
+    - { type: http,  bind: "127.0.0.1:1081", target: "127.0.0.1:1080" }
+    - { type: sshd,  bind: "0.0.0.0:2222", host_key: ~/.ssh/keys/key, authorized_keys: ~/.ssh/keys/auth }
 ```
 
 **Connections Array**
 Dial outbound to other peers, map remote resources, and instantiate tunnels. Traffic types (`forward`, `socks`, `http`) are seamlessly multiplexed.
 ```yaml
-connections:
-  - name: my-vps-tunnel
-    targets:
-      - ubuntu@my-vps.local:22  # Try mDNS first
-      - ubuntu@12.34.56.78:22   # Fallback to public IP
-    retry: 10s
-    auth:
-      key: ~/.ssh/keys/key
-      known_hosts: ~/.ssh/keys/known_hosts
-    forwards:
-      - name: my-mappings
-        local:
-          - { type: forward, bind: "127.0.0.1:8080", target: "127.0.0.1:80" }
-          - { type: socks, bind: "127.0.0.1:2080" }
-        remote:
-          - { type: forward, bind: "0.0.0.0:9090", target: "127.0.0.1:22" }
+myservice:
+  connections:
+    - name: my-vps-tunnel
+      targets:
+        - ubuntu@my-vps.local:22  # Try mDNS first
+        - ubuntu@12.34.56.78:22   # Fallback to public IP
+      retry: 10s
+      auth:
+        key: ~/.ssh/keys/key
+        known_hosts: ~/.ssh/keys/known_hosts
+      forwards:
+        - name: my-mappings
+          local:
+            - { type: forward, bind: "127.0.0.1:8080", target: "127.0.0.1:80" }
+            - { type: socks, bind: "127.0.0.1:2080" }
+          remote:
+            - { type: forward, bind: "0.0.0.0:9090", target: "127.0.0.1:22" }
 ```
 
 **Clipsync Array**
 Seamlessly and securely synchronize your clipboard (text, images, and files) natively across your mesh network, with integrated UDP LAN discovery and explicit firewall bypassing capabilities.
 ```yaml
-clipsync:
-  - bind: "0.0.0.0:7755"
-    lan_discovery: true
-    static_peers: ["192.168.1.10:7755"]
-    allow_send_to: ["all"]
-    allow_receive: ["all"]
+myservice:
+  clipsync:
+    - bind: "0.0.0.0:7755"
+      lan_discovery: true
+      static_peers: ["192.168.1.10:7755"]
+      allow_send_to: ["all"]
+      allow_receive: ["all"]
 ```
 
 Check out the `configs/` directory for our reference file:
@@ -86,13 +89,13 @@ Check out the `configs/` directory for our reference file:
 
 ## Usage
 
-Start the daemon using your desired target configuration:
+Start the daemon for a specific service using a target configuration file:
 ```bash
-./mesh up -config configs/example.yml &
+./mesh -f configs/example.yml server up &
 ```
 
 Query the daemon status or stop it safely utilizing graceful shutdowns:
 ```bash
-./mesh status -config configs/example.yml 
-./mesh down
+./mesh -f configs/example.yml server status
+./mesh server down
 ```
