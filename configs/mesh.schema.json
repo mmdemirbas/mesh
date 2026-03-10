@@ -77,7 +77,7 @@
             "type": "string"
           },
           "type": "object",
-          "description": "Common SSH options applied to all forwards in this connection."
+          "description": "Common SSH options applied to all forwards in this connection.\nOnly a subset of OpenSSH config keys are parsed directly:\nCiphers, MACs, KexAlgorithms, ConnectTimeout, IPQoS.\nOther keys are natively handled by mapping structural YAML (like Auth.Key) or ignored."
         },
         "forwards": {
           "items": {
@@ -135,7 +135,7 @@
             "type": "string"
           },
           "type": "object",
-          "description": "Options overrides or adds to connection-level options (e.g., IPQoS)."
+          "description": "Options overrides or adds to connection-level options.\nOnly a subset of OpenSSH config keys are parsed: Ciphers, MACs, KexAlgorithms, ConnectTimeout, IPQoS."
         },
         "remote": {
           "items": {
@@ -203,7 +203,7 @@
             "type": "string"
           },
           "type": "object",
-          "description": "Additional overrides for the listener."
+          "description": "Additional overrides for the listener.\nOnly a subset of OpenSSH config keys are parsed: Ciphers, MACs, KexAlgorithms, ConnectTimeout, IPQoS."
         }
       },
       "additionalProperties": false,

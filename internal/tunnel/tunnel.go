@@ -773,22 +773,17 @@ func mergeOptions(parent, child map[string]string) map[string]string {
 
 // applySSHConfigOptions applies supported SSH options to the base ssh.Config.
 func applySSHConfigOptions(cfg *ssh.Config, options map[string]string) {
-	// TODO: Do not assume any defaults beyond the actual SSH/SSHD defaults. AND support more options.
+	// The defaults in golang.org/x/crypto/ssh are extensive and secure.
+	// We only override them explicitly if the user defines them.
 	if val := config.GetOption(options, "Ciphers"); val != "" {
 		cfg.Ciphers = strings.Split(val, ",")
-	} else if len(cfg.Ciphers) == 0 {
-		cfg.Ciphers = []string{"chacha20-poly1305@openssh.com", "aes128-gcm@openssh.com"}
 	}
 
 	if val := config.GetOption(options, "KexAlgorithms"); val != "" {
 		cfg.KeyExchanges = strings.Split(val, ",")
-	} else if len(cfg.KeyExchanges) == 0 {
-		cfg.KeyExchanges = []string{"curve25519-sha256@libssh.org", "curve25519-sha256"}
 	}
 
 	if val := config.GetOption(options, "MACs"); val != "" {
 		cfg.MACs = strings.Split(val, ",")
-	} else if len(cfg.MACs) == 0 {
-		cfg.MACs = []string{"umac-64-etm@openssh.com", "hmac-sha2-256-etm@openssh.com"}
 	}
 }

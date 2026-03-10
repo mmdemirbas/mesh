@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -41,6 +42,7 @@ type Listener struct {
 	// Command to execute on SSH session start (e.g., ["bash", "-l"]). Default drops into a basic shell.
 	Shell []string `yaml:"shell,omitempty"`
 	// Additional overrides for the listener.
+	// Only a subset of OpenSSH config keys are parsed: Ciphers, MACs, KexAlgorithms, ConnectTimeout, IPQoS.
 	Options map[string]string `yaml:"options,omitempty"`
 }
 
@@ -58,6 +60,9 @@ type Connection struct {
 	// Authentication credentials for the target server(s).
 	Auth AuthCfg `yaml:"auth"`
 	// Common SSH options applied to all forwards in this connection.
+	// Only a subset of OpenSSH config keys are parsed directly:
+	// Ciphers, MACs, KexAlgorithms, ConnectTimeout, IPQoS.
+	// Other keys are natively handled by mapping structural YAML (like Auth.Key) or ignored.
 	Options map[string]string `yaml:"options,omitempty"`
 	// A list of forwarding sets. Each set establishes its own purely independent physical SSH connection for maximum throughput.
 	Forwards []ForwardSet `yaml:"forwards,omitempty"`
@@ -67,7 +72,8 @@ type Connection struct {
 type ForwardSet struct {
 	// A unique identifier for this forwarding set.
 	Name string `yaml:"name"`
-	// Options overrides or adds to connection-level options (e.g., IPQoS).
+	// Options overrides or adds to connection-level options.
+	// Only a subset of OpenSSH config keys are parsed: Ciphers, MACs, KexAlgorithms, ConnectTimeout, IPQoS.
 	Options map[string]string `yaml:"options,omitempty"`
 	// Reverse forwards (-R). Listens on the remote peer, traffic exits your local machine.
 	Remote []Forward `yaml:"remote,omitempty"`
@@ -135,6 +141,8 @@ func LoadUnvalidated(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
+	WarnUnsupportedOptions(&cfg)
+
 	// Expand ~ in all path fields
 	for i := range cfg.Listeners {
 		if cfg.Listeners[i].Type == "sshd" {
@@ -145,20 +153,6 @@ func LoadUnvalidated(path string) (*Config, error) {
 	for i := range cfg.Connections {
 		cfg.Connections[i].Auth.Key = expandHome(cfg.Connections[i].Auth.Key)
 		cfg.Connections[i].Auth.KnownHosts = expandHome(cfg.Connections[i].Auth.KnownHosts)
-
-		// Apply default type="forward" for all unified mappings
-		for j := range cfg.Connections[i].Forwards {
-			for k := range cfg.Connections[i].Forwards[j].Remote {
-				if cfg.Connections[i].Forwards[j].Remote[k].Type == "" {
-					cfg.Connections[i].Forwards[j].Remote[k].Type = "forward"
-				}
-			}
-			for k := range cfg.Connections[i].Forwards[j].Local {
-				if cfg.Connections[i].Forwards[j].Local[k].Type == "" {
-					cfg.Connections[i].Forwards[j].Local[k].Type = "forward"
-				}
-			}
-		}
 	}
 
 	if cfg.Name == "" {
@@ -166,6 +160,36 @@ func LoadUnvalidated(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// WarnUnsupportedOptions traverses the loaded configuration and logs warnings
+// for any user-defined SSH options that mesh does not natively support mapping.
+func WarnUnsupportedOptions(cfg *Config) {
+	supported := map[string]struct{}{
+		"ciphers":        {},
+		"macs":           {},
+		"kexalgorithms":  {},
+		"connecttimeout": {},
+		"ipqos":          {},
+	}
+
+	check := func(opts map[string]string, context string) {
+		for k := range opts {
+			if _, ok := supported[strings.ToLower(k)]; !ok {
+				slog.Warn("Ignoring unsupported SSH option", "option", k, "context", context)
+			}
+		}
+	}
+
+	for _, l := range cfg.Listeners {
+		check(l.Options, fmt.Sprintf("listener:%s", l.Bind))
+	}
+	for _, c := range cfg.Connections {
+		check(c.Options, fmt.Sprintf("connection:%s", c.Name))
+		for _, f := range c.Forwards {
+			check(f.Options, fmt.Sprintf("connection:%s forwardset:%s", c.Name, f.Name))
+		}
+	}
 }
 
 func (c *Config) validate() error {
@@ -329,22 +353,22 @@ func validateForwards(fwds []Forward) error {
 }
 
 // validIPQoSValues is the set of recognized IPQoS names (OpenSSH-compatible).
-var validIPQoSValues = map[string]bool{
-	"lowdelay": true, "throughput": true, "reliability": true, "none": true,
-	"af11": true, "af12": true, "af13": true,
-	"af21": true, "af22": true, "af23": true,
-	"af31": true, "af32": true, "af33": true,
-	"af41": true, "af42": true, "af43": true,
-	"ef":  true,
-	"cs0": true, "cs1": true, "cs2": true, "cs3": true,
-	"cs4": true, "cs5": true, "cs6": true, "cs7": true,
+var validIPQoSValues = map[string]struct{}{
+	"lowdelay": {}, "throughput": {}, "reliability": {}, "none": {},
+	"af11": {}, "af12": {}, "af13": {},
+	"af21": {}, "af22": {}, "af23": {},
+	"af31": {}, "af32": {}, "af33": {},
+	"af41": {}, "af42": {}, "af43": {},
+	"ef":  {},
+	"cs0": {}, "cs1": {}, "cs2": {}, "cs3": {},
+	"cs4": {}, "cs5": {}, "cs6": {}, "cs7": {},
 }
 
 func validateIPQoS(value string) error {
 	if value == "" {
 		return nil
 	}
-	if !validIPQoSValues[strings.ToLower(value)] {
+	if _, ok := validIPQoSValues[strings.ToLower(value)]; !ok {
 		return fmt.Errorf("unknown ipqos value %q", value)
 	}
 	return nil

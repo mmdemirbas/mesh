@@ -371,18 +371,18 @@ func psCmd() {
 		for _, c := range cfg.Connections {
 			addHeader(fmt.Sprintf("%s%s%s", cMagenta, c.Name, cReset))
 
-			connectedTargets := make(map[string]bool)
+			connectedTargets := make(map[string]struct{})
 			for _, fset := range c.Forwards {
 				id := c.Name + " [" + fset.Name + "]"
 				_, _, comp := getComponentInfo("connection", id)
 				if (comp.Status == state.Connected || comp.Status == state.Connecting) && comp.Message != "" {
-					connectedTargets[comp.Message] = true
+					connectedTargets[comp.Message] = struct{}{}
 				}
 			}
 
 			for _, t := range c.Targets {
 				ind := "⚪️"
-				if connectedTargets[t] {
+				if _, ok := connectedTargets[t]; ok {
 					ind = "🟢"
 				}
 				addRow("  ", ind, colorAddr(t), "", "", "")
