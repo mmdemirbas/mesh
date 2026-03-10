@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -594,6 +595,9 @@ func checkPid(pid int) bool {
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true
 	}
 	// On Unix, sending signal 0 checks if the process exists
 	err = process.Signal(syscall.Signal(0))

@@ -1,10 +1,5 @@
-USABILITY
-- interactive ssh sessions are deadly slow. Tune parameters! Same for non-interactive browser sessions.
-
-
 STATUS
 - Add extra status info including the ports redirected to HERE from the other peers. Since the redirected ports are not defined in the local config, we need to find a way to get and report them. Maybe we should construct an in-app state export method somehow. -> monitor port? or periodical file dump? something else?
-- pid detection is not working well in windows. It say the pidfile exists but the app is dead while it is not.
 
 LOGGING
 - Improve logging. Make it more human readable rather than being cryptic and semi-structured.
