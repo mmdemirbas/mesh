@@ -90,6 +90,7 @@ func upCmd() {
 		TimeFormat: "15:04:05.000",
 	})
 	log := slog.New(&padMessageHandler{Handler: logHandler, width: 30})
+	slog.SetDefault(log)
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -114,6 +115,7 @@ func upCmd() {
 		TimeFormat: "15:04:05.000",
 	})
 	log = slog.New(&padMessageHandler{Handler: logHandler, width: 30})
+	slog.SetDefault(log)
 
 	log.Info("mesh starting", "version", version, "name", cfg.Name)
 
@@ -277,6 +279,13 @@ func psCmd() {
 		}
 		return indicator, color + "[" + msg + "]" + cReset, comp
 	}
+
+	logHandler := tint.NewHandler(os.Stderr, &tint.Options{
+		Level:      slog.LevelInfo,
+		TimeFormat: "15:04:05.000",
+	})
+	log := slog.New(&padMessageHandler{Handler: logHandler, width: 30})
+	slog.SetDefault(log)
 
 	cfg, err := config.LoadUnvalidated(*configPath)
 	if err != nil {
