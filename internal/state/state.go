@@ -16,10 +16,11 @@ const (
 )
 
 type Component struct {
-	Type    string `json:"type"`    // "proxy", "relay", "server", "connection"
-	ID      string `json:"id"`      // unique identifier
-	Status  Status `json:"status"`  // current status
-	Message string `json:"message"` // error or target info
+	Type      string `json:"type"`       // "proxy", "relay", "server", "connection"
+	ID        string `json:"id"`         // unique identifier
+	Status    Status `json:"status"`     // current status
+	Message   string `json:"message"`    // error or target info
+	BoundAddr string `json:"bound_addr"` // active resolved listener address
 }
 
 type State struct {
@@ -34,12 +35,28 @@ var Global = &State{
 func (s *State) Update(compType, id string, status Status, msg string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.components[compType+":"+id] = Component{
-		Type:    compType,
-		ID:      id,
-		Status:  status,
-		Message: msg,
-	}
+	key := compType + ":" + id
+	comp := s.components[key] // retrieve existing to preserve BoundAddr
+	comp.Type = compType
+	comp.ID = id
+	comp.Status = status
+	comp.Message = msg
+	s.components[key] = comp
+}
+
+func (s *State) UpdateBind(compType, id, boundAddr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := compType + ":" + id
+	comp := s.components[key]
+	comp.BoundAddr = boundAddr
+	s.components[key] = comp
+}
+
+func (s *State) Delete(compType, id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.components, compType+":"+id)
 }
 
 func (s *State) Snapshot() map[string]Component {

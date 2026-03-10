@@ -410,11 +410,10 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 		go func() {
 			defer wg.Done()
 			var err error
-			switch fwd.Type {
-			case "forward":
-				err = c.runRemoteForward(sCtx, client, fwd, log)
-			default:
-				err = c.runRemoteProxy(sCtx, client, fwd, log)
+			if fwd.Type == "forward" {
+				err = c.runRemoteForward(sCtx, client, fset.Name, fwd, log)
+			} else {
+				err = c.runRemoteProxy(sCtx, client, fset.Name, fwd, log)
 			}
 			if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
 				log.Error("Forward failed, aborting session", "error", err)
@@ -430,11 +429,10 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 		go func() {
 			defer wg.Done()
 			var err error
-			switch fwd.Type {
-			case "forward":
-				err = c.runLocalForward(sCtx, client, fwd, log)
-			default:
-				err = c.runLocalProxy(sCtx, client, fwd, log)
+			if fwd.Type == "forward" {
+				err = c.runLocalForward(sCtx, client, fset.Name, fwd, log)
+			} else {
+				err = c.runLocalProxy(sCtx, client, fset.Name, fwd, log)
 			}
 			if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
 				log.Error("Forward failed, aborting session", "error", err)
@@ -447,8 +445,10 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 }
 
 // runRemoteForward (-R equivalent): bind on peer, forward here
-func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fwd config.Forward, log *slog.Logger) error {
+func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fsetName string, fwd config.Forward, log *slog.Logger) error {
 	log.Info("Forward -R", "bind", fwd.Bind, "target", fwd.Target)
+	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, fwd.Bind)
+	state.Global.Update("forward", compID, state.Starting, "")
 
 	var listener net.Listener
 	var err error
@@ -464,14 +464,19 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fw
 	}
 	if err != nil {
 		log.Error("Remote listen failed", "bind", fwd.Bind, "error", err)
+		state.Global.Update("forward", compID, state.Failed, err.Error())
 		return err
 	}
 	defer listener.Close()
+
+	state.Global.Update("forward", compID, state.Listening, "")
+	state.Global.UpdateBind("forward", compID, listener.Addr().String())
 
 	// Guarantee immediate closure when session aborts, breaking accept loops
 	go func() {
 		<-ctx.Done()
 		listener.Close()
+		state.Global.Delete("forward", compID)
 	}()
 
 	acceptAndForward(ctx, listener, func() (net.Conn, error) {
@@ -481,8 +486,10 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fw
 }
 
 // runLocalForward (-L equivalent): bind here, forward to peer
-func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd config.Forward, log *slog.Logger) error {
+func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fsetName string, fwd config.Forward, log *slog.Logger) error {
 	log.Info("Forward -L", "bind", fwd.Bind, "target", fwd.Target)
+	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, fwd.Bind)
+	state.Global.Update("forward", compID, state.Starting, "")
 
 	var listener net.Listener
 	var err error
@@ -498,14 +505,19 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd
 	}
 	if err != nil {
 		log.Error("Local listen failed", "bind", fwd.Bind, "error", err)
+		state.Global.Update("forward", compID, state.Failed, err.Error())
 		return err
 	}
 	defer listener.Close()
+
+	state.Global.Update("forward", compID, state.Listening, "")
+	state.Global.UpdateBind("forward", compID, listener.Addr().String())
 
 	// Guarantee immediate closure when session aborts, breaking accept loops
 	go func() {
 		<-ctx.Done()
 		listener.Close()
+		state.Global.Delete("forward", compID)
 	}()
 
 	acceptAndForward(ctx, listener, func() (net.Conn, error) {
@@ -515,8 +527,10 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd
 }
 
 // runRemoteProxy binds proxy on peer, traffic exits HERE.
-func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy config.Forward, log *slog.Logger) error {
+func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fsetName string, pxy config.Forward, log *slog.Logger) error {
 	log.Info("Proxy remote bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
+	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, pxy.Bind)
+	state.Global.Update("forward", compID, state.Starting, "")
 
 	var listener net.Listener
 	var err error
@@ -532,14 +546,19 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy 
 	}
 	if err != nil {
 		log.Error("Remote proxy listen failed", "bind", pxy.Bind, "error", err)
+		state.Global.Update("forward", compID, state.Failed, err.Error())
 		return err
 	}
 	defer listener.Close()
+
+	state.Global.Update("forward", compID, state.Listening, "")
+	state.Global.UpdateBind("forward", compID, listener.Addr().String())
 
 	// Guarantee immediate closure when session aborts, breaking accept loops
 	go func() {
 		<-ctx.Done()
 		listener.Close()
+		state.Global.Delete("forward", compID)
 	}()
 
 	switch pxy.Type {
@@ -555,8 +574,10 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy 
 }
 
 // runLocalProxy binds proxy here, traffic exits PEER.
-func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy config.Forward, log *slog.Logger) error {
+func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, fsetName string, pxy config.Forward, log *slog.Logger) error {
 	log.Info("Proxy local bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
+	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, pxy.Bind)
+	state.Global.Update("forward", compID, state.Starting, "")
 
 	var listener net.Listener
 	var err error
@@ -572,14 +593,19 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy c
 	}
 	if err != nil {
 		log.Error("Local proxy listen failed", "bind", pxy.Bind, "error", err)
+		state.Global.Update("forward", compID, state.Failed, err.Error())
 		return err
 	}
 	defer listener.Close()
+
+	state.Global.Update("forward", compID, state.Listening, "")
+	state.Global.UpdateBind("forward", compID, listener.Addr().String())
 
 	// Guarantee immediate closure when session aborts, breaking accept loops
 	go func() {
 		<-ctx.Done()
 		listener.Close()
+		state.Global.Delete("forward", compID)
 	}()
 
 	// For SOCKS, direct traffic through the SSH tunnel
@@ -668,9 +694,18 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 	}
 
 	actualPort := uint32(ln.Addr().(*net.TCPAddr).Port)
+	actualAddr := ln.Addr().String()
+
 	mu.Lock()
 	listeners[addr] = ln
 	mu.Unlock()
+
+	peerAddr := sshConn.RemoteAddr().String()
+	if sshConn.User() != "" {
+		peerAddr = sshConn.User() + "@" + peerAddr
+	}
+	state.Global.Update("dynamic", actualAddr, state.Listening, "peer: "+peerAddr)
+	defer state.Global.Delete("dynamic", actualAddr)
 
 	log.Info("tcpip-forward active", "addr", addr)
 	if req.WantReply {

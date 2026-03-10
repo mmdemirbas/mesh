@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -348,12 +349,48 @@ func psCmd() {
 	arrowRight := cCyan + "──▶" + cReset
 	arrowLeft := cMagenta + "◀──" + cReset
 
+	// Pre-scan: find the widest bind address among protocol-tagged rows for alignment.
+	maxProtoAddr := 0
+	for _, l := range cfg.Listeners {
+		if l.Type == "socks" || l.Type == "http" || l.Type == "sshd" {
+			if n := len(l.Bind); n > maxProtoAddr {
+				maxProtoAddr = n
+			}
+		}
+	}
+	for _, conn := range cfg.Connections {
+		for _, fset := range conn.Forwards {
+			for _, fwd := range fset.Local {
+				if fwd.Type == "socks" || fwd.Type == "http" {
+					if n := len(fwd.Bind); n > maxProtoAddr {
+						maxProtoAddr = n
+					}
+				}
+			}
+			for _, fwd := range fset.Remote {
+				if fwd.Type == "socks" || fwd.Type == "http" {
+					if n := len(fwd.Bind); n > maxProtoAddr {
+						maxProtoAddr = n
+					}
+				}
+			}
+		}
+	}
+
+	// padForProto pads a colored address so protocol labels start at the same column.
+	padForProto := func(colored string) string {
+		if pad := maxProtoAddr - visibleLen(colored); pad > 0 {
+			return colored + strings.Repeat(" ", pad)
+		}
+		return colored
+	}
+
 	if len(cfg.Listeners) > 0 {
 		for _, l := range cfg.Listeners {
 			indicator, st, _ := getComponentInfo(l.Type, l.Bind)
 			if l.Type == "sshd" {
 				indicator, st, _ = getComponentInfo("server", l.Bind)
-				left := colorAddr(l.Bind) + " " + cBlue + "sshd" + cReset
+				left := padForProto(colorAddr(l.Bind)) + " " + cBlue + strings.ToLower(l.Type) + cReset
 				addRow("", indicator, left, "", "", st)
 			} else if l.Type == "relay" {
 				indicator, st, _ = getComponentInfo("relay", l.Bind)
@@ -364,7 +401,7 @@ func psCmd() {
 			} else {
 				// Proxy
 				indicator, st, _ = getComponentInfo("proxy", l.Bind)
-				left := colorAddr(l.Bind) + " " + cBlue + strings.ToUpper(l.Type) + cReset
+				left := padForProto(colorAddr(l.Bind)) + " " + cBlue + strings.ToLower(l.Type) + cReset
 				arrow := arrowRight
 				right := ""
 				if l.Target != "" {
@@ -392,9 +429,9 @@ func psCmd() {
 			}
 
 			for _, t := range c.Targets {
-				ind := "⚪️"
+				ind := "◽️"
 				if _, ok := connectedTargets[t]; ok {
-					ind = "🟢"
+					ind = "🔹"
 				}
 				addRow("  ", ind, colorAddr(t), "", "", "")
 			}
@@ -410,30 +447,44 @@ func psCmd() {
 				left := cBold + cBlue + "[" + fset.Name + "]" + cReset
 				addRow("  ", indicator, left, "", "", st)
 
-				ind := "" // Placeholder for alignment of forwarding rules
 				indent := "     "
 
 				for _, fwd := range fset.Local {
+					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
+					indicator, st, comp := getComponentInfo("forward", compID)
+
+					lStr := colorAddr(fwd.Bind)
+					if comp.BoundAddr != "" && comp.BoundAddr != fwd.Bind {
+						lStr = colorAddr(comp.BoundAddr) + " " + cGray + "(from " + fwd.Bind + ")" + cReset
+					}
+
 					if fwd.Type == "forward" {
-						lStr := colorAddr(fwd.Bind)
 						rStr := colorAddr(fwd.Target)
-						addRow(indent, ind, lStr, arrowRight, rStr, "")
+						addRow(indent, indicator, lStr, arrowRight, rStr, st)
 					} else { // socks, http
-						lStr := colorAddr(fwd.Bind) + " " + cBlue + strings.ToUpper(fwd.Type) + cReset
+						lStr = padForProto(lStr) + " " + cBlue + strings.ToLower(fwd.Type) + cReset
 						rStr := ""
 						if fwd.Target != "" {
 							rStr = colorAddr(fwd.Target)
 						} else {
 							rStr = cGray + "tunnel" + cReset
 						}
-						addRow(indent, ind, lStr, arrowRight, rStr, "")
+						addRow(indent, indicator, lStr, arrowRight, rStr, st)
 					}
 				}
 				for _, fwd := range fset.Remote {
+					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
+					indicator, st, comp := getComponentInfo("forward", compID)
+
+					rStr := colorAddr(fwd.Bind)
+					if comp.BoundAddr != "" && comp.BoundAddr != fwd.Bind {
+						rStr += colorAddr(comp.BoundAddr) + " " + cGray + "(from " + fwd.Bind + ")" + cReset
+					}
+
 					if fwd.Type == "forward" {
 						lStr := colorAddr(fwd.Target)
 						rStr := colorAddr(fwd.Bind)
-						addRow(indent, ind, lStr, arrowLeft, rStr, "")
+						addRow(indent, indicator, lStr, arrowLeft, rStr, st)
 					} else { // socks, http
 						lStr := ""
 						if fwd.Target != "" {
@@ -441,11 +492,33 @@ func psCmd() {
 						} else {
 							lStr = cGray + "tunnel" + cReset
 						}
-						rStr := colorAddr(fwd.Bind) + " " + cBlue + strings.ToUpper(fwd.Type) + cReset
-						addRow(indent, ind, lStr, arrowLeft, rStr, "")
+						rStr := padForProto(colorAddr(fwd.Bind)) + " " + cBlue + strings.ToLower(fwd.Type) + cReset
+						addRow(indent, indicator, lStr, arrowLeft, rStr, st)
 					}
 				}
 			}
+		}
+		addHeader("")
+	}
+
+	var dynamicForwards []state.Component
+	for k, comp := range activeState {
+		if strings.HasPrefix(k, "dynamic:") {
+			dynamicForwards = append(dynamicForwards, comp)
+		}
+	}
+
+	if len(dynamicForwards) > 0 {
+		sort.Slice(dynamicForwards, func(i, j int) bool {
+			return dynamicForwards[i].ID < dynamicForwards[j].ID
+		})
+
+		addHeader(cMagenta + "dynamic ports (peer forwards)" + cReset)
+		for _, comp := range dynamicForwards {
+			indicator, st, _ := getComponentInfo("dynamic", comp.ID)
+			left := colorAddr(comp.ID)
+			right := cGray + "tunnel (" + comp.Message + ")" + cReset
+			addRow("  ", indicator, left, arrowRight, right, st)
 		}
 		addHeader("")
 	}
