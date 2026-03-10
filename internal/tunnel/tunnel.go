@@ -188,7 +188,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 		for req := range reqs {
 			switch req.Type {
 			case "tcpip-forward":
-				go handleTCPIPForward(ctx, req, sshConn, &mu, listeners, s.log, s.cfg.Bind)
+				go handleTCPIPForward(ctx, req, sshConn, &mu, listeners, s.log, s.cfg.Bind, s.cfg.Options)
 			case "cancel-tcpip-forward":
 				go handleCancelTCPIPForward(req, &mu, listeners, s.log)
 			default:
@@ -203,7 +203,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 	for newChan := range chans {
 		switch newChan.ChannelType() {
 		case "direct-tcpip":
-			go handleDirectTCPIP(newChan, s.log)
+			go handleDirectTCPIP(newChan, s.log, s.cfg.Options)
 		case "session":
 			go handleSession(ctx, newChan, s.cfg.Shell, s.log)
 		default:
@@ -367,8 +367,14 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		// Handle keep-alives (client-side)
 		go startKeepAlive(ctx, sshConn, opts, false, log)
 
-		c.runSession(ctx, client, fset, opts, log)
+		err = c.runSession(ctx, client, fset, opts, log)
 		client.Close()
+
+		if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
+			state.Global.Update("connection", id, state.Failed, "ExitOnForwardFailure")
+			log.Error("Fatal forward failure, stopping reconnection", "error", err)
+			return
+		}
 
 		state.Global.Update("connection", id, state.Retrying, "session ended")
 		log.Warn("Session ended, reconnecting", "retry_in", retryInterval)
@@ -380,10 +386,21 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 	}
 }
 
-func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *config.ForwardSet, opts map[string]string, log *slog.Logger) {
+func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *config.ForwardSet, opts map[string]string, log *slog.Logger) error {
 	var wg sync.WaitGroup
 	sCtx, sCancel := context.WithCancel(ctx)
 	defer sCancel()
+
+	var fatalErr error
+	var errMu sync.Mutex
+	setFatal := func(err error) {
+		errMu.Lock()
+		defer errMu.Unlock()
+		if fatalErr == nil {
+			fatalErr = err
+		}
+		sCancel()
+	}
 
 	// Start keep-alives tied to the session context
 	wg.Add(1)
@@ -431,8 +448,8 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 				err = c.runRemoteProxy(sCtx, client, fset.Name, fwd, log)
 			}
 			if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
-				log.Error("Forward failed, aborting session", "error", err)
-				sCancel()
+				log.Error("Remote forward failed", "error", err)
+				setFatal(err)
 			}
 		}()
 	}
@@ -450,13 +467,14 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 				err = c.runLocalProxy(sCtx, client, fset.Name, fwd, log)
 			}
 			if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
-				log.Error("Forward failed, aborting session", "error", err)
-				sCancel()
+				log.Error("Local forward failed", "error", err)
+				setFatal(err)
 			}
 		}()
 	}
 
 	wg.Wait()
+	return fatalErr
 }
 
 // runRemoteForward (-R equivalent): bind on peer, forward here
@@ -686,7 +704,7 @@ func (c *SSHClient) discoverTarget(ctx context.Context, timeout time.Duration) s
 // --- Shared forwarding helpers ---
 
 // handleTCPIPForward handles tcpip-forward global requests on the server side.
-func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.ServerConn, mu *sync.Mutex, listeners map[string]net.Listener, log *slog.Logger, parentBind string) {
+func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.ServerConn, mu *sync.Mutex, listeners map[string]net.Listener, log *slog.Logger, parentBind string, options map[string]string) {
 	var fwdReq struct {
 		BindAddr string
 		BindPort uint32
@@ -698,7 +716,27 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 		return
 	}
 
-	addr := net.JoinHostPort(fwdReq.BindAddr, strconv.FormatUint(uint64(fwdReq.BindPort), 10))
+	gatewayPorts := config.GetOption(options, "GatewayPorts")
+	bindAddr := fwdReq.BindAddr
+
+	// GatewayPorts implementation
+	switch strings.ToLower(gatewayPorts) {
+	case "yes":
+		// all remote forwards bind to all interfaces
+		bindAddr = "0.0.0.0"
+	case "no":
+		// all remote forwards bind to localhost only (ignore requested bind addr)
+		bindAddr = "127.0.0.1"
+	case "clientspecified":
+		// default OpenSSH behavior or what the user asked
+	default:
+		// Default to mesh's previous behavior: use what's requested, or localhost if it looks like loopback
+		if bindAddr == "" || bindAddr == "localhost" {
+			bindAddr = "127.0.0.1"
+		}
+	}
+
+	addr := net.JoinHostPort(bindAddr, strconv.FormatUint(uint64(fwdReq.BindPort), 10))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Error("tcpip-forward listen failed", "addr", addr, "error", err)
@@ -794,7 +832,7 @@ func handleCancelTCPIPForward(req *ssh.Request, mu *sync.Mutex, listeners map[st
 	log.Info("tcpip-forward cancelled", "addr", addr)
 }
 
-func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger) {
+func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[string]string) {
 	var req struct {
 		DestAddr string
 		DestPort uint32
@@ -807,6 +845,36 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger) {
 	}
 
 	target := net.JoinHostPort(req.DestAddr, strconv.FormatUint(uint64(req.DestPort), 10))
+
+	// PermitOpen implementation
+	permitOpen := config.GetOption(options, "PermitOpen")
+	if permitOpen != "" && permitOpen != "any" {
+		allowed := false
+		for _, p := range strings.Split(permitOpen, ",") {
+			p = strings.TrimSpace(p)
+			if p == "none" {
+				break
+			}
+			if p == target || p == req.DestAddr || (p == "*" && strings.HasSuffix(p, fmt.Sprintf(":%d", req.DestPort))) {
+				// Simple pattern matching for now
+				allowed = true
+				break
+			}
+			// Exact match or wildcard host:*
+			if strings.HasPrefix(p, "*:") {
+				if port, err := strconv.Atoi(strings.TrimPrefix(p, "*:")); err == nil && uint32(port) == req.DestPort {
+					allowed = true
+					break
+				}
+			}
+		}
+		if !allowed {
+			log.Warn("direct-tcpip rejected by PermitOpen", "target", target)
+			newChan.Reject(ssh.ConnectionFailed, "prohibited by PermitOpen")
+			return
+		}
+	}
+
 	conn, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
 		newChan.Reject(ssh.ConnectionFailed, err.Error())

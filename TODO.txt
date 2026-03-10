@@ -11,6 +11,6 @@ PERFORMANCE
 USABILITY
 - Add "enabled" (or "disabled") flag to each connection, forwardset and listener? Or just comment out.
 
-
-
 - Support unsupported ssh/sshd options.
+
+- status: Also show clipsync discovered and static peer details (in the same list with a one-word note)
