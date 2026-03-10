@@ -150,10 +150,13 @@ func (s *SSHServer) Run(ctx context.Context) error {
 }
 
 func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.ServerConfig) {
-	netutil.ApplyTCPKeepAlive(conn)
-	// Set a generous handshake deadline for high-latency links; always clear it afterward.
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
-	defer conn.SetDeadline(time.Time{})
+	tcpKeepAlive := 30 * time.Second
+	if val := config.GetOption(s.cfg.Options, "TCPKeepAlive"); val != "" {
+		if seconds, err := strconv.Atoi(val); err == nil && seconds > 0 {
+			tcpKeepAlive = time.Duration(seconds) * time.Second
+		}
+	}
+	netutil.ApplyTCPKeepAlive(conn, tcpKeepAlive)
 
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, cfg)
 	if err != nil {
@@ -207,6 +210,9 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 			newChan.Reject(ssh.UnknownChannelType, "unsupported")
 		}
 	}
+
+	// Handle keep-alives (server-side)
+	go startKeepAlive(ctx, sshConn, s.cfg.Options, true, s.log)
 
 	s.log.Info("Client disconnected", "remote", sshConn.RemoteAddr())
 }
@@ -333,7 +339,13 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 				continue
 			}
 		}
-		netutil.ApplyTCPKeepAlive(conn)
+		tcpKeepAlive := 30 * time.Second
+		if val := config.GetOption(opts, "TCPKeepAlive"); val != "" {
+			if seconds, err := strconv.Atoi(val); err == nil && seconds > 0 {
+				tcpKeepAlive = time.Duration(seconds) * time.Second
+			}
+		}
+		netutil.ApplyTCPKeepAlive(conn, tcpKeepAlive)
 
 		sshConn, chans, reqs, err := ssh.NewClientConn(conn, host, sshCfg)
 		if err != nil {
@@ -351,6 +363,9 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 
 		state.Global.Update("connection", id, state.Connected, target)
 		log.Info("Connected", "target", target)
+
+		// Handle keep-alives (client-side)
+		go startKeepAlive(ctx, sshConn, opts, false, log)
 
 		c.runSession(ctx, client, fset, opts, log)
 		client.Close()
@@ -733,7 +748,7 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 		if err != nil {
 			return
 		}
-		netutil.ApplyTCPKeepAlive(conn)
+		netutil.ApplyTCPKeepAlive(conn, 0)
 		go func() {
 			defer conn.Close()
 			origin := conn.RemoteAddr().(*net.TCPAddr)
@@ -797,7 +812,7 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger) {
 		newChan.Reject(ssh.ConnectionFailed, err.Error())
 		return
 	}
-	netutil.ApplyTCPKeepAlive(conn)
+	netutil.ApplyTCPKeepAlive(conn, 0)
 
 	ch, chReqs, err := newChan.Accept()
 	if err != nil {
@@ -820,7 +835,7 @@ func acceptAndForward(ctx context.Context, listener net.Listener, dialer func() 
 			}
 			return
 		}
-		netutil.ApplyTCPKeepAlive(conn)
+		netutil.ApplyTCPKeepAlive(conn, 0)
 		go func() {
 			defer conn.Close()
 			target, err := dialer()
@@ -917,5 +932,57 @@ func applySSHConfigOptions(cfg *ssh.Config, options map[string]string) {
 
 	if val := config.GetOption(options, "MACs"); val != "" {
 		cfg.MACs = strings.Split(val, ",")
+	}
+}
+
+// startKeepAlive handles both ClientAlive* (server-side) and ServerAlive* (client-side) options.
+func startKeepAlive(ctx context.Context, conn ssh.Conn, options map[string]string, isServer bool, log *slog.Logger) {
+	intervalKey := "ServerAliveInterval"
+	countMaxKey := "ServerAliveCountMax"
+	reqType := "keepalive@openssh.com" // Client-to-Server
+
+	if isServer {
+		intervalKey = "ClientAliveInterval"
+		countMaxKey = "ClientAliveCountMax"
+		reqType = "keepalive@golang.org" // Server-to-Client
+	}
+
+	interval := 0
+	if val := config.GetOption(options, intervalKey); val != "" {
+		interval, _ = strconv.Atoi(val)
+	}
+	if interval <= 0 {
+		return
+	}
+
+	countMax := 3
+	if val := config.GetOption(options, countMaxKey); val != "" {
+		if c, err := strconv.Atoi(val); err == nil && c >= 0 {
+			countMax = c
+		}
+	}
+
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
+
+	failCount := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Send global request as heartbeat
+			_, _, err := conn.SendRequest(reqType, true, nil)
+			if err != nil {
+				failCount++
+				if failCount > countMax {
+					log.Warn("Keep-alive failed, closing connection", "remote", conn.RemoteAddr(), "error", err, "fail_count", failCount)
+					conn.Close()
+					return
+				}
+			} else {
+				failCount = 0
+			}
+		}
 	}
 }

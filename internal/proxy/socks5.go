@@ -24,7 +24,7 @@ func ServeSocks(ctx context.Context, listener net.Listener, dialer func(string, 
 			time.Sleep(50 * time.Millisecond) // backoff on transient errors
 			continue
 		}
-		netutil.ApplyTCPKeepAlive(conn)
+		netutil.ApplyTCPKeepAlive(conn, 0)
 		go handleSocks5(conn, dialer, log)
 	}
 }

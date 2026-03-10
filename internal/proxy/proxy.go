@@ -85,7 +85,7 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Listener, log *slo
 					}
 					continue
 				}
-				netutil.ApplyTCPKeepAlive(conn)
+				netutil.ApplyTCPKeepAlive(conn, 0)
 
 				go func(c net.Conn) {
 					defer c.Close()
@@ -94,7 +94,7 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Listener, log *slo
 						rLog.Debug("Relay dial failed", "error", err)
 						return
 					}
-					netutil.ApplyTCPKeepAlive(targetConn)
+					netutil.ApplyTCPKeepAlive(targetConn, 0)
 					defer targetConn.Close()
 					netutil.BiCopy(c, targetConn)
 				}(conn)

@@ -11,10 +11,13 @@ import (
 // It explicitly asserts TCP_NODELAY to ensure interactive sessions don't buffer,
 // and forces SetLinger(0) to ensure sockets close immediately with a RST packet
 // instead of lingering politely in TIME_WAIT, keeping proxy listener ports clean.
-func ApplyTCPKeepAlive(conn net.Conn) {
+func ApplyTCPKeepAlive(conn net.Conn, period time.Duration) {
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetKeepAlive(true)
-		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		if period == 0 {
+			period = 30 * time.Second
+		}
+		tcpConn.SetKeepAlivePeriod(period)
 		tcpConn.SetNoDelay(true)
 		tcpConn.SetLinger(0)
 	}

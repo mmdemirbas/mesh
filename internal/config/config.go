@@ -191,11 +191,16 @@ func LoadUnvalidated(path string) (*Config, error) {
 // for any user-defined SSH options that mesh does not natively support mapping.
 func WarnUnsupportedOptions(cfg *Config) {
 	supported := map[string]struct{}{
-		"ciphers":        {},
-		"macs":           {},
-		"kexalgorithms":  {},
-		"connecttimeout": {},
-		"ipqos":          {},
+		"ciphers":             {},
+		"macs":                {},
+		"kexalgorithms":       {},
+		"connecttimeout":      {},
+		"ipqos":               {},
+		"clientaliveinterval": {},
+		"clientalivecountmax": {},
+		"serveraliveinterval": {},
+		"serveralivecountmax": {},
+		"tcpkeepalive":        {},
 	}
 
 	check := func(opts map[string]string, context string) {
