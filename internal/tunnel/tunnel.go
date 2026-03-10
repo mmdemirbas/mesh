@@ -287,7 +287,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 	applySSHConfigOptions(&sshCfg.Config, opts)
 
 	// Parse IPQoS for this forward set's connection
-	tosValue, err := ParseIPQoS(config.GetOption(opts, "IPQoS"))
+	interactiveTos, _, err := ParseIPQoS(config.GetOption(opts, "IPQoS"))
 	if err != nil {
 		state.Global.Update("connection", id, state.Failed, err.Error())
 		c.log.Error("invalid ipqos", "set", fset.Name, "ipqos", config.GetOption(opts, "IPQoS"), "error", err)
@@ -321,7 +321,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 
 		log.Info("Connecting", "target", target)
 
-		dialer := net.Dialer{Timeout: sshCfg.Timeout, Control: dialerControlIPQoS(tosValue)}
+		dialer := net.Dialer{Timeout: sshCfg.Timeout, Control: dialerControlIPQoS(interactiveTos)}
 		conn, err := dialer.DialContext(ctx, "tcp", host)
 		if err != nil {
 			state.Global.Update("connection", id, state.Retrying, err.Error())

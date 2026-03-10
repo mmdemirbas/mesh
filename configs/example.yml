@@ -7,6 +7,8 @@ name: all-features-example
 # ==============================================================================
 # Define common SSH/SSHD options once and reuse them across different configurations.
 # These map closely to standard OpenSSH client/server configurations.
+
+# https://manpages.ubuntu.com/manpages/plucky/en/man5/ssh_config.5.html
 x-ssh-options: &ssh_options
   KexAlgorithms: "curve25519-sha256@libssh.org"
   Ciphers: "chacha20-poly1305@openssh.com,aes128-gcm@openssh.com"
@@ -14,6 +16,7 @@ x-ssh-options: &ssh_options
   ConnectTimeout: "15"
   TCPKeepAlive: "yes"
 
+# https://manpages.ubuntu.com/manpages/plucky/en/man5/sshd_config.5.html
 x-sshd-options: &sshd_options
   <<: *ssh_options
   ClientAliveInterval: "15"
@@ -81,7 +84,7 @@ connections:
       # --- Set A: Port Forwarding (-L / -R) ---
       - name: port-mappings
         # 'options' overrides or adds to connection-level options (e.g., QoS diffserv)
-        options: { IPQoS: lowdelay }
+        options: { IPQoS: "lowdelay throughput" }
         
         # 'local' (-L equivalent): Listen locally (8080), forward traffic TO the peer (80).
         local:
@@ -92,8 +95,8 @@ connections:
           - { type: forward, bind: "0.0.0.0:9090", target: "127.0.0.1:22" }
 
       # --- Set B: Dynamic Proxies (-D / Remote -D) ---
-      - name: dynamic-proxies
-        options: { IPQoS: throughput }
+      - name: remote-proxy
+        options: { IPQoS: "lowdelay throughput" }
         # 'local' (-D equivalent): Bind a SOCKS/HTTP proxy locally.
         # Traffic entering this proxy (2080/2081) exits out into the peer's network.
         local:

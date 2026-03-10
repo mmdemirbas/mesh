@@ -368,8 +368,14 @@ func validateIPQoS(value string) error {
 	if value == "" {
 		return nil
 	}
-	if _, ok := validIPQoSValues[strings.ToLower(value)]; !ok {
-		return fmt.Errorf("unknown ipqos value %q", value)
+	parts := strings.Fields(value)
+	if len(parts) > 2 {
+		return fmt.Errorf("invalid ipqos value: expected 1 or 2 parts, got %d", len(parts))
+	}
+	for _, part := range parts {
+		if _, ok := validIPQoSValues[strings.ToLower(part)]; !ok {
+			return fmt.Errorf("unknown ipqos value %q", part)
+		}
 	}
 	return nil
 }

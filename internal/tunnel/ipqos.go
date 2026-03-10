@@ -27,15 +27,38 @@ var ipqosValues = map[string]int{
 	"none": 0x00,
 }
 
-// ParseIPQoS converts an IPQoS name to its numeric IP_TOS value.
-// Returns -1 if the value is empty (meaning "don't set").
-func ParseIPQoS(name string) (int, error) {
+// ParseIPQoS converts an IPQoS string to numeric IP_TOS values.
+// OpenSSH supports up to two space-separated values: interactive and non-interactive.
+// If one value is provided, both return the same value.
+func ParseIPQoS(name string) (interactive int, nonInteractive int, err error) {
 	if name == "" {
-		return -1, nil
+		return -1, -1, nil
 	}
-	v, ok := ipqosValues[strings.ToLower(name)]
-	if !ok {
-		return 0, fmt.Errorf("unknown ipqos value %q", name)
+	parts := strings.Fields(name)
+	if len(parts) > 2 {
+		return 0, 0, fmt.Errorf("invalid ipqos value: expected 1 or 2 parts")
 	}
-	return v, nil
+
+	parseSingle := func(s string) (int, error) {
+		v, ok := ipqosValues[strings.ToLower(s)]
+		if !ok {
+			return 0, fmt.Errorf("unknown ipqos value %q", s)
+		}
+		return v, nil
+	}
+
+	interactive, err = parseSingle(parts[0])
+	if err != nil {
+		return 0, 0, err
+	}
+
+	nonInteractive = interactive
+	if len(parts) == 2 {
+		nonInteractive, err = parseSingle(parts[1])
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+
+	return interactive, nonInteractive, nil
 }
