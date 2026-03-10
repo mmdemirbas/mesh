@@ -91,7 +91,7 @@ func Start(cfg config.ClipsyncCfg) (*Node, error) {
 		go n.cleanupPeers()
 	}
 
-	state.Global.Update("clipsync", cfg.Bind, state.Listening, "discovery: "+fmt.Sprintf("%v", cfg.LANDiscovery))
+	state.Global.Update("clipsync", cfg.Bind, state.Listening, fmt.Sprintf("[discovery: %v]", cfg.LANDiscovery))
 
 	go n.pollClipboard(pollInterval)
 	return n, nil

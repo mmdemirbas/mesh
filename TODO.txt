@@ -2,34 +2,15 @@ LOGGING
 - Improve logging. Make it more human readable rather than being cryptic and semi-structured.
 - Implement watch mode for ps/status subcommand to see live changes.
 
-- Some IPs are IPv6. Prefer IPv4 for readability if available. Also no need to "tunnel (peer: " part here. Directly show the peer IP/port string without pharantasizing it.
-```
-🟢 127.0.0.1:2080 socks ──▶ direct                           [listening]
-🟢 127.0.0.1:2081 http  ──▶ direct                           [listening]
-🟢 0.0.0.0:2222   sshd                                       [listening]
-
-dynamic ports (peer forwards)
-  🟢 127.0.0.1:1080     ──▶ tunnel (peer: root@192.168.68.111:52746) [listening]
-  🟢 127.0.0.1:1081     ──▶ tunnel (peer: root@192.168.68.111:52746) [listening]
-  🟢 127.0.0.1:1111     ──▶ tunnel (peer: root@192.168.68.111:52745) [listening]
-  🟢 127.0.0.1:11111    ──▶ tunnel (peer: root@[fe80::92bd:3bfe:be7d:5b25%en0]:54633) [listening]
-  🟢 127.0.0.1:18384    ──▶ tunnel (peer: root@[fe80::92bd:3bfe:be7d:5b25%en0]:54633) [listening]
-```
 
 PERFORMANCE
 - Support mux / multiplex connection type to allow creating a ConnectionMaster for a specific connection path.
 - Allow granular control of connections without restarting the whole app. -> is this really necessary? I think NO.
 - Optimize performance by carefully reviewing and improving the code.
 
-SCHEMA:
-"Schema validation: Property 'x-sshd-options' is not allowed" -> allow anchors
-
 USABILITY
-- Define a fixed location for default config (~/.mesh/mesh.yaml)
-- Support unsupported ssh/sshd options.
 - Add "enabled" (or "disabled") flag to each connection, forwardset and listener? Or just comment out.
 
-- Rename "ps" command to "status".
 
-- Do not show status on individual forwarding routes inside a forwarding set because it is all or none. If the forwarding set (which maps to a single connection) works, then the forwarding routes inside it will be always marked as working/listening. And vice versa. So it is unnecessary redundancy on the screen. Just remove status markers from the inner routes. Show them only at the forwarding set level inside a connection block.
-- Support both mesh.yaml and mesh.yml. Maybe ~/.mesh/conf.yaml is a better name. Prefer yaml over yml. Not sure about the config in current dir. It could be prioritized.
+
+- Support unsupported ssh/sshd options.

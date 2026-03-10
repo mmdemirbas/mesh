@@ -85,14 +85,29 @@ func printUsage() {
 }
 
 func getDefaultConfigPath() string {
+	// 1. Check current directory (prioritize yaml over yml)
+	if _, err := os.Stat("mesh.yaml"); err == nil {
+		return "mesh.yaml"
+	}
 	if _, err := os.Stat("mesh.yml"); err == nil {
 		return "mesh.yml"
 	}
+
+	// 2. Check ~/.mesh/
 	home, err := os.UserHomeDir()
 	if err == nil {
-		return filepath.Join(home, ".mesh", "mesh.yaml")
+		p := filepath.Join(home, ".mesh", "mesh.yaml")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		p = filepath.Join(home, ".mesh", "mesh.yml")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
 	}
-	return "mesh.yml"
+
+	// Fallback to default
+	return "mesh.yaml"
 }
 
 func upCmd() {
@@ -422,21 +437,27 @@ func statusCmd() {
 				_, port, err := net.SplitHostPort(parentBind)
 				if err == nil {
 					dynamicByParent[port] = append(dynamicByParent[port], comp)
-				} else {
-					dynamicByParent[parentBind] = append(dynamicByParent[parentBind], comp)
 				}
+				// Also store by full bind as fallback
+				dynamicByParent[parentBind] = append(dynamicByParent[parentBind], comp)
 			}
 		}
 	}
 
 	cleanIPv6 := func(peer string) string {
-		// Example: root@[fe80::92bd:3bfe:be7d:5b25%en0]:54633
-		// We want to extract just the bracketed IPv6 part, but wait, the instructions said:
-		// "Some IPs are IPv6. Prefer IPv4 for readability if available."
-		// And: "Directly show the peer IP/port string without pharantasizing it"
-		// If it's already an IPv6 from the connection, there's no magic IPv4 to fallback to here
-		// on the CLI end unless we resolve it or parse the brackets. Let's just strip brackets strictly for readability if requested.
-		// Actually the client requested: `tunnel (peer: root@[...])` -> `root@[...]`
+		// Example: root@[fe80::92bd:3bfe:be7d:5b25%en0]:54633 -> root@fe80::92bd:3bfe:be7d:5b25:54633
+		peer = strings.ReplaceAll(peer, "[", "")
+		peer = strings.ReplaceAll(peer, "]", "")
+
+		// Remove interface zone indexes like %en0 if they exist
+		if idx := strings.Index(peer, "%"); idx != -1 {
+			if colonIdx := strings.LastIndex(peer, ":"); colonIdx != -1 {
+				// Keep the port
+				peer = peer[:idx] + peer[colonIdx:]
+			} else {
+				peer = peer[:idx]
+			}
+		}
 		return peer
 	}
 
@@ -458,11 +479,11 @@ func statusCmd() {
 				indicator, st, _ = getComponentInfo("proxy", l.Bind)
 				left := padForProto(colorAddr(l.Bind)) + " " + cBlue + strings.ToLower(l.Type) + cReset
 				arrow := arrowRight
-				right := ""
+				var right string
 				if l.Target != "" {
 					right = colorAddr(l.Target)
 				} else {
-					right = cGray + "direct" + cReset
+					right = cGray + "🌐 direct" + cReset
 				}
 				addRow("", indicator, left, arrow, right, st)
 			}
@@ -472,17 +493,27 @@ func statusCmd() {
 				searchPort = l.Bind
 			}
 
-			if dyns, ok := dynamicByParent[searchPort]; ok {
+			// Try matching by full bind first, then by port
+			dyns := dynamicByParent[l.Bind]
+			if len(dyns) == 0 {
+				dyns = dynamicByParent[searchPort]
+			}
+
+			if len(dyns) > 0 {
 				sort.Slice(dyns, func(i, j int) bool { return dyns[i].ID < dyns[j].ID })
+				// Deduplicate if we somehow got both (since we populate both keys sometimes)
+				seenID := make(map[string]bool)
 				for _, comp := range dyns {
+					if seenID[comp.ID] {
+						continue
+					}
+					seenID[comp.ID] = true
 					parts := strings.Split(comp.ID, "|")
 					actualAddr := parts[0]
 					left := colorAddr(actualAddr)
-					right := cGray + "──▶ " + cReset + colorAddr(cleanIPv6(comp.Message))
+					right := colorAddr(cleanIPv6(comp.Message))
 
-					// Re-evaluate component info to extract the status for this specific dynamic route
-					ind, dySt, _ := getComponentInfo("dynamic", comp.ID)
-					addRow("    ", ind, left, "", right, dySt)
+					addRow("", "↳", left, arrowRight, right, "")
 				}
 			}
 		}
@@ -503,9 +534,9 @@ func statusCmd() {
 			}
 
 			for _, t := range c.Targets {
-				ind := "◽️"
+				ind := "○"
 				if _, ok := connectedTargets[t]; ok {
-					ind = "🔹"
+					ind = "●"
 				}
 				addRow("  ", ind, colorAddr(t), "", "", "")
 			}
@@ -541,7 +572,7 @@ func statusCmd() {
 						if fwd.Target != "" {
 							rStr = colorAddr(fwd.Target)
 						} else {
-							rStr = cGray + "tunnel" + cReset
+							rStr = cGray + "🔒 tunnel" + cReset
 						}
 						addRow(indent, "", lStr, arrowRight, rStr, "")
 					}
@@ -564,7 +595,7 @@ func statusCmd() {
 						if fwd.Target != "" {
 							lStr = colorAddr(fwd.Target)
 						} else {
-							lStr = cGray + "tunnel" + cReset
+							lStr = cGray + "🔒 tunnel" + cReset
 						}
 						rStr := padForProto(colorAddr(fwd.Bind)) + " " + cBlue + strings.ToLower(fwd.Type) + cReset
 						addRow(indent, "", lStr, arrowLeft, rStr, "")
@@ -581,16 +612,11 @@ func statusCmd() {
 			indicator, st, comp := getComponentInfo("clipsync", cs.Bind)
 
 			left := colorAddr(cs.Bind)
-			right := cGray + "[discovery: disabled]" + cReset
-			if cs.LANDiscovery {
-				right = cGray + "[discovery: active]" + cReset
-			}
-			if comp.Message != "" {
-				right = cGray + "[" + comp.Message + "]" + cReset
-			}
+			// Status message already contains discovery info from internal/clipsync/clipsync.go
+			right := cGray + comp.Message + cReset
 
 			if len(cs.StaticPeers) > 0 {
-				right += " " + cMagenta + fmt.Sprintf("+%d static peers", len(cs.StaticPeers)) + cReset
+				right += " " + cMagenta + fmt.Sprintf(" +%d peers", len(cs.StaticPeers)) + cReset
 			}
 
 			addRow("  ", indicator, left, "", right, st)
@@ -616,8 +642,8 @@ func statusCmd() {
 		addHeader(cMagenta + "dynamic ports (unmapped)" + cReset)
 		for _, comp := range unmappedDynamic {
 			left := colorAddr(comp.ID)
-			right := colorAddr(comp.Message)
-			addRow("  ", "", left, arrowRight, right, "")
+			right := colorAddr(cleanIPv6(comp.Message))
+			addRow("", "↳", left, arrowRight, right, "")
 		}
 		addHeader("")
 	}
