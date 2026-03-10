@@ -5,7 +5,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.." || exit 1
 
-# Require a subcommand (up, down, ps, etc.)
+# Require a subcommand (up, down, status, etc.)
 if [ -z "$1" ]; then
     echo "Usage: ./client.sh <subcommand> [flags]"
     echo "Example: ./client.sh up"

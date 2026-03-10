@@ -2,7 +2,7 @@
 REM Shortcut script to start the mesh server daemon
 
 cd /d "%~dp0.."
-REM Require a subcommand (up, down, ps, etc.)
+REM Require a subcommand (up, down, status, etc.)
 if "%~1"=="" (
     echo Usage: server.cmd ^<subcommand^> [flags]
     echo Example: server.cmd up

@@ -185,7 +185,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 		for req := range reqs {
 			switch req.Type {
 			case "tcpip-forward":
-				go handleTCPIPForward(ctx, req, sshConn, &mu, listeners, s.log)
+				go handleTCPIPForward(ctx, req, sshConn, &mu, listeners, s.log, s.cfg.Bind)
 			case "cancel-tcpip-forward":
 				go handleCancelTCPIPForward(req, &mu, listeners, s.log)
 			default:
@@ -671,7 +671,7 @@ func (c *SSHClient) discoverTarget(ctx context.Context, timeout time.Duration) s
 // --- Shared forwarding helpers ---
 
 // handleTCPIPForward handles tcpip-forward global requests on the server side.
-func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.ServerConn, mu *sync.Mutex, listeners map[string]net.Listener, log *slog.Logger) {
+func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.ServerConn, mu *sync.Mutex, listeners map[string]net.Listener, log *slog.Logger, parentBind string) {
 	var fwdReq struct {
 		BindAddr string
 		BindPort uint32
@@ -715,8 +715,10 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 	if sshConn.User() != "" {
 		peerAddr = sshConn.User() + "@" + peerAddr
 	}
-	state.Global.Update("dynamic", actualAddr, state.Listening, peerAddr)
-	defer state.Global.Delete("dynamic", actualAddr)
+
+	compID := actualAddr + "|" + parentBind
+	state.Global.Update("dynamic", compID, state.Listening, peerAddr)
+	defer state.Global.Delete("dynamic", compID)
 
 	log.Info("tcpip-forward active", "addr", addr)
 	if req.WantReply {

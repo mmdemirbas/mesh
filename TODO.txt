@@ -32,4 +32,4 @@ USABILITY
 - Rename "ps" command to "status".
 
 - Do not show status on individual forwarding routes inside a forwarding set because it is all or none. If the forwarding set (which maps to a single connection) works, then the forwarding routes inside it will be always marked as working/listening. And vice versa. So it is unnecessary redundancy on the screen. Just remove status markers from the inner routes. Show them only at the forwarding set level inside a connection block.
-- 
+- Support both mesh.yaml and mesh.yml. Maybe ~/.mesh/conf.yaml is a better name. Prefer yaml over yml. Not sure about the config in current dir. It could be prioritized.

@@ -41,8 +41,8 @@ func main() {
 	switch os.Args[1] {
 	case "up":
 		upCmd()
-	case "ps":
-		psCmd()
+	case "status":
+		statusCmd()
 	case "down":
 		downCmd()
 	default:
@@ -68,9 +68,9 @@ func printUsage() {
 	fmt.Println("  mesh " + cyan + "<command>" + reset + " [arguments]")
 	fmt.Println()
 	fmt.Println(bold + "Commands:" + reset)
-	fmt.Println("  " + blue + "up" + reset + "   Start mesh based on a config file")
-	fmt.Println("  " + blue + "down" + reset + " Stop the currently running mesh instance")
-	fmt.Println("  " + blue + "ps" + reset + "   Check if mesh is running and show its active configuration")
+	fmt.Println("  " + blue + "up" + reset + "     Start mesh based on a config file")
+	fmt.Println("  " + blue + "down" + reset + "   Stop the currently running mesh instance")
+	fmt.Println("  " + blue + "status" + reset + " Check if mesh is running and show its active configuration")
 	fmt.Println()
 	fmt.Println(bold + "Examples:" + reset)
 	fmt.Println("  " + gray + "# Start mesh using a specific configuration file in the background" + reset)
@@ -80,13 +80,24 @@ func printUsage() {
 	fmt.Println("  mesh " + blue + "down" + reset)
 	fmt.Println()
 	fmt.Println("  " + gray + "# Check if the daemon is running and view configuration" + reset)
-	fmt.Println("  mesh " + blue + "ps" + reset + " " + yellow + "-config" + reset + " configs/example.yml")
+	fmt.Println("  mesh " + blue + "status" + reset + " " + yellow + "-config" + reset + " configs/example.yml")
 	fmt.Println()
+}
+
+func getDefaultConfigPath() string {
+	if _, err := os.Stat("mesh.yml"); err == nil {
+		return "mesh.yml"
+	}
+	home, err := os.UserHomeDir()
+	if err == nil {
+		return filepath.Join(home, ".mesh", "mesh.yaml")
+	}
+	return "mesh.yml"
 }
 
 func upCmd() {
 	serveFS := flag.NewFlagSet("up", flag.ExitOnError)
-	configPath := serveFS.String("config", "mesh.yml", "Path to config file")
+	configPath := serveFS.String("config", getDefaultConfigPath(), "Path to config file")
 	serveFS.Parse(os.Args[2:])
 
 	logHandler := tint.NewHandler(os.Stderr, &tint.Options{
@@ -228,10 +239,10 @@ func (h *padMessageHandler) Handle(ctx context.Context, r slog.Record) error {
 	return h.Handler.Handle(ctx, r)
 }
 
-func psCmd() {
-	psFS := flag.NewFlagSet("ps", flag.ExitOnError)
-	configPath := psFS.String("config", "mesh.yml", "Path to config file")
-	psFS.Parse(os.Args[2:])
+func statusCmd() {
+	statusFS := flag.NewFlagSet("status", flag.ExitOnError)
+	configPath := statusFS.String("config", getDefaultConfigPath(), "Path to config file")
+	statusFS.Parse(os.Args[2:])
 
 	const (
 		cReset   = "\033[0m"
@@ -400,6 +411,35 @@ func psCmd() {
 		return colored
 	}
 
+	// Map dynamic forwards by the listen port of their parent listener
+	// to handle cases where 0.0.0.0 in config routes to 127.0.0.1 during actual connections.
+	dynamicByParent := make(map[string][]state.Component)
+	for k, comp := range activeState {
+		if strings.HasPrefix(k, "dynamic:") {
+			parts := strings.Split(comp.ID, "|")
+			if len(parts) == 2 {
+				parentBind := parts[1]
+				_, port, err := net.SplitHostPort(parentBind)
+				if err == nil {
+					dynamicByParent[port] = append(dynamicByParent[port], comp)
+				} else {
+					dynamicByParent[parentBind] = append(dynamicByParent[parentBind], comp)
+				}
+			}
+		}
+	}
+
+	cleanIPv6 := func(peer string) string {
+		// Example: root@[fe80::92bd:3bfe:be7d:5b25%en0]:54633
+		// We want to extract just the bracketed IPv6 part, but wait, the instructions said:
+		// "Some IPs are IPv6. Prefer IPv4 for readability if available."
+		// And: "Directly show the peer IP/port string without pharantasizing it"
+		// If it's already an IPv6 from the connection, there's no magic IPv4 to fallback to here
+		// on the CLI end unless we resolve it or parse the brackets. Let's just strip brackets strictly for readability if requested.
+		// Actually the client requested: `tunnel (peer: root@[...])` -> `root@[...]`
+		return peer
+	}
+
 	if len(cfg.Listeners) > 0 {
 		for _, l := range cfg.Listeners {
 			indicator, st, _ := getComponentInfo(l.Type, l.Bind)
@@ -425,6 +465,25 @@ func psCmd() {
 					right = cGray + "direct" + cReset
 				}
 				addRow("", indicator, left, arrow, right, st)
+			}
+
+			_, searchPort, err := net.SplitHostPort(l.Bind)
+			if err != nil {
+				searchPort = l.Bind
+			}
+
+			if dyns, ok := dynamicByParent[searchPort]; ok {
+				sort.Slice(dyns, func(i, j int) bool { return dyns[i].ID < dyns[j].ID })
+				for _, comp := range dyns {
+					parts := strings.Split(comp.ID, "|")
+					actualAddr := parts[0]
+					left := colorAddr(actualAddr)
+					right := cGray + "──▶ " + cReset + colorAddr(cleanIPv6(comp.Message))
+
+					// Re-evaluate component info to extract the status for this specific dynamic route
+					ind, dySt, _ := getComponentInfo("dynamic", comp.ID)
+					addRow("    ", ind, left, "", right, dySt)
+				}
 			}
 		}
 		addHeader("")
@@ -466,7 +525,7 @@ func psCmd() {
 
 				for _, fwd := range fset.Local {
 					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
-					indicator, st, comp := getComponentInfo("forward", compID)
+					_, _, comp := getComponentInfo("forward", compID)
 
 					lStr := colorAddr(fwd.Bind)
 					if comp.BoundAddr != "" && comp.BoundAddr != fwd.Bind {
@@ -475,7 +534,7 @@ func psCmd() {
 
 					if fwd.Type == "forward" {
 						rStr := colorAddr(fwd.Target)
-						addRow(indent, indicator, lStr, arrowRight, rStr, st)
+						addRow(indent, "", lStr, arrowRight, rStr, "")
 					} else { // socks, http
 						lStr = padForProto(lStr) + " " + cBlue + strings.ToLower(fwd.Type) + cReset
 						rStr := ""
@@ -484,12 +543,12 @@ func psCmd() {
 						} else {
 							rStr = cGray + "tunnel" + cReset
 						}
-						addRow(indent, indicator, lStr, arrowRight, rStr, st)
+						addRow(indent, "", lStr, arrowRight, rStr, "")
 					}
 				}
 				for _, fwd := range fset.Remote {
 					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
-					indicator, st, comp := getComponentInfo("forward", compID)
+					_, _, comp := getComponentInfo("forward", compID)
 
 					rStr := colorAddr(fwd.Bind)
 					if comp.BoundAddr != "" && comp.BoundAddr != fwd.Bind {
@@ -499,7 +558,7 @@ func psCmd() {
 					if fwd.Type == "forward" {
 						lStr := colorAddr(fwd.Target)
 						rStr := colorAddr(fwd.Bind)
-						addRow(indent, indicator, lStr, arrowLeft, rStr, st)
+						addRow(indent, "", lStr, arrowLeft, rStr, "")
 					} else { // socks, http
 						lStr := ""
 						if fwd.Target != "" {
@@ -508,7 +567,7 @@ func psCmd() {
 							lStr = cGray + "tunnel" + cReset
 						}
 						rStr := padForProto(colorAddr(fwd.Bind)) + " " + cBlue + strings.ToLower(fwd.Type) + cReset
-						addRow(indent, indicator, lStr, arrowLeft, rStr, st)
+						addRow(indent, "", lStr, arrowLeft, rStr, "")
 					}
 				}
 			}
@@ -539,24 +598,26 @@ func psCmd() {
 		addHeader("")
 	}
 
-	var dynamicForwards []state.Component
+	var unmappedDynamic []state.Component
 	for k, comp := range activeState {
 		if strings.HasPrefix(k, "dynamic:") {
-			dynamicForwards = append(dynamicForwards, comp)
+			parts := strings.Split(comp.ID, "|")
+			if len(parts) != 2 {
+				unmappedDynamic = append(unmappedDynamic, comp)
+			}
 		}
 	}
 
-	if len(dynamicForwards) > 0 {
-		sort.Slice(dynamicForwards, func(i, j int) bool {
-			return dynamicForwards[i].ID < dynamicForwards[j].ID
+	if len(unmappedDynamic) > 0 {
+		sort.Slice(unmappedDynamic, func(i, j int) bool {
+			return unmappedDynamic[i].ID < unmappedDynamic[j].ID
 		})
 
-		addHeader(cMagenta + "dynamic ports (peer forwards)" + cReset)
-		for _, comp := range dynamicForwards {
-			indicator, st, _ := getComponentInfo("dynamic", comp.ID)
+		addHeader(cMagenta + "dynamic ports (unmapped)" + cReset)
+		for _, comp := range unmappedDynamic {
 			left := colorAddr(comp.ID)
-			right := cGray + "tunnel (" + comp.Message + ")" + cReset
-			addRow("  ", indicator, left, arrowRight, right, st)
+			right := colorAddr(comp.Message)
+			addRow("  ", "", left, arrowRight, right, "")
 		}
 		addHeader("")
 	}

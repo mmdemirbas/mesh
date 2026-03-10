@@ -9,7 +9,7 @@
 - **Tuned Parallel SSH**: Within a single connection mapping, you can configure multiple isolated `forwards` sets. `mesh` automatically spawns parallel, high-throughput SSH connections for each set.
 - **Unified Forwarding Types**: Connections seamlessly support standard port forwards alongside remote or local dynamic proxies via a simple `type` property.
 - **Performance Tuned**: Defaults to high-performance, low-cost crypto (`chacha20-poly1305`, `curve25519-sha256`) and robust `KeepAlive` timings.
-- **Subcommand Management**: Built-in daemon control via `up`, `ps`, and `down`.
+- **Subcommand Management**: Built-in daemon control via `up`, `status`, and `down`.
 - **Clipboard Synchronization**: Seamlessly and securely synchronize your clipboard (text, images, and files) natively across your mesh network, with integrated UDP LAN discovery and explicit firewall bypassing capabilities.
 
 ## Building
@@ -93,6 +93,6 @@ Start the daemon using your desired target configuration:
 
 Query the daemon status or stop it safely utilizing graceful shutdowns:
 ```bash
-./mesh ps -config configs/example.yml 
+./mesh status -config configs/example.yml 
 ./mesh down
 ```
