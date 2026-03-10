@@ -10,6 +10,7 @@
 - **Unified Forwarding Types**: Connections seamlessly support standard port forwards alongside remote or local dynamic proxies via a simple `type` property.
 - **Performance Tuned**: Defaults to high-performance, low-cost crypto (`chacha20-poly1305`, `curve25519-sha256`) and robust `KeepAlive` timings.
 - **Subcommand Management**: Built-in daemon control via `up`, `ps`, and `down`.
+- **Clipboard Synchronization**: Seamlessly and securely synchronize your clipboard (text, images, and files) natively across your mesh network, with integrated UDP LAN discovery and explicit firewall bypassing capabilities.
 
 ## Building
 
@@ -69,8 +70,19 @@ connections:
           - { type: forward, bind: "0.0.0.0:9090", target: "127.0.0.1:22" }
 ```
 
+**Clipsync Array**
+Seamlessly and securely synchronize your clipboard (text, images, and files) natively across your mesh network, with integrated UDP LAN discovery and explicit firewall bypassing capabilities.
+```yaml
+clipsync:
+  - bind: "0.0.0.0:7755"
+    lan_discovery: true
+    static_peers: ["192.168.1.10:7755"]
+    allow_send_to: ["all"]
+    allow_receive: ["all"]
+```
+
 Check out the `configs/` directory for our reference file:
-1. `example.yml` — A comprehensively commented file showing every available `mesh` feature (Proxies, Relays, Servers, Connections). Use this as a reference template for your own deployments!
+1. `example.yml` — A comprehensively commented file showing every available `mesh` feature (Proxies, Relays, Servers, Connections, and Clipsync). Use this as a reference template for your own deployments!
 
 ## Usage
 

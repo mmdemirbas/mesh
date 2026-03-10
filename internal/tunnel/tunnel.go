@@ -700,11 +700,22 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 	listeners[addr] = ln
 	mu.Unlock()
 
-	peerAddr := sshConn.RemoteAddr().String()
+	var peerIP string
+	if tcpAddr, ok := sshConn.RemoteAddr().(*net.TCPAddr); ok {
+		if ip4 := tcpAddr.IP.To4(); ip4 != nil {
+			peerIP = net.JoinHostPort(ip4.String(), strconv.Itoa(tcpAddr.Port))
+		} else {
+			peerIP = tcpAddr.String()
+		}
+	} else {
+		peerIP = sshConn.RemoteAddr().String()
+	}
+
+	peerAddr := peerIP
 	if sshConn.User() != "" {
 		peerAddr = sshConn.User() + "@" + peerAddr
 	}
-	state.Global.Update("dynamic", actualAddr, state.Listening, "peer: "+peerAddr)
+	state.Global.Update("dynamic", actualAddr, state.Listening, peerAddr)
 	defer state.Global.Delete("dynamic", actualAddr)
 
 	log.Info("tcpip-forward active", "addr", addr)

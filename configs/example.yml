@@ -107,3 +107,31 @@ connections:
         # Traffic entering the peer's proxy (3080) exits out into YOUR local network.
         remote:
           - { type: socks, bind: "127.0.0.1:3080" }
+
+# ==============================================================================
+# 4. Clipboard Synchronization
+# ==============================================================================
+# Seamlessly sync copied text, images, and files across all your mesh peers.
+# By default, clipsync uses UDP broadcasts to automatically discover other mesh
+# nodes on your local network. It bypasses OS firewalls (like Windows) by having
+# the receiving node proactively pull the payload via HTTP.
+clipsync:
+  # 'bind': The network interface and TCP port for the HTTP pull server.
+  # "0.0.0.0:7755" allows incoming pulls from any peer.
+  - bind: "0.0.0.0:7755"
+    
+    # Enable automatic discovery of peers on the same local subnet using UDP port 7755.
+    lan_discovery: true
+    
+    # 'static_peers': Explicitly define peer addresses (IP:PORT) to sync with.
+    # This is highly useful for syncing across VLANs, VPNs, or the internet where
+    # UDP broadcast discovery is dropped. These peers are synced with unconditionally.
+    static_peers:
+      - "192.168.1.100:7755"
+      - "10.0.0.5:7755"
+      
+    # Discretionary Access Control (ACL)
+    # Define which hosts are allowed to receive your copied data, or send data to you.
+    # Values can be specific IP strings, "udp", "all", or "none".
+    allow_send_to: ["all"]
+    allow_receive: ["all"]

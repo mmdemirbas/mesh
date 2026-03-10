@@ -21,6 +21,8 @@ type Config struct {
 	Listeners []Listener `yaml:"listeners,omitempty"`
 	// Outbound SSH connections to other peers, which encapsulate port forwards and proxy rules.
 	Connections []Connection `yaml:"connections,omitempty"`
+	// Clipsync configuration.
+	Clipsync []ClipsyncCfg `yaml:"clipsync,omitempty"`
 	// Logging configuration.
 	Log LogCfg `yaml:"log,omitempty"`
 }
@@ -66,6 +68,29 @@ type Connection struct {
 	Options map[string]string `yaml:"options,omitempty"`
 	// A list of forwarding sets. Each set establishes its own purely independent physical SSH connection for maximum throughput.
 	Forwards []ForwardSet `yaml:"forwards,omitempty"`
+}
+
+// ClipsyncCfg represents the YAML configuration structure.
+type ClipsyncCfg struct {
+	Bind         string   `yaml:"bind"`          // e.g., "0.0.0.0:7755"
+	LANDiscovery bool     `yaml:"lan_discovery"` // default: true
+	StaticPeers  []string `yaml:"static_peers"`
+	AllowSendTo  []string `yaml:"allow_send_to"` // "all", "none", "udp", or specific IPs
+	AllowReceive []string `yaml:"allow_receive"` // "all", "none", "udp", or specific IPs
+}
+
+// UnmarshalYAML provides default values for ClipsyncCfg.
+func (c *ClipsyncCfg) UnmarshalYAML(value *yaml.Node) error {
+	type plain ClipsyncCfg
+	// Set defaults
+	c.LANDiscovery = true
+	c.AllowSendTo = []string{"all"}
+	c.AllowReceive = []string{"all"}
+
+	if err := value.Decode((*plain)(c)); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ForwardSet represents a distinct SSH connection for a group of port forwards and proxies.

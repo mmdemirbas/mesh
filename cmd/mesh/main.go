@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/lmittmann/tint"
+	"github.com/mmdemirbas/mesh/internal/clipsync"
 	"github.com/mmdemirbas/mesh/internal/config"
 	"github.com/mmdemirbas/mesh/internal/proxy"
 	"github.com/mmdemirbas/mesh/internal/state"
@@ -189,6 +190,20 @@ func upCmd() {
 			c := tunnel.NewSSHClient(conn, log)
 			if err := c.Run(ctx); err != nil {
 				log.Error("Connection failed", "name", conn.Name, "error", err)
+			}
+		}()
+	}
+
+	// 5. Clipsync
+	for _, cs := range cfg.Clipsync {
+		cs := cs
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// TODO: We could need to pass and use ctx in the clipsync.Start func
+			_, err := clipsync.Start(cs)
+			if err != nil {
+				log.Error("Clipsync failed to start", "error", err)
 			}
 		}()
 	}
@@ -497,6 +512,29 @@ func psCmd() {
 					}
 				}
 			}
+		}
+		addHeader("")
+	}
+
+	if len(cfg.Clipsync) > 0 {
+		addHeader(cCyan + "clipsync" + cReset)
+		for _, cs := range cfg.Clipsync {
+			indicator, st, comp := getComponentInfo("clipsync", cs.Bind)
+
+			left := colorAddr(cs.Bind)
+			right := cGray + "[discovery: disabled]" + cReset
+			if cs.LANDiscovery {
+				right = cGray + "[discovery: active]" + cReset
+			}
+			if comp.Message != "" {
+				right = cGray + "[" + comp.Message + "]" + cReset
+			}
+
+			if len(cs.StaticPeers) > 0 {
+				right += " " + cMagenta + fmt.Sprintf("+%d static peers", len(cs.StaticPeers)) + cReset
+			}
+
+			addRow("  ", indicator, left, "", right, st)
 		}
 		addHeader("")
 	}

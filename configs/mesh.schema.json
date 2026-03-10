@@ -22,7 +22,46 @@
       ],
       "description": "AuthCfg configures key-based authentication for a connection."
     },
+    "ClipsyncCfg": {
+      "properties": {
+        "bind": {
+          "type": "string",
+          "description": "Local listening address for clipsync HTTP server."
+        },
+        "lan_discovery": {
+          "type": "boolean",
+          "description": "Enable UDP broadcasting for LAN discovery."
+        },
+        "static_peers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "List of static peer addresses."
+        },
+        "allow_send_to": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allow_receive": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "bind"
+      ]
+    },
     "Config": {
+      "patternProperties": {
+        "^x-": {}
+      },
       "properties": {
         "name": {
           "type": "string",
@@ -41,6 +80,13 @@
           },
           "type": "array",
           "description": "Outbound SSH connections to other peers, which encapsulate port forwards and proxy rules."
+        },
+        "clipsync": {
+          "items": {
+            "$ref": "#/$defs/ClipsyncCfg"
+          },
+          "type": "array",
+          "description": "Clipsync configuration."
         },
         "log": {
           "$ref": "#/$defs/LogCfg",
