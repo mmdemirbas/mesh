@@ -487,8 +487,7 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd
 	var listener net.Listener
 	var err error
 	for i := 0; i < 6; i++ {
-		listenConfig := netutil.ListenConfig()
-		listener, err = listenConfig.Listen(ctx, "tcp", fwd.Bind)
+		listener, err = net.Listen("tcp", fwd.Bind)
 		if err == nil {
 			break
 		}
@@ -562,8 +561,7 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy c
 	var listener net.Listener
 	var err error
 	for i := 0; i < 6; i++ {
-		listenConfig := netutil.ListenConfig()
-		listener, err = listenConfig.Listen(ctx, "tcp", pxy.Bind)
+		listener, err = net.Listen("tcp", pxy.Bind)
 		if err == nil {
 			break
 		}
