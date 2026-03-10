@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -592,12 +593,19 @@ func removePidFile() {
 }
 
 func checkPid(pid int) bool {
+	if runtime.GOOS == "windows" {
+		// FindProcess always succeeds on Windows. Instead, explicitly poll tasklist.
+		cmd := exec.Command("tasklist", "/NH", "/FI", fmt.Sprintf("PID eq %d", pid))
+		output, err := cmd.Output()
+		if err != nil {
+			return false
+		}
+		return strings.Contains(string(output), strconv.Itoa(pid))
+	}
+
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return false
-	}
-	if runtime.GOOS == "windows" {
-		return true
 	}
 	// On Unix, sending signal 0 checks if the process exists
 	err = process.Signal(syscall.Signal(0))

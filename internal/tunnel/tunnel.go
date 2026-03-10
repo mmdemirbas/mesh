@@ -449,7 +449,19 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 // runRemoteForward (-R equivalent): bind on peer, forward here
 func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fwd config.Forward, log *slog.Logger) error {
 	log.Info("Forward -R", "bind", fwd.Bind, "target", fwd.Target)
-	listener, err := client.Listen("tcp", fwd.Bind)
+
+	var listener net.Listener
+	var err error
+	for i := 0; i < 6; i++ {
+		listener, err = client.Listen("tcp", fwd.Bind)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		time.Sleep(500 * time.Millisecond) // wait out TIME_WAIT locking
+	}
 	if err != nil {
 		log.Error("Remote listen failed", "bind", fwd.Bind, "error", err)
 		return err
@@ -467,7 +479,19 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fw
 // runLocalForward (-L equivalent): bind here, forward to peer
 func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd config.Forward, log *slog.Logger) error {
 	log.Info("Forward -L", "bind", fwd.Bind, "target", fwd.Target)
-	listener, err := net.Listen("tcp", fwd.Bind)
+
+	var listener net.Listener
+	var err error
+	for i := 0; i < 6; i++ {
+		listener, err = net.Listen("tcp", fwd.Bind)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		time.Sleep(500 * time.Millisecond) // wait out TIME_WAIT locking
+	}
 	if err != nil {
 		log.Error("Local listen failed", "bind", fwd.Bind, "error", err)
 		return err
@@ -485,7 +509,19 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd
 // runRemoteProxy binds proxy on peer, traffic exits HERE.
 func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy config.Forward, log *slog.Logger) error {
 	log.Info("Proxy remote bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
-	listener, err := client.Listen("tcp", pxy.Bind)
+
+	var listener net.Listener
+	var err error
+	for i := 0; i < 6; i++ {
+		listener, err = client.Listen("tcp", pxy.Bind)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		time.Sleep(500 * time.Millisecond) // wait out TIME_WAIT locking
+	}
 	if err != nil {
 		log.Error("Remote proxy listen failed", "bind", pxy.Bind, "error", err)
 		return err
@@ -509,7 +545,19 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy 
 // runLocalProxy binds proxy here, traffic exits PEER.
 func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy config.Forward, log *slog.Logger) error {
 	log.Info("Proxy local bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
-	listener, err := net.Listen("tcp", pxy.Bind)
+
+	var listener net.Listener
+	var err error
+	for i := 0; i < 6; i++ {
+		listener, err = net.Listen("tcp", pxy.Bind)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		time.Sleep(500 * time.Millisecond) // wait out TIME_WAIT locking
+	}
 	if err != nil {
 		log.Error("Local proxy listen failed", "bind", pxy.Bind, "error", err)
 		return err
