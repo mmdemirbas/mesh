@@ -8,14 +8,15 @@ import (
 )
 
 // ApplyTCPKeepAlive enables TCP keep-alive on the connection if it is a *net.TCPConn.
-// It also explicitly asserts TCP_NODELAY to ensure interactive sessions don't buffer.
-// For non-TCP connections (e.g. SSH channel wrappers from client.Listen), this is a
-// silent no-op by design — keepalives are managed at the SSH layer for those.
+// It explicitly asserts TCP_NODELAY to ensure interactive sessions don't buffer,
+// and forces SetLinger(0) to ensure sockets close immediately with a RST packet
+// instead of lingering politely in TIME_WAIT, keeping proxy listener ports clean.
 func ApplyTCPKeepAlive(conn net.Conn) {
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetKeepAlive(true)
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
 		tcpConn.SetNoDelay(true)
+		tcpConn.SetLinger(0)
 	}
 }
 

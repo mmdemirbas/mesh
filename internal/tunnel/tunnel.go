@@ -467,8 +467,12 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fw
 		return err
 	}
 	defer listener.Close()
-	stop := context.AfterFunc(ctx, func() { listener.Close() })
-	defer stop()
+
+	// Guarantee immediate closure when session aborts, breaking accept loops
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+	}()
 
 	acceptAndForward(ctx, listener, func() (net.Conn, error) {
 		return net.DialTimeout("tcp", fwd.Target, 10*time.Second)
@@ -483,7 +487,8 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd
 	var listener net.Listener
 	var err error
 	for i := 0; i < 6; i++ {
-		listener, err = net.Listen("tcp", fwd.Bind)
+		listenConfig := netutil.ListenConfig()
+		listener, err = listenConfig.Listen(ctx, "tcp", fwd.Bind)
 		if err == nil {
 			break
 		}
@@ -497,8 +502,12 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fwd
 		return err
 	}
 	defer listener.Close()
-	stop := context.AfterFunc(ctx, func() { listener.Close() })
-	defer stop()
+
+	// Guarantee immediate closure when session aborts, breaking accept loops
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+	}()
 
 	acceptAndForward(ctx, listener, func() (net.Conn, error) {
 		return client.Dial("tcp", fwd.Target)
@@ -527,8 +536,12 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, pxy 
 		return err
 	}
 	defer listener.Close()
-	stop := context.AfterFunc(ctx, func() { listener.Close() })
-	defer stop()
+
+	// Guarantee immediate closure when session aborts, breaking accept loops
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+	}()
 
 	switch pxy.Type {
 	case "socks":
@@ -549,7 +562,8 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy c
 	var listener net.Listener
 	var err error
 	for i := 0; i < 6; i++ {
-		listener, err = net.Listen("tcp", pxy.Bind)
+		listenConfig := netutil.ListenConfig()
+		listener, err = listenConfig.Listen(ctx, "tcp", pxy.Bind)
 		if err == nil {
 			break
 		}
@@ -563,8 +577,12 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, pxy c
 		return err
 	}
 	defer listener.Close()
-	stop := context.AfterFunc(ctx, func() { listener.Close() })
-	defer stop()
+
+	// Guarantee immediate closure when session aborts, breaking accept loops
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+	}()
 
 	// For SOCKS, direct traffic through the SSH tunnel
 	sshDialer := func(network, addr string) (net.Conn, error) {
