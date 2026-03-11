@@ -70,6 +70,9 @@ type Node struct {
 	lastWrittenHash string // hash of content written from a peer, to suppress echo re-broadcast
 	lastPayload     []byte
 	notifyCh        chan struct{}
+
+	currentFilesMu sync.Mutex
+	currentFiles   []string // absolute paths of files in filesDir tied to current clipboard content
 }
 
 // Start initializes the mesh node based on the provided configuration.
@@ -97,6 +100,8 @@ func Start(cfg config.ClipsyncCfg) (*Node, error) {
 		filesDir:   filesDir,
 		notifyCh:   make(chan struct{}, 1),
 	}
+
+	n.purgeFilesDir() // remove any files left over from a previous session
 
 	go n.runHTTPServer()
 
@@ -183,9 +188,11 @@ func (n *Node) postHTTP(addr string, data []byte) {
 func (n *Node) processPayload(p Payload, peerHostPort string) {
 	switch p.Type {
 	case "text":
+		n.clearCurrentFiles()
 		n.setWrittenHash(hashBytes(p.Data))
 		writeText(string(p.Data))
 	case "image":
+		n.clearCurrentFiles()
 		n.setWrittenHash(hashBytes(p.Data))
 		writeImage(p.Data, p.MimeType)
 	case "file":
@@ -204,6 +211,7 @@ func (n *Node) processPayload(p Payload, peerHostPort string) {
 			writtenPaths = append(writtenPaths, destPath)
 		}
 		if len(writtenPaths) > 0 {
+			n.setCurrentFiles(writtenPaths) // replaces old files, tracks new ones
 			n.setWrittenHash(hashFilePaths(writtenPaths))
 			writeFiles(writtenPaths)
 		}
@@ -318,6 +326,9 @@ func (n *Node) pollClipboard(pollInterval time.Duration) {
 			continue
 		}
 
+		// No files on clipboard: any previously tracked files are now orphaned.
+		n.clearCurrentFiles()
+
 		// 2. Check Text
 		text := readText()
 		if text != "" {
@@ -345,7 +356,9 @@ func (n *Node) handleFileBroadcast(paths []string) {
 	if len(paths) == 0 {
 		return
 	}
+	n.clearCurrentFiles() // delete files cached from the previous clipboard content
 	var files []FileRef
+	var storedPaths []string
 	for _, src := range paths {
 		fileName := filepath.Base(src)
 
@@ -372,8 +385,10 @@ func (n *Node) handleFileBroadcast(paths []string) {
 			continue
 		}
 		files = append(files, FileRef{FileID: fileID, FileName: fileName, Data: input})
+		storedPaths = append(storedPaths, dest)
 	}
 	if len(files) > 0 {
+		n.setCurrentFiles(storedPaths) // track so they're deleted when clipboard changes
 		n.Broadcast(Payload{Type: "file", Files: files})
 	}
 }
@@ -388,6 +403,47 @@ func (n *Node) checkHash(h string) bool {
 	}
 	n.lastHash = h
 	return true
+}
+
+// clearCurrentFiles deletes all files in filesDir that are associated with the
+// current clipboard content and resets the tracking slice. It is a no-op when
+// there are no tracked files, so it is safe to call on every poll tick.
+func (n *Node) clearCurrentFiles() {
+	n.currentFilesMu.Lock()
+	defer n.currentFilesMu.Unlock()
+	if len(n.currentFiles) == 0 {
+		return
+	}
+	for _, path := range n.currentFiles {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			slog.Debug("Failed to remove old clipboard file", "path", path, "error", err)
+		}
+	}
+	n.currentFiles = nil
+}
+
+// setCurrentFiles atomically replaces the tracked file set, deleting any
+// previously tracked files first.
+func (n *Node) setCurrentFiles(paths []string) {
+	n.clearCurrentFiles()
+	n.currentFilesMu.Lock()
+	n.currentFiles = paths
+	n.currentFilesMu.Unlock()
+}
+
+// purgeFilesDir removes every file in filesDir unconditionally. Called once at
+// startup to discard files left over from a previous (possibly crashed) session.
+func (n *Node) purgeFilesDir() {
+	entries, err := os.ReadDir(n.filesDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		os.Remove(filepath.Join(n.filesDir, e.Name()))
+	}
+	if len(entries) > 0 {
+		slog.Debug("Purged leftover clipsync files from previous session", "count", len(entries))
+	}
 }
 
 // setWrittenHash records the hash of content written from a peer so that
