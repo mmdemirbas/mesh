@@ -1,7 +1,7 @@
 LOGGING
 - Improve logging. Make it more human readable rather than being cryptic and semi-structured.
 - Implement watch mode for ps/status subcommand to see live changes.
-
+- Implement an optional monitoring port (configurable) and web UI with a live dashboard.
 
 PERFORMANCE
 - Support mux / multiplex connection type to allow creating a ConnectionMaster for a specific connection path.
@@ -9,9 +9,18 @@ PERFORMANCE
 - Optimize performance by carefully reviewing and improving the code.
 
 USABILITY
-- Add "enabled" (or "disabled") flag to each connection, forwardset and listener? Or just comment out.
 
 - Support unsupported ssh/sshd options.
 
-- status: Also show clipsync discovered and static peer details (in the same list with a one-word note)
+--------
+
+CLIPSYNC
+
+- config: when to cleanup old files
+- config: file size limit to immediate copy vs. copy (paste) on demand via explicit command
+- config: file extension to include / exclude
+- config: file name pattern to include / exclude
+- config: ...
+
+----------
 
