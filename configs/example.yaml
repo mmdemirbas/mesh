@@ -26,6 +26,9 @@ x-sshd-options: &sshd_options
 # ==============================================================================
 
 my-vps-tunnel-service:
+  # Log verbosity: "debug", "info" (default), "warn", or "error".
+  log_level: info
+
   # ==============================================================================
   # 1. Listeners (Accept incoming connections and requests)
   # ==============================================================================
@@ -60,7 +63,7 @@ my-vps-tunnel-service:
     - name: my-vps-tunnel
 
       # 'targets': A list of fallback URLs to try dialing in order.
-      # Features an automatic 1s mDNS retry and nmap self-healing for .local addresses.
+      # Unreachable targets fail fast (3s probe timeout). .local mDNS addresses get one automatic retry.
       targets:
         - ubuntu@my-vps.local:22  # Try mDNS first
         - ubuntu@12.34.56.78:22   # Fallback to public IP

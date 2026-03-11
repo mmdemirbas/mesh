@@ -145,7 +145,7 @@ func upCmd(nodeName, configPath string) {
 	}
 
 	var logLevel slog.Level
-	switch strings.ToLower(cfg.Log.Level) {
+	switch strings.ToLower(cfg.LogLevel) {
 	case "debug":
 		logLevel = slog.LevelDebug
 	case "warn":

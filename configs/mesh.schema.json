@@ -84,9 +84,15 @@
           "type": "array",
           "description": "Clipsync configuration."
         },
-        "log": {
-          "$ref": "#/$defs/LogCfg",
-          "description": "Logging configuration."
+        "log_level": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "description": "Log level: \"debug\", \"info\", \"warn\", or \"error\". Defaults to \"info\"."
         }
       },
       "additionalProperties": false,
@@ -255,23 +261,6 @@
         "bind"
       ],
       "description": "Listener represents a local server port (proxy, relay, or sshd)."
-    },
-    "LogCfg": {
-      "properties": {
-        "level": {
-          "type": "string",
-          "enum": [
-            "debug",
-            "info",
-            "warn",
-            "error"
-          ],
-          "description": "Log level: \"debug\", \"info\", \"warn\", or \"error\". Defaults to \"info\"."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "description": "LogCfg configures logging behavior."
     },
     "Root": {
       "type": "object",

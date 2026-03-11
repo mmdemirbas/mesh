@@ -21,8 +21,8 @@ type Config struct {
 	Connections []Connection `yaml:"connections,omitempty"`
 	// Clipsync configuration.
 	Clipsync []ClipsyncCfg `yaml:"clipsync,omitempty"`
-	// Logging configuration.
-	Log LogCfg `yaml:"log,omitempty"`
+	// Log level: "debug", "info", "warn", or "error". Defaults to "info".
+	LogLevel string `yaml:"log_level,omitempty" jsonschema:"enum=debug,enum=info,enum=warn,enum=error"`
 }
 
 // Listener represents a local server port (proxy, relay, or sshd).
@@ -130,12 +130,6 @@ type AuthCfg struct {
 	Key string `yaml:"key"`
 	// Path to the known_hosts file.
 	KnownHosts string `yaml:"known_hosts"`
-}
-
-// LogCfg configures logging behavior.
-type LogCfg struct {
-	// Log level: "debug", "info", "warn", or "error". Defaults to "info".
-	Level string `yaml:"level,omitempty" jsonschema:"enum=debug,enum=info,enum=warn,enum=error"`
 }
 
 // Load reads, parses, and returns the requested service's validated config.
