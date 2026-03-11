@@ -308,7 +308,8 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		}
 
 		state.Global.Update("connection", id, state.Connecting, "")
-		target := c.discoverTarget(ctx, sshCfg.Timeout)
+		t0 := time.Now()
+		target, conn := c.probeTarget(ctx, sshCfg.Timeout, interactiveTos)
 		if target == "" {
 			state.Global.Update("connection", id, state.Retrying, "no reachable target")
 			log.Warn("No reachable target", "retry_in", retryInterval)
@@ -327,18 +328,6 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 
 		log.Info("Connecting", "target", target)
 
-		dialer := net.Dialer{Timeout: sshCfg.Timeout, Control: dialerControlIPQoS(interactiveTos)}
-		conn, err := dialer.DialContext(ctx, "tcp", host)
-		if err != nil {
-			state.Global.Update("connection", id, state.Retrying, err.Error())
-			log.Error("Dial failed", "target", target, "error", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(retryDelay(retryInterval)):
-				continue
-			}
-		}
 		tcpKeepAlive := 30 * time.Second
 		if val := config.GetOption(opts, "TCPKeepAlive"); val != "" {
 			if seconds, err := strconv.Atoi(val); err == nil && seconds > 0 {
@@ -347,11 +336,15 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		}
 		netutil.ApplyTCPKeepAlive(conn, tcpKeepAlive)
 
+		t1 := time.Now()
+		if sshCfg.Timeout > 0 {
+			conn.SetDeadline(time.Now().Add(sshCfg.Timeout))
+		}
 		sshConn, chans, reqs, err := ssh.NewClientConn(conn, host, sshCfg)
 		if err != nil {
-			state.Global.Update("connection", id, state.Retrying, err.Error())
-			log.Error("SSH Handshake failed", "target", target, "error", err)
 			conn.Close()
+			state.Global.Update("connection", id, state.Retrying, err.Error())
+			log.Error("SSH handshake failed", "target", target, "elapsed", time.Since(t1).Round(time.Millisecond), "error", err)
 			select {
 			case <-ctx.Done():
 				return
@@ -359,13 +352,13 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 				continue
 			}
 		}
+		conn.SetDeadline(time.Time{}) // clear deadline; data flows indefinitely
 		client := ssh.NewClient(sshConn, chans, reqs)
 
 		state.Global.Update("connection", id, state.Connected, target)
-		log.Info("Connected", "target", target)
-
-		// Handle keep-alives (client-side)
-		go startKeepAlive(ctx, sshConn, opts, false, log)
+		log.Info("Connected", "target", target,
+			"tcp", t1.Sub(t0).Round(time.Millisecond),
+			"ssh", time.Since(t1).Round(time.Millisecond))
 
 		err = c.runSession(ctx, client, fset, opts, log)
 		client.Close()
@@ -402,20 +395,40 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 		sCancel()
 	}
 
-	// Start keep-alives tied to the session context
+	// Start keep-alives tied to the session context.
+	// Uses ServerAliveInterval/ServerAliveCountMax from config; defaults to 15s / 3 failures.
+	aliveInterval := 15 * time.Second
+	if val := config.GetOption(opts, "ServerAliveInterval"); val != "" {
+		if s, err := strconv.Atoi(val); err == nil && s > 0 {
+			aliveInterval = time.Duration(s) * time.Second
+		}
+	}
+	aliveCountMax := 3
+	if val := config.GetOption(opts, "ServerAliveCountMax"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n >= 0 {
+			aliveCountMax = n
+		}
+	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ticker := time.NewTicker(15 * time.Second)
+		ticker := time.NewTicker(aliveInterval)
 		defer ticker.Stop()
+		failCount := 0
 		for {
 			select {
 			case <-sCtx.Done():
 				return
 			case <-ticker.C:
 				if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
-					client.Close()
-					return
+					failCount++
+					if failCount > aliveCountMax {
+						log.Warn("Keep-alive failed, closing connection", "error", err)
+						client.Close()
+						return
+					}
+				} else {
+					failCount = 0
 				}
 			}
 		}
@@ -662,43 +675,47 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, fsetN
 	return nil
 }
 
-// discoverTarget probes each target in order to find the first reachable one.
-// TODO: Avoid double-dial by passing the probed connection through to runForwardSet
-// instead of closing it and re-dialing. This would save a round-trip on high-latency links.
-func (c *SSHClient) discoverTarget(ctx context.Context, timeout time.Duration) string {
-	for _, target := range c.cfg.Targets {
-		_, hostPort := parseTarget(target)
+// probeTarget finds the first reachable target and returns both the target string and
+// the open TCP connection, eliminating the double-dial that would otherwise waste a
+// full round-trip on every reconnect. The caller is responsible for closing the conn.
+//
+// A short probe timeout (capped at 3s) is used for reachability checks, separate from
+// the SSH handshake timeout, so unreachable targets fail fast and fallback targets
+// (e.g., a public IP after a dead .local) are tried without long waits.
+func (c *SSHClient) probeTarget(ctx context.Context, handshakeTimeout time.Duration, ipQoS int) (target string, conn net.Conn) {
+	probeTimeout := 3 * time.Second
+	if handshakeTimeout > 0 && handshakeTimeout/2 < probeTimeout {
+		probeTimeout = handshakeTimeout / 2
+	}
+
+	for _, t := range c.cfg.Targets {
+		_, hostPort := parseTarget(t)
 		host, _, err := net.SplitHostPort(hostPort)
 		if err != nil {
 			host = hostPort
 		}
 
-		if timeout == 0 {
-			timeout = 3 * time.Second
-		}
-		dialer := net.Dialer{Timeout: timeout}
-		conn, err := dialer.DialContext(ctx, "tcp", hostPort)
-
+		dialer := net.Dialer{Timeout: probeTimeout, Control: dialerControlIPQoS(ipQoS)}
+		t0 := time.Now()
+		conn, err = dialer.DialContext(ctx, "tcp", hostPort)
 		if err != nil && strings.HasSuffix(host, ".local") {
-			c.log.Debug("mDNS Dial failed, retrying for .local", "target", target)
-
 			select {
 			case <-ctx.Done():
-				return ""
-			case <-time.After(1 * time.Second):
+				return "", nil
+			case <-time.After(500 * time.Millisecond): // mDNS can be slow to resolve
 			}
-
 			conn, err = dialer.DialContext(ctx, "tcp", hostPort)
 		}
 
+		elapsed := time.Since(t0).Round(time.Millisecond)
 		if err != nil {
-			c.log.Debug("Target unreachable", "target", target)
+			c.log.Debug("Target unreachable", "target", t, "elapsed", elapsed, "error", err)
 			continue
 		}
-		conn.Close()
-		return target
+		c.log.Debug("Target reachable", "target", t, "elapsed", elapsed)
+		return t, conn
 	}
-	return ""
+	return "", nil
 }
 
 // --- Shared forwarding helpers ---
