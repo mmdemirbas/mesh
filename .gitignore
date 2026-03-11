@@ -1,12 +1,9 @@
 # Binaries
-/bin/
+/build/
+/dist/
 
 # OS
 .DS_Store
-
-# Local configs
-*.yaml
-!configs/example.yaml
 
 # IntelliJ
 .idea/
@@ -14,3 +11,7 @@
 # Syncthing
 .stignore
 .stfolder
+
+# Local configs
+*.yaml
+!configs/example.yaml

@@ -1,0 +1,34 @@
+version: '3'
+
+tasks:
+  default:
+    cmds:
+      - task --list
+
+  build:
+    desc: Build the native mesh CLI for local execution (outputs to build/)
+    cmds:
+      - go build -o build/mesh{{exeExt}} -buildvcs=false ./cmd/mesh/
+
+  dist:
+    desc: Build cross-platform release binaries (outputs to dist/)
+    cmds:
+      - GOOS=darwin GOARCH=arm64 go build -buildvcs=false -o dist/mesh-darwin-arm64 ./cmd/mesh/
+      - GOOS=linux GOARCH=arm64 go build -buildvcs=false -o dist/mesh-linux-arm64 ./cmd/mesh/
+      - GOOS=linux GOARCH=amd64 go build -buildvcs=false -o dist/mesh-linux-amd64 ./cmd/mesh/
+      - GOOS=windows GOARCH=amd64 go build -buildvcs=false -o dist/mesh-windows-amd64.exe ./cmd/mesh/
+
+  setup:windows:
+    desc: Add the build directory to Windows PATH
+    platforms: [ windows ]
+    cmds:
+      - powershell -NoProfile -Command '$d="{{.USER_WORKING_DIR}}\build"; $p=[Environment]::GetEnvironmentVariable("PATH","User"); if(($p -split ";") -notcontains $d) { [Environment]::SetEnvironmentVariable("PATH", "$p;$d", "User"); Write-Host "Added $d to PATH" }'
+
+  setup:unix:
+    desc: Add the build directory to Unix PATH (macOS/Linux)
+    platforms: [ darwin, linux ]
+    cmds:
+      - |
+        PROFILE=$([ "$(basename "$SHELL")" = "zsh" ] && echo "$HOME/.zshrc" || echo "$HOME/.bashrc")
+        grep -qxF 'export PATH="$PATH:{{.USER_WORKING_DIR}}/build"' "$PROFILE" || echo 'export PATH="$PATH:{{.USER_WORKING_DIR}}/build"' >> "$PROFILE"
+        echo "Setup complete. Restart your terminal."
