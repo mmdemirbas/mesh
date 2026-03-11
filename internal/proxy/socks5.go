@@ -33,6 +33,9 @@ func ServeSocks(ctx context.Context, listener net.Listener, dialer func(string, 
 func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), log *slog.Logger) {
 	defer conn.Close()
 
+	// Set a deadline for the SOCKS5 handshake to prevent slowloris attacks
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+
 	if dialer == nil {
 		dialer = func(network, addr string) (net.Conn, error) {
 			return net.Dial(network, addr)
@@ -108,6 +111,8 @@ func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), 
 	if err := socksReply(conn, 0x00); err != nil {
 		return
 	}
+	// Clear handshake deadline before entering data relay
+	conn.SetDeadline(time.Time{})
 	netutil.BiCopy(conn, remote)
 }
 

@@ -64,7 +64,13 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 				WidthPx  uint32
 				HeightPx uint32
 			}
-			ssh.Unmarshal(req.Payload, &dim)
+			if err := ssh.Unmarshal(req.Payload, &dim); err != nil {
+				log.Warn("Failed to parse pty-req payload", "error", err)
+				if req.WantReply {
+					req.Reply(false, nil)
+				}
+				continue
+			}
 
 			var err error
 			ptm, pts, err = pty.Open()
@@ -98,7 +104,10 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 				WidthPx  uint32
 				HeightPx uint32
 			}
-			ssh.Unmarshal(req.Payload, &dim)
+			if err := ssh.Unmarshal(req.Payload, &dim); err != nil {
+				log.Warn("Failed to parse window-change payload", "error", err)
+				continue
+			}
 			pty.Setsize(ptm, &pty.Winsize{
 				Rows: uint16(dim.Rows),
 				Cols: uint16(dim.Cols),

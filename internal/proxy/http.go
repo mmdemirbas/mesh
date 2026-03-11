@@ -65,6 +65,9 @@ func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer
 func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *slog.Logger) {
 	defer conn.Close()
 
+	// Set a deadline for the HTTP CONNECT handshake to prevent slowloris attacks
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+
 	br := bufio.NewReader(conn)
 	req, err := http.ReadRequest(br)
 	if err != nil {
@@ -99,6 +102,8 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 		remote.Close()
 		return
 	}
+	// Clear handshake deadline before entering data relay
+	conn.SetDeadline(time.Time{})
 	bc := &bufferedConn{
 		Conn: conn,
 		r:    io.MultiReader(br, conn),
@@ -132,6 +137,10 @@ func DialViaSocks5(baseDialer func(string, string) (net.Conn, error), socksAddr,
 		conn.Close()
 		return nil, err
 	}
+	if len(host) > 255 {
+		conn.Close()
+		return nil, fmt.Errorf("socks5: hostname too long (%d bytes, max 255)", len(host))
+	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
 		conn.Close()
@@ -158,13 +167,28 @@ func DialViaSocks5(baseDialer func(string, string) (net.Conn, error), socksAddr,
 
 	switch resp[3] {
 	case 0x01: // IPv4
-		io.ReadFull(conn, resp[:4+2])
+		if _, err := io.ReadFull(conn, resp[:4+2]); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("socks5: reading IPv4 bind addr: %w", err)
+		}
 	case 0x03: // Domain
-		io.ReadFull(conn, resp[:1])
+		if _, err := io.ReadFull(conn, resp[:1]); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("socks5: reading domain length: %w", err)
+		}
 		domain := make([]byte, resp[0]+2)
-		io.ReadFull(conn, domain)
+		if _, err := io.ReadFull(conn, domain); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("socks5: reading domain bind addr: %w", err)
+		}
 	case 0x04: // IPv6
-		io.ReadFull(conn, resp[:16+2])
+		if _, err := io.ReadFull(conn, resp[:16+2]); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("socks5: reading IPv6 bind addr: %w", err)
+		}
+	default:
+		conn.Close()
+		return nil, fmt.Errorf("socks5: unsupported bind address type %d", resp[3])
 	}
 
 	return conn, nil

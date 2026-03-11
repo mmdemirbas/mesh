@@ -84,7 +84,11 @@ func (s *SSHServer) Run(ctx context.Context) error {
 
 	sshCfg := &ssh.ServerConfig{
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			ip := conn.RemoteAddr().(*net.TCPAddr).IP.String()
+			tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr)
+			if !ok {
+				return nil, fmt.Errorf("unsupported address type: %T", conn.RemoteAddr())
+			}
+			ip := tcpAddr.IP.String()
 			limitersMu.Lock()
 			entry, exists := limiters[ip]
 			if !exists {
@@ -108,14 +112,15 @@ func (s *SSHServer) Run(ctx context.Context) error {
 			limiter := entry.limiter
 			limitersMu.Unlock()
 
+			// Rate-limit all auth attempts (not just failures) to bound CPU from key comparison
+			if err := limiter.Wait(context.Background()); err != nil {
+				return nil, err
+			}
+
 			for _, ak := range authorizedKeys {
 				if bytes.Equal(key.Marshal(), ak.Marshal()) {
 					return &ssh.Permissions{}, nil
 				}
-			}
-
-			if err := limiter.Wait(context.Background()); err != nil {
-				return nil, err
 			}
 
 			return nil, fmt.Errorf("unknown public key for %q", conn.User())
@@ -158,6 +163,10 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 	}
 	netutil.ApplyTCPKeepAlive(conn, tcpKeepAlive)
 
+	// Set a handshake deadline to prevent slowloris-style attacks where a client
+	// connects but never completes the SSH handshake, holding resources indefinitely.
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, cfg)
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) || strings.Contains(err.Error(), "connection reset by peer") {
@@ -168,7 +177,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 		conn.Close()
 		return
 	}
-	conn.SetDeadline(time.Time{})
+	conn.SetDeadline(time.Time{}) // clear deadline; data flows indefinitely
 	defer sshConn.Close()
 
 	s.log.Info("Client connected", "remote", sshConn.RemoteAddr(), "user", sshConn.User())
@@ -199,6 +208,9 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 		}
 	}()
 
+	// Handle keep-alives (server-side) -- must start before blocking on chans
+	go startKeepAlive(ctx, sshConn, s.cfg.Options, true, s.log)
+
 	// Handle channel requests
 	for newChan := range chans {
 		switch newChan.ChannelType() {
@@ -210,9 +222,6 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 			newChan.Reject(ssh.UnknownChannelType, "unsupported")
 		}
 	}
-
-	// Handle keep-alives (server-side)
-	go startKeepAlive(ctx, sshConn, s.cfg.Options, true, s.log)
 
 	s.log.Info("Client disconnected", "remote", sshConn.RemoteAddr())
 }
@@ -811,7 +820,10 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 		netutil.ApplyTCPKeepAlive(conn, 0)
 		go func() {
 			defer conn.Close()
-			origin := conn.RemoteAddr().(*net.TCPAddr)
+			origin, ok := conn.RemoteAddr().(*net.TCPAddr)
+			if !ok {
+				return
+			}
 			payload := ssh.Marshal(struct {
 				DestAddr   string
 				DestPort   uint32
@@ -877,14 +889,21 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[str
 			if p == "none" {
 				break
 			}
-			if p == target || p == req.DestAddr || (p == "*" && strings.HasSuffix(p, fmt.Sprintf(":%d", req.DestPort))) {
-				// Simple pattern matching for now
+			if p == target {
+				// Exact host:port match
 				allowed = true
 				break
 			}
-			// Exact match or wildcard host:*
+			// Wildcard host with specific port: "*:22"
 			if strings.HasPrefix(p, "*:") {
 				if port, err := strconv.Atoi(strings.TrimPrefix(p, "*:")); err == nil && uint32(port) == req.DestPort {
+					allowed = true
+					break
+				}
+			}
+			// Specific host with wildcard port: "myhost:*"
+			if strings.HasSuffix(p, ":*") {
+				if strings.TrimSuffix(p, ":*") == req.DestAddr {
 					allowed = true
 					break
 				}
@@ -899,7 +918,8 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[str
 
 	conn, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
-		newChan.Reject(ssh.ConnectionFailed, err.Error())
+		log.Debug("direct-tcpip dial failed", "target", target, "error", err)
+		newChan.Reject(ssh.ConnectionFailed, "connection refused")
 		return
 	}
 	netutil.ApplyTCPKeepAlive(conn, 0)
@@ -965,7 +985,13 @@ func loadAuthorizedKeys(path string) ([]ssh.PublicKey, error) {
 			if len(bytes.TrimSpace(rest)) > 0 && !bytes.HasPrefix(bytes.TrimSpace(rest), []byte("#")) {
 				slog.Warn("Skipping unparsable authorized_keys entry", "file", path, "line", lineNum, "error", err)
 			}
-			break
+			// Advance past the current line instead of stopping, so subsequent valid keys are still loaded
+			if idx := bytes.IndexByte(rest, '\n'); idx >= 0 {
+				rest = rest[idx+1:]
+			} else {
+				break // no more lines
+			}
+			continue
 		}
 		keys = append(keys, key)
 		rest = r
