@@ -545,6 +545,25 @@ func contains(slice []string, item string) bool {
 
 // ─── OS Clipboard CLI Wrappers ───────────────────────────────────────────────
 
+// linuxClipTool caches the detected Linux clipboard tool at first use.
+// The available tool won't change during process lifetime, so calling
+// exec.LookPath on every 500ms poll tick is wasteful.
+var linuxClipTool struct {
+	once sync.Once
+	name string // "xclip", "wl" (for wl-clipboard), or "" (none)
+}
+
+func detectLinuxClipTool() string {
+	linuxClipTool.once.Do(func() {
+		if _, err := exec.LookPath("xclip"); err == nil {
+			linuxClipTool.name = "xclip"
+		} else if _, err := exec.LookPath("wl-paste"); err == nil {
+			linuxClipTool.name = "wl"
+		}
+	})
+	return linuxClipTool.name
+}
+
 func readText() string {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
@@ -553,11 +572,12 @@ func readText() string {
 	case "windows":
 		cmd = exec.Command("powershell", "-NoProfile", "-Command", "Get-Clipboard")
 	case "linux":
-		if _, err := exec.LookPath("xclip"); err == nil {
+		switch detectLinuxClipTool() {
+		case "xclip":
 			cmd = exec.Command("xclip", "-selection", "clipboard", "-o")
-		} else if _, err := exec.LookPath("wl-paste"); err == nil {
+		case "wl":
 			cmd = exec.Command("wl-paste", "-t", "text/plain")
-		} else {
+		default:
 			return ""
 		}
 	default:
@@ -578,11 +598,12 @@ func writeText(text string) {
 	case "windows":
 		cmd = exec.Command("clip")
 	case "linux":
-		if _, err := exec.LookPath("xclip"); err == nil {
+		switch detectLinuxClipTool() {
+		case "xclip":
 			cmd = exec.Command("xclip", "-selection", "clipboard", "-i")
-		} else if _, err := exec.LookPath("wl-copy"); err == nil {
+		case "wl":
 			cmd = exec.Command("wl-copy")
-		} else {
+		default:
 			return
 		}
 	default:
@@ -644,11 +665,12 @@ func readImage() ([]byte, string) {
 
 	case "linux":
 		var cmd *exec.Cmd
-		if _, err := exec.LookPath("xclip"); err == nil {
+		switch detectLinuxClipTool() {
+		case "xclip":
 			cmd = exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "image/png", "-o")
-		} else if _, err := exec.LookPath("wl-paste"); err == nil {
+		case "wl":
 			cmd = exec.CommandContext(ctx, "wl-paste", "--type", "image/png")
-		} else {
+		default:
 			return nil, ""
 		}
 		data, err := cmd.Output()
@@ -692,25 +714,23 @@ func writeImage(data []byte, ext string) {
 		exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", script).Run()
 
 	case "linux":
-		if _, err := exec.LookPath("xclip"); err == nil {
-			f, err := os.Open(tmpFile)
-			if err != nil {
-				return
-			}
-			cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "image/png", "-i")
-			cmd.Stdin = f
-			cmd.Run()
-			f.Close()
-		} else if _, err := exec.LookPath("wl-copy"); err == nil {
-			f, err := os.Open(tmpFile)
-			if err != nil {
-				return
-			}
-			cmd := exec.CommandContext(ctx, "wl-copy", "--type", "image/png")
-			cmd.Stdin = f
-			cmd.Run()
-			f.Close()
+		f, err := os.Open(tmpFile)
+		if err != nil {
+			return
 		}
+		var cmd *exec.Cmd
+		switch detectLinuxClipTool() {
+		case "xclip":
+			cmd = exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "image/png", "-i")
+		case "wl":
+			cmd = exec.CommandContext(ctx, "wl-copy", "--type", "image/png")
+		default:
+			f.Close()
+			return
+		}
+		cmd.Stdin = f
+		cmd.Run()
+		f.Close()
 	}
 }
 
@@ -754,9 +774,10 @@ func readFiles() []string {
 
 	case "linux":
 		var out []byte
-		if _, err := exec.LookPath("xclip"); err == nil {
+		switch detectLinuxClipTool() {
+		case "xclip":
 			out, _ = exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "text/uri-list", "-o").Output()
-		} else if _, err := exec.LookPath("wl-paste"); err == nil {
+		case "wl":
 			out, _ = exec.CommandContext(ctx, "wl-paste", "--type", "text/uri-list").Output()
 		}
 		if len(out) == 0 {
@@ -806,15 +827,17 @@ func writeFiles(paths []string) {
 		}
 		uriList := sb.String()
 
-		if _, err := exec.LookPath("xclip"); err == nil {
-			cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "text/uri-list", "-i")
-			cmd.Stdin = strings.NewReader(uriList)
-			cmd.Run()
-		} else if _, err := exec.LookPath("wl-copy"); err == nil {
-			cmd := exec.CommandContext(ctx, "wl-copy", "--type", "text/uri-list")
-			cmd.Stdin = strings.NewReader(uriList)
-			cmd.Run()
+		var cmd *exec.Cmd
+		switch detectLinuxClipTool() {
+		case "xclip":
+			cmd = exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "text/uri-list", "-i")
+		case "wl":
+			cmd = exec.CommandContext(ctx, "wl-copy", "--type", "text/uri-list")
+		default:
+			return
 		}
+		cmd.Stdin = strings.NewReader(uriList)
+		cmd.Run()
 	}
 }
 
@@ -862,7 +885,7 @@ func (n *Node) runUDPServer(magicHeader string, port int) {
 
 	buf := make([]byte, 1024)
 	for {
-		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		nBytes, remoteAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			continue
@@ -920,6 +943,44 @@ func (n *Node) runUDPBeacon(magicHeader string, port int) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
+	// Cache broadcast addresses; network interfaces rarely change at runtime.
+	var cachedBcastAddrs []*net.UDPAddr
+	var lastIfaceRefresh time.Time
+
+	refreshBroadcastAddrs := func() []*net.UDPAddr {
+		if time.Since(lastIfaceRefresh) < 30*time.Second {
+			return cachedBcastAddrs
+		}
+		lastIfaceRefresh = time.Now()
+		addrs := []*net.UDPAddr{{IP: net.IPv4bcast, Port: port}}
+		ifaces, _ := net.Interfaces()
+		for _, iface := range ifaces {
+			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagBroadcast == 0 {
+				continue
+			}
+			ifAddrs, _ := iface.Addrs()
+			for _, addr := range ifAddrs {
+				if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
+					ip := ipnet.IP.To4()
+					mask := ipnet.Mask
+					bcast := net.IPv4(ip[0]|^mask[0], ip[1]|^mask[1], ip[2]|^mask[2], ip[3]|^mask[3])
+					addrs = append(addrs, &net.UDPAddr{IP: bcast, Port: port})
+				}
+			}
+		}
+		cachedBcastAddrs = addrs
+		return addrs
+	}
+
+	// Pre-allocate beacon message struct to avoid map allocation each tick.
+	type beaconMsg struct {
+		Magic string `json:"m"`
+		ID    string `json:"id"`
+		Port  int    `json:"port"`
+		Hash  string `json:"h"`
+	}
+	beacon := beaconMsg{Magic: magicHeader, ID: n.id, Port: n.port}
+
 	for {
 		select {
 		case <-ticker.C:
@@ -928,28 +989,13 @@ func (n *Node) runUDPBeacon(magicHeader string, port int) {
 		}
 
 		n.stateMu.Lock()
-		h := n.lastHash
+		beacon.Hash = n.lastHash
 		n.stateMu.Unlock()
 
-		msg, _ := json.Marshal(map[string]interface{}{"m": magicHeader, "id": n.id, "port": n.port, "h": h})
+		msg, _ := json.Marshal(&beacon)
 
-		globalBcast := &net.UDPAddr{IP: net.IPv4bcast, Port: port}
-		conn.WriteTo(msg, globalBcast)
-
-		ifaces, _ := net.Interfaces()
-		for _, iface := range ifaces {
-			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagBroadcast == 0 {
-				continue
-			}
-			addrs, _ := iface.Addrs()
-			for _, addr := range addrs {
-				if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
-					ip := ipnet.IP.To4()
-					mask := ipnet.Mask
-					bcast := net.IPv4(ip[0]|^mask[0], ip[1]|^mask[1], ip[2]|^mask[2], ip[3]|^mask[3])
-					conn.WriteTo(msg, &net.UDPAddr{IP: bcast, Port: port})
-				}
-			}
+		for _, addr := range refreshBroadcastAddrs() {
+			conn.WriteTo(msg, addr)
 		}
 	}
 }
