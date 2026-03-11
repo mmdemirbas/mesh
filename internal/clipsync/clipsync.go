@@ -30,11 +30,20 @@ const (
 	Port         = 7755
 	MagicHeader  = "CLPSYNC2"
 	PollInterval = 500 * time.Millisecond
+
+	// maxSyncFileSize is the per-file size limit for clipboard sync.
+	// Files larger than this are skipped to avoid OOM and transfer timeouts.
+	maxSyncFileSize = 50 * 1024 * 1024 // 50 MB
+
+	// maxRequestBodySize caps the /sync endpoint body.
+	// Allows up to ~20 files at maxSyncFileSize with base64 overhead (~33%).
+	maxRequestBodySize = maxSyncFileSize * 20 * 4 / 3
 )
 
 type FileRef struct {
 	FileID   string `json:"file_id"`
 	FileName string `json:"file_name"`
+	Data     []byte `json:"data,omitempty"` // file content embedded in payload; avoids a pull-back when sender blocks incoming connections
 }
 
 type Payload struct {
@@ -84,7 +93,7 @@ func Start(cfg config.ClipsyncCfg) (*Node, error) {
 		port:       port,
 		peers:      make(map[string]time.Time),
 		peerHashes: make(map[string]string),
-		httpClient: &http.Client{Timeout: 5 * time.Second},
+		httpClient: &http.Client{Timeout: 2 * time.Minute},
 		filesDir:   filesDir,
 		notifyCh:   make(chan struct{}, 1),
 	}
@@ -182,11 +191,17 @@ func (n *Node) processPayload(p Payload, peerHostPort string) {
 	case "file":
 		var writtenPaths []string
 		for _, f := range p.Files {
-			if err := n.downloadFile(f.FileID, f.FileName, peerHostPort); err == nil {
-				writtenPaths = append(writtenPaths, filepath.Join(n.filesDir, f.FileName))
-			} else {
-				slog.Warn("Failed to download clipboard file", "file", f.FileName, "error", err)
+			destPath := filepath.Join(n.filesDir, f.FileName)
+			if len(f.Data) > 0 {
+				if err := os.WriteFile(destPath, f.Data, 0644); err != nil {
+					slog.Warn("Failed to save clipboard file", "file", f.FileName, "error", err)
+					continue
+				}
+			} else if err := n.downloadFile(f.FileID, f.FileName, peerHostPort); err != nil {
+				slog.Warn("Failed to download clipboard file", "file", f.FileName, "peer", peerHostPort, "error", err)
+				continue
 			}
+			writtenPaths = append(writtenPaths, destPath)
 		}
 		if len(writtenPaths) > 0 {
 			n.setWrittenHash(hashFilePaths(writtenPaths))
@@ -227,8 +242,13 @@ func (n *Node) runHTTPServer() {
 			return
 		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		var p Payload
 		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			if err.Error() == "http: request body too large" {
+				slog.Warn("Rejected oversized sync payload", "from", r.RemoteAddr)
+				http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+			}
 			return
 		}
 
@@ -328,6 +348,18 @@ func (n *Node) handleFileBroadcast(paths []string) {
 	var files []FileRef
 	for _, src := range paths {
 		fileName := filepath.Base(src)
+
+		info, err := os.Stat(src)
+		if err != nil {
+			slog.Warn("Failed to stat clipboard file", "path", src, "error", err)
+			continue
+		}
+		if info.Size() > maxSyncFileSize {
+			slog.Warn("Skipping clipboard file: too large for sync", "file", fileName,
+				"size_mb", info.Size()>>20, "limit_mb", maxSyncFileSize>>20)
+			continue
+		}
+
 		fileID := generateID() + filepath.Ext(fileName)
 		dest := filepath.Join(n.filesDir, fileID)
 		input, err := os.ReadFile(src)
@@ -339,7 +371,7 @@ func (n *Node) handleFileBroadcast(paths []string) {
 			slog.Warn("Failed to store clipboard file", "path", dest, "error", err)
 			continue
 		}
-		files = append(files, FileRef{FileID: fileID, FileName: fileName})
+		files = append(files, FileRef{FileID: fileID, FileName: fileName, Data: input})
 	}
 	if len(files) > 0 {
 		n.Broadcast(Payload{Type: "file", Files: files})
