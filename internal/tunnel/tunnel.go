@@ -361,7 +361,6 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 			"ssh", time.Since(t1).Round(time.Millisecond))
 
 		err = c.runSession(ctx, client, fset, opts, log)
-		client.Close()
 
 		if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
 			state.Global.Update("connection", id, state.Failed, "ExitOnForwardFailure")
@@ -383,6 +382,10 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 	var wg sync.WaitGroup
 	sCtx, sCancel := context.WithCancel(ctx)
 	defer sCancel()
+
+	var closeOnce sync.Once
+	closeClient := func() { closeOnce.Do(func() { client.Close() }) }
+	defer closeClient()
 
 	var fatalErr error
 	var errMu sync.Mutex
@@ -424,7 +427,7 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 					failCount++
 					if failCount > aliveCountMax {
 						log.Warn("Keep-alive failed, closing connection", "error", err)
-						client.Close()
+						closeClient()
 						return
 					}
 				} else {
@@ -443,9 +446,11 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 	}()
 
 	// Force connection close on context shutdown
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		<-sCtx.Done()
-		client.Close()
+		closeClient()
 	}()
 
 	// Outbound rules: Remote (-R or remote proxy)
