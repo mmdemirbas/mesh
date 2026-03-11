@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -30,12 +32,16 @@ const (
 	PollInterval = 500 * time.Millisecond
 )
 
+type FileRef struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name"`
+}
+
 type Payload struct {
-	Type     string `json:"type"` // "text", "image", "file"
-	MimeType string `json:"mime_type,omitempty"`
-	Data     []byte `json:"data,omitempty"`
-	FileName string `json:"file_name,omitempty"`
-	FileID   string `json:"file_id,omitempty"`
+	Type     string    `json:"type"` // "text", "image", "file"
+	MimeType string    `json:"mime_type,omitempty"`
+	Data     []byte    `json:"data,omitempty"`
+	Files    []FileRef `json:"files,omitempty"`
 }
 
 type Node struct {
@@ -50,11 +56,11 @@ type Node struct {
 	httpClient *http.Client
 	filesDir   string
 
-	stateMu     sync.Mutex
-	lastHash    string
-	lastPayload []byte
-	isLocked    bool
-	notifyCh    chan struct{}
+	stateMu         sync.Mutex
+	lastHash        string
+	lastWrittenHash string // hash of content written from a peer, to suppress echo re-broadcast
+	lastPayload     []byte
+	notifyCh        chan struct{}
 }
 
 // Start initializes the mesh node based on the provided configuration.
@@ -166,28 +172,25 @@ func (n *Node) postHTTP(addr string, data []byte) {
 // ─── HTTP Server & File Handling ─────────────────────────────────────────────
 
 func (n *Node) processPayload(p Payload, peerHostPort string) {
-	n.stateMu.Lock()
-	n.isLocked = true
-	n.stateMu.Unlock()
-
-	defer func() {
-		n.stateMu.Lock()
-		n.isLocked = false
-		n.stateMu.Unlock()
-	}()
-
 	switch p.Type {
 	case "text":
-		n.setHash(hashBytes(p.Data))
+		n.setWrittenHash(hashBytes(p.Data))
 		writeText(string(p.Data))
 	case "image":
-		n.setHash(hashBytes(p.Data))
+		n.setWrittenHash(hashBytes(p.Data))
 		writeImage(p.Data, p.MimeType)
 	case "file":
-		if err := n.downloadFile(p.FileID, p.FileName, peerHostPort); err == nil {
-			path := filepath.Join(n.filesDir, p.FileName)
-			n.setHash(hashBytes([]byte(path)))
-			writeFiles([]string{path})
+		var writtenPaths []string
+		for _, f := range p.Files {
+			if err := n.downloadFile(f.FileID, f.FileName, peerHostPort); err == nil {
+				writtenPaths = append(writtenPaths, filepath.Join(n.filesDir, f.FileName))
+			} else {
+				slog.Warn("Failed to download clipboard file", "file", f.FileName, "error", err)
+			}
+		}
+		if len(writtenPaths) > 0 {
+			n.setWrittenHash(hashFilePaths(writtenPaths))
+			writeFiles(writtenPaths)
 		}
 	}
 }
@@ -284,17 +287,10 @@ func (n *Node) downloadFile(fileID, fileName, peerAddr string) error {
 func (n *Node) pollClipboard(pollInterval time.Duration) {
 	ticker := time.NewTicker(pollInterval)
 	for range ticker.C {
-		n.stateMu.Lock()
-		if n.isLocked {
-			n.stateMu.Unlock()
-			continue
-		}
-		n.stateMu.Unlock()
-
 		// 1. Check Files
 		paths := readFiles()
 		if len(paths) > 0 {
-			h := hashBytes([]byte(strings.Join(paths, "")))
+			h := hashFilePaths(paths)
 			if n.checkHash(h) {
 				slog.Debug("Local clipboard files changed", "hash", h, "count", len(paths))
 				n.handleFileBroadcast(paths)
@@ -326,25 +322,28 @@ func (n *Node) pollClipboard(pollInterval time.Duration) {
 }
 
 func (n *Node) handleFileBroadcast(paths []string) {
-	// For simplicity in a single file, handle the first copied file.
 	if len(paths) == 0 {
 		return
 	}
-	src := paths[0]
-	fileName := filepath.Base(src)
-	fileID := generateID() + filepath.Ext(fileName)
-
-	dest := filepath.Join(n.filesDir, fileID)
-
-	// Copy file to local static hosting dir
-	input, _ := os.ReadFile(src)
-	os.WriteFile(dest, input, 0644)
-
-	n.Broadcast(Payload{
-		Type:     "file",
-		FileName: fileName,
-		FileID:   fileID,
-	})
+	var files []FileRef
+	for _, src := range paths {
+		fileName := filepath.Base(src)
+		fileID := generateID() + filepath.Ext(fileName)
+		dest := filepath.Join(n.filesDir, fileID)
+		input, err := os.ReadFile(src)
+		if err != nil {
+			slog.Warn("Failed to read clipboard file", "path", src, "error", err)
+			continue
+		}
+		if err := os.WriteFile(dest, input, 0644); err != nil {
+			slog.Warn("Failed to store clipboard file", "path", dest, "error", err)
+			continue
+		}
+		files = append(files, FileRef{FileID: fileID, FileName: fileName})
+	}
+	if len(files) > 0 {
+		n.Broadcast(Payload{Type: "file", Files: files})
+	}
 }
 
 // ─── Helpers & OS Bindings (Text/Files only shown for brevity) ───────────────
@@ -352,27 +351,39 @@ func (n *Node) handleFileBroadcast(paths []string) {
 func (n *Node) checkHash(h string) bool {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
-	if n.lastHash != h {
-		n.lastHash = h
-		return true
+	if h == n.lastHash || h == n.lastWrittenHash {
+		return false
 	}
-	return false
+	n.lastHash = h
+	return true
 }
 
-func (n *Node) setHash(h string) {
+// setWrittenHash records the hash of content written from a peer so that
+// the next poll cycle does not re-broadcast it as a local change.
+func (n *Node) setWrittenHash(h string) {
 	n.stateMu.Lock()
 	n.lastHash = h
+	n.lastWrittenHash = h
 	n.stateMu.Unlock()
 }
 
 func generateID() string {
-	b := make([]byte, 4)
-	md5.New().Write([]byte(time.Now().String()))
+	b := make([]byte, 8)
+	rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
 func hashBytes(b []byte) string {
 	h := md5.Sum(b)
+	return hex.EncodeToString(h[:])
+}
+
+// hashFilePaths returns a stable, order-independent hash of a set of file paths.
+func hashFilePaths(paths []string) string {
+	sorted := make([]string, len(paths))
+	copy(sorted, paths)
+	sort.Strings(sorted)
+	h := md5.Sum([]byte(strings.Join(sorted, "\n")))
 	return hex.EncodeToString(h[:])
 }
 
