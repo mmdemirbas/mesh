@@ -82,9 +82,14 @@ func Start(cfg config.ClipsyncCfg) (*Node, error) {
 	magicHeader := MagicHeader
 	pollInterval := PollInterval
 
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("clipsync: cannot determine home directory: %w", err)
+	}
 	filesDir := filepath.Join(home, ".mesh", "clipsync")
-	os.MkdirAll(filesDir, 0755)
+	if err := os.MkdirAll(filesDir, 0755); err != nil {
+		return nil, fmt.Errorf("clipsync: cannot create files directory: %w", err)
+	}
 
 	_, portStr, _ := net.SplitHostPort(cfg.Bind)
 
@@ -133,7 +138,7 @@ func (n *Node) canSendTo(addr string, isUDP bool) bool {
 		return true
 	}
 	host, _, _ := net.SplitHostPort(addr)
-	return contains(n.config.AllowSendTo, host) || contains(n.config.AllowSendTo, addr)
+	return containsIP(n.config.AllowSendTo, host) || contains(n.config.AllowSendTo, addr)
 }
 
 func (n *Node) canReceiveFrom(addr string) bool {
@@ -144,7 +149,27 @@ func (n *Node) canReceiveFrom(addr string) bool {
 		return true
 	}
 	host, _, _ := net.SplitHostPort(addr)
-	return contains(n.config.AllowReceive, host) || contains(n.config.AllowReceive, addr)
+	return containsIP(n.config.AllowReceive, host) || contains(n.config.AllowReceive, addr)
+}
+
+// containsIP checks if the IP in host matches any entry in the slice,
+// handling IPv6-mapped IPv4 addresses (e.g., "::ffff:192.168.1.5" matches "192.168.1.5").
+func containsIP(slice []string, host string) bool {
+	hostIP := net.ParseIP(host)
+	if hostIP == nil {
+		// Not a valid IP, fall back to string match
+		return contains(slice, host)
+	}
+	for _, s := range slice {
+		entryIP := net.ParseIP(s)
+		if entryIP != nil && hostIP.Equal(entryIP) {
+			return true
+		}
+		if s == host {
+			return true
+		}
+	}
+	return false
 }
 
 func (n *Node) Broadcast(payload Payload) {
@@ -201,7 +226,13 @@ func (n *Node) processPayload(p Payload, peerHostPort string) {
 	case "file":
 		var writtenPaths []string
 		for _, f := range p.Files {
-			destPath := filepath.Join(n.filesDir, f.FileName)
+			// Sanitize filename to prevent path traversal (e.g., "../../etc/passwd")
+			safeName := filepath.Base(f.FileName)
+			if safeName == "." || safeName == ".." || safeName == "" {
+				slog.Warn("Rejected clipboard file with unsafe name", "file", f.FileName)
+				continue
+			}
+			destPath := filepath.Join(n.filesDir, safeName)
 			if len(f.Data) > 0 {
 				if err := os.WriteFile(destPath, f.Data, 0644); err != nil {
 					slog.Warn("Failed to save clipboard file", "file", f.FileName, "error", err)
@@ -235,7 +266,7 @@ func (n *Node) pullHTTP(peerAddr string) {
 	defer resp.Body.Close()
 
 	var p Payload
-	if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxRequestBodySize)).Decode(&p); err != nil {
 		slog.Debug("Failed to decode pulled payload", "peer", peerAddr, "error", err)
 		return
 	}
@@ -259,6 +290,8 @@ func (n *Node) runHTTPServer() {
 			if err.Error() == "http: request body too large" {
 				slog.Warn("Rejected oversized sync payload", "from", r.RemoteAddr)
 				http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+			} else {
+				http.Error(w, "bad request", http.StatusBadRequest)
 			}
 			return
 		}
@@ -289,27 +322,50 @@ func (n *Node) runHTTPServer() {
 		w.Write(data)
 	})
 
-	// Serve files for peers to download
-	mux.Handle("/files/", http.StripPrefix("/files/", http.FileServer(http.Dir(n.filesDir))))
+	// Serve files for peers to download, with ACL check
+	fileServer := http.StripPrefix("/files/", http.FileServer(http.Dir(n.filesDir)))
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		if !n.canReceiveFrom(r.RemoteAddr) {
+			http.Error(w, "Forbidden by ACL", http.StatusForbidden)
+			return
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 
-	srv := &http.Server{Addr: n.config.Bind, Handler: mux}
+	srv := &http.Server{
+		Addr:              n.config.Bind,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       60 * time.Second,
+	}
 	slog.Info("Clipsync HTTP listening", "bind", n.config.Bind)
-	srv.ListenAndServe()
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		slog.Error("Clipsync HTTP server failed", "error", err)
+	}
 }
 
 func (n *Node) downloadFile(fileID, fileName, peerAddr string) error {
-	resp, err := n.httpClient.Get(fmt.Sprintf("http://%s/files/%s", peerAddr, fileID))
+	// Sanitize both fileID (used in URL) and fileName (used in local path) to prevent traversal
+	safeID := filepath.Base(fileID)
+	safeName := filepath.Base(fileName)
+	if safeName == "." || safeName == ".." || safeName == "" {
+		return fmt.Errorf("unsafe file name: %q", fileName)
+	}
+
+	resp, err := n.httpClient.Get(fmt.Sprintf("http://%s/files/%s", peerAddr, safeID))
 	if err != nil || resp.StatusCode != 200 {
 		return err
 	}
 	defer resp.Body.Close()
 
-	dst, err := os.Create(filepath.Join(n.filesDir, fileName))
+	dst, err := os.Create(filepath.Join(n.filesDir, safeName))
 	if err != nil {
 		return err
 	}
 	defer dst.Close()
-	_, err = io.Copy(dst, resp.Body)
+	_, err = io.Copy(dst, io.LimitReader(resp.Body, maxSyncFileSize))
 	return err
 }
 
@@ -605,6 +661,14 @@ func readImage() ([]byte, string) {
 }
 
 func writeImage(data []byte, ext string) {
+	// Sanitize extension to prevent command injection in AppleScript/PowerShell
+	// Only allow known safe image extensions
+	switch ext {
+	case "png", "tiff", "tif", "jpg", "jpeg", "gif", "bmp":
+		// allowed
+	default:
+		ext = "png" // safe default
+	}
 	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("clp_write_%d.%s", os.Getpid(), ext))
 	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
 		return

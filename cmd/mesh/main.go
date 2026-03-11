@@ -171,18 +171,6 @@ func upCmd(nodeName, configPath string) {
 		defer removePidFile(nodeName)
 	}
 
-	adminLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err == nil {
-		port := adminLn.Addr().(*net.TCPAddr).Port
-		os.WriteFile(portFilePath(nodeName), []byte(strconv.Itoa(port)), 0644)
-		defer os.Remove(portFilePath(nodeName))
-
-		go http.Serve(adminLn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(state.Global.Snapshot())
-		}))
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -193,6 +181,21 @@ func upCmd(nodeName, configPath string) {
 		log.Info("Shutting down", "signal", sig)
 		cancel()
 	}()
+
+	adminLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err == nil {
+		port := adminLn.Addr().(*net.TCPAddr).Port
+		os.WriteFile(portFilePath(nodeName), []byte(strconv.Itoa(port)), 0600)
+		defer os.Remove(portFilePath(nodeName))
+
+		adminSrv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(state.Global.Snapshot())
+		})}
+		go adminSrv.Serve(adminLn)
+		// Ensure admin server shuts down when context is cancelled
+		context.AfterFunc(ctx, func() { adminSrv.Close() })
+	}
 
 	var wg sync.WaitGroup
 
@@ -803,7 +806,7 @@ func pidFilePath(nodeName string) string {
 func writePidFile(nodeName string) error {
 	pid := os.Getpid()
 	data := []byte(strconv.Itoa(pid))
-	return os.WriteFile(pidFilePath(nodeName), data, 0644)
+	return os.WriteFile(pidFilePath(nodeName), data, 0600)
 }
 
 func readPidFile(nodeName string) (int, error) {
