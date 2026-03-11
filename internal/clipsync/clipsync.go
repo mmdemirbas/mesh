@@ -529,6 +529,8 @@ func writeText(text string) {
 		} else {
 			return
 		}
+	default:
+		return
 	}
 	cmd.Stdin = strings.NewReader(text)
 	cmd.Run()
@@ -627,13 +629,19 @@ func writeImage(data []byte, ext string) {
 
 	case "linux":
 		if _, err := exec.LookPath("xclip"); err == nil {
-			f, _ := os.Open(tmpFile)
+			f, err := os.Open(tmpFile)
+			if err != nil {
+				return
+			}
 			cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "image/png", "-i")
 			cmd.Stdin = f
 			cmd.Run()
 			f.Close()
 		} else if _, err := exec.LookPath("wl-copy"); err == nil {
-			f, _ := os.Open(tmpFile)
+			f, err := os.Open(tmpFile)
+			if err != nil {
+				return
+			}
 			cmd := exec.CommandContext(ctx, "wl-copy", "--type", "image/png")
 			cmd.Stdin = f
 			cmd.Run()
