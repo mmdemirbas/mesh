@@ -107,14 +107,14 @@ func getDefaultConfigPath() string {
 		return "mesh.yml"
 	}
 
-	// 2. Check ~/.mesh/
+	// 2. Check ~/.mesh/conf
 	home, err := os.UserHomeDir()
 	if err == nil {
-		p := filepath.Join(home, ".mesh", "mesh.yaml")
+		p := filepath.Join(home, ".mesh", "conf", "mesh.yaml")
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
-		p = filepath.Join(home, ".mesh", "mesh.yml")
+		p = filepath.Join(home, ".mesh", "conf", "mesh.yml")
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
