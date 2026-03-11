@@ -626,17 +626,28 @@ func statusCmd(nodeName, configPath string) {
 	if len(cfg.Clipsync) > 0 {
 		addHeader(cCyan + "clipsync" + cReset)
 		for _, cs := range cfg.Clipsync {
-			indicator, st, comp := getComponentInfo("clipsync", cs.Bind)
+			indicator, st, _ := getComponentInfo("clipsync", cs.Bind)
+			addRow("  ", indicator, colorAddr(cs.Bind), "", "", st)
 
-			left := colorAddr(cs.Bind)
-			// Status message already contains discovery info from internal/clipsync/clipsync.go
-			right := cGray + comp.Message + cReset
-
-			if len(cs.StaticPeers) > 0 {
-				right += " " + cMagenta + fmt.Sprintf(" +%d peers", len(cs.StaticPeers)) + cReset
+			// Collect peers: from live state if available, else fall back to config static peers
+			type peerEntry struct{ addr, label string }
+			var peerList []peerEntry
+			prefix := "clipsync-peer:" + cs.Bind + "|"
+			if activeState != nil {
+				for k, comp := range activeState {
+					if strings.HasPrefix(k, prefix) {
+						peerList = append(peerList, peerEntry{strings.TrimPrefix(k, prefix), comp.Message})
+					}
+				}
+				sort.Slice(peerList, func(i, j int) bool { return peerList[i].addr < peerList[j].addr })
+			} else {
+				for _, addr := range cs.StaticPeers {
+					peerList = append(peerList, peerEntry{addr, "static"})
+				}
 			}
-
-			addRow("  ", indicator, left, "", right, st)
+			for _, p := range peerList {
+				addRow("     ", "●", colorAddr(p.addr), "", cGray+p.label+cReset, "")
+			}
 		}
 		addHeader("")
 	}

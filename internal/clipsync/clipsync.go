@@ -111,7 +111,10 @@ func Start(cfg config.ClipsyncCfg) (*Node, error) {
 		go n.cleanupPeers()
 	}
 
-	state.Global.Update("clipsync", cfg.Bind, state.Listening, fmt.Sprintf("[discovery: %v]", cfg.LANDiscovery))
+	state.Global.Update("clipsync", cfg.Bind, state.Listening, "")
+	for _, addr := range cfg.StaticPeers {
+		state.Global.Update("clipsync-peer", cfg.Bind+"|"+addr, state.Connected, "static")
+	}
 
 	go n.pollClipboard(pollInterval)
 	return n, nil
@@ -810,6 +813,7 @@ func (n *Node) runUDPServer(magicHeader string, port int) {
 		n.peersMu.Lock()
 		if _, exists := n.peers[peerAddr]; !exists {
 			slog.Info("Discovered new peer via LAN UDP broadcast", "peer", peerAddr, "ID", msg.ID)
+			state.Global.Update("clipsync-peer", n.config.Bind+"|"+peerAddr, state.Connected, "discovered")
 		}
 		n.peers[peerAddr] = time.Now()
 
@@ -887,6 +891,7 @@ func (n *Node) cleanupPeers() {
 		for addr, lastSeen := range n.peers {
 			if now.Sub(lastSeen) > 15*time.Second {
 				delete(n.peers, addr)
+				state.Global.Delete("clipsync-peer", n.config.Bind+"|"+addr)
 			}
 		}
 		n.peersMu.Unlock()
