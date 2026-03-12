@@ -180,6 +180,11 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 	conn.SetDeadline(time.Time{}) // clear deadline; data flows indefinitely
 	defer sshConn.Close()
 
+	// Per-connection context so background goroutines (keep-alive, forwarding)
+	// stop when this connection ends rather than running until server shutdown.
+	connCtx, connCancel := context.WithCancel(ctx)
+	defer connCancel()
+
 	s.log.Info("Client connected", "remote", sshConn.RemoteAddr(), "user", sshConn.User())
 
 	var mu sync.Mutex
@@ -197,7 +202,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 		for req := range reqs {
 			switch req.Type {
 			case "tcpip-forward":
-				go handleTCPIPForward(ctx, req, sshConn, &mu, listeners, s.log, s.cfg.Bind, s.cfg.Options)
+				go handleTCPIPForward(connCtx, req, sshConn, &mu, listeners, s.log, s.cfg.Bind, s.cfg.Options)
 			case "cancel-tcpip-forward":
 				go handleCancelTCPIPForward(req, &mu, listeners, s.log)
 			default:
@@ -209,7 +214,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 	}()
 
 	// Handle keep-alives (server-side) -- must start before blocking on chans
-	go startKeepAlive(ctx, sshConn, s.cfg.Options, true, s.log)
+	go startKeepAlive(connCtx, sshConn, s.cfg.Options, true, s.log)
 
 	// Handle channel requests
 	for newChan := range chans {
@@ -217,7 +222,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 		case "direct-tcpip":
 			go handleDirectTCPIP(newChan, s.log, s.cfg.Options)
 		case "session":
-			go handleSession(ctx, newChan, s.cfg.Shell, s.log)
+			go handleSession(connCtx, newChan, s.cfg.Shell, s.log)
 		default:
 			newChan.Reject(ssh.UnknownChannelType, "unsupported")
 		}
