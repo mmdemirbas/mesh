@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	config "github.com/mmdemirbas/mesh/internal/config"
@@ -73,6 +74,8 @@ type Node struct {
 
 	currentFilesMu sync.Mutex
 	currentFiles   []string // absolute paths of files in filesDir tied to current clipboard content
+
+	clipMu sync.Mutex // serializes all clipboard read/write process spawning
 }
 
 // Start initializes the mesh node based on the provided configuration.
@@ -216,13 +219,17 @@ func (n *Node) postHTTP(addr string, data []byte) {
 func (n *Node) processPayload(p Payload, peerHostPort string) {
 	switch p.Type {
 	case "text":
+		n.clipMu.Lock()
 		n.clearCurrentFiles()
 		n.setWrittenHash(hashBytes(p.Data))
 		writeText(string(p.Data))
+		n.clipMu.Unlock()
 	case "image":
+		n.clipMu.Lock()
 		n.clearCurrentFiles()
 		n.setWrittenHash(hashBytes(p.Data))
 		writeImage(p.Data, p.MimeType)
+		n.clipMu.Unlock()
 	case "file":
 		var writtenPaths []string
 		for _, f := range p.Files {
@@ -245,9 +252,11 @@ func (n *Node) processPayload(p Payload, peerHostPort string) {
 			writtenPaths = append(writtenPaths, destPath)
 		}
 		if len(writtenPaths) > 0 {
+			n.clipMu.Lock()
 			n.setCurrentFiles(writtenPaths) // replaces old files, tracks new ones
 			n.setWrittenHash(hashFilePaths(writtenPaths))
 			writeFiles(writtenPaths)
+			n.clipMu.Unlock()
 		}
 	}
 }
@@ -373,15 +382,27 @@ func (n *Node) downloadFile(fileID, fileName, peerAddr string) error {
 
 func (n *Node) pollClipboard(pollInterval time.Duration) {
 	ticker := time.NewTicker(pollInterval)
+	var polling atomic.Bool
 	for range ticker.C {
+		// Skip this tick if the previous one is still running.
+		if !polling.CompareAndSwap(false, true) {
+			continue
+		}
+
+		// Read clipboard state under the mutex so that concurrent
+		// writes from processPayload cannot race with our reads.
+		n.clipMu.Lock()
+
 		// 1. Check Files
 		paths := readFiles()
 		if len(paths) > 0 {
+			n.clipMu.Unlock()
 			h := hashFilePaths(paths)
 			if n.checkHash(h) {
 				slog.Debug("Local clipboard files changed", "hash", h, "count", len(paths))
 				n.handleFileBroadcast(paths)
 			}
+			polling.Store(false)
 			continue
 		}
 
@@ -391,16 +412,19 @@ func (n *Node) pollClipboard(pollInterval time.Duration) {
 		// 2. Check Text
 		text := readText()
 		if text != "" {
+			n.clipMu.Unlock()
 			h := hashBytes([]byte(text))
 			if n.checkHash(h) {
 				slog.Debug("Local clipboard text changed", "hash", h)
 				n.Broadcast(Payload{Type: "text", Data: []byte(text)})
 			}
+			polling.Store(false)
 			continue
 		}
 
 		// 3. Check Image
 		img, ext := readImage()
+		n.clipMu.Unlock()
 		if len(img) > 0 {
 			h := hashBytes(img)
 			if n.checkHash(h) {
@@ -408,6 +432,8 @@ func (n *Node) pollClipboard(pollInterval time.Duration) {
 				n.Broadcast(Payload{Type: "image", MimeType: ext, Data: img})
 			}
 		}
+
+		polling.Store(false)
 	}
 }
 
