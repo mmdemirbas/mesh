@@ -565,18 +565,21 @@ func detectLinuxClipTool() string {
 }
 
 func readText() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("pbpaste")
+		cmd = exec.CommandContext(ctx, "pbpaste")
 	case "windows":
-		cmd = exec.Command("powershell", "-NoProfile", "-Command", "Get-Clipboard")
+		cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", "Get-Clipboard")
 	case "linux":
 		switch detectLinuxClipTool() {
 		case "xclip":
-			cmd = exec.Command("xclip", "-selection", "clipboard", "-o")
+			cmd = exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-o")
 		case "wl":
-			cmd = exec.Command("wl-paste", "-t", "text/plain")
+			cmd = exec.CommandContext(ctx, "wl-paste", "-t", "text/plain")
 		default:
 			return ""
 		}
@@ -591,18 +594,21 @@ func readText() string {
 }
 
 func writeText(text string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("pbcopy")
+		cmd = exec.CommandContext(ctx, "pbcopy")
 	case "windows":
-		cmd = exec.Command("clip")
+		cmd = exec.CommandContext(ctx, "clip")
 	case "linux":
 		switch detectLinuxClipTool() {
 		case "xclip":
-			cmd = exec.Command("xclip", "-selection", "clipboard", "-i")
+			cmd = exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-i")
 		case "wl":
-			cmd = exec.Command("wl-copy")
+			cmd = exec.CommandContext(ctx, "wl-copy")
 		default:
 			return
 		}
