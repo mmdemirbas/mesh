@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -47,12 +46,15 @@ type FileRef struct {
 	Data     []byte `json:"data,omitempty"` // file content embedded in payload; avoids a pull-back when sender blocks incoming connections
 }
 
+// ClipFormat holds a single clipboard representation keyed by MIME type.
+type ClipFormat struct {
+	MimeType string `json:"mime_type"` // "text/plain", "text/html", "text/rtf", "image/png", "image/tiff"
+	Data     []byte `json:"data"`
+}
+
 type Payload struct {
-	Type     string    `json:"type"` // "text", "image", "file"
-	MimeType string    `json:"mime_type,omitempty"`
-	Data     []byte    `json:"data,omitempty"`
-	HTML     []byte    `json:"html,omitempty"` // rich text HTML representation (e.g. Notion → Wiki)
-	Files    []FileRef `json:"files,omitempty"`
+	Formats []ClipFormat `json:"formats,omitempty"` // multi-format clipboard content
+	Files   []FileRef    `json:"files,omitempty"`
 }
 
 type Node struct {
@@ -227,24 +229,7 @@ func (n *Node) postHTTP(addr string, data []byte) {
 // ─── HTTP Server & File Handling ─────────────────────────────────────────────
 
 func (n *Node) processPayload(p Payload, peerHostPort string) {
-	switch p.Type {
-	case "text":
-		n.clipMu.Lock()
-		n.clearCurrentFiles()
-		n.setWrittenHash(hashBytes(p.Data), peerHostPort)
-		if len(p.HTML) > 0 {
-			writeRichText(string(p.Data), string(p.HTML))
-		} else {
-			writeText(string(p.Data))
-		}
-		n.clipMu.Unlock()
-	case "image":
-		n.clipMu.Lock()
-		n.clearCurrentFiles()
-		n.setWrittenHash(hashBytes(p.Data), peerHostPort)
-		writeImage(p.Data, p.MimeType)
-		n.clipMu.Unlock()
-	case "file":
+	if len(p.Files) > 0 {
 		var writtenPaths []string
 		for _, f := range p.Files {
 			// Sanitize filename to prevent path traversal (e.g., "../../etc/passwd")
@@ -267,11 +252,17 @@ func (n *Node) processPayload(p Payload, peerHostPort string) {
 		}
 		if len(writtenPaths) > 0 {
 			n.clipMu.Lock()
-			n.setCurrentFiles(writtenPaths) // replaces old files, tracks new ones
+			n.setCurrentFiles(writtenPaths)
 			n.setWrittenHash(hashFilePaths(writtenPaths), peerHostPort)
 			writeFiles(writtenPaths)
 			n.clipMu.Unlock()
 		}
+	} else if len(p.Formats) > 0 {
+		n.clipMu.Lock()
+		n.clearCurrentFiles()
+		n.setWrittenHash(hashFormats(p.Formats), peerHostPort)
+		writeClipboardFormats(p.Formats)
+		n.clipMu.Unlock()
 	}
 }
 
@@ -294,7 +285,7 @@ func (n *Node) pullHTTP(peerAddr string) {
 		return
 	}
 
-	slog.Info("Successfully pulled and ingested payload", "type", p.Type, "peer", peerAddr)
+	slog.Info("Successfully pulled and ingested payload", "formats", len(p.Formats), "files", len(p.Files), "peer", peerAddr)
 	n.processPayload(p, peerAddr)
 }
 
@@ -322,7 +313,7 @@ func (n *Node) runHTTPServer() {
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
 		peerHostPort := net.JoinHostPort(host, fmt.Sprintf("%d", n.port))
 
-		slog.Info("Received pushed payload via HTTP POST", "type", p.Type, "from", r.RemoteAddr)
+		slog.Info("Received pushed payload via HTTP POST", "formats", len(p.Formats), "from", r.RemoteAddr)
 		n.processPayload(p, peerHostPort)
 	})
 
@@ -423,31 +414,14 @@ func (n *Node) pollClipboard(pollInterval time.Duration) {
 		// No files on clipboard: any previously tracked files are now orphaned.
 		n.clearCurrentFiles()
 
-		// 2. Check Text
-		text := readText()
-		if text != "" {
-			n.clipMu.Unlock()
-			h := hashBytes([]byte(text))
-			if n.checkHash(h) {
-				slog.Debug("Local clipboard text changed", "hash", h)
-				payload := Payload{Type: "text", Data: []byte(text)}
-				if html := readHTML(); html != "" {
-					payload.HTML = []byte(html)
-				}
-				n.Broadcast(payload)
-			}
-			polling.Store(false)
-			continue
-		}
-
-		// 3. Check Image
-		img, ext := readImage()
+		// 2. Read all clipboard formats (text, html, rtf, image) in one call.
+		formats := readClipboardFormats()
 		n.clipMu.Unlock()
-		if len(img) > 0 {
-			h := hashBytes(img)
+		if len(formats) > 0 {
+			h := hashFormats(formats)
 			if n.checkHash(h) {
-				slog.Debug("Local clipboard image changed", "hash", h, "ext", ext)
-				n.Broadcast(Payload{Type: "image", MimeType: ext, Data: img})
+				slog.Debug("Local clipboard changed", "hash", h, "formats", len(formats))
+				n.Broadcast(Payload{Formats: formats})
 			}
 		}
 
@@ -492,7 +466,7 @@ func (n *Node) handleFileBroadcast(paths []string) {
 	}
 	if len(files) > 0 {
 		n.setCurrentFiles(storedPaths) // track so they're deleted when clipboard changes
-		n.Broadcast(Payload{Type: "file", Files: files})
+		n.Broadcast(Payload{Files: files})
 	}
 }
 
@@ -579,6 +553,20 @@ func hashFilePaths(paths []string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// hashFormats returns a stable hash of a set of clipboard formats.
+func hashFormats(formats []ClipFormat) string {
+	sorted := make([]ClipFormat, len(formats))
+	copy(sorted, formats)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].MimeType < sorted[j].MimeType })
+	h := md5.New()
+	for _, f := range sorted {
+		h.Write([]byte(f.MimeType))
+		h.Write([]byte{0}) // separator
+		h.Write(f.Data)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {
@@ -605,7 +593,7 @@ var utf8Env = sync.OnceValue(func() []string {
 
 // clipCmd creates an exec.Cmd with UTF-8 locale forced.
 func clipCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
-	cmd := clipCmd(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = utf8Env()
 	return cmd
 }
@@ -629,106 +617,308 @@ func detectLinuxClipTool() string {
 	return linuxClipTool.name
 }
 
-func readText() string {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+// ── Multi-format clipboard read/write ────────────────────────────────────────
+//
+// Reads/writes ALL formats (text, html, rtf, image) in one OS call via temp dir.
+// macOS: single osascript using NSPasteboard
+// Windows: single PowerShell using System.Windows.Forms.Clipboard
+// Linux: multiple xclip/wl-paste calls (one per available type)
 
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = clipCmd(ctx, "pbpaste")
-	case "windows":
-		cmd = clipCmd(ctx, "powershell", "-NoProfile", "-Command",
-			"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-Clipboard")
-	case "linux":
-		switch detectLinuxClipTool() {
-		case "xclip":
-			cmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-o")
-		case "wl":
-			cmd = clipCmd(ctx, "wl-paste", "-t", "text/plain")
-		default:
-			return ""
-		}
-	default:
-		return ""
+// clipTmpDir is a per-process scratch directory for clipboard format exchange.
+var clipTmpDir = sync.OnceValue(func() string {
+	dir := filepath.Join(os.TempDir(), fmt.Sprintf("clipsync_fmt_%d", os.Getpid()))
+	os.MkdirAll(dir, 0700)
+	return dir
+})
+
+func clearDir(dir string) {
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		os.Remove(filepath.Join(dir, e.Name()))
 	}
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
 }
 
-func writeText(text string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+// clipFormatEntry maps between temp file names, MIME types, and macOS UTIs.
+type clipFormatEntry struct {
+	fileName  string
+	mimeType  string
+	darwinUTI string
+}
+
+var clipFormatTable = []clipFormatEntry{
+	{"text_plain", "text/plain", "public.utf8-plain-text"},
+	{"text_html", "text/html", "public.html"},
+	{"text_rtf", "text/rtf", "public.rtf"},
+	{"image_png", "image/png", "public.png"},
+	{"image_tiff", "image/tiff", "public.tiff"},
+}
+
+// readClipboardFormats reads all known non-file formats from the OS clipboard.
+func readClipboardFormats() []ClipFormat {
+	dir := clipTmpDir()
+	clearDir(dir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = clipCmd(ctx, "pbcopy")
+		readClipboardDarwin(ctx, dir)
 	case "windows":
-		cmd = clipCmd(ctx, "powershell", "-NoProfile", "-Command",
-			"[Console]::InputEncoding = [System.Text.Encoding]::UTF8; $input | Set-Clipboard")
+		readClipboardWindows(ctx, dir)
 	case "linux":
-		switch detectLinuxClipTool() {
-		case "xclip":
-			cmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-i")
-		case "wl":
-			cmd = clipCmd(ctx, "wl-copy")
-		default:
-			return
+		readClipboardLinux(ctx, dir)
+	}
+
+	return loadFormatsFromDir(dir)
+}
+
+func loadFormatsFromDir(dir string) []ClipFormat {
+	var formats []ClipFormat
+	for _, entry := range clipFormatTable {
+		data, err := os.ReadFile(filepath.Join(dir, entry.fileName))
+		if err != nil || len(data) == 0 {
+			continue
 		}
-	default:
+		if len(data) > maxSyncFileSize {
+			continue
+		}
+		formats = append(formats, ClipFormat{MimeType: entry.mimeType, Data: data})
+	}
+
+	// Windows stores CF_HTML in a wrapper; extract the fragment.
+	if runtime.GOOS == "windows" {
+		cfdata, err := os.ReadFile(filepath.Join(dir, "text_html_cf"))
+		if err == nil && len(cfdata) > 0 {
+			if frag := extractCFHTMLFragment(string(cfdata)); frag != "" {
+				formats = append(formats, ClipFormat{MimeType: "text/html", Data: []byte(frag)})
+			}
+		}
+	}
+	return formats
+}
+
+func readClipboardDarwin(ctx context.Context, dir string) {
+	// Build the UTI→filename pairs for the AppleScript loop.
+	var pairs []string
+	for _, e := range clipFormatTable {
+		pairs = append(pairs, fmt.Sprintf(`{"%s", "/%s"}`, e.darwinUTI, e.fileName))
+	}
+	script := fmt.Sprintf(`use framework "AppKit"
+set pb to current application's NSPasteboard's generalPasteboard()
+set tmpDir to "%s"
+set typeMap to {%s}
+repeat with pair in typeMap
+	set utiType to item 1 of pair
+	set fName to item 2 of pair
+	if (pb's availableTypeFromArray:{utiType}) is not missing value then
+		set d to (pb's dataForType:utiType)
+		if d is not missing value and (d's |length|()) > 0 then
+			d's writeToFile:(tmpDir & fName) atomically:true
+		end if
+	end if
+end repeat`, dir, strings.Join(pairs, ", "))
+	clipCmd(ctx, "osascript", "-e", script).Run()
+}
+
+func readClipboardWindows(ctx context.Context, dir string) {
+	script := fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$d = '%s'
+$text = [System.Windows.Forms.Clipboard]::GetText([System.Windows.Forms.TextDataFormat]::UnicodeText)
+if ($text) { [System.IO.File]::WriteAllBytes("$d\text_plain", [System.Text.Encoding]::UTF8.GetBytes($text)) }
+if ([System.Windows.Forms.Clipboard]::ContainsData('HTML Format')) {
+  $obj = [System.Windows.Forms.Clipboard]::GetData('HTML Format')
+  if ($obj -is [System.IO.MemoryStream]) {
+    $r = New-Object System.IO.StreamReader($obj, [System.Text.Encoding]::UTF8); $cf = $r.ReadToEnd()
+    [System.IO.File]::WriteAllText("$d\text_html_cf", $cf, [System.Text.Encoding]::UTF8)
+  } elseif ($obj -is [string]) {
+    [System.IO.File]::WriteAllText("$d\text_html_cf", $obj, [System.Text.Encoding]::UTF8)
+  }
+}
+if ([System.Windows.Forms.Clipboard]::ContainsData([System.Windows.Forms.DataFormats]::Rtf)) {
+  $rtf = [System.Windows.Forms.Clipboard]::GetData([System.Windows.Forms.DataFormats]::Rtf)
+  if ($rtf -is [string]) { [System.IO.File]::WriteAllBytes("$d\text_rtf", [System.Text.Encoding]::UTF8.GetBytes($rtf)) }
+}
+$img = [System.Windows.Forms.Clipboard]::GetImage()
+if ($img) {
+  $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+  [System.IO.File]::WriteAllBytes("$d\image_png", $ms.ToArray()); $ms.Dispose(); $img.Dispose()
+}`, dir)
+	clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", script).Run()
+}
+
+func readClipboardLinux(ctx context.Context, dir string) {
+	tool := detectLinuxClipTool()
+	if tool == "" {
 		return
 	}
-	cmd.Stdin = strings.NewReader(text)
-	cmd.Run()
+
+	// Discover which MIME types are available on the clipboard.
+	var targetsCmd *exec.Cmd
+	switch tool {
+	case "xclip":
+		targetsCmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o")
+	case "wl":
+		targetsCmd = clipCmd(ctx, "wl-paste", "--list-types")
+	}
+	targetsOut, err := targetsCmd.Output()
+	if err != nil {
+		return
+	}
+	available := string(targetsOut)
+
+	type linuxTarget struct {
+		target   string // X11/Wayland MIME target
+		fileName string
+	}
+	known := []linuxTarget{
+		{"UTF8_STRING", "text_plain"},
+		{"text/html", "text_html"},
+		{"text/rtf", "text_rtf"},
+		{"image/png", "image_png"},
+	}
+	// wl-paste uses standard MIME types instead of X11 atoms.
+	if tool == "wl" {
+		known[0] = linuxTarget{"text/plain", "text_plain"}
+	}
+
+	for _, kt := range known {
+		if !strings.Contains(available, kt.target) {
+			continue
+		}
+		var cmd *exec.Cmd
+		switch tool {
+		case "xclip":
+			cmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-t", kt.target, "-o")
+		case "wl":
+			cmd = clipCmd(ctx, "wl-paste", "-t", kt.target)
+		}
+		data, err := cmd.Output()
+		if err == nil && len(data) > 0 {
+			os.WriteFile(filepath.Join(dir, kt.fileName), data, 0600)
+		}
+	}
 }
 
-// readHTML reads the HTML representation from the clipboard, if any.
-// Only called when a text change is detected (not every poll tick).
-func readHTML() string {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+// writeClipboardFormats writes all formats to the OS clipboard at once.
+func writeClipboardFormats(formats []ClipFormat) {
+	if len(formats) == 0 {
+		return
+	}
+
+	dir := clipTmpDir()
+	clearDir(dir)
+
+	// Build a lookup and write temp files.
+	fmtMap := make(map[string][]byte) // mimeType → data
+	for _, f := range formats {
+		fmtMap[f.MimeType] = f.Data
+	}
+	for _, entry := range clipFormatTable {
+		if data, ok := fmtMap[entry.mimeType]; ok {
+			os.WriteFile(filepath.Join(dir, entry.fileName), data, 0600)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		script := `use framework "AppKit"
-set pb to current application's NSPasteboard's generalPasteboard()
-set htmlType to "public.html"
-if (pb's availableTypeFromArray:{htmlType}) is not missing value then
-	return (pb's stringForType:htmlType) as text
-end if
-return ""`
-		cmd = clipCmd(ctx, "osascript", "-e", script)
+		writeClipboardDarwin(ctx, dir)
 	case "windows":
-		cmd = clipCmd(ctx, "powershell", "-NoProfile", "-Command",
-			"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-Clipboard -TextFormatType Html")
+		writeClipboardWindows(ctx, dir, fmtMap)
 	case "linux":
-		switch detectLinuxClipTool() {
-		case "xclip":
-			cmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-t", "text/html", "-o")
-		case "wl":
-			cmd = clipCmd(ctx, "wl-paste", "-t", "text/html")
-		default:
-			return ""
-		}
-	default:
-		return ""
+		writeClipboardLinux(ctx, formats)
 	}
-	out, err := cmd.Output()
-	if err != nil || len(out) == 0 {
-		return ""
-	}
-	result := strings.TrimSpace(string(out))
+}
 
-	// Windows CF_HTML wraps the actual content; extract the fragment.
-	if runtime.GOOS == "windows" {
-		result = extractCFHTMLFragment(result)
+func writeClipboardDarwin(ctx context.Context, dir string) {
+	var pairs []string
+	for _, e := range clipFormatTable {
+		pairs = append(pairs, fmt.Sprintf(`{"%s", "/%s"}`, e.darwinUTI, e.fileName))
 	}
-	return result
+	script := fmt.Sprintf(`use framework "AppKit"
+set pb to current application's NSPasteboard's generalPasteboard()
+pb's clearContents()
+set tmpDir to "%s"
+set fm to current application's NSFileManager's defaultManager()
+set typeMap to {%s}
+repeat with pair in typeMap
+	set utiType to item 1 of pair
+	set fName to item 2 of pair
+	set fp to tmpDir & fName
+	if (fm's fileExistsAtPath:fp) as boolean then
+		set d to current application's NSData's dataWithContentsOfFile:fp
+		if d is not missing value then
+			pb's setData:d forType:utiType
+		end if
+	end if
+end repeat`, dir, strings.Join(pairs, ", "))
+	clipCmd(ctx, "osascript", "-e", script).Run()
+}
+
+func writeClipboardWindows(ctx context.Context, dir string, fmtMap map[string][]byte) {
+	// HTML needs CF_HTML wrapping.
+	if html, ok := fmtMap["text/html"]; ok {
+		cfhtml := buildCFHTML(string(html))
+		os.WriteFile(filepath.Join(dir, "text_html_cf"), []byte(cfhtml), 0600)
+	}
+
+	script := fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$d = '%s'
+$dataObj = New-Object System.Windows.Forms.DataObject
+$fp = "$d\text_plain"
+if (Test-Path $fp) { $dataObj.SetText([System.IO.File]::ReadAllText($fp, [System.Text.Encoding]::UTF8)) }
+$fp = "$d\text_html_cf"
+if (Test-Path $fp) {
+  $bytes = [System.IO.File]::ReadAllBytes($fp)
+  $ms = New-Object System.IO.MemoryStream(,$bytes)
+  $dataObj.SetData('HTML Format', $ms)
+}
+$fp = "$d\text_rtf"
+if (Test-Path $fp) { $dataObj.SetData([System.Windows.Forms.DataFormats]::Rtf, [System.IO.File]::ReadAllText($fp, [System.Text.Encoding]::UTF8)) }
+$fp = "$d\image_png"
+if (Test-Path $fp) {
+  $bytes = [System.IO.File]::ReadAllBytes($fp)
+  $ms = New-Object System.IO.MemoryStream(,$bytes)
+  $img = [System.Drawing.Image]::FromStream($ms)
+  $dataObj.SetImage($img)
+}
+[System.Windows.Forms.Clipboard]::SetDataObject($dataObj, $true)`, dir)
+	clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", script).Run()
+}
+
+func writeClipboardLinux(ctx context.Context, formats []ClipFormat) {
+	// Linux clipboard tools can only set one MIME type per invocation.
+	// Write the most universally useful format.
+	priority := []string{"text/plain", "text/html", "text/rtf", "image/png", "image/tiff"}
+	for _, mime := range priority {
+		for _, f := range formats {
+			if f.MimeType != mime {
+				continue
+			}
+			tool := detectLinuxClipTool()
+			var cmd *exec.Cmd
+			switch tool {
+			case "xclip":
+				target := mime
+				if mime == "text/plain" {
+					target = "UTF8_STRING"
+				}
+				cmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-t", target, "-i")
+			case "wl":
+				cmd = clipCmd(ctx, "wl-copy", "--type", mime)
+			default:
+				return
+			}
+			cmd.Stdin = bytes.NewReader(f.Data)
+			cmd.Run()
+			return
+		}
+	}
 }
 
 // extractCFHTMLFragment extracts the HTML fragment from Windows CF_HTML format.
@@ -747,8 +937,6 @@ func extractCFHTMLFragment(cfhtml string) string {
 func buildCFHTML(fragment string) string {
 	prefix := "<html><body>\r\n<!--StartFragment-->"
 	suffix := "<!--EndFragment-->\r\n</body></html>"
-	// Header format — offsets are decimal byte positions within the final string.
-	// Use a dummy header to measure its own length first.
 	hdr := fmt.Sprintf("Version:0.9\r\nStartHTML:%010d\r\nEndHTML:%010d\r\nStartFragment:%010d\r\nEndFragment:%010d\r\n", 0, 0, 0, 0)
 	startHTML := len(hdr)
 	startFrag := startHTML + len(prefix)
@@ -757,197 +945,6 @@ func buildCFHTML(fragment string) string {
 	hdr = fmt.Sprintf("Version:0.9\r\nStartHTML:%010d\r\nEndHTML:%010d\r\nStartFragment:%010d\r\nEndFragment:%010d\r\n",
 		startHTML, endHTML, startFrag, endFrag)
 	return hdr + prefix + fragment + suffix
-}
-
-// writeRichText writes both plain text and HTML to the clipboard.
-func writeRichText(text, html string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	switch runtime.GOOS {
-	case "darwin":
-		textFile := filepath.Join(os.TempDir(), fmt.Sprintf("clipsync_text_%d", os.Getpid()))
-		htmlFile := filepath.Join(os.TempDir(), fmt.Sprintf("clipsync_html_%d", os.Getpid()))
-		if err := os.WriteFile(textFile, []byte(text), 0600); err != nil {
-			return
-		}
-		if err := os.WriteFile(htmlFile, []byte(html), 0600); err != nil {
-			os.Remove(textFile)
-			return
-		}
-		defer os.Remove(textFile)
-		defer os.Remove(htmlFile)
-
-		script := fmt.Sprintf(`use framework "AppKit"
-set pb to current application's NSPasteboard's generalPasteboard()
-pb's clearContents()
-set textData to (read POSIX file "%s" as «class utf8»)
-set htmlData to (read POSIX file "%s" as «class utf8»)
-pb's setString:textData forType:"public.utf8-plain-text"
-pb's setString:htmlData forType:"public.html"`, textFile, htmlFile)
-		clipCmd(ctx, "osascript", "-e", script).Run()
-
-	case "windows":
-		textFile := filepath.Join(os.TempDir(), fmt.Sprintf("clipsync_text_%d.txt", os.Getpid()))
-		htmlFile := filepath.Join(os.TempDir(), fmt.Sprintf("clipsync_html_%d.txt", os.Getpid()))
-		if err := os.WriteFile(textFile, []byte(text), 0600); err != nil {
-			return
-		}
-		cfhtml := buildCFHTML(html)
-		if err := os.WriteFile(htmlFile, []byte(cfhtml), 0600); err != nil {
-			os.Remove(textFile)
-			return
-		}
-		defer os.Remove(textFile)
-		defer os.Remove(htmlFile)
-
-		script := fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms
-$dataObj = New-Object System.Windows.Forms.DataObject
-$dataObj.SetText([System.IO.File]::ReadAllText('%s', [System.Text.Encoding]::UTF8))
-$cfhtml = [System.IO.File]::ReadAllText('%s', [System.Text.Encoding]::UTF8)
-$bytes = [System.Text.Encoding]::UTF8.GetBytes($cfhtml)
-$ms = New-Object System.IO.MemoryStream(,$bytes)
-$dataObj.SetData('HTML Format', $ms)
-[System.Windows.Forms.Clipboard]::SetDataObject($dataObj, $true)`, textFile, htmlFile)
-		clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", script).Run()
-
-	case "linux":
-		// Linux clipboard managers don't easily support multiple types at once.
-		// Write HTML so rich-text editors (wikis, browsers) get formatted content.
-		var cmd *exec.Cmd
-		switch detectLinuxClipTool() {
-		case "xclip":
-			cmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-t", "text/html", "-i")
-		case "wl":
-			cmd = clipCmd(ctx, "wl-copy", "--type", "text/html")
-		default:
-			writeText(text)
-			return
-		}
-		cmd.Stdin = strings.NewReader(html)
-		cmd.Run()
-	}
-}
-
-func readImage() ([]byte, string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	switch runtime.GOOS {
-	case "darwin":
-		base := filepath.Join(os.TempDir(), fmt.Sprintf("clipsync_%d", os.Getpid()))
-		script := fmt.Sprintf(`
-		try
-			set imgData to (the clipboard as «class PNGf»)
-			set ext to "png"
-		on error
-			try
-				set imgData to (the clipboard as «class TIFF»)
-				set ext to "tiff"
-			on error
-				return ""
-			end try
-		end try
-		set fp to "%s." & ext
-		set f to open for access (POSIX file fp) with write permission
-		set eof f to 0
-		write imgData to f
-		close access f
-		return ext`, base)
-		out, err := clipCmd(ctx, "osascript", "-e", script).Output()
-		if err != nil {
-			return nil, ""
-		}
-		ext := strings.TrimSpace(string(out))
-		if ext == "" {
-			return nil, ""
-		}
-		tmp := base + "." + ext
-		defer os.Remove(tmp)
-		data, _ := os.ReadFile(tmp)
-		return data, ext
-
-	case "windows":
-		script := `Add-Type -AssemblyName System.Windows.Forms; $img = [Windows.Forms.Clipboard]::GetImage(); if ($img) { $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($ms.ToArray()) }`
-		out, err := clipCmd(ctx, "powershell", "-NoProfile", "-Command", script).Output()
-		if err != nil || len(out) == 0 {
-			return nil, ""
-		}
-		data, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(out)))
-		if err != nil {
-			return nil, ""
-		}
-		return data, "png"
-
-	case "linux":
-		var cmd *exec.Cmd
-		switch detectLinuxClipTool() {
-		case "xclip":
-			cmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-t", "image/png", "-o")
-		case "wl":
-			cmd = clipCmd(ctx, "wl-paste", "--type", "image/png")
-		default:
-			return nil, ""
-		}
-		data, err := cmd.Output()
-		if err != nil || len(data) == 0 {
-			return nil, ""
-		}
-		return data, "png"
-	}
-	return nil, ""
-}
-
-func writeImage(data []byte, ext string) {
-	// Sanitize extension to prevent command injection in AppleScript/PowerShell
-	// Only allow known safe image extensions
-	switch ext {
-	case "png", "tiff", "tif", "jpg", "jpeg", "gif", "bmp":
-		// allowed
-	default:
-		ext = "png" // safe default
-	}
-	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("clp_write_%d.%s", os.Getpid(), ext))
-	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
-		return
-	}
-	defer os.Remove(tmpFile)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	switch runtime.GOOS {
-	case "darwin":
-		cls := "PNGf"
-		if ext == "tiff" || ext == "tif" {
-			cls = "TIFF"
-		}
-		script := fmt.Sprintf(`set the clipboard to (read (POSIX file "%s") as «class %s»)`, tmpFile, cls)
-		clipCmd(ctx, "osascript", "-e", script).Run()
-
-	case "windows":
-		script := fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $img = [System.Drawing.Image]::FromFile('%s'); [Windows.Forms.Clipboard]::SetImage($img)`, tmpFile)
-		clipCmd(ctx, "powershell", "-NoProfile", "-Command", script).Run()
-
-	case "linux":
-		f, err := os.Open(tmpFile)
-		if err != nil {
-			return
-		}
-		var cmd *exec.Cmd
-		switch detectLinuxClipTool() {
-		case "xclip":
-			cmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-t", "image/png", "-i")
-		case "wl":
-			cmd = clipCmd(ctx, "wl-copy", "--type", "image/png")
-		default:
-			f.Close()
-			return
-		}
-		cmd.Stdin = f
-		cmd.Run()
-		f.Close()
-	}
 }
 
 func readFiles() []string {
