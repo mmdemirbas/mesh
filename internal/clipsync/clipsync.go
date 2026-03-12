@@ -51,6 +51,7 @@ type Payload struct {
 	Type     string    `json:"type"` // "text", "image", "file"
 	MimeType string    `json:"mime_type,omitempty"`
 	Data     []byte    `json:"data,omitempty"`
+	HTML     []byte    `json:"html,omitempty"` // rich text HTML representation (e.g. Notion → Wiki)
 	Files    []FileRef `json:"files,omitempty"`
 }
 
@@ -69,6 +70,7 @@ type Node struct {
 	stateMu         sync.Mutex
 	lastHash        string
 	lastWrittenHash string // hash of content written from a peer, to suppress echo re-broadcast
+	originAddr      string // peer address that last pushed content to us; cleared on local broadcast
 	lastPayload     []byte
 	notifyCh        chan struct{}
 
@@ -180,6 +182,8 @@ func (n *Node) Broadcast(payload Payload) {
 
 	n.stateMu.Lock()
 	n.lastPayload = data
+	origin := n.originAddr
+	n.originAddr = "" // locally originated broadcast; clear for next cycle
 	n.stateMu.Unlock()
 
 	select {
@@ -190,6 +194,9 @@ func (n *Node) Broadcast(payload Payload) {
 	// Send to Dynamic UDP Peers
 	n.peersMu.RLock()
 	for addr := range n.peers {
+		if addr == origin {
+			continue // don't echo back to the peer we received from
+		}
 		if n.canSendTo(addr, true) {
 			slog.Debug("Pushing payload via HTTP POST to dynamic peer", "peer", addr)
 			go n.postHTTP(addr, data)
@@ -199,6 +206,9 @@ func (n *Node) Broadcast(payload Payload) {
 
 	// Send to Static Peers (SSH Tunnels or explicit IP)
 	for _, addr := range n.config.StaticPeers {
+		if addr == origin {
+			continue // don't echo back to the peer we received from
+		}
 		if n.canSendTo(addr, false) {
 			slog.Debug("Pushing payload via HTTP POST to static peer", "peer", addr)
 			go n.postHTTP(addr, data)
@@ -221,13 +231,17 @@ func (n *Node) processPayload(p Payload, peerHostPort string) {
 	case "text":
 		n.clipMu.Lock()
 		n.clearCurrentFiles()
-		n.setWrittenHash(hashBytes(p.Data))
-		writeText(string(p.Data))
+		n.setWrittenHash(hashBytes(p.Data), peerHostPort)
+		if len(p.HTML) > 0 {
+			writeRichText(string(p.Data), string(p.HTML))
+		} else {
+			writeText(string(p.Data))
+		}
 		n.clipMu.Unlock()
 	case "image":
 		n.clipMu.Lock()
 		n.clearCurrentFiles()
-		n.setWrittenHash(hashBytes(p.Data))
+		n.setWrittenHash(hashBytes(p.Data), peerHostPort)
 		writeImage(p.Data, p.MimeType)
 		n.clipMu.Unlock()
 	case "file":
@@ -254,7 +268,7 @@ func (n *Node) processPayload(p Payload, peerHostPort string) {
 		if len(writtenPaths) > 0 {
 			n.clipMu.Lock()
 			n.setCurrentFiles(writtenPaths) // replaces old files, tracks new ones
-			n.setWrittenHash(hashFilePaths(writtenPaths))
+			n.setWrittenHash(hashFilePaths(writtenPaths), peerHostPort)
 			writeFiles(writtenPaths)
 			n.clipMu.Unlock()
 		}
@@ -416,7 +430,11 @@ func (n *Node) pollClipboard(pollInterval time.Duration) {
 			h := hashBytes([]byte(text))
 			if n.checkHash(h) {
 				slog.Debug("Local clipboard text changed", "hash", h)
-				n.Broadcast(Payload{Type: "text", Data: []byte(text)})
+				payload := Payload{Type: "text", Data: []byte(text)}
+				if html := readHTML(); html != "" {
+					payload.HTML = []byte(html)
+				}
+				n.Broadcast(payload)
 			}
 			polling.Store(false)
 			continue
@@ -533,10 +551,11 @@ func (n *Node) purgeFilesDir() {
 
 // setWrittenHash records the hash of content written from a peer so that
 // the next poll cycle does not re-broadcast it as a local change.
-func (n *Node) setWrittenHash(h string) {
+func (n *Node) setWrittenHash(h, origin string) {
 	n.stateMu.Lock()
 	n.lastHash = h
 	n.lastWrittenHash = h
+	n.originAddr = origin
 	n.stateMu.Unlock()
 }
 
@@ -571,6 +590,26 @@ func contains(slice []string, item string) bool {
 
 // ─── OS Clipboard CLI Wrappers ───────────────────────────────────────────────
 
+// utf8Env returns a cached copy of the process environment with LC_ALL
+// forced to en_US.UTF-8 so that clipboard tools always produce/consume UTF-8,
+// regardless of the user's locale.
+var utf8Env = sync.OnceValue(func() []string {
+	var env []string
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "LC_ALL=") {
+			env = append(env, e)
+		}
+	}
+	return append(env, "LC_ALL=en_US.UTF-8")
+})
+
+// clipCmd creates an exec.Cmd with UTF-8 locale forced.
+func clipCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := clipCmd(ctx, name, args...)
+	cmd.Env = utf8Env()
+	return cmd
+}
+
 // linuxClipTool caches the detected Linux clipboard tool at first use.
 // The available tool won't change during process lifetime, so calling
 // exec.LookPath on every 500ms poll tick is wasteful.
@@ -597,15 +636,16 @@ func readText() string {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.CommandContext(ctx, "pbpaste")
+		cmd = clipCmd(ctx, "pbpaste")
 	case "windows":
-		cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", "Get-Clipboard")
+		cmd = clipCmd(ctx, "powershell", "-NoProfile", "-Command",
+			"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-Clipboard")
 	case "linux":
 		switch detectLinuxClipTool() {
 		case "xclip":
-			cmd = exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-o")
+			cmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-o")
 		case "wl":
-			cmd = exec.CommandContext(ctx, "wl-paste", "-t", "text/plain")
+			cmd = clipCmd(ctx, "wl-paste", "-t", "text/plain")
 		default:
 			return ""
 		}
@@ -626,15 +666,16 @@ func writeText(text string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.CommandContext(ctx, "pbcopy")
+		cmd = clipCmd(ctx, "pbcopy")
 	case "windows":
-		cmd = exec.CommandContext(ctx, "clip")
+		cmd = clipCmd(ctx, "powershell", "-NoProfile", "-Command",
+			"[Console]::InputEncoding = [System.Text.Encoding]::UTF8; $input | Set-Clipboard")
 	case "linux":
 		switch detectLinuxClipTool() {
 		case "xclip":
-			cmd = exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-i")
+			cmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-i")
 		case "wl":
-			cmd = exec.CommandContext(ctx, "wl-copy")
+			cmd = clipCmd(ctx, "wl-copy")
 		default:
 			return
 		}
@@ -643,6 +684,149 @@ func writeText(text string) {
 	}
 	cmd.Stdin = strings.NewReader(text)
 	cmd.Run()
+}
+
+// readHTML reads the HTML representation from the clipboard, if any.
+// Only called when a text change is detected (not every poll tick).
+func readHTML() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		script := `use framework "AppKit"
+set pb to current application's NSPasteboard's generalPasteboard()
+set htmlType to "public.html"
+if (pb's availableTypeFromArray:{htmlType}) is not missing value then
+	return (pb's stringForType:htmlType) as text
+end if
+return ""`
+		cmd = clipCmd(ctx, "osascript", "-e", script)
+	case "windows":
+		cmd = clipCmd(ctx, "powershell", "-NoProfile", "-Command",
+			"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-Clipboard -TextFormatType Html")
+	case "linux":
+		switch detectLinuxClipTool() {
+		case "xclip":
+			cmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-t", "text/html", "-o")
+		case "wl":
+			cmd = clipCmd(ctx, "wl-paste", "-t", "text/html")
+		default:
+			return ""
+		}
+	default:
+		return ""
+	}
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		return ""
+	}
+	result := strings.TrimSpace(string(out))
+
+	// Windows CF_HTML wraps the actual content; extract the fragment.
+	if runtime.GOOS == "windows" {
+		result = extractCFHTMLFragment(result)
+	}
+	return result
+}
+
+// extractCFHTMLFragment extracts the HTML fragment from Windows CF_HTML format.
+func extractCFHTMLFragment(cfhtml string) string {
+	const startMarker = "<!--StartFragment-->"
+	const endMarker = "<!--EndFragment-->"
+	start := strings.Index(cfhtml, startMarker)
+	end := strings.Index(cfhtml, endMarker)
+	if start < 0 || end < 0 || end <= start {
+		return ""
+	}
+	return strings.TrimSpace(cfhtml[start+len(startMarker) : end])
+}
+
+// buildCFHTML wraps an HTML fragment in Windows CF_HTML clipboard format.
+func buildCFHTML(fragment string) string {
+	prefix := "<html><body>\r\n<!--StartFragment-->"
+	suffix := "<!--EndFragment-->\r\n</body></html>"
+	// Header format — offsets are decimal byte positions within the final string.
+	// Use a dummy header to measure its own length first.
+	hdr := fmt.Sprintf("Version:0.9\r\nStartHTML:%010d\r\nEndHTML:%010d\r\nStartFragment:%010d\r\nEndFragment:%010d\r\n", 0, 0, 0, 0)
+	startHTML := len(hdr)
+	startFrag := startHTML + len(prefix)
+	endFrag := startFrag + len(fragment)
+	endHTML := endFrag + len(suffix)
+	hdr = fmt.Sprintf("Version:0.9\r\nStartHTML:%010d\r\nEndHTML:%010d\r\nStartFragment:%010d\r\nEndFragment:%010d\r\n",
+		startHTML, endHTML, startFrag, endFrag)
+	return hdr + prefix + fragment + suffix
+}
+
+// writeRichText writes both plain text and HTML to the clipboard.
+func writeRichText(text, html string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	switch runtime.GOOS {
+	case "darwin":
+		textFile := filepath.Join(os.TempDir(), fmt.Sprintf("clipsync_text_%d", os.Getpid()))
+		htmlFile := filepath.Join(os.TempDir(), fmt.Sprintf("clipsync_html_%d", os.Getpid()))
+		if err := os.WriteFile(textFile, []byte(text), 0600); err != nil {
+			return
+		}
+		if err := os.WriteFile(htmlFile, []byte(html), 0600); err != nil {
+			os.Remove(textFile)
+			return
+		}
+		defer os.Remove(textFile)
+		defer os.Remove(htmlFile)
+
+		script := fmt.Sprintf(`use framework "AppKit"
+set pb to current application's NSPasteboard's generalPasteboard()
+pb's clearContents()
+set textData to (read POSIX file "%s" as «class utf8»)
+set htmlData to (read POSIX file "%s" as «class utf8»)
+pb's setString:textData forType:"public.utf8-plain-text"
+pb's setString:htmlData forType:"public.html"`, textFile, htmlFile)
+		clipCmd(ctx, "osascript", "-e", script).Run()
+
+	case "windows":
+		textFile := filepath.Join(os.TempDir(), fmt.Sprintf("clipsync_text_%d.txt", os.Getpid()))
+		htmlFile := filepath.Join(os.TempDir(), fmt.Sprintf("clipsync_html_%d.txt", os.Getpid()))
+		if err := os.WriteFile(textFile, []byte(text), 0600); err != nil {
+			return
+		}
+		cfhtml := buildCFHTML(html)
+		if err := os.WriteFile(htmlFile, []byte(cfhtml), 0600); err != nil {
+			os.Remove(textFile)
+			return
+		}
+		defer os.Remove(textFile)
+		defer os.Remove(htmlFile)
+
+		script := fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms
+$dataObj = New-Object System.Windows.Forms.DataObject
+$dataObj.SetText([System.IO.File]::ReadAllText('%s', [System.Text.Encoding]::UTF8))
+$cfhtml = [System.IO.File]::ReadAllText('%s', [System.Text.Encoding]::UTF8)
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($cfhtml)
+$ms = New-Object System.IO.MemoryStream(,$bytes)
+$dataObj.SetData('HTML Format', $ms)
+[System.Windows.Forms.Clipboard]::SetDataObject($dataObj, $true)`, textFile, htmlFile)
+		clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", script).Run()
+
+	case "linux":
+		// Linux clipboard managers don't easily support multiple types at once.
+		// Write HTML so rich-text editors (wikis, browsers) get formatted content.
+		var cmd *exec.Cmd
+		switch detectLinuxClipTool() {
+		case "xclip":
+			cmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-t", "text/html", "-i")
+		case "wl":
+			cmd = clipCmd(ctx, "wl-copy", "--type", "text/html")
+		default:
+			writeText(text)
+			return
+		}
+		cmd.Stdin = strings.NewReader(html)
+		cmd.Run()
+	}
 }
 
 func readImage() ([]byte, string) {
@@ -670,7 +854,7 @@ func readImage() ([]byte, string) {
 		write imgData to f
 		close access f
 		return ext`, base)
-		out, err := exec.CommandContext(ctx, "osascript", "-e", script).Output()
+		out, err := clipCmd(ctx, "osascript", "-e", script).Output()
 		if err != nil {
 			return nil, ""
 		}
@@ -685,7 +869,7 @@ func readImage() ([]byte, string) {
 
 	case "windows":
 		script := `Add-Type -AssemblyName System.Windows.Forms; $img = [Windows.Forms.Clipboard]::GetImage(); if ($img) { $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($ms.ToArray()) }`
-		out, err := exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", script).Output()
+		out, err := clipCmd(ctx, "powershell", "-NoProfile", "-Command", script).Output()
 		if err != nil || len(out) == 0 {
 			return nil, ""
 		}
@@ -699,9 +883,9 @@ func readImage() ([]byte, string) {
 		var cmd *exec.Cmd
 		switch detectLinuxClipTool() {
 		case "xclip":
-			cmd = exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "image/png", "-o")
+			cmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-t", "image/png", "-o")
 		case "wl":
-			cmd = exec.CommandContext(ctx, "wl-paste", "--type", "image/png")
+			cmd = clipCmd(ctx, "wl-paste", "--type", "image/png")
 		default:
 			return nil, ""
 		}
@@ -739,11 +923,11 @@ func writeImage(data []byte, ext string) {
 			cls = "TIFF"
 		}
 		script := fmt.Sprintf(`set the clipboard to (read (POSIX file "%s") as «class %s»)`, tmpFile, cls)
-		exec.CommandContext(ctx, "osascript", "-e", script).Run()
+		clipCmd(ctx, "osascript", "-e", script).Run()
 
 	case "windows":
 		script := fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $img = [System.Drawing.Image]::FromFile('%s'); [Windows.Forms.Clipboard]::SetImage($img)`, tmpFile)
-		exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", script).Run()
+		clipCmd(ctx, "powershell", "-NoProfile", "-Command", script).Run()
 
 	case "linux":
 		f, err := os.Open(tmpFile)
@@ -753,9 +937,9 @@ func writeImage(data []byte, ext string) {
 		var cmd *exec.Cmd
 		switch detectLinuxClipTool() {
 		case "xclip":
-			cmd = exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "image/png", "-i")
+			cmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-t", "image/png", "-i")
 		case "wl":
-			cmd = exec.CommandContext(ctx, "wl-copy", "--type", "image/png")
+			cmd = clipCmd(ctx, "wl-copy", "--type", "image/png")
 		default:
 			f.Close()
 			return
@@ -790,7 +974,7 @@ func readFiles() []string {
 			end if
 		end repeat
 		return pathList`
-		out, err := exec.CommandContext(ctx, "osascript", "-e", script).Output()
+		out, err := clipCmd(ctx, "osascript", "-e", script).Output()
 		if err != nil {
 			return nil
 		}
@@ -798,7 +982,7 @@ func readFiles() []string {
 
 	case "windows":
 		script := `(Get-Clipboard -Format FileDropList).FullName`
-		out, err := exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", script).Output()
+		out, err := clipCmd(ctx, "powershell", "-NoProfile", "-Command", script).Output()
 		if err != nil {
 			return nil
 		}
@@ -808,9 +992,9 @@ func readFiles() []string {
 		var out []byte
 		switch detectLinuxClipTool() {
 		case "xclip":
-			out, _ = exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "text/uri-list", "-o").Output()
+			out, _ = clipCmd(ctx, "xclip", "-selection", "clipboard", "-t", "text/uri-list", "-o").Output()
 		case "wl":
-			out, _ = exec.CommandContext(ctx, "wl-paste", "--type", "text/uri-list").Output()
+			out, _ = clipCmd(ctx, "wl-paste", "--type", "text/uri-list").Output()
 		}
 		if len(out) == 0 {
 			return nil
@@ -839,7 +1023,7 @@ func writeFiles(paths []string) {
 			sb.WriteString(fmt.Sprintf("urls's addObject:(current application's NSURL's fileURLWithPath:\"%s\")\n", esc))
 		}
 		sb.WriteString("pb's writeObjects:urls\n")
-		exec.CommandContext(ctx, "osascript", "-e", sb.String()).Run()
+		clipCmd(ctx, "osascript", "-e", sb.String()).Run()
 
 	case "windows":
 		var sb strings.Builder
@@ -850,7 +1034,7 @@ func writeFiles(paths []string) {
 				sb.WriteString(",")
 			}
 		}
-		exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", sb.String()).Run()
+		clipCmd(ctx, "powershell", "-NoProfile", "-Command", sb.String()).Run()
 
 	case "linux":
 		var sb strings.Builder
@@ -862,9 +1046,9 @@ func writeFiles(paths []string) {
 		var cmd *exec.Cmd
 		switch detectLinuxClipTool() {
 		case "xclip":
-			cmd = exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "text/uri-list", "-i")
+			cmd = clipCmd(ctx, "xclip", "-selection", "clipboard", "-t", "text/uri-list", "-i")
 		case "wl":
-			cmd = exec.CommandContext(ctx, "wl-copy", "--type", "text/uri-list")
+			cmd = clipCmd(ctx, "wl-copy", "--type", "text/uri-list")
 		default:
 			return
 		}
