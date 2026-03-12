@@ -479,7 +479,45 @@ func statusCmd(nodeName, configPath string) {
 		return peer
 	}
 
+	sectionTitle := func(name string) string {
+		return cBold + cCyan + name + cReset
+	}
+
+	if len(cfg.Clipsync) > 0 {
+		addHeader(sectionTitle("clipsync"))
+		for _, cs := range cfg.Clipsync {
+			indicator, st, _ := getComponentInfo("clipsync", cs.Bind)
+			addRow("", indicator, colorAddr(cs.Bind), "", "", st)
+
+			// Collect peers: from live state if available, else fall back to config static peers
+			type peerEntry struct{ addr, label string }
+			var peerList []peerEntry
+			prefix := "clipsync-peer:" + cs.Bind + "|"
+			if activeState != nil {
+				for k, comp := range activeState {
+					if strings.HasPrefix(k, prefix) {
+						peerList = append(peerList, peerEntry{strings.TrimPrefix(k, prefix), comp.Message})
+					}
+				}
+				sort.Slice(peerList, func(i, j int) bool { return peerList[i].addr < peerList[j].addr })
+			} else {
+				for _, addr := range cs.StaticPeers {
+					peerList = append(peerList, peerEntry{addr, "static"})
+				}
+			}
+			for _, p := range peerList {
+				icon := "~" // discovered at runtime
+				if p.label == "static" {
+					icon = "·" // configured/fixed
+				}
+				addRow("   ", icon, colorAddr(p.addr), "", cGray+p.label+cReset, "")
+			}
+		}
+		addHeader("")
+	}
+
 	if len(cfg.Listeners) > 0 {
+		addHeader(sectionTitle("listeners"))
 		for _, l := range cfg.Listeners {
 			indicator, st, _ := getComponentInfo(l.Type, l.Bind)
 			if l.Type == "sshd" {
@@ -496,12 +534,11 @@ func statusCmd(nodeName, configPath string) {
 				// Proxy
 				indicator, st, _ = getComponentInfo("proxy", l.Bind)
 				left := padForProto(colorAddr(l.Bind)) + " " + cBlue + strings.ToLower(l.Type) + cReset
-				arrow := arrowRight
-				var right string
+				var right = ""
+				var arrow = ""
 				if l.Target != "" {
 					right = colorAddr(l.Target)
-				} else {
-					right = cGray + "🌐 direct" + cReset
+					arrow = arrowRight
 				}
 				addRow("", indicator, left, arrow, right, st)
 			}
@@ -531,7 +568,7 @@ func statusCmd(nodeName, configPath string) {
 					left := colorAddr(actualAddr)
 					right := colorAddr(cleanIPv6(comp.Message))
 
-					addRow("  ", "~", left, arrowRight, right, "")
+					addRow("   ", "~", left, arrowRight, right, "")
 				}
 			}
 		}
@@ -540,7 +577,7 @@ func statusCmd(nodeName, configPath string) {
 
 	if len(cfg.Connections) > 0 {
 		for _, c := range cfg.Connections {
-			addHeader(fmt.Sprintf("%s%s%s", cMagenta, c.Name, cReset))
+			addHeader(sectionTitle(c.Name))
 
 			connectedTargets := make(map[string]struct{})
 			for _, fset := range c.Forwards {
@@ -556,21 +593,17 @@ func statusCmd(nodeName, configPath string) {
 				if _, ok := connectedTargets[t]; ok {
 					ind = "●"
 				}
-				addRow("  ", ind, colorAddr(t), "", "", "")
-			}
-
-			if len(c.Forwards) > 0 {
-				addHeader("")
+				addRow(" ", ind, colorAddr(t), "", "", "")
 			}
 
 			for _, fset := range c.Forwards {
 				id := c.Name + " [" + fset.Name + "]"
 				indicator, st, _ := getComponentInfo("connection", id)
 
-				left := cBold + cBlue + "[" + fset.Name + "]" + cReset
-				addRow("  ", indicator, left, "", "", st)
+				left := sectionTitle(fset.Name)
+				addRow("", indicator, left, "", "", st)
 
-				indent := "     "
+				indent := "   "
 
 				for _, fwd := range fset.Local {
 					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
@@ -619,39 +652,6 @@ func statusCmd(nodeName, configPath string) {
 						addRow(indent, "", lStr, arrowLeft, rStr, "")
 					}
 				}
-			}
-		}
-		addHeader("")
-	}
-
-	if len(cfg.Clipsync) > 0 {
-		addHeader(cCyan + "clipsync" + cReset)
-		for _, cs := range cfg.Clipsync {
-			indicator, st, _ := getComponentInfo("clipsync", cs.Bind)
-			addRow("  ", indicator, colorAddr(cs.Bind), "", "", st)
-
-			// Collect peers: from live state if available, else fall back to config static peers
-			type peerEntry struct{ addr, label string }
-			var peerList []peerEntry
-			prefix := "clipsync-peer:" + cs.Bind + "|"
-			if activeState != nil {
-				for k, comp := range activeState {
-					if strings.HasPrefix(k, prefix) {
-						peerList = append(peerList, peerEntry{strings.TrimPrefix(k, prefix), comp.Message})
-					}
-				}
-				sort.Slice(peerList, func(i, j int) bool { return peerList[i].addr < peerList[j].addr })
-			} else {
-				for _, addr := range cs.StaticPeers {
-					peerList = append(peerList, peerEntry{addr, "static"})
-				}
-			}
-			for _, p := range peerList {
-				icon := "~" // discovered at runtime
-				if p.label == "static" {
-					icon = "·" // configured/fixed
-				}
-				addRow("     ", icon, colorAddr(p.addr), "", cGray+p.label+cReset, "")
 			}
 		}
 		addHeader("")

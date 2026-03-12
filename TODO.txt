@@ -11,16 +11,3 @@ PERFORMANCE
 USABILITY
 
 - Support unsupported ssh/sshd options.
-
---------
-
-CLIPSYNC
-
-- config: when to cleanup old files
-- config: file size limit to immediate copy vs. copy (paste) on demand via explicit command
-- config: file extension to include / exclude
-- config: file name pattern to include / exclude
-- config: ...
-
-----------
-
