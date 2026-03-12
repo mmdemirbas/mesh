@@ -80,7 +80,11 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 			target = req.URL.Host
 		}
 		if !strings.Contains(target, ":") {
-			target += ":80"
+			if req.URL.Scheme == "https" {
+				target += ":443"
+			} else {
+				target += ":80"
+			}
 		}
 
 		remote, err := dialer(target)

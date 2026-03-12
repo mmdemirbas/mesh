@@ -354,7 +354,11 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 		WriteTimeout:      2 * time.Minute,
 		IdleTimeout:       60 * time.Second,
 	}
-	context.AfterFunc(ctx, func() { srv.Close() })
+
+	go func() {
+		<-ctx.Done()
+		srv.Close()
+	}()
 
 	slog.Info("Clipsync HTTP listening", "bind", n.config.Bind)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
