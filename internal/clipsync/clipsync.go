@@ -654,7 +654,16 @@ var clipFormatTable = []clipFormatEntry{
 }
 
 // readClipboardFormats reads all known non-file formats from the OS clipboard.
-func readClipboardFormats() []ClipFormat {
+// The function recovers from panics (e.g. Go runtime crashes during subprocess
+// creation on Windows) so that a transient OS failure cannot kill the process.
+func readClipboardFormats() (formats []ClipFormat) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("Recovered panic in readClipboardFormats", "panic", r)
+			formats = nil
+		}
+	}()
+
 	dir := clipTmpDir()
 	clearDir(dir)
 
@@ -802,7 +811,14 @@ func readClipboardLinux(ctx context.Context, dir string) {
 }
 
 // writeClipboardFormats writes all formats to the OS clipboard at once.
+// Recovers from panics to prevent subprocess crashes from killing the process.
 func writeClipboardFormats(formats []ClipFormat) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("Recovered panic in writeClipboardFormats", "panic", r)
+		}
+	}()
+
 	if len(formats) == 0 {
 		return
 	}
