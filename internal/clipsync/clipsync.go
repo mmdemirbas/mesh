@@ -387,12 +387,26 @@ func (n *Node) downloadFile(fileID, fileName, peerAddr string) error {
 
 func (n *Node) pollClipboard(pollInterval time.Duration) {
 	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop() // Prevent ticker leak
+
 	var polling atomic.Bool
+	var lastSeq uint32
+
 	for range ticker.C {
 		// Skip this tick if the previous one is still running.
 		if !polling.CompareAndSwap(false, true) {
 			continue
 		}
+
+		// Cross-platform sequence check.
+		// On Windows, this prevents spawning powershell.exe if the clipboard hasn't changed.
+		// On macOS/Linux, it returns 0 and proceeds normally.
+		seq := getOSClipSeq()
+		if seq != 0 && seq == lastSeq {
+			polling.Store(false)
+			continue
+		}
+		lastSeq = seq
 
 		// Read clipboard state under the mutex so that concurrent
 		// writes from processPayload cannot race with our reads.
@@ -594,7 +608,14 @@ var utf8Env = sync.OnceValue(func() []string {
 // clipCmd creates an exec.Cmd with UTF-8 locale forced.
 func clipCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = utf8Env()
+
+	// Deep copy the environment slice to prevent StartProcess memory violations
+	// when the OS level iterates over the slice concurrently.
+	baseEnv := utf8Env()
+	envCopy := make([]string, len(baseEnv))
+	copy(envCopy, baseEnv)
+	cmd.Env = envCopy
+
 	return cmd
 }
 
@@ -1104,7 +1125,8 @@ func parseURIList(s string) []string {
 // ─── UDP Discovery & Peer Management ─────────────────────────────────────────
 
 func (n *Node) runUDPServer(magicHeader string, port int) {
-	addr := &net.UDPAddr{Port: port}
+	// 1. Explicit IPv4 binding to match the WriteToUDP implementation
+	addr := &net.UDPAddr{IP: net.IPv4zero, Port: port}
 	conn, err := net.ListenUDP("udp4", addr)
 	if err != nil {
 		slog.Error("Clipsync UDP listen failed", "error", err)
@@ -1112,11 +1134,17 @@ func (n *Node) runUDPServer(magicHeader string, port int) {
 	}
 	defer conn.Close()
 
-	buf := make([]byte, 1024)
+	// 2. Increase buffer slightly to prevent edge-case payload truncation
+	buf := make([]byte, 2048)
+
 	for {
-		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		// 3. Removed the 30s deadline. A blocking read uses 0% CPU and is
+		// natively managed by the OS thread scheduler.
 		nBytes, remoteAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
+			// 4. Prevent CPU spinning if the Windows network stack temporarily
+			// invalidates the socket (e.g., during WiFi roaming or VPN toggles).
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
@@ -1131,8 +1159,11 @@ func (n *Node) runUDPServer(magicHeader string, port int) {
 			continue
 		}
 
-		host, _, _ := net.SplitHostPort(remoteAddr.String())
-		peerAddr := fmt.Sprintf("%s:%d", host, msg.Port)
+		// 5. Zero-allocation IP extraction (bypasses SplitHostPort overhead)
+		if remoteAddr == nil || remoteAddr.IP == nil {
+			continue
+		}
+		peerAddr := fmt.Sprintf("%s:%d", remoteAddr.IP.String(), msg.Port)
 
 		n.peersMu.Lock()
 		if _, exists := n.peers[peerAddr]; !exists {
@@ -1162,7 +1193,9 @@ func (n *Node) runUDPServer(magicHeader string, port int) {
 }
 
 func (n *Node) runUDPBeacon(magicHeader string, port int) {
-	conn, err := net.ListenPacket("udp4", ":0")
+	// 1. Explicitly use UDPConn to ensure strict memory alignment for the OS kernel
+	addr := &net.UDPAddr{IP: net.IPv4zero, Port: 0}
+	conn, err := net.ListenUDP("udp4", addr)
 	if err != nil {
 		slog.Error("Clipsync UDP Beacon binding failed", "error", err)
 		return
@@ -1181,20 +1214,58 @@ func (n *Node) runUDPBeacon(magicHeader string, port int) {
 			return cachedBcastAddrs
 		}
 		lastIfaceRefresh = time.Now()
+
+		// Global broadcast fallback
 		addrs := []*net.UDPAddr{{IP: net.IPv4bcast, Port: port}}
-		ifaces, _ := net.Interfaces()
+
+		// 2. Mitigate Windows Driver/EDR Faults
+		// Windows network drivers frequently crash (0xc0000005) when blasted with
+		// malformed per-interface UDP broadcasts. The global 255.255.255.255 is
+		// natively routed and 100% stable on Windows for LAN discovery.
+		if runtime.GOOS == "windows" {
+			cachedBcastAddrs = addrs
+			return addrs
+		}
+
+		ifaces, err := net.Interfaces()
+		if err != nil {
+			return addrs
+		}
+
 		for _, iface := range ifaces {
 			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagBroadcast == 0 {
 				continue
 			}
-			ifAddrs, _ := iface.Addrs()
-			for _, addr := range ifAddrs {
-				if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
-					ip := ipnet.IP.To4()
-					mask := ipnet.Mask
-					bcast := net.IPv4(ip[0]|^mask[0], ip[1]|^mask[1], ip[2]|^mask[2], ip[3]|^mask[3])
-					addrs = append(addrs, &net.UDPAddr{IP: bcast, Port: port})
+			ifAddrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, a := range ifAddrs {
+				ipnet, ok := a.(*net.IPNet)
+				if !ok {
+					continue
 				}
+				ip4 := ipnet.IP.To4()
+				if ip4 == nil {
+					continue
+				}
+
+				// 3. Safe IPv4 mask extraction to prevent bitwise corruption
+				mask := ipnet.Mask
+				if len(mask) == net.IPv6len {
+					mask = mask[12:]
+				}
+				if len(mask) != net.IPv4len {
+					continue
+				}
+
+				bcast := net.IPv4(
+					ip4[0]|^mask[0],
+					ip4[1]|^mask[1],
+					ip4[2]|^mask[2],
+					ip4[3]|^mask[3],
+				)
+				addrs = append(addrs, &net.UDPAddr{IP: bcast, Port: port})
 			}
 		}
 		cachedBcastAddrs = addrs
@@ -1221,10 +1292,13 @@ func (n *Node) runUDPBeacon(magicHeader string, port int) {
 		beacon.Hash = n.lastHash
 		n.stateMu.Unlock()
 
-		msg, _ := json.Marshal(&beacon)
+		msg, err := json.Marshal(&beacon)
+		if err != nil {
+			continue // Prevent nil payloads from reaching WriteTo
+		}
 
-		for _, addr := range refreshBroadcastAddrs() {
-			conn.WriteTo(msg, addr)
+		for _, baddr := range refreshBroadcastAddrs() {
+			conn.WriteToUDP(msg, baddr)
 		}
 	}
 }

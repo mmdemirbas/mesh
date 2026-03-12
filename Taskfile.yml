@@ -6,17 +6,21 @@ tasks:
       - task --list
 
   build:
-    desc: Build the native mesh CLI for local execution (outputs to build/)
+    desc: Build the native mesh CLI for local execution
     cmds:
+      # Native local builds automatically use CGO_ENABLED=1 on macOS
+      # and CGO_ENABLED=0 on Windows. Best performance locally.
       - go build -o build/mesh{{exeExt}} -buildvcs=false ./cmd/mesh/
 
   dist:
     desc: Build cross-platform release binaries (outputs to dist/)
     cmds:
+      # CGO_ENABLED Omitted: Auto-detects 1 on Mac (optimized) and 0 on Windows (safe fallback).
       - GOOS=darwin GOARCH=arm64 go build -buildvcs=false -o dist/mesh-darwin-arm64 ./cmd/mesh/
-      - GOOS=linux GOARCH=arm64 go build -buildvcs=false -o dist/mesh-linux-arm64 ./cmd/mesh/
-      - GOOS=linux GOARCH=amd64 go build -buildvcs=false -o dist/mesh-linux-amd64 ./cmd/mesh/
-      - GOOS=windows GOARCH=amd64 go build -buildvcs=false -o dist/mesh-windows-amd64.exe ./cmd/mesh/
+      # CGO_ENABLED=0: Guarantees 100% static linking, preventing glibc dependency issues.
+      - CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -buildvcs=false -o dist/mesh-linux-arm64 ./cmd/mesh/
+      - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -o dist/mesh-linux-amd64 ./cmd/mesh/
+      - CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -buildvcs=false -o dist/mesh-windows-amd64.exe ./cmd/mesh/
 
   setup:windows:
     desc: Add the build directory to Windows PATH
