@@ -247,8 +247,7 @@ func upCmd(nodeName, configPath string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// TODO: We could need to pass and use ctx in the clipsync.Start func
-			_, err := clipsync.Start(cs)
+			_, err := clipsync.Start(ctx, cs)
 			if err != nil {
 				log.Error("Clipsync failed to start", "error", err)
 			}

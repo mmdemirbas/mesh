@@ -29,7 +29,7 @@ import (
 const (
 	Port         = 7755
 	MagicHeader  = "CLPSYNC2"
-	PollInterval = 500 * time.Millisecond
+	PollInterval = 2 * time.Second // Optimized default for lower OS footprint
 
 	// maxSyncFileSize is the per-file size limit for clipboard sync.
 	// Files larger than this are skipped to avoid OOM and transfer timeouts.
@@ -83,7 +83,7 @@ type Node struct {
 }
 
 // Start initializes the mesh node based on the provided configuration.
-func Start(cfg config.ClipsyncCfg) (*Node, error) {
+func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 	// Defaults
 	port := Port
 	magicHeader := MagicHeader
@@ -115,12 +115,12 @@ func Start(cfg config.ClipsyncCfg) (*Node, error) {
 
 	n.purgeFilesDir() // remove any files left over from a previous session
 
-	go n.runHTTPServer()
+	go n.runHTTPServer(ctx)
 
 	if cfg.LANDiscovery {
-		go n.runUDPServer(magicHeader, port)
-		go n.runUDPBeacon(magicHeader, port)
-		go n.cleanupPeers()
+		go n.runUDPServer(ctx, magicHeader, port)
+		go n.runUDPBeacon(ctx, magicHeader, port)
+		go n.cleanupPeers(ctx)
 	}
 
 	state.Global.Update("clipsync", cfg.Bind, state.Listening, "")
@@ -128,7 +128,7 @@ func Start(cfg config.ClipsyncCfg) (*Node, error) {
 		state.Global.Update("clipsync-peer", cfg.Bind+"|"+addr, state.Connected, "static")
 	}
 
-	go n.pollClipboard(pollInterval)
+	go n.pollClipboard(ctx, pollInterval)
 	return n, nil
 }
 
@@ -289,7 +289,7 @@ func (n *Node) pullHTTP(peerAddr string) {
 	n.processPayload(p, peerAddr)
 }
 
-func (n *Node) runHTTPServer() {
+func (n *Node) runHTTPServer(ctx context.Context) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/sync", func(w http.ResponseWriter, r *http.Request) {
@@ -354,6 +354,8 @@ func (n *Node) runHTTPServer() {
 		WriteTimeout:      2 * time.Minute,
 		IdleTimeout:       60 * time.Second,
 	}
+	context.AfterFunc(ctx, func() { srv.Close() })
+
 	slog.Info("Clipsync HTTP listening", "bind", n.config.Bind)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("Clipsync HTTP server failed", "error", err)
@@ -385,14 +387,20 @@ func (n *Node) downloadFile(fileID, fileName, peerAddr string) error {
 
 // ─── OS Clipboard Monitor ────────────────────────────────────────────────────
 
-func (n *Node) pollClipboard(pollInterval time.Duration) {
+func (n *Node) pollClipboard(ctx context.Context, pollInterval time.Duration) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop() // Prevent ticker leak
 
 	var polling atomic.Bool
 	var lastSeq uint32
 
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
 		// Skip this tick if the previous one is still running.
 		if !polling.CompareAndSwap(false, true) {
 			continue
@@ -1063,7 +1071,9 @@ func writeFiles(paths []string) {
 		var sb strings.Builder
 		sb.WriteString("Set-Clipboard -Path ")
 		for i, p := range paths {
-			sb.WriteString(fmt.Sprintf("'%s'", p))
+			// PowerShell string escape to prevent command injection
+			safePath := strings.ReplaceAll(p, "'", "''")
+			sb.WriteString(fmt.Sprintf("'%s'", safePath))
 			if i < len(paths)-1 {
 				sb.WriteString(",")
 			}
@@ -1124,7 +1134,7 @@ func parseURIList(s string) []string {
 
 // ─── UDP Discovery & Peer Management ─────────────────────────────────────────
 
-func (n *Node) runUDPServer(magicHeader string, port int) {
+func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 	// 1. Explicit IPv4 binding to match the WriteToUDP implementation
 	addr := &net.UDPAddr{IP: net.IPv4zero, Port: port}
 	conn, err := net.ListenUDP("udp4", addr)
@@ -1133,6 +1143,11 @@ func (n *Node) runUDPServer(magicHeader string, port int) {
 		return
 	}
 	defer conn.Close()
+
+	go func() {
+		<-ctx.Done()
+		conn.Close()
+	}()
 
 	// 2. Increase buffer slightly to prevent edge-case payload truncation
 	buf := make([]byte, 2048)
@@ -1192,7 +1207,7 @@ func (n *Node) runUDPServer(magicHeader string, port int) {
 	}
 }
 
-func (n *Node) runUDPBeacon(magicHeader string, port int) {
+func (n *Node) runUDPBeacon(ctx context.Context, magicHeader string, port int) {
 	// 1. Explicitly use UDPConn to ensure strict memory alignment for the OS kernel
 	addr := &net.UDPAddr{IP: net.IPv4zero, Port: 0}
 	conn, err := net.ListenUDP("udp4", addr)
@@ -1283,6 +1298,8 @@ func (n *Node) runUDPBeacon(magicHeader string, port int) {
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-ticker.C:
 		case <-n.notifyCh:
 			slog.Debug("Broadcasting instant UDP beacon for new clipboard content")
@@ -1303,10 +1320,15 @@ func (n *Node) runUDPBeacon(magicHeader string, port int) {
 	}
 }
 
-func (n *Node) cleanupPeers() {
+func (n *Node) cleanupPeers(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 		now := time.Now()
 		n.peersMu.Lock()
 		for addr, lastSeen := range n.peers {

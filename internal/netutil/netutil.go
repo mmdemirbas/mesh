@@ -1,9 +1,11 @@
 package netutil
 
 import (
+	"context"
 	"io"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -25,10 +27,28 @@ func ApplyTCPKeepAlive(conn net.Conn, period time.Duration) {
 
 var copyBufPool = sync.Pool{
 	New: func() any {
-		// 64KB buffer for efficient multiplexing bursts
-		b := make([]byte, 64*1024)
+		// 32KB buffer for optimal TCP streaming and memory usage
+		b := make([]byte, 32*1024)
 		return &b
 	},
+}
+
+// ListenReusable creates a TCP listener that automatically asserts SO_REUSEADDR.
+// This eliminates OS-level TIME_WAIT collisions when rapidly re-binding local ports.
+func ListenReusable(ctx context.Context, network, address string) (net.Listener, error) {
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var sockErr error
+			err := c.Control(func(fd uintptr) {
+				sockErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+			})
+			if err != nil {
+				return err
+			}
+			return sockErr
+		},
+	}
+	return lc.Listen(ctx, network, address)
 }
 
 // BiCopy symmetrically copies data between a and b, and closes the write half if supported.

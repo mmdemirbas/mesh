@@ -75,13 +75,30 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 	}
 
 	if req.Method != http.MethodConnect {
-		resp := &http.Response{
-			StatusCode: http.StatusMethodNotAllowed,
-			ProtoMajor: 1, ProtoMinor: 1,
-			Header: make(http.Header),
+		target := req.Host
+		if target == "" {
+			target = req.URL.Host
 		}
-		resp.Header.Set("Allow", "CONNECT")
-		resp.Write(conn)
+		if !strings.Contains(target, ":") {
+			target += ":80"
+		}
+
+		remote, err := dialer(target)
+		if err != nil {
+			log.Debug("HTTP proxy dial failed", "target", target, "error", err)
+			conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+			return
+		}
+		defer remote.Close()
+
+		req.RequestURI = "" // Must be empty for client requests
+		if err := req.Write(remote); err != nil {
+			return
+		}
+
+		conn.SetDeadline(time.Time{})
+		bc := &bufferedConn{Conn: conn, r: io.MultiReader(br, conn)}
+		netutil.BiCopy(bc, remote)
 		return
 	}
 
@@ -117,6 +134,10 @@ func DialViaSocks5(baseDialer func(string, string) (net.Conn, error), socksAddr,
 	if err != nil {
 		return nil, fmt.Errorf("socks5 dial: %w", err)
 	}
+
+	// Protect the SOCKS5 handshake from tarpit servers
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	defer conn.SetDeadline(time.Time{})
 
 	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil { // v5, 1 method, no auth
 		conn.Close()

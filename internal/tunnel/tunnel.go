@@ -275,6 +275,9 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		return
 	}
 
+	// 1. Evaluate options FIRST so we can use them for security policy decisions
+	opts := mergeOptions(c.cfg.Options, fset.Options)
+
 	var hostKeyCallback ssh.HostKeyCallback
 	if c.cfg.Auth.KnownHosts != "" {
 		hkc, err := knownhosts.New(c.cfg.Auth.KnownHosts)
@@ -285,8 +288,15 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		}
 		hostKeyCallback = hkc
 	} else {
-		hostKeyCallback = ssh.InsecureIgnoreHostKey()
-		c.log.Warn("known_hosts is not configured. Vulnerable to MITM attacks.")
+		if strings.ToLower(config.GetOption(opts, "StrictHostKeyChecking")) == "no" {
+			hostKeyCallback = ssh.InsecureIgnoreHostKey()
+			c.log.Warn("StrictHostKeyChecking=no is configured. Vulnerable to MITM attacks.")
+		} else {
+			err := errors.New("known_hosts is missing. Configure auth.known_hosts or set StrictHostKeyChecking: no")
+			state.Global.Update("connection", id, state.Failed, err.Error())
+			c.log.Error("Security policy enforcement failed", "error", err)
+			return
+		}
 	}
 
 	sshCfg := &ssh.ClientConfig{
@@ -296,8 +306,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		Timeout:         15 * time.Second,
 	}
 
-	opts := mergeOptions(c.cfg.Options, fset.Options)
-
+	// 2. Remove the old opts declaration from down here
 	if timeoutStr := config.GetOption(opts, "ConnectTimeout"); timeoutStr != "" {
 		if t, err := strconv.Atoi(timeoutStr); err == nil {
 			sshCfg.Timeout = time.Duration(t) * time.Second
@@ -556,18 +565,7 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fse
 	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, fwd.Bind)
 	state.Global.Update("forward", compID, state.Starting, "")
 
-	var listener net.Listener
-	var err error
-	for i := 0; i < 6; i++ {
-		listener, err = net.Listen("tcp", fwd.Bind)
-		if err == nil {
-			break
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		time.Sleep(500 * time.Millisecond) // wait out TIME_WAIT locking
-	}
+	listener, err := netutil.ListenReusable(ctx, "tcp", fwd.Bind)
 	if err != nil {
 		log.Error("Local listen failed", "bind", fwd.Bind, "error", err)
 		state.Global.Update("forward", compID, state.Failed, err.Error())
@@ -644,18 +642,7 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, fsetN
 	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, pxy.Bind)
 	state.Global.Update("forward", compID, state.Starting, "")
 
-	var listener net.Listener
-	var err error
-	for i := 0; i < 6; i++ {
-		listener, err = net.Listen("tcp", pxy.Bind)
-		if err == nil {
-			break
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		time.Sleep(500 * time.Millisecond) // wait out TIME_WAIT locking
-	}
+	listener, err := netutil.ListenReusable(ctx, "tcp", pxy.Bind)
 	if err != nil {
 		log.Error("Local proxy listen failed", "bind", pxy.Bind, "error", err)
 		state.Global.Update("forward", compID, state.Failed, err.Error())
