@@ -531,7 +531,7 @@ func statusCmd(nodeName, configPath string) {
 					left := colorAddr(actualAddr)
 					right := colorAddr(cleanIPv6(comp.Message))
 
-					addRow("", "↳", left, arrowRight, right, "")
+					addRow("  ", "~", left, arrowRight, right, "")
 				}
 			}
 		}
@@ -647,7 +647,11 @@ func statusCmd(nodeName, configPath string) {
 				}
 			}
 			for _, p := range peerList {
-				addRow("     ", "●", colorAddr(p.addr), "", cGray+p.label+cReset, "")
+				icon := "~" // discovered at runtime
+				if p.label == "static" {
+					icon = "·" // configured/fixed
+				}
+				addRow("     ", icon, colorAddr(p.addr), "", cGray+p.label+cReset, "")
 			}
 		}
 		addHeader("")
