@@ -32,6 +32,8 @@ import (
 
 var version = "dev"
 
+var ansiStripRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
 func main() {
 	var configPath string
 	flag.StringVar(&configPath, "f", "", "Path to config file")
@@ -360,12 +362,8 @@ func statusCmd(nodeName, configPath string) {
 	fmt.Printf("%s⚙ Configuration: %s%s%s\n", cBold, cCyan, nodeName, cReset)
 	fmt.Println(cGray + strings.Repeat("─", 80) + cReset)
 
-	stripANSI := func(str string) string {
-		return regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(str, "")
-	}
-
 	visibleLen := func(str string) int {
-		return utf8.RuneCountInString(stripANSI(str))
+		return utf8.RuneCountInString(ansiStripRe.ReplaceAllString(str, ""))
 	}
 
 	colorAddr := func(addr string) string {
