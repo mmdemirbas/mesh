@@ -434,7 +434,7 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 			case <-ticker.C:
 				if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
 					failCount++
-					if failCount > aliveCountMax {
+					if failCount > aliveCountMax || isHardConnError(err) {
 						log.Warn("Keep-alive failed, closing connection", "error", err)
 						closeClient()
 						return
@@ -1091,7 +1091,7 @@ func startKeepAlive(ctx context.Context, conn ssh.Conn, options map[string]strin
 			_, _, err := conn.SendRequest(reqType, true, nil)
 			if err != nil {
 				failCount++
-				if failCount > countMax {
+				if failCount > countMax || isHardConnError(err) {
 					log.Warn("Keep-alive failed, closing connection", "remote", conn.RemoteAddr(), "error", err, "fail_count", failCount)
 					conn.Close()
 					return
@@ -1101,4 +1101,23 @@ func startKeepAlive(ctx context.Context, conn ssh.Conn, options map[string]strin
 			}
 		}
 	}
+}
+
+// isHardConnError reports whether err is a fatal connection error (RST, EOF,
+// broken pipe, closed connection) that will not recover on retry.
+func isHardConnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "use of closed network connection")
 }
