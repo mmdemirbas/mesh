@@ -1155,12 +1155,19 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 
 	// 2. Increase buffer slightly to prevent edge-case payload truncation
 	buf := make([]byte, 2048)
+	go func() {
+		<-ctx.Done()
+		conn.Close()
+	}()
 
 	for {
 		// 3. Removed the 30s deadline. A blocking read uses 0% CPU and is
 		// natively managed by the OS thread scheduler.
 		nBytes, remoteAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			// 4. Prevent CPU spinning if the Windows network stack temporarily
 			// invalidates the socket (e.g., during WiFi roaming or VPN toggles).
 			time.Sleep(100 * time.Millisecond)
@@ -1210,7 +1217,6 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 		}
 	}
 }
-
 func (n *Node) runUDPBeacon(ctx context.Context, magicHeader string, port int) {
 	// 1. Explicitly use UDPConn to ensure strict memory alignment for the OS kernel
 	addr := &net.UDPAddr{IP: net.IPv4zero, Port: 0}
@@ -1236,6 +1242,11 @@ func (n *Node) runUDPBeacon(ctx context.Context, magicHeader string, port int) {
 
 		// Global broadcast fallback
 		addrs := []*net.UDPAddr{{IP: net.IPv4bcast, Port: port}}
+
+		if runtime.GOOS == "windows" {
+			cachedBcastAddrs = addrs
+			return addrs
+		}
 
 		// 2. Mitigate Windows Driver/EDR Faults
 		// Windows network drivers frequently crash (0xc0000005) when blasted with

@@ -24,5 +24,9 @@ func ListenReusable(ctx context.Context, network, address string) (net.Listener,
 		},
 	}
 
+	if network == "tcp" && address == "" {
+		return lc.Listen(ctx, network, "0.0.0.0:0")
+	}
+
 	return lc.Listen(ctx, network, address)
 }
