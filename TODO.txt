@@ -12,3 +12,4 @@ USABILITY
 - Support unsupported ssh/sshd options.
 - Consider adding config monitoring and hot-reloading feature
 - Implement 'mesh config' to show a summary of all available nodes and corresponding configurations.
+- Consider implementing an "admin" feature to allow running pre-defined commands / scripts remotely

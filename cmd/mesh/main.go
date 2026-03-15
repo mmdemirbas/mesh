@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -33,6 +34,39 @@ import (
 var version = "dev"
 
 var ansiStripRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// parseAddr extracts the IP and port from an address string.
+// Handles "host:port", "user@host:port", or just "host".
+func parseAddr(s string) (net.IP, int) {
+	if at := strings.LastIndex(s, "@"); at != -1 {
+		s = s[at+1:]
+	}
+	host, portStr, err := net.SplitHostPort(s)
+	if err != nil {
+		host = s
+		portStr = ""
+	}
+	ip := net.ParseIP(host)
+	port, _ := strconv.Atoi(portStr)
+	return ip, port
+}
+
+// compareAddr compares two address strings semantically by IP then port.
+func compareAddr(a, b string) bool {
+	ipA, portA := parseAddr(a)
+	ipB, portB := parseAddr(b)
+	if ipA != nil && ipB != nil {
+		cmp := bytes.Compare(ipA.To16(), ipB.To16())
+		if cmp != 0 {
+			return cmp < 0
+		}
+		return portA < portB
+	}
+	if a != b {
+		return a < b
+	}
+	return portA < portB
+}
 
 func main() {
 	var configPath string
@@ -498,7 +532,7 @@ func statusCmd(nodeName, configPath string) {
 						peerList = append(peerList, peerEntry{strings.TrimPrefix(k, prefix), comp.Message})
 					}
 				}
-				sort.Slice(peerList, func(i, j int) bool { return peerList[i].addr < peerList[j].addr })
+				sort.Slice(peerList, func(i, j int) bool { return compareAddr(peerList[i].addr, peerList[j].addr) })
 			} else {
 				for _, addr := range cs.StaticPeers {
 					peerList = append(peerList, peerEntry{addr, "static"})
@@ -554,7 +588,11 @@ func statusCmd(nodeName, configPath string) {
 			}
 
 			if len(dyns) > 0 {
-				sort.Slice(dyns, func(i, j int) bool { return dyns[i].ID < dyns[j].ID })
+				sort.Slice(dyns, func(i, j int) bool {
+					a := strings.SplitN(dyns[i].ID, "|", 2)[0]
+					b := strings.SplitN(dyns[j].ID, "|", 2)[0]
+					return compareAddr(a, b)
+				})
 				// Deduplicate if we somehow got both (since we populate both keys sometimes)
 				seenID := make(map[string]bool)
 				for _, comp := range dyns {
@@ -668,7 +706,7 @@ func statusCmd(nodeName, configPath string) {
 
 	if len(unmappedDynamic) > 0 {
 		sort.Slice(unmappedDynamic, func(i, j int) bool {
-			return unmappedDynamic[i].ID < unmappedDynamic[j].ID
+			return compareAddr(unmappedDynamic[i].ID, unmappedDynamic[j].ID)
 		})
 
 		addHeader(cMagenta + "dynamic ports (unmapped)" + cReset)

@@ -22,6 +22,21 @@ tasks:
       - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -o dist/mesh-linux-amd64 ./cmd/mesh/
       - CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -buildvcs=false -o dist/mesh-windows-amd64.exe ./cmd/mesh/
 
+  test:
+    desc: "Run all tests"
+    cmds:
+      - go test -count=1 ./...
+
+  test:v:
+    desc: "Run all tests with verbose output"
+    cmds:
+      - go test -v count=1 ./...
+
+  bench:
+    desc: Run all benchmarks
+    cmds:
+      - go test -bench=. -benchmem ./...
+
   setup:windows:
     desc: Add the build directory to Windows PATH
     platforms: [ windows ]
