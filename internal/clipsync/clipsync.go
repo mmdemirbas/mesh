@@ -252,7 +252,8 @@ func (n *Node) Broadcast(payload Payload) {
 }
 
 func (n *Node) postHTTP(addr string, data []byte) {
-	req, _ := http.NewRequest("POST", fmt.Sprintf("http://%s/sync", addr), bytes.NewBuffer(data))
+	req, _ := http.NewRequest("POST", fmt.Sprintf("http://%s/sync", addr), bytes.NewReader(data))
+	req.ContentLength = int64(len(data))
 	resp, err := n.httpClient.Do(req)
 	if err == nil {
 		resp.Body.Close()
@@ -774,9 +775,9 @@ func readClipboardFormats() (formats []ClipFormat) {
 
 	switch runtime.GOOS {
 	case "darwin":
-		readClipboardDarwin(ctx, dir)
+		readClipboardDarwin(ctx)
 	case "windows":
-		readClipboardWindows(ctx, dir)
+		readClipboardWindows(ctx)
 	case "linux":
 		readClipboardLinux(ctx, dir)
 	}
@@ -809,13 +810,15 @@ func loadFormatsFromDir(dir string) []ClipFormat {
 	return formats
 }
 
-func readClipboardDarwin(ctx context.Context, dir string) {
-	// Build the UTI→filename pairs for the AppleScript loop.
+// darwinReadScript is cached because clipTmpDir() and clipFormatTable are both
+// fixed for the lifetime of the process, making the script string invariant.
+var darwinReadScript = sync.OnceValue(func() string {
+	dir := clipTmpDir()
 	var pairs []string
 	for _, e := range clipFormatTable {
 		pairs = append(pairs, fmt.Sprintf(`{"%s", "/%s"}`, e.darwinUTI, e.fileName))
 	}
-	script := fmt.Sprintf(`use framework "AppKit"
+	return fmt.Sprintf(`use framework "AppKit"
 set pb to current application's NSPasteboard's generalPasteboard()
 set tmpDir to "%s"
 set typeMap to {%s}
@@ -829,11 +832,15 @@ repeat with pair in typeMap
 		end if
 	end if
 end repeat`, dir, strings.Join(pairs, ", "))
-	clipCmd(ctx, "osascript", "-e", script).Run()
+})
+
+func readClipboardDarwin(ctx context.Context) {
+	clipCmd(ctx, "osascript", "-e", darwinReadScript()).Run()
 }
 
-func readClipboardWindows(ctx context.Context, dir string) {
-	script := fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms
+var windowsReadScript = sync.OnceValue(func() string {
+	dir := clipTmpDir()
+	return fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $d = '%s'
 $text = [System.Windows.Forms.Clipboard]::GetText([System.Windows.Forms.TextDataFormat]::UnicodeText)
@@ -856,7 +863,10 @@ if ($img) {
   $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
   [System.IO.File]::WriteAllBytes("$d\image_png", $ms.ToArray()); $ms.Dispose(); $img.Dispose()
 }`, dir)
-	clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", script).Run()
+})
+
+func readClipboardWindows(ctx context.Context) {
+	clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", windowsReadScript()).Run()
 }
 
 func readClipboardLinux(ctx context.Context, dir string) {
@@ -944,20 +954,21 @@ func writeClipboardFormats(formats []ClipFormat) {
 
 	switch runtime.GOOS {
 	case "darwin":
-		writeClipboardDarwin(ctx, dir)
+		writeClipboardDarwin(ctx)
 	case "windows":
-		writeClipboardWindows(ctx, dir, fmtMap)
+		writeClipboardWindows(ctx, fmtMap)
 	case "linux":
 		writeClipboardLinux(ctx, formats)
 	}
 }
 
-func writeClipboardDarwin(ctx context.Context, dir string) {
+var darwinWriteScript = sync.OnceValue(func() string {
+	dir := clipTmpDir()
 	var pairs []string
 	for _, e := range clipFormatTable {
 		pairs = append(pairs, fmt.Sprintf(`{"%s", "/%s"}`, e.darwinUTI, e.fileName))
 	}
-	script := fmt.Sprintf(`use framework "AppKit"
+	return fmt.Sprintf(`use framework "AppKit"
 set pb to current application's NSPasteboard's generalPasteboard()
 pb's clearContents()
 set tmpDir to "%s"
@@ -974,17 +985,15 @@ repeat with pair in typeMap
 		end if
 	end if
 end repeat`, dir, strings.Join(pairs, ", "))
-	clipCmd(ctx, "osascript", "-e", script).Run()
+})
+
+func writeClipboardDarwin(ctx context.Context) {
+	clipCmd(ctx, "osascript", "-e", darwinWriteScript()).Run()
 }
 
-func writeClipboardWindows(ctx context.Context, dir string, fmtMap map[string][]byte) {
-	// HTML needs CF_HTML wrapping.
-	if html, ok := fmtMap["text/html"]; ok {
-		cfhtml := buildCFHTML(string(html))
-		os.WriteFile(filepath.Join(dir, "text_html_cf"), []byte(cfhtml), 0600)
-	}
-
-	script := fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms
+var windowsWriteScript = sync.OnceValue(func() string {
+	dir := clipTmpDir()
+	return fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $d = '%s'
 $dataObj = New-Object System.Windows.Forms.DataObject
@@ -1006,7 +1015,15 @@ if (Test-Path $fp) {
   $dataObj.SetImage($img)
 }
 [System.Windows.Forms.Clipboard]::SetDataObject($dataObj, $true)`, dir)
-	clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", script).Run()
+})
+
+func writeClipboardWindows(ctx context.Context, fmtMap map[string][]byte) {
+	// HTML needs CF_HTML wrapping.
+	if html, ok := fmtMap["text/html"]; ok {
+		cfhtml := buildCFHTML(string(html))
+		os.WriteFile(filepath.Join(clipTmpDir(), "text_html_cf"), []byte(cfhtml), 0600)
+	}
+	clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", windowsWriteScript()).Run()
 }
 
 func writeClipboardLinux(ctx context.Context, formats []ClipFormat) {

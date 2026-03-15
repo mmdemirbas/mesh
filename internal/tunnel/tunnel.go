@@ -526,7 +526,8 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fs
 
 	var listener net.Listener
 	var err error
-	for i := 0; i < 6; i++ {
+	backoff := 100 * time.Millisecond
+	for range 6 {
 		listener, err = client.Listen("tcp", fwd.Bind)
 		if err == nil {
 			break
@@ -534,7 +535,8 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fs
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		time.Sleep(500 * time.Millisecond) // wait out TIME_WAIT locking
+		time.Sleep(backoff) // wait out TIME_WAIT locking
+		backoff *= 2
 	}
 	if err != nil {
 		log.Error("Remote listen failed", "bind", fwd.Bind, "error", err)
@@ -597,7 +599,8 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fset
 
 	var listener net.Listener
 	var err error
-	for i := 0; i < 6; i++ {
+	backoff := 100 * time.Millisecond
+	for range 6 {
 		listener, err = client.Listen("tcp", pxy.Bind)
 		if err == nil {
 			break
@@ -605,7 +608,8 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fset
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		time.Sleep(500 * time.Millisecond) // wait out TIME_WAIT locking
+		time.Sleep(backoff) // wait out TIME_WAIT locking
+		backoff *= 2
 	}
 	if err != nil {
 		log.Error("Remote proxy listen failed", "bind", pxy.Bind, "error", err)
@@ -708,7 +712,7 @@ func (c *SSHClient) probeTarget(ctx context.Context, handshakeTimeout time.Durat
 			select {
 			case <-ctx.Done():
 				return "", nil
-			case <-time.After(500 * time.Millisecond): // mDNS can be slow to resolve
+			case <-time.After(150 * time.Millisecond): // mDNS usually resolves within 50-100ms
 			}
 			conn, err = dialer.DialContext(ctx, "tcp", hostPort)
 		}
