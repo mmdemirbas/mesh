@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -36,47 +35,111 @@ var version = "dev"
 var ansiStripRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 // addrKey is a pre-parsed, comparable sort key for an address string.
-// Using a fixed-size [16]byte array avoids heap allocation from net.ParseIP.
+// The IP is stored as two uint64s for single-instruction comparison on 64-bit CPUs.
 type addrKey struct {
-	ip    [16]byte // IPv4-mapped-to-IPv6 or raw IPv6
+	ipHi  uint64 // upper 8 bytes of IPv6/mapped-IPv4
+	ipLo  uint64 // lower 8 bytes
 	port  uint16
 	hasIP bool
 	raw   string // original string, used as fallback for non-IP addresses
 }
 
-// makeAddrKey parses an address string into a sort key in a single pass.
+// makeAddrKey parses an address string into a sort key.
+// For the common case of [user@]IPv4:port, it does a single-pass parse with
+// no calls to net.SplitHostPort, net.ParseIP, or strconv.Atoi.
 func makeAddrKey(s string) addrKey {
 	raw := s
-	if at := strings.LastIndex(s, "@"); at != -1 {
-		s = s[at+1:]
+	// Strip user@ prefix
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == '@' {
+			s = s[i+1:]
+			break
+		}
 	}
+
+	// Fast path: try to parse entire "IPv4:port" in one scan
+	if k, ok := parseIPv4Port(s, raw); ok {
+		return k
+	}
+
+	// Slow path: IPv6 or hostname — use stdlib
 	host, portStr, err := net.SplitHostPort(s)
 	if err != nil {
 		host = s
 		portStr = ""
 	}
-	port, _ := strconv.Atoi(portStr)
-	k := addrKey{port: uint16(port), raw: raw}
+	port := atoiUint16(portStr)
+	k := addrKey{port: port, raw: raw}
 
-	// Fast path: try parsing IPv4 without allocation
-	if ip4 := parseIPv4(host); ip4 != [4]byte{} || host == "0.0.0.0" {
-		// IPv4-mapped IPv6: ::ffff:x.x.x.x
-		k.ip[10] = 0xff
-		k.ip[11] = 0xff
-		k.ip[12] = ip4[0]
-		k.ip[13] = ip4[1]
-		k.ip[14] = ip4[2]
-		k.ip[15] = ip4[3]
-		k.hasIP = true
-		return k
-	}
-
-	// Slow path: IPv6 or unparseable
 	if ip := net.ParseIP(host); ip != nil {
-		copy(k.ip[:], ip.To16())
+		ip16 := ip.To16()
+		k.ipHi = uint64(ip16[0])<<56 | uint64(ip16[1])<<48 | uint64(ip16[2])<<40 | uint64(ip16[3])<<32 |
+			uint64(ip16[4])<<24 | uint64(ip16[5])<<16 | uint64(ip16[6])<<8 | uint64(ip16[7])
+		k.ipLo = uint64(ip16[8])<<56 | uint64(ip16[9])<<48 | uint64(ip16[10])<<40 | uint64(ip16[11])<<32 |
+			uint64(ip16[12])<<24 | uint64(ip16[13])<<16 | uint64(ip16[14])<<8 | uint64(ip16[15])
 		k.hasIP = true
 	}
 	return k
+}
+
+// parseIPv4Port parses "A.B.C.D:port" in a single scan.
+// Returns (key, true) on success. On failure returns (_, false).
+func parseIPv4Port(s, raw string) (addrKey, bool) {
+	var ip [4]byte
+	octet := 0
+	dots := 0
+	digits := 0
+	port := 0
+	inPort := false
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= '0' && c <= '9' {
+			if inPort {
+				port = port*10 + int(c-'0')
+				if port > 65535 {
+					return addrKey{}, false
+				}
+			} else {
+				octet = octet*10 + int(c-'0')
+				if octet > 255 {
+					return addrKey{}, false
+				}
+				digits++
+			}
+		} else if c == '.' && !inPort {
+			if digits == 0 || dots >= 3 {
+				return addrKey{}, false
+			}
+			ip[dots] = byte(octet)
+			dots++
+			octet = 0
+			digits = 0
+		} else if c == ':' && !inPort && dots == 3 && digits > 0 {
+			ip[3] = byte(octet)
+			inPort = true
+		} else {
+			return addrKey{}, false
+		}
+	}
+
+	// Handle bare IPv4 without port (e.g., "10.0.0.1")
+	if !inPort {
+		if dots != 3 || digits == 0 {
+			return addrKey{}, false
+		}
+		ip[3] = byte(octet)
+	}
+
+	// IPv4-mapped IPv6: ::ffff:A.B.C.D stored as uint64 pair
+	k := addrKey{
+		ipHi:  0,
+		ipLo:  uint64(0xff)<<40 | uint64(0xff)<<32 | uint64(ip[0])<<24 | uint64(ip[1])<<16 | uint64(ip[2])<<8 | uint64(ip[3]),
+		port:  uint16(port),
+		hasIP: true,
+		raw:   raw,
+	}
+	return k, true
 }
 
 // parseIPv4 parses an IPv4 dotted-quad without allocation.
@@ -113,11 +176,22 @@ func parseIPv4(s string) [4]byte {
 	return ip
 }
 
+// atoiUint16 parses a small non-negative integer without allocation or error handling.
+func atoiUint16(s string) uint16 {
+	var n uint16
+	for i := 0; i < len(s); i++ {
+		n = n*10 + uint16(s[i]-'0')
+	}
+	return n
+}
+
 func (k addrKey) less(other addrKey) bool {
 	if k.hasIP && other.hasIP {
-		cmp := bytes.Compare(k.ip[:], other.ip[:])
-		if cmp != 0 {
-			return cmp < 0
+		if k.ipHi != other.ipHi {
+			return k.ipHi < other.ipHi
+		}
+		if k.ipLo != other.ipLo {
+			return k.ipLo < other.ipLo
 		}
 		return k.port < other.port
 	}
@@ -134,7 +208,24 @@ func parseAddr(s string) (net.IP, int) {
 	if !k.hasIP {
 		return nil, int(k.port)
 	}
-	return net.IP(k.ip[:]), int(k.port)
+	ip := make(net.IP, 16)
+	ip[0] = byte(k.ipHi >> 56)
+	ip[1] = byte(k.ipHi >> 48)
+	ip[2] = byte(k.ipHi >> 40)
+	ip[3] = byte(k.ipHi >> 32)
+	ip[4] = byte(k.ipHi >> 24)
+	ip[5] = byte(k.ipHi >> 16)
+	ip[6] = byte(k.ipHi >> 8)
+	ip[7] = byte(k.ipHi)
+	ip[8] = byte(k.ipLo >> 56)
+	ip[9] = byte(k.ipLo >> 48)
+	ip[10] = byte(k.ipLo >> 40)
+	ip[11] = byte(k.ipLo >> 32)
+	ip[12] = byte(k.ipLo >> 24)
+	ip[13] = byte(k.ipLo >> 16)
+	ip[14] = byte(k.ipLo >> 8)
+	ip[15] = byte(k.ipLo)
+	return ip, int(k.port)
 }
 
 // compareAddr compares two address strings semantically by IP then port.
