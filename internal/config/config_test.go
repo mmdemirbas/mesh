@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -294,4 +296,242 @@ allow_receive: ["192.168.1.1"]
 // yamlUnmarshal is a test helper that uses the same YAML library as production.
 func yamlUnmarshal(data []byte, v interface{}) error {
 	return yaml.Unmarshal(data, v)
+}
+
+func TestExpandHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home dir")
+	}
+
+	tests := []struct {
+		input, want string
+	}{
+		{"~/foo/bar", filepath.Join(home, "foo/bar")},
+		{"~/.ssh/id_rsa", filepath.Join(home, ".ssh/id_rsa")},
+		{"/absolute/path", "/absolute/path"},
+		{"relative/path", "relative/path"},
+		{"", ""},
+		{"~", "~"},                   // no slash after ~, not expanded
+		{"~user/path", "~user/path"}, // not current user, not expanded
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := expandHome(tt.input)
+			if got != tt.want {
+				t.Errorf("expandHome(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRequireFile(t *testing.T) {
+	// Empty path
+	if err := requireFile("", "test_key"); err == nil {
+		t.Error("expected error for empty path")
+	}
+
+	// Non-existent file
+	if err := requireFile("/nonexistent/path/file", "test_key"); err == nil {
+		t.Error("expected error for non-existent file")
+	}
+
+	// Existing file
+	f := filepath.Join(t.TempDir(), "exists.txt")
+	os.WriteFile(f, []byte("ok"), 0644)
+	if err := requireFile(f, "test_key"); err != nil {
+		t.Errorf("expected no error for existing file, got: %v", err)
+	}
+}
+
+func TestLoadUnvalidated(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "mesh.yml")
+	content := `
+mynode:
+  listeners:
+    - type: socks
+      bind: "127.0.0.1:1080"
+    - type: http
+      bind: "127.0.0.1:3128"
+  connections:
+    - name: remote
+      targets: ["user@10.0.0.1:22"]
+      retry: "10s"
+      auth:
+        key: "~/.ssh/id_rsa"
+        known_hosts: "~/.ssh/known_hosts"
+      forwards:
+        - name: web
+          local:
+            - type: forward
+              bind: "127.0.0.1:8080"
+              target: "10.0.0.1:80"
+`
+	os.WriteFile(cfgFile, []byte(content), 0644)
+
+	cfgs, err := LoadUnvalidated(cfgFile)
+	if err != nil {
+		t.Fatalf("LoadUnvalidated failed: %v", err)
+	}
+
+	cfg, ok := cfgs["mynode"]
+	if !ok {
+		t.Fatal("mynode not found in config")
+	}
+
+	if len(cfg.Listeners) != 2 {
+		t.Errorf("listeners count = %d, want 2", len(cfg.Listeners))
+	}
+	if cfg.Listeners[0].Type != "socks" {
+		t.Errorf("listener[0].Type = %q, want socks", cfg.Listeners[0].Type)
+	}
+	if len(cfg.Connections) != 1 {
+		t.Fatalf("connections count = %d, want 1", len(cfg.Connections))
+	}
+	if cfg.Connections[0].Name != "remote" {
+		t.Errorf("connection name = %q, want remote", cfg.Connections[0].Name)
+	}
+	if len(cfg.Connections[0].Forwards) != 1 {
+		t.Fatalf("forwards count = %d, want 1", len(cfg.Connections[0].Forwards))
+	}
+	if len(cfg.Connections[0].Forwards[0].Local) != 1 {
+		t.Fatalf("local forwards count = %d, want 1", len(cfg.Connections[0].Forwards[0].Local))
+	}
+}
+
+func TestLoadUnvalidated_NonExistentFile(t *testing.T) {
+	_, err := LoadUnvalidated("/nonexistent/mesh.yml")
+	if err == nil {
+		t.Error("expected error for non-existent file")
+	}
+}
+
+func TestLoadUnvalidated_InvalidYAML(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "bad.yml")
+	os.WriteFile(f, []byte("{{invalid yaml"), 0644)
+
+	_, err := LoadUnvalidated(f)
+	if err == nil {
+		t.Error("expected error for invalid YAML")
+	}
+}
+
+func TestLoadUnvalidated_EnvExpansion(t *testing.T) {
+	t.Setenv("MESH_TEST_PORT", "9999")
+
+	f := filepath.Join(t.TempDir(), "env.yml")
+	content := `
+test:
+  listeners:
+    - type: socks
+      bind: "127.0.0.1:${MESH_TEST_PORT}"
+`
+	os.WriteFile(f, []byte(content), 0644)
+
+	cfgs, err := LoadUnvalidated(f)
+	if err != nil {
+		t.Fatalf("LoadUnvalidated failed: %v", err)
+	}
+
+	cfg := cfgs["test"]
+	if cfg.Listeners[0].Bind != "127.0.0.1:9999" {
+		t.Errorf("bind = %q, want 127.0.0.1:9999 (env not expanded)", cfg.Listeners[0].Bind)
+	}
+}
+
+func TestLoad_ServiceNotFound(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "mesh.yml")
+	os.WriteFile(f, []byte("mynode:\n  listeners: []\n"), 0644)
+
+	_, err := Load(f, "nonexistent")
+	if err == nil {
+		t.Error("expected error for missing service")
+	}
+}
+
+func TestValidate_ListenerMissingBind(t *testing.T) {
+	cfg := &Config{
+		Listeners: []Listener{{Type: "socks"}},
+	}
+	if err := cfg.validate(); err == nil {
+		t.Error("expected error for missing bind")
+	}
+}
+
+func TestValidate_ListenerMissingType(t *testing.T) {
+	cfg := &Config{
+		Listeners: []Listener{{Bind: "127.0.0.1:1080"}},
+	}
+	if err := cfg.validate(); err == nil {
+		t.Error("expected error for missing type")
+	}
+}
+
+func TestValidate_ListenerUnknownType(t *testing.T) {
+	cfg := &Config{
+		Listeners: []Listener{{Bind: "127.0.0.1:1080", Type: "tcp"}},
+	}
+	if err := cfg.validate(); err == nil {
+		t.Error("expected error for unknown type")
+	}
+}
+
+func TestValidate_RelayMissingTarget(t *testing.T) {
+	cfg := &Config{
+		Listeners: []Listener{{Bind: "127.0.0.1:1080", Type: "relay"}},
+	}
+	if err := cfg.validate(); err == nil {
+		t.Error("expected error for relay missing target")
+	}
+}
+
+func TestValidate_ConnectionMissingTargets(t *testing.T) {
+	cfg := &Config{
+		Connections: []Connection{{Name: "test"}},
+	}
+	if err := cfg.validate(); err == nil {
+		t.Error("expected error for missing targets")
+	}
+}
+
+func TestValidate_InvalidRetryDuration(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "key")
+	os.WriteFile(f, []byte("key"), 0644)
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	os.WriteFile(kh, []byte("host"), 0644)
+
+	cfg := &Config{
+		Connections: []Connection{{
+			Name:    "test",
+			Targets: []string{"host:22"},
+			Retry:   "not-a-duration",
+			Auth:    AuthCfg{Key: f, KnownHosts: kh},
+		}},
+	}
+	if err := cfg.validate(); err == nil {
+		t.Error("expected error for invalid retry duration")
+	}
+}
+
+func TestWarnUnsupportedOptions(t *testing.T) {
+	// Should not panic with supported and unsupported options
+	cfg := &Config{
+		Listeners: []Listener{{
+			Bind: "127.0.0.1:22",
+			Options: map[string]string{
+				"Ciphers":       "aes256-ctr",
+				"UnsupportedOp": "value",
+			},
+		}},
+		Connections: []Connection{{
+			Name:    "test",
+			Options: map[string]string{"MACs": "hmac-sha2-256"},
+			Forwards: []ForwardSet{{
+				Name:    "fwd",
+				Options: map[string]string{"UnknownOption": "x"},
+			}},
+		}},
+	}
+	WarnUnsupportedOptions(cfg) // should not panic
 }
