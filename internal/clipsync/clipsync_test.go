@@ -304,7 +304,8 @@ func TestCanSendTo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			n := &Node{config: config.ClipsyncCfg{AllowSendTo: tt.allowSend}}
+			cfg := config.ClipsyncCfg{AllowSendTo: tt.allowSend}
+			n := &Node{config: cfg, sendToIPs: parseIPList(cfg.AllowSendTo)}
 			got := n.canSendTo(tt.addr, tt.isUDP)
 			if got != tt.want {
 				t.Errorf("canSendTo(%q, %v) = %v, want %v", tt.addr, tt.isUDP, got, tt.want)
@@ -328,7 +329,8 @@ func TestCanReceiveFrom(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			n := &Node{config: config.ClipsyncCfg{AllowReceive: tt.allowRcv}}
+			cfg := config.ClipsyncCfg{AllowReceive: tt.allowRcv}
+			n := &Node{config: cfg, receiveIPs: parseIPList(cfg.AllowReceive)}
 			got := n.canReceiveFrom(tt.addr)
 			if got != tt.want {
 				t.Errorf("canReceiveFrom(%q) = %v, want %v", tt.addr, got, tt.want)

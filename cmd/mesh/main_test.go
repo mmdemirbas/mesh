@@ -7,6 +7,38 @@ import (
 	"testing"
 )
 
+func TestParseIPv4(t *testing.T) {
+	tests := []struct {
+		input string
+		want  [4]byte
+	}{
+		{"192.168.1.1", [4]byte{192, 168, 1, 1}},
+		{"10.0.0.1", [4]byte{10, 0, 0, 1}},
+		{"0.0.0.0", [4]byte{0, 0, 0, 0}},
+		{"255.255.255.255", [4]byte{255, 255, 255, 255}},
+		{"127.0.0.1", [4]byte{127, 0, 0, 1}},
+		{"1.2.3.4", [4]byte{1, 2, 3, 4}},
+		// Invalid cases — should return zero
+		{"", [4]byte{}},
+		{"256.0.0.1", [4]byte{}},
+		{"1.2.3", [4]byte{}},
+		{"1.2.3.4.5", [4]byte{}},
+		{"abc", [4]byte{}},
+		{"::1", [4]byte{}},
+		{"1.2.3.4a", [4]byte{}},
+		{".1.2.3", [4]byte{}},
+		{"1..2.3", [4]byte{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := parseIPv4(tt.input)
+			if got != tt.want {
+				t.Errorf("parseIPv4(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseAddr(t *testing.T) {
 	tests := []struct {
 		input    string

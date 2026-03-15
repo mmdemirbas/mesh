@@ -62,6 +62,10 @@ type Node struct {
 	id     string
 	port   int
 
+	// Pre-parsed IPs from config for fast ACL checks without per-call parsing.
+	sendToIPs  []net.IP
+	receiveIPs []net.IP
+
 	peers      map[string]time.Time // Tracks dynamic UDP peers
 	peerHashes map[string]string    // Tracks last seen hash per peer
 	peersMu    sync.RWMutex
@@ -106,6 +110,8 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 		config:     cfg,
 		id:         generateID(),
 		port:       port,
+		sendToIPs:  parseIPList(cfg.AllowSendTo),
+		receiveIPs: parseIPList(cfg.AllowReceive),
 		peers:      make(map[string]time.Time),
 		peerHashes: make(map[string]string),
 		httpClient: &http.Client{Timeout: 2 * time.Minute},
@@ -134,6 +140,18 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 
 // ─── Network & ACL Logic ─────────────────────────────────────────────────────
 
+// parseIPList pre-parses IP addresses from a config slice for fast ACL lookups.
+// Non-IP entries (like "all", "none", "udp") are skipped.
+func parseIPList(entries []string) []net.IP {
+	var ips []net.IP
+	for _, s := range entries {
+		if ip := net.ParseIP(s); ip != nil {
+			ips = append(ips, ip)
+		}
+	}
+	return ips
+}
+
 func (n *Node) canSendTo(addr string, isUDP bool) bool {
 	if contains(n.config.AllowSendTo, "none") {
 		return false
@@ -145,7 +163,7 @@ func (n *Node) canSendTo(addr string, isUDP bool) bool {
 		return true
 	}
 	host, _, _ := net.SplitHostPort(addr)
-	return containsIP(n.config.AllowSendTo, host) || contains(n.config.AllowSendTo, addr)
+	return matchesIPList(n.sendToIPs, host) || contains(n.config.AllowSendTo, addr)
 }
 
 func (n *Node) canReceiveFrom(addr string) bool {
@@ -156,7 +174,22 @@ func (n *Node) canReceiveFrom(addr string) bool {
 		return true
 	}
 	host, _, _ := net.SplitHostPort(addr)
-	return containsIP(n.config.AllowReceive, host) || contains(n.config.AllowReceive, addr)
+	return matchesIPList(n.receiveIPs, host) || contains(n.config.AllowReceive, addr)
+}
+
+// matchesIPList checks if the IP in host matches any pre-parsed IP in the list,
+// handling IPv6-mapped IPv4 addresses (e.g., "::ffff:192.168.1.5" matches "192.168.1.5").
+func matchesIPList(ips []net.IP, host string) bool {
+	hostIP := net.ParseIP(host)
+	if hostIP == nil {
+		return false
+	}
+	for _, ip := range ips {
+		if hostIP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // containsIP checks if the IP in host matches any entry in the slice,
@@ -572,18 +605,54 @@ func hashBytes(b []byte) string {
 
 // hashFilePaths returns a stable, order-independent hash of a set of file paths.
 func hashFilePaths(paths []string) string {
-	sorted := make([]string, len(paths))
-	copy(sorted, paths)
-	sort.Strings(sorted)
-	h := md5.Sum([]byte(strings.Join(sorted, "\n")))
+	// Fast path: single path (common case) avoids copy+sort+join.
+	if len(paths) == 1 {
+		h := md5.Sum([]byte(paths[0]))
+		return hex.EncodeToString(h[:])
+	}
+	// Check if already sorted.
+	needsSort := false
+	for i := 1; i < len(paths); i++ {
+		if paths[i] < paths[i-1] {
+			needsSort = true
+			break
+		}
+	}
+	if needsSort {
+		sorted := make([]string, len(paths))
+		copy(sorted, paths)
+		sort.Strings(sorted)
+		h := md5.Sum([]byte(strings.Join(sorted, "\n")))
+		return hex.EncodeToString(h[:])
+	}
+	h := md5.Sum([]byte(strings.Join(paths, "\n")))
 	return hex.EncodeToString(h[:])
 }
 
 // hashFormats returns a stable hash of a set of clipboard formats.
 func hashFormats(formats []ClipFormat) string {
-	sorted := make([]ClipFormat, len(formats))
-	copy(sorted, formats)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].MimeType < sorted[j].MimeType })
+	// Fast path: single format (most common case) avoids copy+sort.
+	if len(formats) == 1 {
+		h := md5.New()
+		h.Write([]byte(formats[0].MimeType))
+		h.Write([]byte{0})
+		h.Write(formats[0].Data)
+		return hex.EncodeToString(h.Sum(nil))
+	}
+	// Check if already sorted (common when formats come from a consistent source).
+	sorted := formats
+	needsSort := false
+	for i := 1; i < len(formats); i++ {
+		if formats[i].MimeType < formats[i-1].MimeType {
+			needsSort = true
+			break
+		}
+	}
+	if needsSort {
+		sorted = make([]ClipFormat, len(formats))
+		copy(sorted, formats)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].MimeType < sorted[j].MimeType })
+	}
 	h := md5.New()
 	for _, f := range sorted {
 		h.Write([]byte(f.MimeType))

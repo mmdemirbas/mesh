@@ -35,9 +35,18 @@ var version = "dev"
 
 var ansiStripRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
-// parseAddr extracts the IP and port from an address string.
-// Handles "host:port", "user@host:port", or just "host".
-func parseAddr(s string) (net.IP, int) {
+// addrKey is a pre-parsed, comparable sort key for an address string.
+// Using a fixed-size [16]byte array avoids heap allocation from net.ParseIP.
+type addrKey struct {
+	ip    [16]byte // IPv4-mapped-to-IPv6 or raw IPv6
+	port  uint16
+	hasIP bool
+	raw   string // original string, used as fallback for non-IP addresses
+}
+
+// makeAddrKey parses an address string into a sort key in a single pass.
+func makeAddrKey(s string) addrKey {
+	raw := s
 	if at := strings.LastIndex(s, "@"); at != -1 {
 		s = s[at+1:]
 	}
@@ -46,26 +55,113 @@ func parseAddr(s string) (net.IP, int) {
 		host = s
 		portStr = ""
 	}
-	ip := net.ParseIP(host)
 	port, _ := strconv.Atoi(portStr)
-	return ip, port
+	k := addrKey{port: uint16(port), raw: raw}
+
+	// Fast path: try parsing IPv4 without allocation
+	if ip4 := parseIPv4(host); ip4 != [4]byte{} || host == "0.0.0.0" {
+		// IPv4-mapped IPv6: ::ffff:x.x.x.x
+		k.ip[10] = 0xff
+		k.ip[11] = 0xff
+		k.ip[12] = ip4[0]
+		k.ip[13] = ip4[1]
+		k.ip[14] = ip4[2]
+		k.ip[15] = ip4[3]
+		k.hasIP = true
+		return k
+	}
+
+	// Slow path: IPv6 or unparseable
+	if ip := net.ParseIP(host); ip != nil {
+		copy(k.ip[:], ip.To16())
+		k.hasIP = true
+	}
+	return k
+}
+
+// parseIPv4 parses an IPv4 dotted-quad without allocation.
+// Returns [4]byte{} on failure (caller must check for "0.0.0.0" separately).
+func parseIPv4(s string) [4]byte {
+	var ip [4]byte
+	octet := 0
+	dots := 0
+	digits := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= '0' && c <= '9' {
+			octet = octet*10 + int(c-'0')
+			if octet > 255 {
+				return [4]byte{}
+			}
+			digits++
+		} else if c == '.' {
+			if digits == 0 || dots >= 3 {
+				return [4]byte{}
+			}
+			ip[dots] = byte(octet)
+			dots++
+			octet = 0
+			digits = 0
+		} else {
+			return [4]byte{}
+		}
+	}
+	if dots != 3 || digits == 0 {
+		return [4]byte{}
+	}
+	ip[3] = byte(octet)
+	return ip
+}
+
+func (k addrKey) less(other addrKey) bool {
+	if k.hasIP && other.hasIP {
+		cmp := bytes.Compare(k.ip[:], other.ip[:])
+		if cmp != 0 {
+			return cmp < 0
+		}
+		return k.port < other.port
+	}
+	if k.raw != other.raw {
+		return k.raw < other.raw
+	}
+	return k.port < other.port
+}
+
+// parseAddr extracts the IP and port from an address string.
+// Handles "host:port", "user@host:port", or just "host".
+func parseAddr(s string) (net.IP, int) {
+	k := makeAddrKey(s)
+	if !k.hasIP {
+		return nil, int(k.port)
+	}
+	return net.IP(k.ip[:]), int(k.port)
 }
 
 // compareAddr compares two address strings semantically by IP then port.
 func compareAddr(a, b string) bool {
-	ipA, portA := parseAddr(a)
-	ipB, portB := parseAddr(b)
-	if ipA != nil && ipB != nil {
-		cmp := bytes.Compare(ipA.To16(), ipB.To16())
-		if cmp != 0 {
-			return cmp < 0
-		}
-		return portA < portB
+	return makeAddrKey(a).less(makeAddrKey(b))
+}
+
+// sortAddrs sorts a string slice of addresses semantically by IP then port.
+// It pre-parses all addresses once, avoiding repeated parsing inside the comparator.
+func sortAddrs(addrs []string) {
+	keys := make([]addrKey, len(addrs))
+	for i, a := range addrs {
+		keys[i] = makeAddrKey(a)
 	}
-	if a != b {
-		return a < b
-	}
-	return portA < portB
+	sort.Sort(addrSorter{addrs: addrs, keys: keys})
+}
+
+type addrSorter struct {
+	addrs []string
+	keys  []addrKey
+}
+
+func (s addrSorter) Len() int           { return len(s.addrs) }
+func (s addrSorter) Less(i, j int) bool { return s.keys[i].less(s.keys[j]) }
+func (s addrSorter) Swap(i, j int) {
+	s.addrs[i], s.addrs[j] = s.addrs[j], s.addrs[i]
+	s.keys[i], s.keys[j] = s.keys[j], s.keys[i]
 }
 
 func main() {
