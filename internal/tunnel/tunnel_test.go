@@ -255,3 +255,38 @@ func TestRetryDelayDistribution(t *testing.T) {
 		t.Error("retryDelay returned the same value 50 times; expected jitter")
 	}
 }
+
+func TestParseByteSize(t *testing.T) {
+	tests := []struct {
+		input string
+		want  uint64
+	}{
+		{"1G", 1024 * 1024 * 1024},
+		{"1g", 1024 * 1024 * 1024},
+		{"500M", 500 * 1024 * 1024},
+		{"500m", 500 * 1024 * 1024},
+		{"64K", 64 * 1024},
+		{"64k", 64 * 1024},
+		{"1024", 1024},
+		{"0", 0},
+		{"", 0},
+		{"abc", 0},
+		{"  2G  ", 2 * 1024 * 1024 * 1024},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := parseByteSize(tt.input)
+			if got != tt.want {
+				t.Errorf("parseByteSize(%q) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplySSHConfigOptions_RekeyLimit(t *testing.T) {
+	cfg := &ssh.Config{}
+	applySSHConfigOptions(cfg, map[string]string{"RekeyLimit": "1G"})
+	if cfg.RekeyThreshold != 1024*1024*1024 {
+		t.Errorf("RekeyThreshold = %d, want %d", cfg.RekeyThreshold, 1024*1024*1024)
+	}
+}

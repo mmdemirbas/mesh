@@ -315,6 +315,10 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 
 	applySSHConfigOptions(&sshCfg.Config, opts)
 
+	if val := config.GetOption(opts, "HostKeyAlgorithms"); val != "" {
+		sshCfg.HostKeyAlgorithms = strings.Split(val, ",")
+	}
+
 	// Parse IPQoS for this forward set's connection
 	interactiveTos, _, err := ParseIPQoS(config.GetOption(opts, "IPQoS"))
 	if err != nil {
@@ -1045,6 +1049,37 @@ func applySSHConfigOptions(cfg *ssh.Config, options map[string]string) {
 	if val := config.GetOption(options, "MACs"); val != "" {
 		cfg.MACs = strings.Split(val, ",")
 	}
+
+	if val := config.GetOption(options, "RekeyLimit"); val != "" {
+		if n := parseByteSize(val); n > 0 {
+			cfg.RekeyThreshold = n
+		}
+	}
+}
+
+// parseByteSize parses a human-readable byte size (e.g., "1G", "500M", "64K") to bytes.
+func parseByteSize(s string) uint64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	multiplier := uint64(1)
+	switch s[len(s)-1] {
+	case 'K', 'k':
+		multiplier = 1024
+		s = s[:len(s)-1]
+	case 'M', 'm':
+		multiplier = 1024 * 1024
+		s = s[:len(s)-1]
+	case 'G', 'g':
+		multiplier = 1024 * 1024 * 1024
+		s = s[:len(s)-1]
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n * multiplier
 }
 
 // startKeepAlive handles both ClientAlive* (server-side) and ServerAlive* (client-side) options.

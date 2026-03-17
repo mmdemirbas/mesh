@@ -299,6 +299,8 @@ func main() {
 		configCmd(nodeName, configPath)
 	case "down":
 		downCmd(nodeName)
+	case "help":
+		printHelp()
 	default:
 		printUsage()
 		os.Exit(1)
@@ -328,6 +330,58 @@ func printUsage() {
 	fmt.Println()
 	fmt.Println("  " + cGray + "# Gracefully stop the 'server' node" + cReset)
 	fmt.Println("  mesh server " + cBlue + "down" + cReset)
+	fmt.Println()
+}
+
+func printHelp() {
+	printUsage()
+	fmt.Println(cBold + "Command Details:" + cReset)
+	fmt.Println()
+	fmt.Println(cBold + "  up" + cReset)
+	fmt.Println("    Starts all configured listeners, connections, and clipsync for the node.")
+	fmt.Println("    When running in a terminal, shows a live dashboard that auto-refreshes.")
+	fmt.Println("    Logs are written to " + cGray + "~/.mesh/log/<node>.log" + cReset + ".")
+	fmt.Println("    When stdout is not a terminal (piped or backgrounded), logs go to stderr.")
+	fmt.Println("    Press Ctrl+C to stop gracefully.")
+	fmt.Println()
+	fmt.Println(cBold + "  status" + cReset + " [" + cYellow + "-w" + cReset + "]")
+	fmt.Println("    Shows the current status of a running node (listeners, connections, peers).")
+	fmt.Println("    Use " + cYellow + "-w" + cReset + " for watch mode: continuously refreshes like 'top'.")
+	fmt.Println("    Without " + cYellow + "-w" + cReset + ", prints once and exits.")
+	fmt.Println()
+	fmt.Println(cBold + "  config" + cReset)
+	fmt.Println("    Displays the parsed configuration for a node without starting it.")
+	fmt.Println("    Useful for verifying config changes before running 'up'.")
+	fmt.Println("    If the node is not found, lists all available nodes in the config file.")
+	fmt.Println()
+	fmt.Println(cBold + "  down" + cReset)
+	fmt.Println("    Sends SIGTERM to the running node and waits for graceful shutdown.")
+	fmt.Println()
+	fmt.Println(cBold + "  help" + cReset)
+	fmt.Println("    Shows this detailed help.")
+	fmt.Println()
+	fmt.Println(cBold + "SSH Options:" + cReset)
+	fmt.Println("  The following OpenSSH-compatible options can be set in listener/connection/forward config:")
+	fmt.Println()
+	for _, opt := range []struct{ name, desc string }{
+		{"Ciphers", "Encryption algorithms (e.g., aes256-ctr,chacha20-poly1305@openssh.com)"},
+		{"MACs", "Message authentication codes (e.g., hmac-sha2-256,hmac-sha2-512)"},
+		{"KexAlgorithms", "Key exchange methods (e.g., curve25519-sha256)"},
+		{"HostKeyAlgorithms", "Accepted server host key types (e.g., ssh-ed25519,rsa-sha2-256)"},
+		{"ConnectTimeout", "Seconds before connection attempt times out"},
+		{"IPQoS", "IP QoS/DSCP (e.g., lowdelay, throughput, af11 ef)"},
+		{"TCPKeepAlive", "OS-level TCP keepalive interval in seconds"},
+		{"ServerAliveInterval", "Client keepalive interval in seconds"},
+		{"ServerAliveCountMax", "Max unanswered keepalives before disconnect"},
+		{"ClientAliveInterval", "Server keepalive interval in seconds"},
+		{"ClientAliveCountMax", "Max unanswered keepalives before disconnect"},
+		{"ExitOnForwardFailure", "Stop reconnection if a forward fails (yes/no)"},
+		{"GatewayPorts", "Remote forward bind policy (yes/no/clientspecified)"},
+		{"PermitOpen", "Restrict tunneled destinations (e.g., *:22, host:80, none)"},
+		{"RekeyLimit", "Bytes before SSH re-keying (e.g., 1G, 500M)"},
+	} {
+		fmt.Printf("    %s%-24s%s %s\n", cCyan, opt.name, cReset, opt.desc)
+	}
 	fmt.Println()
 }
 
@@ -372,7 +426,7 @@ func upCmd(nodeName, configPath string) {
 		Level:      slog.LevelInfo,
 		TimeFormat: "15:04:05.000",
 	})
-	log := slog.New(&padMessageHandler{Handler: logHandler, width: 30})
+	log := slog.New(&humanLogHandler{Handler: logHandler})
 	slog.SetDefault(log)
 
 	cfg, err := config.Load(configPath, nodeName)
@@ -410,6 +464,7 @@ func upCmd(nodeName, configPath string) {
 		} else {
 			defer logFile.Close()
 			// File gets plain text, ring gets colored text for the dashboard.
+			// humanLogHandler inlines attrs into the message for readability.
 			logHandler = tint.NewHandler(logFile, &tint.Options{
 				Level:      logLevel,
 				TimeFormat: "15:04:05.000",
@@ -419,7 +474,7 @@ func upCmd(nodeName, configPath string) {
 				Level:      logLevel,
 				TimeFormat: "15:04:05.000",
 			})
-			log = slog.New(&padMessageHandler{Handler: &multiHandler{plain: logHandler, color: colorHandler}, width: 30})
+			log = slog.New(&humanLogHandler{Handler: &multiHandler{plain: logHandler, color: colorHandler}})
 			slog.SetDefault(log)
 		}
 	}
@@ -429,7 +484,7 @@ func upCmd(nodeName, configPath string) {
 			Level:      logLevel,
 			TimeFormat: "15:04:05.000",
 		})
-		log = slog.New(&padMessageHandler{Handler: logHandler, width: 30})
+		log = slog.New(&humanLogHandler{Handler: logHandler})
 		slog.SetDefault(log)
 	}
 
@@ -538,16 +593,77 @@ func upCmd(nodeName, configPath string) {
 	}
 }
 
-type padMessageHandler struct {
+// humanLogHandler rewrites slog records into natural prose before passing them
+// to the underlying handler. Instead of "Connected target=root@10.0.0.1:22 tcp=45ms ssh=120ms"
+// it produces "Connected to root@10.0.0.1:22 (tcp: 45ms, ssh: 120ms)".
+//
+// Strategy: known attribute keys are consumed and inlined into the message.
+// Any remaining attributes pass through to the underlying handler unchanged.
+type humanLogHandler struct {
 	slog.Handler
-	width int
 }
 
-func (h *padMessageHandler) Handle(ctx context.Context, r slog.Record) error {
-	if len(r.Message) < h.width {
-		r.Message += strings.Repeat(" ", h.width-len(r.Message))
+func (h *humanLogHandler) Handle(ctx context.Context, r slog.Record) error {
+	attrs := make(map[string]slog.Value)
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value
+		return true
+	})
+
+	// Build a human-readable message by consuming known attributes.
+	var msg strings.Builder
+	msg.WriteString(r.Message)
+	consumed := map[string]bool{}
+
+	// Inline "target", "bind", "addr", "peer", "remote", "listen" into the message
+	for _, key := range []string{"target", "bind", "addr", "peer", "remote", "listen", "name", "file", "path"} {
+		if v, ok := attrs[key]; ok {
+			msg.WriteString(" " + v.String())
+			consumed[key] = true
+		}
 	}
-	return h.Handler.Handle(ctx, r)
+
+	// Group timing/detail attrs as parenthetical
+	var details []string
+	for _, key := range []string{"tcp", "ssh", "elapsed", "retry_in", "version", "node", "config", "signal",
+		"type", "set", "formats", "files", "count", "size", "user", "from", "status", "fail_count"} {
+		if v, ok := attrs[key]; ok {
+			details = append(details, key+": "+v.String())
+			consumed[key] = true
+		}
+	}
+	if len(details) > 0 {
+		msg.WriteString(" (" + strings.Join(details, ", ") + ")")
+	}
+
+	// "error" goes last, separated
+	if v, ok := attrs["error"]; ok {
+		msg.WriteString(": " + v.String())
+		consumed["error"] = true
+	}
+
+	// Rebuild record with new message and only unconsumed attributes
+	r.Message = msg.String()
+	var remaining []slog.Attr
+	r.Attrs(func(a slog.Attr) bool {
+		if !consumed[a.Key] {
+			remaining = append(remaining, a)
+		}
+		return true
+	})
+
+	// Create a clean record without the consumed attrs
+	newRecord := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
+	newRecord.AddAttrs(remaining...)
+	return h.Handler.Handle(ctx, newRecord)
+}
+
+func (h *humanLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &humanLogHandler{Handler: h.Handler.WithAttrs(attrs)}
+}
+
+func (h *humanLogHandler) WithGroup(name string) slog.Handler {
+	return &humanLogHandler{Handler: h.Handler.WithGroup(name)}
 }
 
 // multiHandler fans out log records to two handlers: one for the log file (plain)
@@ -1112,7 +1228,7 @@ func statusCmd(nodeName, configPath string, watch bool) {
 		Level:      slog.LevelInfo,
 		TimeFormat: "15:04:05.000",
 	})
-	log := slog.New(&padMessageHandler{Handler: logHandler, width: 30})
+	log := slog.New(&humanLogHandler{Handler: logHandler})
 	slog.SetDefault(log)
 
 	cfgs, err := config.LoadUnvalidated(configPath)

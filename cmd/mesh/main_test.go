@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
 	"net"
 	"sort"
 	"strings"
@@ -320,6 +322,78 @@ func TestRenderStatus_WithConnections(t *testing.T) {
 	}
 	if !strings.Contains(output, "8080") {
 		t.Error("output should contain forward bind port")
+	}
+}
+
+func TestHumanLogHandler(t *testing.T) {
+	var buf bytes.Buffer
+	textHandler := slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			// Strip time and level for test predictability
+			if a.Key == slog.TimeKey || a.Key == slog.LevelKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	})
+	logger := slog.New(&humanLogHandler{Handler: textHandler})
+
+	tests := []struct {
+		name    string
+		msg     string
+		attrs   []slog.Attr
+		want    string // substring that must be present in the output message
+		wantNot string // substring that must NOT be in the message attr (key consumed)
+	}{
+		{
+			"target inlined",
+			"Connected",
+			[]slog.Attr{slog.String("target", "root@10.0.0.1:22")},
+			"Connected root@10.0.0.1:22",
+			"target=",
+		},
+		{
+			"timing details parenthesized",
+			"Connected",
+			[]slog.Attr{
+				slog.String("target", "host:22"),
+				slog.String("tcp", "45ms"),
+				slog.String("ssh", "120ms"),
+			},
+			"(tcp: 45ms, ssh: 120ms)",
+			"",
+		},
+		{
+			"error appended with colon",
+			"SSH handshake failed",
+			[]slog.Attr{
+				slog.String("target", "host:22"),
+				slog.String("error", "connection refused"),
+			},
+			": connection refused",
+			"",
+		},
+		{
+			"unknown attrs pass through",
+			"Something",
+			[]slog.Attr{slog.String("custom_key", "custom_val")},
+			"custom_key=custom_val",
+			"",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf.Reset()
+			logger.LogAttrs(nil, slog.LevelInfo, tt.msg, tt.attrs...)
+			output := buf.String()
+			if !strings.Contains(output, tt.want) {
+				t.Errorf("output %q does not contain %q", output, tt.want)
+			}
+			if tt.wantNot != "" && strings.Contains(output, tt.wantNot) {
+				t.Errorf("output %q should not contain %q (key should be consumed)", output, tt.wantNot)
+			}
+		})
 	}
 }
 
