@@ -10,8 +10,9 @@ import (
 
 func init() {
 	// Enable ANSI escape code processing on Windows cmd.exe so that
-	// the tint logger's color output renders correctly.
+	// the tint logger's color output and the live dashboard render correctly.
 	enableVirtualTerminalProcessing(os.Stderr)
+	enableVirtualTerminalProcessing(os.Stdout)
 }
 
 func enableVirtualTerminalProcessing(f *os.File) {

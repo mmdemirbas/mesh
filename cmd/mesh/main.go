@@ -28,11 +28,24 @@ import (
 	"github.com/mmdemirbas/mesh/internal/proxy"
 	"github.com/mmdemirbas/mesh/internal/state"
 	"github.com/mmdemirbas/mesh/internal/tunnel"
+	"golang.org/x/term"
 )
 
 var version = "dev"
 
 var ansiStripRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+const (
+	cReset   = "\033[0m"
+	cBold    = "\033[1m"
+	cRed     = "\033[31m"
+	cGreen   = "\033[32m"
+	cYellow  = "\033[33m"
+	cBlue    = "\033[34m"
+	cMagenta = "\033[35m"
+	cCyan    = "\033[36m"
+	cGray    = "\033[90m"
+)
 
 // addrKey is a pre-parsed, comparable sort key for an address string.
 // The IP is stored as two uint64s for single-instruction comparison on 64-bit CPUs.
@@ -289,35 +302,27 @@ func main() {
 }
 
 func printUsage() {
-	const (
-		reset  = "\033[0m"
-		bold   = "\033[1m"
-		blue   = "\033[34m"
-		cyan   = "\033[36m"
-		gray   = "\033[90m"
-		yellow = "\033[33m"
-	)
-	fmt.Println(bold + cyan + "mesh" + reset + " " + gray + version + reset + " - Human-friendly networking tool")
+	fmt.Println(cBold + cCyan + "mesh" + cReset + " " + cGray + version + cReset + " - Human-friendly networking tool")
 	fmt.Println()
 	fmt.Println("All-in-one replacement for ssh, sshd, autossh, socat, and SOCKS/HTTP proxy servers.")
 	fmt.Println()
-	fmt.Println(bold + "Usage:" + reset)
-	fmt.Println("  mesh " + yellow + "[-f config.yaml] " + reset + cyan + "<node> <command>" + reset + " [arguments]")
+	fmt.Println(cBold + "Usage:" + cReset)
+	fmt.Println("  mesh " + cYellow + "[-f config.yaml] " + cReset + cCyan + "<node> <command>" + cReset + " [arguments]")
 	fmt.Println()
-	fmt.Println(bold + "Commands:" + reset)
-	fmt.Println("  " + blue + "up" + reset + "     Start the specified mesh node")
-	fmt.Println("  " + blue + "down" + reset + "   Stop the currently running mesh node")
-	fmt.Println("  " + blue + "status" + reset + " Check if the mesh node is running and show its active configuration")
+	fmt.Println(cBold + "Commands:" + cReset)
+	fmt.Println("  " + cBlue + "up" + cReset + "     Start the specified mesh node")
+	fmt.Println("  " + cBlue + "down" + cReset + "   Stop the currently running mesh node")
+	fmt.Println("  " + cBlue + "status" + cReset + " Check if the mesh node is running and show its active configuration")
 	fmt.Println()
-	fmt.Println(bold + "Examples:" + reset)
-	fmt.Println("  " + gray + "# Start the 'server' node using the default configuration file" + reset)
-	fmt.Println("  mesh server " + blue + "up" + reset + " &")
+	fmt.Println(cBold + "Examples:" + cReset)
+	fmt.Println("  " + cGray + "# Start the 'server' node using the default configuration file" + cReset)
+	fmt.Println("  mesh server " + cBlue + "up" + cReset + " &")
 	fmt.Println()
-	fmt.Println("  " + gray + "# Start utilizing a specific configuration file" + reset)
-	fmt.Println("  mesh " + yellow + "-f" + reset + " configs/example.yml server " + blue + "up" + reset)
+	fmt.Println("  " + cGray + "# Start utilizing a specific configuration file" + cReset)
+	fmt.Println("  mesh " + cYellow + "-f" + cReset + " configs/example.yml server " + cBlue + "up" + cReset)
 	fmt.Println()
-	fmt.Println("  " + gray + "# Gracefully stop the 'server' node" + reset)
-	fmt.Println("  mesh server " + blue + "down" + reset)
+	fmt.Println("  " + cGray + "# Gracefully stop the 'server' node" + cReset)
+	fmt.Println("  mesh server " + cBlue + "down" + cReset)
 	fmt.Println()
 }
 
@@ -354,6 +359,10 @@ func upCmd(nodeName, configPath string) {
 		os.Exit(1)
 	}
 
+	// Determine whether to use the live dashboard (TTY) or classic log-to-stderr mode.
+	useDashboard := term.IsTerminal(int(os.Stdout.Fd()))
+
+	// Phase 1: Bootstrap logger to stderr so config errors are visible.
 	logHandler := tint.NewHandler(os.Stderr, &tint.Options{
 		Level:      slog.LevelInfo,
 		TimeFormat: "15:04:05.000",
@@ -379,12 +388,45 @@ func upCmd(nodeName, configPath string) {
 		logLevel = slog.LevelInfo
 	}
 
-	logHandler = tint.NewHandler(os.Stderr, &tint.Options{
-		Level:      logLevel,
-		TimeFormat: "15:04:05.000",
-	})
-	log = slog.New(&padMessageHandler{Handler: logHandler, width: 30})
-	slog.SetDefault(log)
+	// Phase 2: Set up log destination — file (dashboard mode) or stderr (classic mode).
+	ring := newLogRing(15)
+	var logFilePath string
+
+	if useDashboard {
+		home, _ := os.UserHomeDir()
+		logDir := filepath.Join(home, ".mesh", "log")
+		os.MkdirAll(logDir, 0755)
+		logFilePath = filepath.Join(logDir, nodeName+".log")
+		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not open log file %s: %v (falling back to stderr)\n", logFilePath, err)
+			useDashboard = false
+			logFilePath = ""
+		} else {
+			defer logFile.Close()
+			// File gets plain text, ring gets colored text for the dashboard.
+			logHandler = tint.NewHandler(logFile, &tint.Options{
+				Level:      logLevel,
+				TimeFormat: "15:04:05.000",
+				NoColor:    true,
+			})
+			colorHandler := tint.NewHandler(ring, &tint.Options{
+				Level:      logLevel,
+				TimeFormat: "15:04:05.000",
+			})
+			log = slog.New(&padMessageHandler{Handler: &multiHandler{plain: logHandler, color: colorHandler}, width: 30})
+			slog.SetDefault(log)
+		}
+	}
+
+	if !useDashboard {
+		logHandler = tint.NewHandler(os.Stderr, &tint.Options{
+			Level:      logLevel,
+			TimeFormat: "15:04:05.000",
+		})
+		log = slog.New(&padMessageHandler{Handler: logHandler, width: 30})
+		slog.SetDefault(log)
+	}
 
 	log.Info("mesh starting", "version", version, "node", nodeName, "config", configPath)
 
@@ -416,7 +458,6 @@ func upCmd(nodeName, configPath string) {
 			json.NewEncoder(w).Encode(state.Global.Snapshot())
 		})}
 		go adminSrv.Serve(adminLn)
-		// Ensure admin server shuts down when context is cancelled
 		context.AfterFunc(ctx, func() { adminSrv.Close() })
 	}
 
@@ -449,7 +490,7 @@ func upCmd(nodeName, configPath string) {
 		proxy.RunStandaloneRelays(ctx, relays, log, &wg)
 	}
 
-	// 4. Outbound connections (Multi-set forwards)
+	// 2. Outbound connections (Multi-set forwards)
 	for _, conn := range cfg.Connections {
 		conn := conn
 		wg.Add(1)
@@ -462,7 +503,7 @@ func upCmd(nodeName, configPath string) {
 		}()
 	}
 
-	// 5. Clipsync
+	// 3. Clipsync
 	for _, cs := range cfg.Clipsync {
 		cs := cs
 		wg.Add(1)
@@ -475,12 +516,21 @@ func upCmd(nodeName, configPath string) {
 		}()
 	}
 
-	// Block until a signal triggers context cancellation
+	// 4. Live dashboard or block until signal
+	if useDashboard {
+		go runDashboard(ctx, cfg, nodeName, logFilePath, ring)
+	}
+
 	<-ctx.Done()
 
-	// Wait a moment for graceful shutdown of spawned servers/clients
 	wg.Wait()
 	log.Info("mesh gracefully stopped")
+
+	if useDashboard {
+		// Final static render after shutdown
+		fmt.Print("\033[H\033[2J\033[?25h") // clear screen, show cursor
+		fmt.Print(renderStatus(cfg, state.Global.Snapshot(), nodeName))
+	}
 }
 
 type padMessageHandler struct {
@@ -495,39 +545,155 @@ func (h *padMessageHandler) Handle(ctx context.Context, r slog.Record) error {
 	return h.Handler.Handle(ctx, r)
 }
 
-func statusCmd(nodeName, configPath string) {
-	const (
-		cReset   = "\033[0m"
-		cBold    = "\033[1m"
-		cRed     = "\033[31m"
-		cGreen   = "\033[32m"
-		cYellow  = "\033[33m"
-		cBlue    = "\033[34m"
-		cMagenta = "\033[35m"
-		cCyan    = "\033[36m"
-		cGray    = "\033[90m"
-	)
+// multiHandler fans out log records to two handlers: one for the log file (plain)
+// and one for the dashboard ring buffer (colored).
+type multiHandler struct {
+	plain slog.Handler
+	color slog.Handler
+}
 
-	pid, err := readPidFile(nodeName)
-	if err != nil || pid == 0 {
-		fmt.Printf("%s⨯ mesh node %q is not running.%s\n", cRed, nodeName, cReset)
-		os.Exit(3)
+func (h *multiHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.plain.Enabled(ctx, level) || h.color.Enabled(ctx, level)
+}
+
+func (h *multiHandler) Handle(ctx context.Context, r slog.Record) error {
+	if h.plain.Enabled(ctx, r.Level) {
+		h.plain.Handle(ctx, r)
 	}
-
-	if !checkPid(pid) {
-		fmt.Printf("%s⨯ mesh node %q is dead but pidfile exists (pid %d).%s\n", cRed, nodeName, pid, cReset)
-		os.Exit(1)
+	if h.color.Enabled(ctx, r.Level) {
+		h.color.Handle(ctx, r)
 	}
+	return nil
+}
 
-	fmt.Printf("%s✔ mesh node %q is running (pid %d).%s\n\n", cGreen, nodeName, pid, cReset)
+func (h *multiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &multiHandler{plain: h.plain.WithAttrs(attrs), color: h.color.WithAttrs(attrs)}
+}
 
-	var activeState map[string]state.Component
-	if portData, err := os.ReadFile(portFilePath(nodeName)); err == nil {
-		if resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/", string(portData))); err == nil {
-			defer resp.Body.Close()
-			json.NewDecoder(resp.Body).Decode(&activeState)
+func (h *multiHandler) WithGroup(name string) slog.Handler {
+	return &multiHandler{plain: h.plain.WithGroup(name), color: h.color.WithGroup(name)}
+}
+
+// logRing is a fixed-size ring buffer that captures recent log lines for the dashboard.
+type logRing struct {
+	mu    sync.Mutex
+	lines []string
+	size  int
+	pos   int
+	full  bool
+}
+
+func newLogRing(size int) *logRing {
+	return &logRing{lines: make([]string, size), size: size}
+}
+
+func (r *logRing) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Split into lines; log handlers write one record at a time but may include a trailing newline.
+	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		r.lines[r.pos] = line
+		r.pos = (r.pos + 1) % r.size
+		if r.pos == 0 {
+			r.full = true
 		}
 	}
+	return len(p), nil
+}
+
+// Lines returns the buffered log lines in chronological order.
+func (r *logRing) Lines() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.full {
+		return append([]string{}, r.lines[:r.pos]...)
+	}
+	out := make([]string, 0, r.size)
+	out = append(out, r.lines[r.pos:]...)
+	out = append(out, r.lines[:r.pos]...)
+	return out
+}
+
+// runDashboard renders a live status screen that refreshes periodically.
+// It reads state directly from state.Global (in-process) rather than HTTP.
+func runDashboard(ctx context.Context, cfg *config.Config, nodeName string, logFilePath string, ring *logRing) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	// Hide cursor while dashboard is active
+	fmt.Print("\033[?25l")
+	defer fmt.Print("\033[?25h")
+
+	render := func() {
+		var buf strings.Builder
+
+		// Header line
+		buf.WriteString(fmt.Sprintf("%s%smesh %s%s | pid %d | %s",
+			cBold, cCyan, nodeName, cReset, os.Getpid(), time.Now().Format("15:04:05")))
+		if logFilePath != "" {
+			buf.WriteString(fmt.Sprintf(" | log: %s%s%s", cGray, logFilePath, cReset))
+		}
+		buf.WriteByte('\n')
+		buf.WriteByte('\n')
+
+		// Status body
+		statusOutput := renderStatus(cfg, state.Global.Snapshot(), nodeName)
+		buf.WriteString(statusOutput)
+
+		// Determine how many log lines fit in the remaining terminal height.
+		// Dashboard content always takes priority over logs.
+		logLines := ring.Lines()
+		if len(logLines) > 0 {
+			termHeight := 24 // safe default
+			if _, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && h > 0 {
+				termHeight = h
+			}
+			// Count lines used by header (2) + status body
+			usedLines := 2 + strings.Count(statusOutput, "\n")
+			// Reserve 1 line for the separator, leave at least 0 for logs
+			available := termHeight - usedLines - 1
+			if available > len(logLines) {
+				available = len(logLines)
+			}
+			if available > 0 {
+				// Show only the most recent lines that fit
+				visibleLogs := logLines[len(logLines)-available:]
+				buf.WriteString(cGray + strings.Repeat("─", 80) + cReset + "\n")
+				for _, line := range visibleLogs {
+					buf.WriteString(line + "\033[K\n")
+				}
+			}
+		}
+
+		// Clear screen, move home, write buffer
+		fmt.Print("\033[H\033[2J" + buf.String())
+	}
+
+	winch := winchSignal() // immediate re-render on terminal resize (Unix); nil on Windows
+
+	render() // initial render immediately
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			render()
+		case <-winch:
+			render()
+		}
+	}
+}
+
+// renderStatus builds the status dashboard output as a string.
+// It can be called from both the live dashboard (in-process state) and
+// the statusCmd (state fetched via HTTP from a running node).
+func renderStatus(cfg *config.Config, activeState map[string]state.Component, nodeName string) string {
+	var w strings.Builder
+
+	writeln := func(s string) { w.WriteString(s); w.WriteByte('\n') }
 
 	getComponentInfo := func(compType, id string) (string, string, state.Component) {
 		if activeState == nil {
@@ -537,7 +703,6 @@ func statusCmd(nodeName, configPath string) {
 		if !ok {
 			return "⚪️", cGray + "[starting]" + cReset, state.Component{}
 		}
-
 		color := cGray
 		indicator := "⚪️"
 		switch comp.Status {
@@ -551,7 +716,6 @@ func statusCmd(nodeName, configPath string) {
 			color = cRed
 			indicator = "🔴"
 		}
-
 		msg := string(comp.Status)
 		if comp.Message != "" {
 			if comp.Status == state.Failed || comp.Status == state.Retrying {
@@ -560,27 +724,6 @@ func statusCmd(nodeName, configPath string) {
 		}
 		return indicator, color + "[" + msg + "]" + cReset, comp
 	}
-
-	logHandler := tint.NewHandler(os.Stderr, &tint.Options{
-		Level:      slog.LevelInfo,
-		TimeFormat: "15:04:05.000",
-	})
-	log := slog.New(&padMessageHandler{Handler: logHandler, width: 30})
-	slog.SetDefault(log)
-
-	cfgs, err := config.LoadUnvalidated(configPath)
-	if err != nil {
-		fmt.Printf("%s⚠ Could not load configuration to show details: %v%s\n", cYellow, err, cReset)
-		os.Exit(0)
-	}
-	cfg, ok := cfgs[nodeName]
-	if !ok {
-		fmt.Printf("%s⚠ Node %q not found in config%s\n", cYellow, nodeName, cReset)
-		os.Exit(0)
-	}
-
-	fmt.Printf("%s⚙ Configuration: %s%s%s\n", cBold, cCyan, nodeName, cReset)
-	fmt.Println(cGray + strings.Repeat("─", 80) + cReset)
 
 	visibleLen := func(str string) int {
 		return utf8.RuneCountInString(ansiStripRe.ReplaceAllString(str, ""))
@@ -596,7 +739,6 @@ func statusCmd(nodeName, configPath string) {
 		}
 		host := addr[:idx]
 		port := addr[idx+1:]
-
 		atIdx := strings.Index(host, "@")
 		if atIdx != -1 {
 			user := host[:atIdx]
@@ -628,6 +770,9 @@ func statusCmd(nodeName, configPath string) {
 	arrowRight := cCyan + "──▶" + cReset
 	arrowLeft := cMagenta + "◀──" + cReset
 
+	writeln(fmt.Sprintf("%s⚙ Configuration: %s%s%s", cBold, cCyan, nodeName, cReset))
+	writeln(cGray + strings.Repeat("─", 80) + cReset)
+
 	// Pre-scan: find the widest bind address among protocol-tagged rows for alignment.
 	maxProtoAddr := 0
 	for _, l := range cfg.Listeners {
@@ -656,7 +801,6 @@ func statusCmd(nodeName, configPath string) {
 		}
 	}
 
-	// padForProto pads a colored address so protocol labels start at the same column.
 	padForProto := func(colored string) string {
 		if pad := maxProtoAddr - visibleLen(colored); pad > 0 {
 			return colored + strings.Repeat(" ", pad)
@@ -664,8 +808,6 @@ func statusCmd(nodeName, configPath string) {
 		return colored
 	}
 
-	// Map dynamic forwards by the listen port of their parent listener
-	// to handle cases where 0.0.0.0 in config routes to 127.0.0.1 during actual connections.
 	dynamicByParent := make(map[string][]state.Component)
 	for k, comp := range activeState {
 		if strings.HasPrefix(k, "dynamic:") {
@@ -676,21 +818,16 @@ func statusCmd(nodeName, configPath string) {
 				if err == nil {
 					dynamicByParent[port] = append(dynamicByParent[port], comp)
 				}
-				// Also store by full bind as fallback
 				dynamicByParent[parentBind] = append(dynamicByParent[parentBind], comp)
 			}
 		}
 	}
 
 	cleanIPv6 := func(peer string) string {
-		// Example: root@[fe80::92bd:3bfe:be7d:5b25%en0]:54633 -> root@fe80::92bd:3bfe:be7d:5b25:54633
 		peer = strings.ReplaceAll(peer, "[", "")
 		peer = strings.ReplaceAll(peer, "]", "")
-
-		// Remove interface zone indexes like %en0 if they exist
 		if idx := strings.Index(peer, "%"); idx != -1 {
 			if colonIdx := strings.LastIndex(peer, ":"); colonIdx != -1 {
-				// Keep the port
 				peer = peer[:idx] + peer[colonIdx:]
 			} else {
 				peer = peer[:idx]
@@ -703,13 +840,14 @@ func statusCmd(nodeName, configPath string) {
 		return cBold + cCyan + name + cReset
 	}
 
+	// --- Build rows for each section ---
+
 	if len(cfg.Clipsync) > 0 {
 		addHeader(sectionTitle("clipsync"))
 		for _, cs := range cfg.Clipsync {
 			indicator, st, _ := getComponentInfo("clipsync", cs.Bind)
 			addRow("", indicator, colorAddr(cs.Bind), "", "", st)
 
-			// Collect peers: from live state if available, else fall back to config static peers
 			type peerEntry struct{ addr, label string }
 			var peerList []peerEntry
 			prefix := "clipsync-peer:" + cs.Bind + "|"
@@ -726,9 +864,9 @@ func statusCmd(nodeName, configPath string) {
 				}
 			}
 			for _, p := range peerList {
-				icon := "~" // discovered at runtime
+				icon := "~"
 				if p.label == "static" {
-					icon = "·" // configured/fixed
+					icon = "·"
 				}
 				addRow("   ", icon, colorAddr(p.addr), "", cGray+p.label+cReset, "")
 			}
@@ -746,16 +884,11 @@ func statusCmd(nodeName, configPath string) {
 				addRow("", indicator, left, "", "", st)
 			} else if l.Type == "relay" {
 				indicator, st, _ = getComponentInfo("relay", l.Bind)
-				left := colorAddr(l.Bind)
-				arrow := arrowRight
-				right := colorAddr(l.Target)
-				addRow("", indicator, left, arrow, right, st)
+				addRow("", indicator, colorAddr(l.Bind), arrowRight, colorAddr(l.Target), st)
 			} else {
-				// Proxy
 				indicator, st, _ = getComponentInfo("proxy", l.Bind)
 				left := padForProto(colorAddr(l.Bind)) + " " + cBlue + strings.ToLower(l.Type) + cReset
-				var right = ""
-				var arrow = ""
+				arrow, right := "", ""
 				if l.Target != "" {
 					right = colorAddr(l.Target)
 					arrow = arrowRight
@@ -767,20 +900,16 @@ func statusCmd(nodeName, configPath string) {
 			if err != nil {
 				searchPort = l.Bind
 			}
-
-			// Try matching by full bind first, then by port
 			dyns := dynamicByParent[l.Bind]
 			if len(dyns) == 0 {
 				dyns = dynamicByParent[searchPort]
 			}
-
 			if len(dyns) > 0 {
 				sort.Slice(dyns, func(i, j int) bool {
 					a := strings.SplitN(dyns[i].ID, "|", 2)[0]
 					b := strings.SplitN(dyns[j].ID, "|", 2)[0]
 					return compareAddr(a, b)
 				})
-				// Deduplicate if we somehow got both (since we populate both keys sometimes)
 				seenID := make(map[string]bool)
 				for _, comp := range dyns {
 					if seenID[comp.ID] {
@@ -788,11 +917,7 @@ func statusCmd(nodeName, configPath string) {
 					}
 					seenID[comp.ID] = true
 					parts := strings.Split(comp.ID, "|")
-					actualAddr := parts[0]
-					left := colorAddr(actualAddr)
-					right := colorAddr(cleanIPv6(comp.Message))
-
-					addRow("   ", "~", left, arrowRight, right, "")
+					addRow("   ", "~", colorAddr(parts[0]), arrowRight, colorAddr(cleanIPv6(comp.Message)), "")
 				}
 			}
 		}
@@ -811,7 +936,6 @@ func statusCmd(nodeName, configPath string) {
 					connectedTargets[comp.Message] = struct{}{}
 				}
 			}
-
 			for _, t := range c.Targets {
 				ind := "○"
 				if _, ok := connectedTargets[t]; ok {
@@ -823,31 +947,23 @@ func statusCmd(nodeName, configPath string) {
 			for _, fset := range c.Forwards {
 				id := c.Name + " [" + fset.Name + "]"
 				indicator, st, _ := getComponentInfo("connection", id)
-
-				left := sectionTitle(fset.Name)
-				addRow("", indicator, left, "", "", st)
+				addRow("", indicator, sectionTitle(fset.Name), "", "", st)
 
 				indent := "   "
-
 				for _, fwd := range fset.Local {
 					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
 					_, _, comp := getComponentInfo("forward", compID)
-
 					lStr := colorAddr(fwd.Bind)
 					if comp.BoundAddr != "" && comp.BoundAddr != fwd.Bind {
 						lStr = colorAddr(comp.BoundAddr) + " " + cGray + "(from " + fwd.Bind + ")" + cReset
 					}
-
 					if fwd.Type == "forward" {
-						rStr := colorAddr(fwd.Target)
-						addRow(indent, "", lStr, arrowRight, rStr, "")
-					} else { // socks, http
+						addRow(indent, "", lStr, arrowRight, colorAddr(fwd.Target), "")
+					} else {
 						lStr = padForProto(lStr) + " " + cBlue + strings.ToLower(fwd.Type) + cReset
-						rStr := ""
+						rStr := cGray + "🔒 tunnel" + cReset
 						if fwd.Target != "" {
 							rStr = colorAddr(fwd.Target)
-						} else {
-							rStr = cGray + "🔒 tunnel" + cReset
 						}
 						addRow(indent, "", lStr, arrowRight, rStr, "")
 					}
@@ -855,24 +971,18 @@ func statusCmd(nodeName, configPath string) {
 				for _, fwd := range fset.Remote {
 					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
 					_, _, comp := getComponentInfo("forward", compID)
-
 					rStr := colorAddr(fwd.Bind)
 					if comp.BoundAddr != "" && comp.BoundAddr != fwd.Bind {
 						rStr += colorAddr(comp.BoundAddr) + " " + cGray + "(from " + fwd.Bind + ")" + cReset
 					}
-
 					if fwd.Type == "forward" {
-						lStr := colorAddr(fwd.Target)
-						rStr := colorAddr(fwd.Bind)
-						addRow(indent, "", lStr, arrowLeft, rStr, "")
-					} else { // socks, http
-						lStr := ""
+						addRow(indent, "", colorAddr(fwd.Target), arrowLeft, colorAddr(fwd.Bind), "")
+					} else {
+						lStr := cGray + "🔒 tunnel" + cReset
 						if fwd.Target != "" {
 							lStr = colorAddr(fwd.Target)
-						} else {
-							lStr = cGray + "🔒 tunnel" + cReset
 						}
-						rStr := padForProto(colorAddr(fwd.Bind)) + " " + cBlue + strings.ToLower(fwd.Type) + cReset
+						rStr = padForProto(colorAddr(fwd.Bind)) + " " + cBlue + strings.ToLower(fwd.Type) + cReset
 						addRow(indent, "", lStr, arrowLeft, rStr, "")
 					}
 				}
@@ -890,27 +1000,25 @@ func statusCmd(nodeName, configPath string) {
 			}
 		}
 	}
-
 	if len(unmappedDynamic) > 0 {
 		sort.Slice(unmappedDynamic, func(i, j int) bool {
 			return compareAddr(unmappedDynamic[i].ID, unmappedDynamic[j].ID)
 		})
-
 		addHeader(cMagenta + "dynamic ports (unmapped)" + cReset)
 		for _, comp := range unmappedDynamic {
-			left := colorAddr(comp.ID)
-			right := colorAddr(cleanIPv6(comp.Message))
-			addRow("", "↳", left, arrowRight, right, "")
+			addRow("", "↳", colorAddr(comp.ID), arrowRight, colorAddr(cleanIPv6(comp.Message)), "")
 		}
 		addHeader("")
 	}
+
+	// --- Layout alignment ---
 
 	maxTotalLeft := 0
 	for _, r := range rows {
 		if !r.isHeader && r.left != "" && r.arrow != "" {
 			l := len(r.indent)
 			if r.indicator != "" {
-				l += 2 // '⚪ ' indicator plus space
+				l += 2
 			}
 			l += visibleLen(r.left)
 			if l > maxTotalLeft {
@@ -927,7 +1035,6 @@ func statusCmd(nodeName, configPath string) {
 				line += r.indicator + " "
 			}
 			line += r.left
-
 			if r.arrow != "" || r.right != "" {
 				currentLen := visibleLen(line)
 				padLen := 0
@@ -937,29 +1044,23 @@ func statusCmd(nodeName, configPath string) {
 				line += strings.Repeat(" ", padLen+1) + r.arrow + " " + r.right
 			}
 			rows[i].text = line
-
-			l := visibleLen(line)
-			if l > maxLineLen {
+			if l := visibleLen(line); l > maxLineLen {
 				maxLineLen = l
 			}
 		}
 	}
 
 	statusPadCol := maxLineLen + 1
-
-	// Don't pad out further than 60 characters so short rows don't push statuses too far out
 	if statusPadCol > 60 {
 		statusPadCol = 60
 	}
 
 	for _, r := range rows {
 		if r.isHeader {
-			fmt.Println(r.text)
+			writeln(r.text)
 			continue
 		}
-
 		line := r.text
-
 		if r.status != "" {
 			lineLen := visibleLen(line)
 			if lineLen < statusPadCol {
@@ -969,9 +1070,53 @@ func statusCmd(nodeName, configPath string) {
 			}
 			line += r.status
 		}
-		fmt.Println(strings.TrimRight(line, " "))
+		writeln(strings.TrimRight(line, " "))
 	}
 
+	return w.String()
+}
+
+func statusCmd(nodeName, configPath string) {
+	pid, err := readPidFile(nodeName)
+	if err != nil || pid == 0 {
+		fmt.Printf("%s⨯ mesh node %q is not running.%s\n", cRed, nodeName, cReset)
+		os.Exit(3)
+	}
+
+	if !checkPid(pid) {
+		fmt.Printf("%s⨯ mesh node %q is dead but pidfile exists (pid %d).%s\n", cRed, nodeName, pid, cReset)
+		os.Exit(1)
+	}
+
+	fmt.Printf("%s✔ mesh node %q is running (pid %d).%s\n\n", cGreen, nodeName, pid, cReset)
+
+	var activeState map[string]state.Component
+	if portData, err := os.ReadFile(portFilePath(nodeName)); err == nil {
+		if resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/", string(portData))); err == nil {
+			defer resp.Body.Close()
+			json.NewDecoder(resp.Body).Decode(&activeState)
+		}
+	}
+
+	logHandler := tint.NewHandler(os.Stderr, &tint.Options{
+		Level:      slog.LevelInfo,
+		TimeFormat: "15:04:05.000",
+	})
+	log := slog.New(&padMessageHandler{Handler: logHandler, width: 30})
+	slog.SetDefault(log)
+
+	cfgs, err := config.LoadUnvalidated(configPath)
+	if err != nil {
+		fmt.Printf("%s⚠ Could not load configuration to show details: %v%s\n", cYellow, err, cReset)
+		os.Exit(0)
+	}
+	cfg, ok := cfgs[nodeName]
+	if !ok {
+		fmt.Printf("%s⚠ Node %q not found in config%s\n", cYellow, nodeName, cReset)
+		os.Exit(0)
+	}
+
+	fmt.Print(renderStatus(cfg, activeState, nodeName))
 	os.Exit(0)
 }
 

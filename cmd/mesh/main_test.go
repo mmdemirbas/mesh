@@ -4,7 +4,11 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strings"
 	"testing"
+
+	"github.com/mmdemirbas/mesh/internal/config"
+	"github.com/mmdemirbas/mesh/internal/state"
 )
 
 func TestParseIPv4(t *testing.T) {
@@ -209,6 +213,113 @@ func BenchmarkCompareAddr(b *testing.B) {
 				compareAddr(p[0], p[1])
 			}
 		})
+	}
+}
+
+func TestLogRing(t *testing.T) {
+	r := newLogRing(3)
+
+	// Empty ring
+	if lines := r.Lines(); len(lines) != 0 {
+		t.Errorf("empty ring has %d lines", len(lines))
+	}
+
+	// Add fewer than capacity
+	r.Write([]byte("line1\n"))
+	r.Write([]byte("line2\n"))
+	lines := r.Lines()
+	if len(lines) != 2 || lines[0] != "line1" || lines[1] != "line2" {
+		t.Errorf("got %v, want [line1 line2]", lines)
+	}
+
+	// Fill and wrap around
+	r.Write([]byte("line3\n"))
+	r.Write([]byte("line4\n"))
+	lines = r.Lines()
+	if len(lines) != 3 || lines[0] != "line2" || lines[1] != "line3" || lines[2] != "line4" {
+		t.Errorf("after wrap: got %v, want [line2 line3 line4]", lines)
+	}
+}
+
+func TestLogRing_MultiLineWrite(t *testing.T) {
+	r := newLogRing(5)
+	r.Write([]byte("a\nb\nc\n"))
+	lines := r.Lines()
+	if len(lines) != 3 || lines[0] != "a" || lines[1] != "b" || lines[2] != "c" {
+		t.Errorf("got %v, want [a b c]", lines)
+	}
+}
+
+func TestLogRing_LinesIsACopy(t *testing.T) {
+	r := newLogRing(3)
+	r.Write([]byte("x\n"))
+	lines := r.Lines()
+	lines[0] = "mutated"
+	if r.Lines()[0] == "mutated" {
+		t.Error("Lines() returned a reference, not a copy")
+	}
+}
+
+func TestRenderStatus_Empty(t *testing.T) {
+	cfg := &config.Config{}
+	output := renderStatus(cfg, nil, "testnode")
+	if !strings.Contains(output, "testnode") {
+		t.Error("output should contain the node name")
+	}
+	if !strings.Contains(output, "Configuration") {
+		t.Error("output should contain the header")
+	}
+}
+
+func TestRenderStatus_WithListeners(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "socks", Bind: "127.0.0.1:1080"},
+			{Type: "http", Bind: "127.0.0.1:3128"},
+		},
+	}
+	activeState := map[string]state.Component{
+		"proxy:127.0.0.1:1080": {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
+		"proxy:127.0.0.1:3128": {Type: "proxy", ID: "127.0.0.1:3128", Status: state.Failed, Message: "bind error"},
+	}
+	output := renderStatus(cfg, activeState, "testnode")
+	if !strings.Contains(output, "listeners") {
+		t.Error("output should contain 'listeners' section")
+	}
+	if !strings.Contains(output, "1080") {
+		t.Error("output should contain port 1080")
+	}
+	if !strings.Contains(output, "listening") {
+		t.Error("output should show listening status")
+	}
+	if !strings.Contains(output, "failed") {
+		t.Error("output should show failed status")
+	}
+}
+
+func TestRenderStatus_WithConnections(t *testing.T) {
+	cfg := &config.Config{
+		Connections: []config.Connection{
+			{
+				Name:    "remote",
+				Targets: []string{"root@10.0.0.1:22"},
+				Forwards: []config.ForwardSet{
+					{
+						Name: "web",
+						Local: []config.Forward{
+							{Type: "forward", Bind: "127.0.0.1:8080", Target: "10.0.0.1:80"},
+						},
+					},
+				},
+			},
+		},
+	}
+	output := renderStatus(cfg, nil, "testnode")
+	if !strings.Contains(output, "remote") {
+		t.Error("output should contain connection name")
+	}
+	if !strings.Contains(output, "8080") {
+		t.Error("output should contain forward bind port")
 	}
 }
 
