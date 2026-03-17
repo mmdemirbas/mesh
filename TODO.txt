@@ -1,16 +1,13 @@
 LOGGING
 - Improve logging. Make it more human readable rather than being cryptic and semi-structured.
-- Implement watch mode for ps/status subcommand to see live changes.
 - Implement an optional monitoring port (configurable) and web UI with a live dashboard.
 
 PERFORMANCE
 - Support mux / multiplex connection type to allow creating a ConnectionMaster for a specific connection path.
 - Allow granular control of connections without restarting the whole app. -> is this really necessary? I think NO.
-- Optimize performance by carefully reviewing and improving the code.
 
 USABILITY
 - Support unsupported ssh/sshd options.
 - Consider adding config monitoring and hot-reloading feature
-- Implement 'mesh config' to show a summary of all available nodes and corresponding configurations.
 - Consider implementing an "admin" feature to allow running pre-defined commands / scripts remotely
 - Implement a "help" command to provide detailed usage instructions and examples for each subcommand.

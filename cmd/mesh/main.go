@@ -270,8 +270,10 @@ func (s addrSorter) Swap(i, j int) {
 
 func main() {
 	var configPath string
+	var watchMode bool
 	flag.StringVar(&configPath, "f", "", "Path to config file")
 	flag.StringVar(&configPath, "file", "", "Path to config file")
+	flag.BoolVar(&watchMode, "w", false, "Watch mode: continuously refresh (for status command)")
 	flag.Usage = printUsage
 	flag.Parse()
 
@@ -292,7 +294,9 @@ func main() {
 	case "up":
 		upCmd(nodeName, configPath)
 	case "status":
-		statusCmd(nodeName, configPath)
+		statusCmd(nodeName, configPath, watchMode)
+	case "config":
+		configCmd(nodeName, configPath)
 	case "down":
 		downCmd(nodeName)
 	default:
@@ -310,9 +314,10 @@ func printUsage() {
 	fmt.Println("  mesh " + cYellow + "[-f config.yaml] " + cReset + cCyan + "<node> <command>" + cReset + " [arguments]")
 	fmt.Println()
 	fmt.Println(cBold + "Commands:" + cReset)
-	fmt.Println("  " + cBlue + "up" + cReset + "     Start the specified mesh node")
+	fmt.Println("  " + cBlue + "up" + cReset + "     Start the specified mesh node (live dashboard when running in a terminal)")
 	fmt.Println("  " + cBlue + "down" + cReset + "   Stop the currently running mesh node")
-	fmt.Println("  " + cBlue + "status" + cReset + " Check if the mesh node is running and show its active configuration")
+	fmt.Println("  " + cBlue + "status" + cReset + " Show live status of a running node (use " + cYellow + "-w" + cReset + " for watch mode)")
+	fmt.Println("  " + cBlue + "config" + cReset + " Show the parsed configuration for a node without starting it")
 	fmt.Println()
 	fmt.Println(cBold + "Examples:" + cReset)
 	fmt.Println("  " + cGray + "# Start the 'server' node using the default configuration file" + cReset)
@@ -1076,7 +1081,22 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, no
 	return w.String()
 }
 
-func statusCmd(nodeName, configPath string) {
+func fetchState(nodeName string) map[string]state.Component {
+	portData, err := os.ReadFile(portFilePath(nodeName))
+	if err != nil {
+		return nil
+	}
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/", string(portData)))
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var s map[string]state.Component
+	json.NewDecoder(resp.Body).Decode(&s)
+	return s
+}
+
+func statusCmd(nodeName, configPath string, watch bool) {
 	pid, err := readPidFile(nodeName)
 	if err != nil || pid == 0 {
 		fmt.Printf("%s⨯ mesh node %q is not running.%s\n", cRed, nodeName, cReset)
@@ -1086,16 +1106,6 @@ func statusCmd(nodeName, configPath string) {
 	if !checkPid(pid) {
 		fmt.Printf("%s⨯ mesh node %q is dead but pidfile exists (pid %d).%s\n", cRed, nodeName, pid, cReset)
 		os.Exit(1)
-	}
-
-	fmt.Printf("%s✔ mesh node %q is running (pid %d).%s\n\n", cGreen, nodeName, pid, cReset)
-
-	var activeState map[string]state.Component
-	if portData, err := os.ReadFile(portFilePath(nodeName)); err == nil {
-		if resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/", string(portData))); err == nil {
-			defer resp.Body.Close()
-			json.NewDecoder(resp.Body).Decode(&activeState)
-		}
 	}
 
 	logHandler := tint.NewHandler(os.Stderr, &tint.Options{
@@ -1116,8 +1126,69 @@ func statusCmd(nodeName, configPath string) {
 		os.Exit(0)
 	}
 
-	fmt.Print(renderStatus(cfg, activeState, nodeName))
-	os.Exit(0)
+	if !watch {
+		// One-shot mode
+		fmt.Printf("%s✔ mesh node %q is running (pid %d).%s\n\n", cGreen, nodeName, pid, cReset)
+		fmt.Print(renderStatus(cfg, fetchState(nodeName), nodeName))
+		os.Exit(0)
+	}
+
+	// Watch mode — live refresh like the dashboard
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	winch := winchSignal()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	fmt.Print("\033[?25l") // hide cursor
+	defer fmt.Print("\033[?25h\n")
+
+	render := func() {
+		if !checkPid(pid) {
+			fmt.Print("\033[H\033[2J\033[?25h")
+			fmt.Printf("%s⨯ mesh node %q has stopped.%s\n", cRed, nodeName, cReset)
+			os.Exit(0)
+		}
+		var header strings.Builder
+		header.WriteString(fmt.Sprintf("%s✔ mesh node %q is running (pid %d)%s | %s\n\n",
+			cGreen, nodeName, pid, cReset, time.Now().Format("15:04:05")))
+		output := header.String() + renderStatus(cfg, fetchState(nodeName), nodeName)
+		fmt.Print("\033[H\033[2J" + output)
+	}
+
+	render()
+	for {
+		select {
+		case <-sigCh:
+			return
+		case <-ticker.C:
+			render()
+		case <-winch:
+			render()
+		}
+	}
+}
+
+func configCmd(nodeName, configPath string) {
+	cfgs, err := config.LoadUnvalidated(configPath)
+	if err != nil {
+		fmt.Printf("%s⨯ Could not load configuration: %v%s\n", cRed, err, cReset)
+		os.Exit(1)
+	}
+
+	cfg, ok := cfgs[nodeName]
+	if !ok {
+		// If the requested node doesn't exist, list available nodes
+		fmt.Printf("%s⨯ Node %q not found in %s%s\n\n", cRed, nodeName, configPath, cReset)
+		fmt.Printf("%sAvailable nodes:%s\n", cBold, cReset)
+		for name := range cfgs {
+			fmt.Printf("  %s%s%s\n", cCyan, name, cReset)
+		}
+		os.Exit(1)
+	}
+
+	fmt.Print(renderStatus(cfg, nil, nodeName))
 }
 
 func downCmd(nodeName string) {
