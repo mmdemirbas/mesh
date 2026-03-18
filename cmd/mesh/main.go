@@ -609,8 +609,10 @@ func upCmd(nodeName, configPath string) {
 	log.Info("mesh gracefully stopped")
 
 	if useDashboard {
-		// Final static render after shutdown
-		fmt.Print("\033[H\033[2J\033[?25h") // clear screen, show cursor
+		// The deferred runDashboard cleanup restores the original screen (alternate buffer exit).
+		// Print the final static status to the normal terminal so the user sees the shutdown state.
+		// Small delay to let the alternate screen buffer exit complete.
+		time.Sleep(50 * time.Millisecond)
 		fmt.Print(renderStatus(cfg, state.Global.Snapshot(), nodeName))
 	}
 }
@@ -761,63 +763,65 @@ func (r *logRing) Lines() []string {
 }
 
 // runDashboard renders a live status screen that refreshes periodically.
-// It reads state directly from state.Global (in-process) rather than HTTP.
+// It uses the terminal's alternate screen buffer (like vim, top, htop) so the
+// dashboard doesn't pollute scrollback and the user's previous terminal content
+// is restored when the dashboard exits. Rendering overwrites in-place line by
+// line to avoid flicker — no full screen clear is needed.
 func runDashboard(ctx context.Context, cfg *config.Config, nodeName string, logFilePath string, ring *logRing) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	// Hide cursor while dashboard is active
-	fmt.Print("\033[?25l")
-	defer fmt.Print("\033[?25h")
+	// Enter alternate screen buffer and hide cursor
+	fmt.Print("\033[?1049h\033[?25l")
+	defer fmt.Print("\033[?25h\033[?1049l") // show cursor, leave alternate screen
 
 	render := func() {
-		var buf strings.Builder
+		var lines []string
 
-		// Header line
-		buf.WriteString(fmt.Sprintf("%s%smesh %s%s | pid %d | %s",
-			cBold, cCyan, nodeName, cReset, os.Getpid(), time.Now().Format("15:04:05")))
+		// Header
+		header := fmt.Sprintf("%s%smesh %s%s | pid %d | %s",
+			cBold, cCyan, nodeName, cReset, os.Getpid(), time.Now().Format("15:04:05"))
 		if logFilePath != "" {
-			buf.WriteString(fmt.Sprintf(" | log: %s%s%s", cGray, logFilePath, cReset))
+			header += fmt.Sprintf(" | log: %s%s%s", cGray, logFilePath, cReset)
 		}
-		buf.WriteByte('\n')
-		buf.WriteByte('\n')
+		lines = append(lines, header, "")
 
 		// Status body
 		statusOutput := renderStatus(cfg, state.Global.Snapshot(), nodeName)
-		buf.WriteString(statusOutput)
+		lines = append(lines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
 
-		// Determine how many log lines fit in the remaining terminal height.
-		// Dashboard content always takes priority over logs.
+		// Log tail — fill remaining terminal height
 		logLines := ring.Lines()
 		if len(logLines) > 0 {
-			termHeight := 24 // safe default
+			termHeight := 24
 			if _, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && h > 0 {
 				termHeight = h
 			}
-			// Count lines used by header (2) + status body
-			usedLines := 2 + strings.Count(statusOutput, "\n")
-			// Reserve 1 line for the separator, leave at least 0 for logs
-			available := termHeight - usedLines - 1
+			available := termHeight - len(lines) - 1 // -1 for separator
 			if available > len(logLines) {
 				available = len(logLines)
 			}
 			if available > 0 {
-				// Show only the most recent lines that fit
-				visibleLogs := logLines[len(logLines)-available:]
-				buf.WriteString(cGray + strings.Repeat("─", 80) + cReset + "\n")
-				for _, line := range visibleLogs {
-					buf.WriteString(line + "\033[K\n")
-				}
+				lines = append(lines, cGray+strings.Repeat("─", 80)+cReset)
+				lines = append(lines, logLines[len(logLines)-available:]...)
 			}
 		}
 
-		// Clear screen, move home, write buffer
-		fmt.Print("\033[H\033[2J" + buf.String())
+		// Overwrite in-place: cursor home, then each line + clear-to-EOL.
+		// After all lines, clear from cursor to end of screen (removes stale content).
+		var buf strings.Builder
+		buf.WriteString("\033[H") // cursor home — no clear
+		for _, line := range lines {
+			buf.WriteString(line)
+			buf.WriteString("\033[K\n") // clear to end of line, then newline
+		}
+		buf.WriteString("\033[J") // clear from cursor to end of screen
+		fmt.Print(buf.String())
 	}
 
-	winch := winchSignal() // immediate re-render on terminal resize (Unix); nil on Windows
+	winch := winchSignal()
 
-	render() // initial render immediately
+	render()
 	for {
 		select {
 		case <-ctx.Done():
@@ -1271,7 +1275,7 @@ func statusCmd(nodeName, configPath string, watch bool) {
 		os.Exit(0)
 	}
 
-	// Watch mode — live refresh like the dashboard
+	// Watch mode — alternate screen buffer, overwrite in-place
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	winch := winchSignal()
@@ -1279,20 +1283,29 @@ func statusCmd(nodeName, configPath string, watch bool) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	fmt.Print("\033[?25l") // hide cursor
-	defer fmt.Print("\033[?25h\n")
+	fmt.Print("\033[?1049h\033[?25l") // alternate screen, hide cursor
+	defer fmt.Print("\033[?25h\033[?1049l")
 
 	render := func() {
 		if !checkPid(pid) {
-			fmt.Print("\033[H\033[2J\033[?25h")
+			fmt.Print("\033[?25h\033[?1049l") // restore screen
 			fmt.Printf("%s⨯ mesh node %q has stopped.%s\n", cRed, nodeName, cReset)
 			os.Exit(0)
 		}
-		var header strings.Builder
-		header.WriteString(fmt.Sprintf("%s✔ mesh node %q is running (pid %d)%s | %s\n\n",
-			cGreen, nodeName, pid, cReset, time.Now().Format("15:04:05")))
-		output := header.String() + renderStatus(cfg, fetchState(nodeName), nodeName)
-		fmt.Print("\033[H\033[2J" + output)
+		header := fmt.Sprintf("%s✔ mesh node %q is running (pid %d)%s | %s",
+			cGreen, nodeName, pid, cReset, time.Now().Format("15:04:05"))
+		statusOutput := renderStatus(cfg, fetchState(nodeName), nodeName)
+		lines := []string{header, ""}
+		lines = append(lines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
+
+		var buf strings.Builder
+		buf.WriteString("\033[H") // cursor home
+		for _, line := range lines {
+			buf.WriteString(line)
+			buf.WriteString("\033[K\n")
+		}
+		buf.WriteString("\033[J") // clear to end of screen
+		fmt.Print(buf.String())
 	}
 
 	render()

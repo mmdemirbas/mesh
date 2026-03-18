@@ -2,7 +2,6 @@ LOGGING
 - Implement an optional monitoring port (configurable) and web UI with a live dashboard.
 
 PERFORMANCE
-- Support mux / multiplex connection type to allow creating a ConnectionMaster for a specific connection path.
 - Allow granular control of connections without restarting the whole app. -> is this really necessary? I think NO.
 
 USABILITY
