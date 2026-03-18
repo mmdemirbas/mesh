@@ -35,7 +35,8 @@ var version = "dev"
 
 var ansiStripRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
-const (
+// ANSI color codes. Disabled when NO_COLOR env var is set (https://no-color.org/).
+var (
 	cReset   = "\033[0m"
 	cBold    = "\033[1m"
 	cRed     = "\033[31m"
@@ -46,6 +47,20 @@ const (
 	cCyan    = "\033[36m"
 	cGray    = "\033[90m"
 )
+
+func init() {
+	if _, ok := os.LookupEnv("NO_COLOR"); ok {
+		cReset = ""
+		cBold = ""
+		cRed = ""
+		cGreen = ""
+		cYellow = ""
+		cBlue = ""
+		cMagenta = ""
+		cCyan = ""
+		cGray = ""
+	}
+}
 
 // addrKey is a pre-parsed, comparable sort key for an address string.
 // The IP is stored as two uint64s for single-instruction comparison on 64-bit CPUs.
@@ -271,11 +286,18 @@ func (s addrSorter) Swap(i, j int) {
 func main() {
 	var configPath string
 	var watchMode bool
+	var showVersion bool
 	flag.StringVar(&configPath, "f", "", "Path to config file")
 	flag.StringVar(&configPath, "file", "", "Path to config file")
 	flag.BoolVar(&watchMode, "w", false, "Watch mode: continuously refresh (for status command)")
+	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.Usage = printUsage
 	flag.Parse()
+
+	if showVersion {
+		fmt.Println("mesh " + version)
+		return
+	}
 
 	args := flag.Args()
 	if len(args) < 2 {
