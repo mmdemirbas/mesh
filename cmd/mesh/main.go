@@ -510,7 +510,7 @@ func upCmd(nodeName, configPath string) {
 	adminLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err == nil {
 		port := adminLn.Addr().(*net.TCPAddr).Port
-		os.WriteFile(portFilePath(nodeName), []byte(strconv.Itoa(port)), 0600)
+		_ = os.WriteFile(portFilePath(nodeName), []byte(strconv.Itoa(port)), 0600)
 		defer os.Remove(portFilePath(nodeName))
 
 		adminSrv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

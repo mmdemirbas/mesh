@@ -580,7 +580,7 @@ func TestValidate_ConnectionPasswordCommandAuth(t *testing.T) {
 
 func TestValidate_InvalidMode(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "key")
-	os.WriteFile(f, []byte("key"), 0644)
+	_ = os.WriteFile(f, []byte("key"), 0644)
 
 	cfg := &Config{
 		Connections: []Connection{{

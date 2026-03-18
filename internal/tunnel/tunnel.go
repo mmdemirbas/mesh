@@ -180,7 +180,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 		conn.Close()
 		return
 	}
-	conn.SetDeadline(time.Time{}) // clear deadline; data flows indefinitely
+	_ = conn.SetDeadline(time.Time{}) // clear deadline; data flows indefinitely
 	defer sshConn.Close()
 
 	// Per-connection context so background goroutines (keep-alive, forwarding)
@@ -476,7 +476,7 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 
 		t1 := time.Now()
 		if sshCfg.Timeout > 0 {
-			conn.SetDeadline(time.Now().Add(sshCfg.Timeout))
+			_ = conn.SetDeadline(time.Now().Add(sshCfg.Timeout))
 		}
 		sshConn, chans, reqs, err := ssh.NewClientConn(conn, hostPort, sshCfg)
 		if err != nil {
@@ -490,7 +490,7 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 				continue
 			}
 		}
-		conn.SetDeadline(time.Time{})
+		_ = conn.SetDeadline(time.Time{})
 		client := ssh.NewClient(sshConn, chans, reqs)
 
 		state.Global.Update("connection", id, state.Connected, target)
@@ -570,7 +570,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 
 		t1 := time.Now()
 		if sshCfg.Timeout > 0 {
-			conn.SetDeadline(time.Now().Add(sshCfg.Timeout))
+			_ = conn.SetDeadline(time.Now().Add(sshCfg.Timeout))
 		}
 		sshConn, chans, reqs, err := ssh.NewClientConn(conn, host, sshCfg)
 		if err != nil {
@@ -584,7 +584,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 				continue
 			}
 		}
-		conn.SetDeadline(time.Time{}) // clear deadline; data flows indefinitely
+		_ = conn.SetDeadline(time.Time{}) // clear deadline; data flows indefinitely
 		client := ssh.NewClient(sshConn, chans, reqs)
 
 		state.Global.Update("connection", id, state.Connected, target)
