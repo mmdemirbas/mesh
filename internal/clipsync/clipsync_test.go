@@ -423,7 +423,7 @@ func newTestNode(t *testing.T, allowReceive []string) (*Node, string, func()) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(data)
+		_, _ = w.Write(data)
 	})
 	fileServer := http.StripPrefix("/files/", http.FileServer(http.Dir(n.filesDir)))
 	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {

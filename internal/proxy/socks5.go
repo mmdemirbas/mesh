@@ -34,7 +34,7 @@ func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), 
 	defer conn.Close()
 
 	// Set a deadline for the SOCKS5 handshake to prevent slowloris attacks
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	if dialer == nil {
 		dialer = func(network, addr string) (net.Conn, error) {
@@ -64,7 +64,7 @@ func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), 
 		return
 	}
 	if buf[0] != 0x05 || buf[1] != 0x01 || buf[2] != 0x00 { // Only CONNECT, RSV must be 0x00
-		socksReply(conn, 0x07)
+		_ = socksReply(conn, 0x07)
 		return
 	}
 
@@ -90,7 +90,7 @@ func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), 
 		}
 		destAddr = net.IP(buf[:16]).String()
 	default:
-		socksReply(conn, 0x08)
+		_ = socksReply(conn, 0x08)
 		return
 	}
 
@@ -103,7 +103,7 @@ func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), 
 	remote, err := dialer("tcp", target)
 	if err != nil {
 		log.Debug("SOCKS connect failed", "target", target, "error", err)
-		socksReply(conn, 0x05)
+		_ = socksReply(conn, 0x05)
 		return
 	}
 	defer remote.Close()
@@ -112,7 +112,7 @@ func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), 
 		return
 	}
 	// Clear handshake deadline before entering data relay
-	conn.SetDeadline(time.Time{})
+	_ = conn.SetDeadline(time.Time{})
 	netutil.BiCopy(conn, remote)
 }
 

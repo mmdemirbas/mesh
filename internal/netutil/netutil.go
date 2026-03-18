@@ -13,13 +13,13 @@ import (
 // instead of lingering politely in TIME_WAIT, keeping proxy listener ports clean.
 func ApplyTCPKeepAlive(conn net.Conn, period time.Duration) {
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlive(true)
 		if period == 0 {
 			period = 30 * time.Second
 		}
-		tcpConn.SetKeepAlivePeriod(period)
-		tcpConn.SetNoDelay(true)
-		tcpConn.SetLinger(0)
+		_ = tcpConn.SetKeepAlivePeriod(period)
+		_ = tcpConn.SetNoDelay(true)
+		_ = tcpConn.SetLinger(0)
 	}
 }
 
@@ -39,18 +39,18 @@ func BiCopy(a, b io.ReadWriteCloser) {
 		defer wg.Done()
 		bufPtr := copyBufPool.Get().(*[]byte)
 		defer copyBufPool.Put(bufPtr)
-		io.CopyBuffer(a, b, *bufPtr)
+		_, _ = io.CopyBuffer(a, b, *bufPtr)
 		if c, ok := a.(interface{ CloseWrite() error }); ok {
-			c.CloseWrite()
+			_ = c.CloseWrite()
 		}
 	}()
 	go func() {
 		defer wg.Done()
 		bufPtr := copyBufPool.Get().(*[]byte)
 		defer copyBufPool.Put(bufPtr)
-		io.CopyBuffer(b, a, *bufPtr)
+		_, _ = io.CopyBuffer(b, a, *bufPtr)
 		if c, ok := b.(interface{ CloseWrite() error }); ok {
-			c.CloseWrite()
+			_ = c.CloseWrite()
 		}
 	}()
 	wg.Wait()

@@ -261,28 +261,6 @@ func compareAddr(a, b string) bool {
 	return makeAddrKey(a).less(makeAddrKey(b))
 }
 
-// sortAddrs sorts a string slice of addresses semantically by IP then port.
-// It pre-parses all addresses once, avoiding repeated parsing inside the comparator.
-func sortAddrs(addrs []string) {
-	keys := make([]addrKey, len(addrs))
-	for i, a := range addrs {
-		keys[i] = makeAddrKey(a)
-	}
-	sort.Sort(addrSorter{addrs: addrs, keys: keys})
-}
-
-type addrSorter struct {
-	addrs []string
-	keys  []addrKey
-}
-
-func (s addrSorter) Len() int           { return len(s.addrs) }
-func (s addrSorter) Less(i, j int) bool { return s.keys[i].less(s.keys[j]) }
-func (s addrSorter) Swap(i, j int) {
-	s.addrs[i], s.addrs[j] = s.addrs[j], s.addrs[i]
-	s.keys[i], s.keys[j] = s.keys[j], s.keys[i]
-}
-
 func main() {
 	var configPath string
 	var watchMode bool
@@ -476,7 +454,7 @@ func upCmd(nodeName, configPath string) {
 	if useDashboard {
 		home, _ := os.UserHomeDir()
 		logDir := filepath.Join(home, ".mesh", "log")
-		os.MkdirAll(logDir, 0755)
+		_ = os.MkdirAll(logDir, 0755)
 		logFilePath = filepath.Join(logDir, nodeName+".log")
 		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
@@ -537,9 +515,9 @@ func upCmd(nodeName, configPath string) {
 
 		adminSrv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(state.Global.Snapshot())
+			_ = json.NewEncoder(w).Encode(state.Global.Snapshot())
 		})}
-		go adminSrv.Serve(adminLn)
+		go func() { _ = adminSrv.Serve(adminLn) }()
 		context.AfterFunc(ctx, func() { adminSrv.Close() })
 	}
 
@@ -703,10 +681,10 @@ func (h *multiHandler) Enabled(ctx context.Context, level slog.Level) bool {
 
 func (h *multiHandler) Handle(ctx context.Context, r slog.Record) error {
 	if h.plain.Enabled(ctx, r.Level) {
-		h.plain.Handle(ctx, r)
+		_ = h.plain.Handle(ctx, r)
 	}
 	if h.color.Enabled(ctx, r.Level) {
-		h.color.Handle(ctx, r)
+		_ = h.color.Handle(ctx, r)
 	}
 	return nil
 }
@@ -1024,16 +1002,15 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, no
 	if len(cfg.Listeners) > 0 {
 		addHeader(sectionTitle("listeners"))
 		for _, l := range cfg.Listeners {
-			indicator, st, _ := getComponentInfo(l.Type, l.Bind)
 			if l.Type == "sshd" {
-				indicator, st, _ = getComponentInfo("server", l.Bind)
+				indicator, st, _ := getComponentInfo("server", l.Bind)
 				left := padForProto(colorAddr(l.Bind)) + " " + cBlue + strings.ToLower(l.Type) + cReset
 				addRow("", indicator, left, "", "", st)
 			} else if l.Type == "relay" {
-				indicator, st, _ = getComponentInfo("relay", l.Bind)
+				indicator, st, _ := getComponentInfo("relay", l.Bind)
 				addRow("", indicator, colorAddr(l.Bind), arrowRight, colorAddr(l.Target), st)
 			} else {
-				indicator, st, _ = getComponentInfo("proxy", l.Bind)
+				indicator, st, _ := getComponentInfo("proxy", l.Bind)
 				left := padForProto(colorAddr(l.Bind)) + " " + cBlue + strings.ToLower(l.Type) + cReset
 				arrow, right := "", ""
 				if l.Target != "" {
@@ -1116,12 +1093,6 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, no
 					}
 				}
 				for _, fwd := range fset.Remote {
-					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
-					_, _, comp := getComponentInfo("forward", compID)
-					rStr := colorAddr(fwd.Bind)
-					if comp.BoundAddr != "" && comp.BoundAddr != fwd.Bind {
-						rStr += colorAddr(comp.BoundAddr) + " " + cGray + "(from " + fwd.Bind + ")" + cReset
-					}
 					if fwd.Type == "forward" {
 						addRow(indent, "", colorAddr(fwd.Target), arrowLeft, colorAddr(fwd.Bind), "")
 					} else {
@@ -1129,7 +1100,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, no
 						if fwd.Target != "" {
 							lStr = colorAddr(fwd.Target)
 						}
-						rStr = padForProto(colorAddr(fwd.Bind)) + " " + cBlue + strings.ToLower(fwd.Type) + cReset
+						rStr := padForProto(colorAddr(fwd.Bind)) + " " + cBlue + strings.ToLower(fwd.Type) + cReset
 						addRow(indent, "", lStr, arrowLeft, rStr, "")
 					}
 				}
@@ -1234,7 +1205,7 @@ func fetchState(nodeName string) map[string]state.Component {
 	}
 	defer resp.Body.Close()
 	var s map[string]state.Component
-	json.NewDecoder(resp.Body).Decode(&s)
+	_ = json.NewDecoder(resp.Body).Decode(&s)
 	return s
 }
 
@@ -1380,7 +1351,7 @@ func portFilePath(nodeName string) string {
 			dir = os.TempDir()
 		}
 	}
-	os.MkdirAll(filepath.Join(dir, "mesh"), 0700)
+	_ = os.MkdirAll(filepath.Join(dir, "mesh"), 0700)
 	return filepath.Join(dir, "mesh", fmt.Sprintf("mesh-%s.port", nodeName))
 }
 
@@ -1392,7 +1363,7 @@ func pidFilePath(nodeName string) string {
 			dir = os.TempDir()
 		}
 	}
-	os.MkdirAll(filepath.Join(dir, "mesh"), 0700)
+	_ = os.MkdirAll(filepath.Join(dir, "mesh"), 0700)
 	return filepath.Join(dir, "mesh", fmt.Sprintf("mesh-%s.pid", nodeName))
 }
 

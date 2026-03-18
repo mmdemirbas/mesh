@@ -34,8 +34,8 @@ func TestBiCopy_BidirectionalData(t *testing.T) {
 		buf := make([]byte, 1024)
 		n, _ := conn.Read(buf)
 		serverGot = buf[:n]
-		conn.Write(serverData)
-		conn.(*net.TCPConn).CloseWrite()
+		_, _ = conn.Write(serverData)
+		_ = conn.(*net.TCPConn).CloseWrite()
 	}()
 
 	client, err := net.Dial("tcp", ln.Addr().String())
@@ -43,8 +43,8 @@ func TestBiCopy_BidirectionalData(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	client.Write(clientData)
-	client.(*net.TCPConn).CloseWrite()
+	_, _ = client.Write(clientData)
+	_ = client.(*net.TCPConn).CloseWrite()
 
 	clientGot, _ := io.ReadAll(client)
 	client.Close()
@@ -78,7 +78,7 @@ func TestBiCopy_RelayThroughProxy(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		io.Copy(conn, conn) // echo
+		_, _ = io.Copy(conn, conn) // echo
 	}()
 
 	// Proxy server that relays using BiCopy
@@ -113,8 +113,8 @@ func TestBiCopy_RelayThroughProxy(t *testing.T) {
 	}
 
 	testData := []byte("proxied data round trip")
-	client.Write(testData)
-	client.(*net.TCPConn).CloseWrite()
+	_, _ = client.Write(testData)
+	_ = client.(*net.TCPConn).CloseWrite()
 
 	got, _ := io.ReadAll(client)
 	client.Close()
@@ -150,7 +150,7 @@ func TestBiCopy_LargePayload(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		io.Copy(conn, conn) // echo
+		_, _ = io.Copy(conn, conn) // echo
 	}()
 
 	proxy, err := net.Listen("tcp", "127.0.0.1:0")
@@ -180,8 +180,8 @@ func TestBiCopy_LargePayload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	client.Write(payload)
-	client.(*net.TCPConn).CloseWrite()
+	_, _ = client.Write(payload)
+	_ = client.(*net.TCPConn).CloseWrite()
 
 	got, _ := io.ReadAll(client)
 	client.Close()

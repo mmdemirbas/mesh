@@ -168,7 +168,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 
 	// Set a handshake deadline to prevent slowloris-style attacks where a client
 	// connects but never completes the SSH handshake, holding resources indefinitely.
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, cfg)
 	if err != nil {
@@ -210,7 +210,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 				go handleCancelTCPIPForward(req, &mu, listeners, s.log)
 			default:
 				if req.WantReply {
-					req.Reply(false, nil)
+					_ = req.Reply(false, nil)
 				}
 			}
 		}
@@ -227,7 +227,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 		case "session":
 			go handleSession(connCtx, newChan, s.cfg.Shell, s.log)
 		default:
-			newChan.Reject(ssh.UnknownChannelType, "unsupported")
+			_ = newChan.Reject(ssh.UnknownChannelType, "unsupported")
 		}
 	}
 
@@ -673,7 +673,7 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		client.Wait()
+		_ = client.Wait()
 		sCancel()
 	}()
 
@@ -947,7 +947,7 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 	}
 	if err := ssh.Unmarshal(req.Payload, &fwdReq); err != nil {
 		if req.WantReply {
-			req.Reply(false, nil)
+			_ = req.Reply(false, nil)
 		}
 		return
 	}
@@ -977,7 +977,7 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 	if err != nil {
 		log.Error("tcpip-forward listen failed", "addr", addr, "error", err)
 		if req.WantReply {
-			req.Reply(false, nil)
+			_ = req.Reply(false, nil)
 		}
 		return
 	}
@@ -1011,7 +1011,7 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 
 	log.Info("tcpip-forward active", "addr", addr)
 	if req.WantReply {
-		req.Reply(true, ssh.Marshal(struct{ Port uint32 }{actualPort}))
+		_ = req.Reply(true, ssh.Marshal(struct{ Port uint32 }{actualPort}))
 	}
 
 	stop := context.AfterFunc(ctx, func() { ln.Close() })
@@ -1054,7 +1054,7 @@ func handleCancelTCPIPForward(req *ssh.Request, mu *sync.Mutex, listeners map[st
 	}
 	if err := ssh.Unmarshal(req.Payload, &r); err != nil {
 		if req.WantReply {
-			req.Reply(false, nil)
+			_ = req.Reply(false, nil)
 		}
 		return
 	}
@@ -1066,7 +1066,7 @@ func handleCancelTCPIPForward(req *ssh.Request, mu *sync.Mutex, listeners map[st
 	}
 	mu.Unlock()
 	if req.WantReply {
-		req.Reply(true, nil)
+		_ = req.Reply(true, nil)
 	}
 	log.Info("tcpip-forward cancelled", "addr", addr)
 }
@@ -1079,7 +1079,7 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[str
 		SrcPort  uint32
 	}
 	if err := ssh.Unmarshal(newChan.ExtraData(), &req); err != nil {
-		newChan.Reject(ssh.ConnectionFailed, "parse error")
+		_ = newChan.Reject(ssh.ConnectionFailed, "parse error")
 		return
 	}
 
@@ -1116,7 +1116,7 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[str
 		}
 		if !allowed {
 			log.Warn("direct-tcpip rejected by PermitOpen", "target", target)
-			newChan.Reject(ssh.ConnectionFailed, "prohibited by PermitOpen")
+			_ = newChan.Reject(ssh.ConnectionFailed, "prohibited by PermitOpen")
 			return
 		}
 	}
@@ -1124,7 +1124,7 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[str
 	conn, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
 		log.Debug("direct-tcpip dial failed", "target", target, "error", err)
-		newChan.Reject(ssh.ConnectionFailed, "connection refused")
+		_ = newChan.Reject(ssh.ConnectionFailed, "connection refused")
 		return
 	}
 	netutil.ApplyTCPKeepAlive(conn, 0)

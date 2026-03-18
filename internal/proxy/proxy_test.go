@@ -30,8 +30,8 @@ func TestDialViaSocks5_Success(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		io.Copy(conn, conn)
-		conn.(*net.TCPConn).CloseWrite()
+		_, _ = io.Copy(conn, conn)
+		_ = conn.(*net.TCPConn).CloseWrite()
 	}()
 
 	go func() {
@@ -50,8 +50,8 @@ func TestDialViaSocks5_Success(t *testing.T) {
 	defer conn.Close()
 
 	testData := []byte("through socks5")
-	conn.Write(testData)
-	conn.(*net.TCPConn).CloseWrite()
+	_, _ = conn.Write(testData)
+	_ = conn.(*net.TCPConn).CloseWrite()
 
 	got, _ := io.ReadAll(conn)
 	if string(got) != string(testData) {
@@ -108,9 +108,9 @@ func TestDialViaSocks5_InvalidTarget(t *testing.T) {
 		defer conn.Close()
 		// Read greeting + respond
 		buf := make([]byte, 258)
-		io.ReadFull(conn, buf[:2])
-		io.ReadFull(conn, buf[:buf[1]])
-		conn.Write([]byte{0x05, 0x00})
+		_, _ = io.ReadFull(conn, buf[:2])
+		_, _ = io.ReadFull(conn, buf[:buf[1]])
+		_, _ = conn.Write([]byte{0x05, 0x00})
 		// Client will fail before sending connect request
 	}()
 
@@ -134,8 +134,8 @@ func TestServeSocks_EndToEnd(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		io.Copy(conn, conn)
-		conn.(*net.TCPConn).CloseWrite()
+		_, _ = io.Copy(conn, conn)
+		_ = conn.(*net.TCPConn).CloseWrite()
 	}()
 
 	// SOCKS5 proxy using ServeSocks
@@ -158,8 +158,8 @@ func TestServeSocks_EndToEnd(t *testing.T) {
 	defer conn.Close()
 
 	testData := []byte("end-to-end socks test")
-	conn.Write(testData)
-	conn.(*net.TCPConn).CloseWrite()
+	_, _ = conn.Write(testData)
+	_ = conn.(*net.TCPConn).CloseWrite()
 
 	got, _ := io.ReadAll(conn)
 	if string(got) != string(testData) {
@@ -184,7 +184,7 @@ func TestServeHTTPProxy_CONNECT(t *testing.T) {
 		// Read whatever the client sends, then respond
 		buf := make([]byte, 1024)
 		n, _ := conn.Read(buf)
-		conn.Write(buf[:n]) // echo
+		_, _ = conn.Write(buf[:n]) // echo
 	}()
 
 	// HTTP proxy
@@ -208,7 +208,7 @@ func TestServeHTTPProxy_CONNECT(t *testing.T) {
 
 	// Send CONNECT request
 	connectReq := "CONNECT " + targetLn.Addr().String() + " HTTP/1.1\r\nHost: " + targetLn.Addr().String() + "\r\n\r\n"
-	conn.Write([]byte(connectReq))
+	_, _ = conn.Write([]byte(connectReq))
 
 	// Read response (should be 200 Connection established)
 	buf := make([]byte, 1024)
@@ -223,8 +223,8 @@ func TestServeHTTPProxy_CONNECT(t *testing.T) {
 
 	// Now send data through the tunnel
 	testData := []byte("tunneled data")
-	conn.Write(testData)
-	conn.(*net.TCPConn).CloseWrite()
+	_, _ = conn.Write(testData)
+	_ = conn.(*net.TCPConn).CloseWrite()
 
 	got, _ := io.ReadAll(conn)
 	if string(got) != string(testData) {
@@ -238,58 +238,58 @@ func mockSocks5Server(t *testing.T, conn net.Conn, targetAddr string) {
 	t.Helper()
 	buf := make([]byte, 258)
 
-	io.ReadFull(conn, buf[:2])
-	io.ReadFull(conn, buf[:buf[1]])
-	conn.Write([]byte{0x05, 0x00})
+	_, _ = io.ReadFull(conn, buf[:2])
+	_, _ = io.ReadFull(conn, buf[:buf[1]])
+	_, _ = conn.Write([]byte{0x05, 0x00})
 
-	io.ReadFull(conn, buf[:4])
+	_, _ = io.ReadFull(conn, buf[:4])
 	switch buf[3] {
 	case 0x01:
-		io.ReadFull(conn, buf[:6])
+		_, _ = io.ReadFull(conn, buf[:6])
 	case 0x03:
-		io.ReadFull(conn, buf[:1])
-		io.ReadFull(conn, buf[:buf[0]+2])
+		_, _ = io.ReadFull(conn, buf[:1])
+		_, _ = io.ReadFull(conn, buf[:buf[0]+2])
 	case 0x04:
-		io.ReadFull(conn, buf[:18])
+		_, _ = io.ReadFull(conn, buf[:18])
 	}
 
 	targetConn, err := net.DialTimeout("tcp", targetAddr, time.Second)
 	if err != nil {
-		conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		_, _ = conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
 	defer targetConn.Close()
 
-	conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+	_, _ = conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 
 	// Relay both directions; when one side closes, close the other
 	done := make(chan struct{})
 	go func() {
-		io.Copy(targetConn, conn)
-		targetConn.(*net.TCPConn).CloseWrite()
+		_, _ = io.Copy(targetConn, conn)
+		_ = targetConn.(*net.TCPConn).CloseWrite()
 		close(done)
 	}()
-	io.Copy(conn, targetConn)
-	conn.(*net.TCPConn).CloseWrite()
+	_, _ = io.Copy(conn, targetConn)
+	_ = conn.(*net.TCPConn).CloseWrite()
 	<-done
 }
 
 func mockSocks5ServerReject(conn net.Conn) {
 	buf := make([]byte, 258)
-	io.ReadFull(conn, buf[:2])
-	io.ReadFull(conn, buf[:buf[1]])
-	conn.Write([]byte{0x05, 0x00})
+	_, _ = io.ReadFull(conn, buf[:2])
+	_, _ = io.ReadFull(conn, buf[:buf[1]])
+	_, _ = conn.Write([]byte{0x05, 0x00})
 
-	io.ReadFull(conn, buf[:4])
+	_, _ = io.ReadFull(conn, buf[:4])
 	switch buf[3] {
 	case 0x01:
-		io.ReadFull(conn, buf[:6])
+		_, _ = io.ReadFull(conn, buf[:6])
 	case 0x03:
-		io.ReadFull(conn, buf[:1])
-		io.ReadFull(conn, buf[:buf[0]+2])
+		_, _ = io.ReadFull(conn, buf[:1])
+		_, _ = io.ReadFull(conn, buf[:buf[0]+2])
 	case 0x04:
-		io.ReadFull(conn, buf[:18])
+		_, _ = io.ReadFull(conn, buf[:18])
 	}
 
-	conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+	_, _ = conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 }

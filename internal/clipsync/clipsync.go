@@ -109,7 +109,7 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 
 	_, portStr, _ := net.SplitHostPort(cfg.Bind)
 
-	fmt.Sscanf(portStr, "%d", &port)
+	_, _ = fmt.Sscanf(portStr, "%d", &port)
 
 	n := &Node{
 		config:     cfg,
@@ -376,7 +376,7 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(data)
+		_, _ = w.Write(data)
 	})
 
 	// Serve files for peers to download, with ACL check
@@ -604,7 +604,7 @@ func (n *Node) setWrittenHash(h, origin string) {
 
 func generateID() string {
 	b := make([]byte, 8)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
@@ -739,7 +739,7 @@ func detectLinuxClipTool() string {
 // clipTmpDir is a per-process scratch directory for clipboard format exchange.
 var clipTmpDir = sync.OnceValue(func() string {
 	dir := filepath.Join(os.TempDir(), fmt.Sprintf("clipsync_fmt_%d", os.Getpid()))
-	os.MkdirAll(dir, 0700)
+	_ = os.MkdirAll(dir, 0700)
 	return dir
 })
 
@@ -844,7 +844,7 @@ end repeat`, dir, strings.Join(pairs, ", "))
 })
 
 func readClipboardDarwin(ctx context.Context) {
-	clipCmd(ctx, "osascript", "-e", darwinReadScript()).Run()
+	_ = clipCmd(ctx, "osascript", "-e", darwinReadScript()).Run()
 }
 
 var windowsReadScript = sync.OnceValue(func() string {
@@ -875,7 +875,7 @@ if ($img) {
 })
 
 func readClipboardWindows(ctx context.Context) {
-	clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", windowsReadScript()).Run()
+	_ = clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", windowsReadScript()).Run()
 }
 
 func readClipboardLinux(ctx context.Context, dir string) {
@@ -926,7 +926,7 @@ func readClipboardLinux(ctx context.Context, dir string) {
 		}
 		data, err := cmd.Output()
 		if err == nil && len(data) > 0 {
-			os.WriteFile(filepath.Join(dir, kt.fileName), data, 0600)
+			_ = os.WriteFile(filepath.Join(dir, kt.fileName), data, 0600)
 		}
 	}
 }
@@ -954,7 +954,7 @@ func writeClipboardFormats(formats []ClipFormat) {
 	}
 	for _, entry := range clipFormatTable {
 		if data, ok := fmtMap[entry.mimeType]; ok {
-			os.WriteFile(filepath.Join(dir, entry.fileName), data, 0600)
+			_ = os.WriteFile(filepath.Join(dir, entry.fileName), data, 0600)
 		}
 	}
 
@@ -997,7 +997,7 @@ end repeat`, dir, strings.Join(pairs, ", "))
 })
 
 func writeClipboardDarwin(ctx context.Context) {
-	clipCmd(ctx, "osascript", "-e", darwinWriteScript()).Run()
+	_ = clipCmd(ctx, "osascript", "-e", darwinWriteScript()).Run()
 }
 
 var windowsWriteScript = sync.OnceValue(func() string {
@@ -1030,9 +1030,9 @@ func writeClipboardWindows(ctx context.Context, fmtMap map[string][]byte) {
 	// HTML needs CF_HTML wrapping.
 	if html, ok := fmtMap["text/html"]; ok {
 		cfhtml := buildCFHTML(string(html))
-		os.WriteFile(filepath.Join(clipTmpDir(), "text_html_cf"), []byte(cfhtml), 0600)
+		_ = os.WriteFile(filepath.Join(clipTmpDir(), "text_html_cf"), []byte(cfhtml), 0600)
 	}
-	clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", windowsWriteScript()).Run()
+	_ = clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", windowsWriteScript()).Run()
 }
 
 func writeClipboardLinux(ctx context.Context, formats []ClipFormat) {
@@ -1059,7 +1059,7 @@ func writeClipboardLinux(ctx context.Context, formats []ClipFormat) {
 				return
 			}
 			cmd.Stdin = bytes.NewReader(f.Data)
-			cmd.Run()
+			_ = cmd.Run()
 			return
 		}
 	}
@@ -1164,7 +1164,7 @@ func writeFiles(paths []string) {
 			sb.WriteString(fmt.Sprintf("urls's addObject:(current application's NSURL's fileURLWithPath:\"%s\")\n", esc))
 		}
 		sb.WriteString("pb's writeObjects:urls\n")
-		clipCmd(ctx, "osascript", "-e", sb.String()).Run()
+		_ = clipCmd(ctx, "osascript", "-e", sb.String()).Run()
 
 	case "windows":
 		var sb strings.Builder
@@ -1177,7 +1177,7 @@ func writeFiles(paths []string) {
 				sb.WriteString(",")
 			}
 		}
-		clipCmd(ctx, "powershell", "-NoProfile", "-Command", sb.String()).Run()
+		_ = clipCmd(ctx, "powershell", "-NoProfile", "-Command", sb.String()).Run()
 
 	case "linux":
 		var sb strings.Builder
@@ -1196,7 +1196,7 @@ func writeFiles(paths []string) {
 			return
 		}
 		cmd.Stdin = strings.NewReader(uriList)
-		cmd.Run()
+		_ = cmd.Run()
 	}
 }
 
@@ -1430,7 +1430,7 @@ func (n *Node) runUDPBeacon(ctx context.Context, magicHeader string, port int) {
 		}
 
 		for _, baddr := range refreshBroadcastAddrs() {
-			conn.WriteToUDP(msg, baddr)
+			_, _ = conn.WriteToUDP(msg, baddr)
 		}
 	}
 }

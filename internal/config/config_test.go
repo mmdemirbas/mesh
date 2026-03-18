@@ -339,7 +339,7 @@ func TestRequireFile(t *testing.T) {
 
 	// Existing file
 	f := filepath.Join(t.TempDir(), "exists.txt")
-	os.WriteFile(f, []byte("ok"), 0644)
+	_ = os.WriteFile(f, []byte("ok"), 0644)
 	if err := requireFile(f, "test_key"); err != nil {
 		t.Errorf("expected no error for existing file, got: %v", err)
 	}
@@ -368,7 +368,7 @@ mynode:
               bind: "127.0.0.1:8080"
               target: "10.0.0.1:80"
 `
-	os.WriteFile(cfgFile, []byte(content), 0644)
+	_ = os.WriteFile(cfgFile, []byte(content), 0644)
 
 	cfgs, err := LoadUnvalidated(cfgFile)
 	if err != nil {
@@ -409,7 +409,7 @@ func TestLoadUnvalidated_NonExistentFile(t *testing.T) {
 
 func TestLoadUnvalidated_InvalidYAML(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "bad.yml")
-	os.WriteFile(f, []byte("{{invalid yaml"), 0644)
+	_ = os.WriteFile(f, []byte("{{invalid yaml"), 0644)
 
 	_, err := LoadUnvalidated(f)
 	if err == nil {
@@ -427,7 +427,7 @@ test:
     - type: socks
       bind: "127.0.0.1:${MESH_TEST_PORT}"
 `
-	os.WriteFile(f, []byte(content), 0644)
+	_ = os.WriteFile(f, []byte(content), 0644)
 
 	cfgs, err := LoadUnvalidated(f)
 	if err != nil {
@@ -442,7 +442,7 @@ test:
 
 func TestLoad_ServiceNotFound(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "mesh.yml")
-	os.WriteFile(f, []byte("mynode:\n  listeners: []\n"), 0644)
+	_ = os.WriteFile(f, []byte("mynode:\n  listeners: []\n"), 0644)
 
 	_, err := Load(f, "nonexistent")
 	if err == nil {
@@ -497,9 +497,9 @@ func TestValidate_ConnectionMissingTargets(t *testing.T) {
 
 func TestValidate_InvalidRetryDuration(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "key")
-	os.WriteFile(f, []byte("key"), 0644)
+	_ = os.WriteFile(f, []byte("key"), 0644)
 	kh := filepath.Join(t.TempDir(), "known_hosts")
-	os.WriteFile(kh, []byte("host"), 0644)
+	_ = os.WriteFile(kh, []byte("host"), 0644)
 
 	cfg := &Config{
 		Connections: []Connection{{

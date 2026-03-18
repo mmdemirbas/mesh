@@ -20,7 +20,7 @@ import (
 // attributes (e.g., curses/ncurses) won't render correctly, but that's rare on Windows.
 func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, log *slog.Logger) {
 	if len(shellCommand) == 0 {
-		newChan.Reject(ssh.Prohibited, "shell execution disabled")
+		_ = newChan.Reject(ssh.Prohibited, "shell execution disabled")
 		return
 	}
 
@@ -44,12 +44,12 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 				// we use plain pipes underneath. This is the standard approach
 				// for Go SSH servers on Windows without ConPTY.
 				if req.WantReply {
-					req.Reply(true, nil)
+					_ = req.Reply(true, nil)
 				}
 			case "window-change":
 				// Acknowledge but ignore — no real PTY to resize.
 				if req.WantReply {
-					req.Reply(true, nil)
+					_ = req.Reply(true, nil)
 				}
 			case "shell", "exec":
 				cmdStart.Do(func() {
@@ -68,13 +68,13 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					if err != nil {
 						log.Error("Start shell failed", "command", shellCommand, "error", err)
 						if req.WantReply {
-							req.Reply(false, nil)
+							_ = req.Reply(false, nil)
 						}
 						return
 					}
 
 					if req.WantReply {
-						req.Reply(true, nil)
+						_ = req.Reply(true, nil)
 					}
 
 					go func() {
@@ -88,13 +88,13 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 
 						msg := make([]byte, 4)
 						binary.BigEndian.PutUint32(msg, status)
-						ch.SendRequest("exit-status", false, msg)
+						_, _ = ch.SendRequest("exit-status", false, msg)
 						ch.Close()
 					}()
 				})
 			default:
 				if req.WantReply {
-					req.Reply(false, nil)
+					_ = req.Reply(false, nil)
 				}
 			}
 		}

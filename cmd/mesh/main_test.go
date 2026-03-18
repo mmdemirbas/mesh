@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
@@ -227,16 +228,16 @@ func TestLogRing(t *testing.T) {
 	}
 
 	// Add fewer than capacity
-	r.Write([]byte("line1\n"))
-	r.Write([]byte("line2\n"))
+	_, _ = r.Write([]byte("line1\n"))
+	_, _ = r.Write([]byte("line2\n"))
 	lines := r.Lines()
 	if len(lines) != 2 || lines[0] != "line1" || lines[1] != "line2" {
 		t.Errorf("got %v, want [line1 line2]", lines)
 	}
 
 	// Fill and wrap around
-	r.Write([]byte("line3\n"))
-	r.Write([]byte("line4\n"))
+	_, _ = r.Write([]byte("line3\n"))
+	_, _ = r.Write([]byte("line4\n"))
 	lines = r.Lines()
 	if len(lines) != 3 || lines[0] != "line2" || lines[1] != "line3" || lines[2] != "line4" {
 		t.Errorf("after wrap: got %v, want [line2 line3 line4]", lines)
@@ -245,7 +246,7 @@ func TestLogRing(t *testing.T) {
 
 func TestLogRing_MultiLineWrite(t *testing.T) {
 	r := newLogRing(5)
-	r.Write([]byte("a\nb\nc\n"))
+	_, _ = r.Write([]byte("a\nb\nc\n"))
 	lines := r.Lines()
 	if len(lines) != 3 || lines[0] != "a" || lines[1] != "b" || lines[2] != "c" {
 		t.Errorf("got %v, want [a b c]", lines)
@@ -254,7 +255,7 @@ func TestLogRing_MultiLineWrite(t *testing.T) {
 
 func TestLogRing_LinesIsACopy(t *testing.T) {
 	r := newLogRing(3)
-	r.Write([]byte("x\n"))
+	_, _ = r.Write([]byte("x\n"))
 	lines := r.Lines()
 	lines[0] = "mutated"
 	if r.Lines()[0] == "mutated" {
@@ -385,7 +386,7 @@ func TestHumanLogHandler(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			buf.Reset()
-			logger.LogAttrs(nil, slog.LevelInfo, tt.msg, tt.attrs...)
+			logger.LogAttrs(context.TODO(), slog.LevelInfo, tt.msg, tt.attrs...)
 			output := buf.String()
 			if !strings.Contains(output, tt.want) {
 				t.Errorf("output %q does not contain %q", output, tt.want)

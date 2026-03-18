@@ -66,7 +66,7 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 	defer conn.Close()
 
 	// Set a deadline for the HTTP CONNECT handshake to prevent slowloris attacks
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	br := bufio.NewReader(conn)
 	req, err := http.ReadRequest(br)
@@ -90,7 +90,7 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 		remote, err := dialer(target)
 		if err != nil {
 			log.Debug("HTTP proxy dial failed", "target", target, "error", err)
-			conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+			_, _ = conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 			return
 		}
 		defer remote.Close()
@@ -100,7 +100,7 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 			return
 		}
 
-		conn.SetDeadline(time.Time{})
+		_ = conn.SetDeadline(time.Time{})
 		bc := &bufferedConn{Conn: conn, r: io.MultiReader(br, conn)}
 		netutil.BiCopy(bc, remote)
 		return
@@ -114,7 +114,7 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 	remote, err := dialer(target)
 	if err != nil {
 		log.Debug("HTTP CONNECT failed", "target", target, "error", err)
-		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+		_, _ = conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
 	}
 	defer remote.Close()
@@ -124,7 +124,7 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 		return
 	}
 	// Clear handshake deadline before entering data relay
-	conn.SetDeadline(time.Time{})
+	_ = conn.SetDeadline(time.Time{})
 	bc := &bufferedConn{
 		Conn: conn,
 		r:    io.MultiReader(br, conn),
@@ -140,8 +140,8 @@ func DialViaSocks5(baseDialer func(string, string) (net.Conn, error), socksAddr,
 	}
 
 	// Protect the SOCKS5 handshake from tarpit servers
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
-	defer conn.SetDeadline(time.Time{})
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	defer func() { _ = conn.SetDeadline(time.Time{}) }()
 
 	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil { // v5, 1 method, no auth
 		conn.Close()
