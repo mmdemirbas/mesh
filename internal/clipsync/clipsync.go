@@ -1224,8 +1224,7 @@ func parseURIList(s string) []string {
 			continue
 		}
 		if strings.HasPrefix(line, "file://") {
-			path := strings.TrimPrefix(line, "file://")
-			out = append(out, filepath.FromSlash(path))
+			out = append(out, strings.TrimPrefix(line, "file://"))
 		}
 	}
 	return out
