@@ -1,8 +1,8 @@
 # mesh
 
+[![CI](https://github.com/mmdemirbas/mesh/actions/workflows/ci.yml/badge.svg)](https://github.com/mmdemirbas/mesh/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-290+-brightgreen)](#testing)
 
 A single-binary, cross-platform networking tool that replaces `ssh`, `sshd`, `autossh`, `socat`, and SOCKS/HTTP proxy servers.
 

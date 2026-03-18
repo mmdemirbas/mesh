@@ -5,12 +5,8 @@
 - **TLS for Clipsync** — Clipboard sync uses unencrypted HTTP. Most impactful remaining security improvement.
   - Design needed: mTLS vs pre-shared keys, cert management, config schema, backward compat for local-only setups.
 
-## CI/CD & Release
+## Release
 
-- GitHub Actions CI — tests + race detector + lint on every push/PR
-- `golangci-lint` config
-- `go vuln check` in CI
-- Release workflow — automated cross-platform binaries on git tag (goreleaser)
 - Semantic versioning via git tags (`v1.0.0`)
 - `CHANGELOG.md`
 
@@ -23,8 +19,6 @@
 
 ## Documentation
 
-- README: installation instructions, quick-start guide, architecture overview
-- README: comparison table vs alternatives (autossh, sshuttle, frp, etc.)
 - README: demo GIF showing the live dashboard
 
 ## Testing
