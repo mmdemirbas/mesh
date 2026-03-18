@@ -535,3 +535,92 @@ func TestWarnUnsupportedOptions(t *testing.T) {
 	}
 	WarnUnsupportedOptions(cfg) // should not panic
 }
+
+func TestValidate_ConnectionNoAuth(t *testing.T) {
+	cfg := &Config{
+		Connections: []Connection{{
+			Name:    "test",
+			Targets: []string{"host:22"},
+			Auth:    AuthCfg{},
+		}},
+	}
+	if err := cfg.validate(); err == nil {
+		t.Error("expected error when no auth methods configured")
+	}
+}
+
+func TestValidate_ConnectionAgentAuth(t *testing.T) {
+	cfg := &Config{
+		Connections: []Connection{{
+			Name:    "test",
+			Targets: []string{"host:22"},
+			Auth:    AuthCfg{Agent: true},
+		}},
+	}
+	// Should not fail on missing key file — agent is sufficient
+	err := cfg.validate()
+	if err != nil {
+		t.Errorf("validate with agent auth should not fail: %v", err)
+	}
+}
+
+func TestValidate_ConnectionPasswordCommandAuth(t *testing.T) {
+	cfg := &Config{
+		Connections: []Connection{{
+			Name:    "test",
+			Targets: []string{"host:22"},
+			Auth:    AuthCfg{PasswordCommand: "echo secret"},
+		}},
+	}
+	err := cfg.validate()
+	if err != nil {
+		t.Errorf("validate with password_command should not fail: %v", err)
+	}
+}
+
+func TestValidate_InvalidMode(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "key")
+	os.WriteFile(f, []byte("key"), 0644)
+
+	cfg := &Config{
+		Connections: []Connection{{
+			Name:    "test",
+			Mode:    "invalid",
+			Targets: []string{"host:22"},
+			Auth:    AuthCfg{Key: f},
+		}},
+	}
+	if err := cfg.validate(); err == nil {
+		t.Error("expected error for invalid mode")
+	}
+}
+
+func TestValidate_MultiplexMode(t *testing.T) {
+	cfg := &Config{
+		Connections: []Connection{{
+			Name:    "test",
+			Mode:    "multiplex",
+			Targets: []string{"host1:22", "host2:22"},
+			Auth:    AuthCfg{PasswordCommand: "echo pass"},
+		}},
+	}
+	err := cfg.validate()
+	if err != nil {
+		t.Errorf("validate multiplex mode should not fail: %v", err)
+	}
+}
+
+func TestValidate_FailoverModeExplicit(t *testing.T) {
+	cfg := &Config{
+		Connections: []Connection{{
+			Name:    "test",
+			Mode:    "failover",
+			Targets: []string{"host:22"},
+			Auth:    AuthCfg{Agent: true},
+		}},
+	}
+	err := cfg.validate()
+	if err != nil {
+		t.Errorf("validate explicit failover mode should not fail: %v", err)
+	}
+}

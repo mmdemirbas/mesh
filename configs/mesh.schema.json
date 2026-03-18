@@ -1,67 +1,74 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/mmdemirbas/mesh/internal/config/config",
-  "$ref": "#/$defs/Root",
+  "$ref": "#/$defs/Config",
   "$defs": {
     "AuthCfg": {
       "properties": {
+        "agent": {
+          "type": "boolean",
+          "description": "Use the running SSH agent (SSH_AUTH_SOCK) for authentication. Most secure — keys never leave the agent."
+        },
         "key": {
           "type": "string",
           "description": "Path to the private SSH key."
         },
+        "password_command": {
+          "type": "string",
+          "description": "Shell command whose stdout is used as the password. Supports macOS Keychain, pass, 1Password CLI, etc.\nExample: \"security find-generic-password -s mesh -w\" (macOS) or \"pass show mesh/server\" (pass/gpg)."
+        },
         "known_hosts": {
           "type": "string",
-          "description": "Path to the known_hosts file."
+          "description": "Path to the known_hosts file for server verification."
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "key",
-        "known_hosts"
-      ],
-      "description": "AuthCfg configures key-based authentication for a connection."
+      "description": "AuthCfg configures authentication for a connection."
     },
     "ClipsyncCfg": {
       "properties": {
         "bind": {
           "type": "string",
-          "description": "Local listening address for clipsync HTTP server."
+          "description": "e.g., \"0.0.0.0:7755\""
         },
         "lan_discovery": {
           "type": "boolean",
-          "description": "Enable UDP broadcasting for LAN discovery."
+          "description": "default: true"
         },
         "static_peers": {
           "items": {
             "type": "string"
           },
-          "type": "array",
-          "description": "List of static peer addresses."
+          "type": "array"
         },
         "allow_send_to": {
           "items": {
             "type": "string"
           },
-          "type": "array"
+          "type": "array",
+          "description": "\"all\", \"none\", \"udp\", or specific IPs"
         },
         "allow_receive": {
           "items": {
             "type": "string"
           },
-          "type": "array"
+          "type": "array",
+          "description": "\"all\", \"none\", \"udp\", or specific IPs"
         }
       },
       "additionalProperties": false,
       "type": "object",
       "required": [
-        "bind"
-      ]
+        "bind",
+        "lan_discovery",
+        "static_peers",
+        "allow_send_to",
+        "allow_receive"
+      ],
+      "description": "ClipsyncCfg represents the YAML configuration structure."
     },
     "Config": {
-      "patternProperties": {
-        "^x-": {}
-      },
       "properties": {
         "listeners": {
           "items": {
@@ -105,12 +112,20 @@
           "type": "string",
           "description": "A unique identifier for this connection."
         },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "failover",
+            "multiplex"
+          ],
+          "description": "Connection mode: \"failover\" (default) tries targets in order until one succeeds;\n\"multiplex\" connects to ALL targets simultaneously."
+        },
         "targets": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "A list of target addresses to attempt dialing in order (e.g., [\"user@192.168.1.50:22\", \"user@public-ip:22\"])."
+          "description": "A list of target addresses. In failover mode, tried in order. In multiplex mode, all connected simultaneously.\nFormat: \"user@host:port\" (e.g., [\"root@192.168.1.50:22\", \"root@10.0.0.1:22\"])."
         },
         "retry": {
           "type": "string",
@@ -125,14 +140,14 @@
             "type": "string"
           },
           "type": "object",
-          "description": "Common SSH options applied to all forwards in this connection.\nOnly a subset of OpenSSH config keys are parsed directly:\nCiphers, MACs, KexAlgorithms, ConnectTimeout, IPQoS.\nOther keys are natively handled by mapping structural YAML (like Auth.Key) or ignored."
+          "description": "Common SSH options applied to all forwards in this connection.\nSupported keys: Ciphers, MACs, KexAlgorithms, HostKeyAlgorithms, ConnectTimeout,\nIPQoS, TCPKeepAlive, ServerAliveInterval, ServerAliveCountMax, ExitOnForwardFailure,\nGatewayPorts, PermitOpen, RekeyLimit, StrictHostKeyChecking."
         },
         "forwards": {
           "items": {
             "$ref": "#/$defs/ForwardSet"
           },
           "type": "array",
-          "description": "A list of forwarding sets. Each set establishes its own purely independent physical SSH connection for maximum throughput."
+          "description": "A list of forwarding sets. Each set establishes its own purely independent physical SSH connection for maximum throughput.\nIn multiplex mode, forwards are applied to each target connection independently."
         }
       },
       "additionalProperties": false,
@@ -261,16 +276,6 @@
         "bind"
       ],
       "description": "Listener represents a local server port (proxy, relay, or sshd)."
-    },
-    "Root": {
-      "type": "object",
-      "patternProperties": {
-        "^x-.*": {}
-      },
-      "additionalProperties": {
-        "$ref": "#/$defs/Config"
-      },
-      "description": "A map of services containing mesh configurations."
     }
   }
 }

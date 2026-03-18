@@ -53,18 +53,23 @@ type Listener struct {
 type Connection struct {
 	// A unique identifier for this connection.
 	Name string `yaml:"name"`
-	// A list of target addresses to attempt dialing in order (e.g., ["user@192.168.1.50:22", "user@public-ip:22"]).
+	// Connection mode: "failover" (default) tries targets in order until one succeeds;
+	// "multiplex" connects to ALL targets simultaneously.
+	Mode string `yaml:"mode,omitempty" jsonschema:"enum=failover,enum=multiplex"`
+	// A list of target addresses. In failover mode, tried in order. In multiplex mode, all connected simultaneously.
+	// Format: "user@host:port" (e.g., ["root@192.168.1.50:22", "root@10.0.0.1:22"]).
 	Targets []string `yaml:"targets"`
 	// How long to wait before attempting to reconnect if the session drops (e.g., "10s").
 	Retry string `yaml:"retry"`
 	// Authentication credentials for the target server(s).
 	Auth AuthCfg `yaml:"auth"`
 	// Common SSH options applied to all forwards in this connection.
-	// Only a subset of OpenSSH config keys are parsed directly:
-	// Ciphers, MACs, KexAlgorithms, ConnectTimeout, IPQoS.
-	// Other keys are natively handled by mapping structural YAML (like Auth.Key) or ignored.
+	// Supported keys: Ciphers, MACs, KexAlgorithms, HostKeyAlgorithms, ConnectTimeout,
+	// IPQoS, TCPKeepAlive, ServerAliveInterval, ServerAliveCountMax, ExitOnForwardFailure,
+	// GatewayPorts, PermitOpen, RekeyLimit, StrictHostKeyChecking.
 	Options map[string]string `yaml:"options,omitempty"`
 	// A list of forwarding sets. Each set establishes its own purely independent physical SSH connection for maximum throughput.
+	// In multiplex mode, forwards are applied to each target connection independently.
 	Forwards []ForwardSet `yaml:"forwards,omitempty"`
 }
 
@@ -124,12 +129,19 @@ func GetOption(options map[string]string, key string) string {
 	return ""
 }
 
-// AuthCfg configures key-based authentication for a connection.
+// AuthCfg configures authentication for a connection.
+// Methods are listed in recommended order (most secure first).
+// Multiple methods can be configured; they are tried in order: agent → key → password.
 type AuthCfg struct {
+	// Use the running SSH agent (SSH_AUTH_SOCK) for authentication. Most secure — keys never leave the agent.
+	Agent bool `yaml:"agent,omitempty"`
 	// Path to the private SSH key.
-	Key string `yaml:"key"`
-	// Path to the known_hosts file.
-	KnownHosts string `yaml:"known_hosts"`
+	Key string `yaml:"key,omitempty"`
+	// Shell command whose stdout is used as the password. Supports macOS Keychain, pass, 1Password CLI, etc.
+	// Example: "security find-generic-password -s mesh -w" (macOS) or "pass show mesh/server" (pass/gpg).
+	PasswordCommand string `yaml:"password_command,omitempty"`
+	// Path to the known_hosts file for server verification.
+	KnownHosts string `yaml:"known_hosts,omitempty"`
 }
 
 // Load reads, parses, and returns the requested service's validated config.
@@ -254,16 +266,28 @@ func (c *Config) validate() error {
 		if len(conn.Targets) == 0 {
 			return fmt.Errorf("connections[%d] %q: targets is required", i, conn.Name)
 		}
+		if conn.Mode != "" && conn.Mode != "failover" && conn.Mode != "multiplex" {
+			return fmt.Errorf("connections[%d] %q: mode must be 'failover' or 'multiplex', got %q", i, conn.Name, conn.Mode)
+		}
 		if conn.Retry != "" {
 			if _, err := time.ParseDuration(conn.Retry); err != nil {
 				return fmt.Errorf("connections[%d] %q: invalid retry duration %q: %w", i, conn.Name, conn.Retry, err)
 			}
 		}
-		if err := requireFile(conn.Auth.Key, "auth.key"); err != nil {
-			return fmt.Errorf("connections[%d] %q: %w", i, conn.Name, err)
+		// At least one auth method must be configured
+		hasAuth := conn.Auth.Agent || conn.Auth.Key != "" || conn.Auth.PasswordCommand != ""
+		if !hasAuth {
+			return fmt.Errorf("connections[%d] %q: at least one auth method is required (agent, key, or password_command)", i, conn.Name)
 		}
-		if err := requireFile(conn.Auth.KnownHosts, "auth.known_hosts"); err != nil {
-			return fmt.Errorf("connections[%d] %q: %w", i, conn.Name, err)
+		if conn.Auth.Key != "" {
+			if err := requireFile(conn.Auth.Key, "auth.key"); err != nil {
+				return fmt.Errorf("connections[%d] %q: %w", i, conn.Name, err)
+			}
+		}
+		if conn.Auth.KnownHosts != "" {
+			if err := requireFile(conn.Auth.KnownHosts, "auth.known_hosts"); err != nil {
+				return fmt.Errorf("connections[%d] %q: %w", i, conn.Name, err)
+			}
 		}
 		for j, fset := range conn.Forwards {
 			if err := validateIPQoS(GetOption(fset.Options, "IPQoS")); err != nil {

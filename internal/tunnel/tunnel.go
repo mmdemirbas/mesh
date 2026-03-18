@@ -17,7 +17,10 @@ import (
 	"syscall"
 	"time"
 
+	"os/exec"
+
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 	"golang.org/x/time/rate"
 
@@ -244,9 +247,12 @@ func NewSSHClient(cfg config.Connection, log *slog.Logger) *SSHClient {
 }
 
 func (c *SSHClient) Run(ctx context.Context) error {
+	if c.cfg.Mode == "multiplex" {
+		return c.runMultiplex(ctx)
+	}
 	var wg sync.WaitGroup
 	for _, fset := range c.cfg.Forwards {
-		fset := fset // capture loop variable
+		fset := fset
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -255,6 +261,256 @@ func (c *SSHClient) Run(ctx context.Context) error {
 	}
 	wg.Wait()
 	return nil
+}
+
+// runMultiplex connects to ALL targets simultaneously (one connection per target).
+// Each target gets its own set of forwards.
+func (c *SSHClient) runMultiplex(ctx context.Context) error {
+	var wg sync.WaitGroup
+	for _, target := range c.cfg.Targets {
+		target := target
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.runMultiplexTarget(ctx, target)
+		}()
+	}
+	wg.Wait()
+	return nil
+}
+
+func (c *SSHClient) runMultiplexTarget(ctx context.Context, target string) {
+	// Each multiplex target acts like its own connection with a single-target failover.
+	// If there are no forwards, create a dummy forward set to keep the connection alive.
+	fsets := c.cfg.Forwards
+	if len(fsets) == 0 {
+		fsets = []config.ForwardSet{{Name: "keepalive"}}
+	}
+
+	var wg sync.WaitGroup
+	for _, fset := range fsets {
+		fset := fset
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.runForwardSetForTarget(ctx, &fset, target)
+		}()
+	}
+	wg.Wait()
+}
+
+// buildAuthMethods constructs SSH auth methods from the config.
+// Methods are tried in order: agent → key → password_command.
+func (c *SSHClient) buildAuthMethods(id string) ([]ssh.AuthMethod, error) {
+	var methods []ssh.AuthMethod
+
+	// 1. SSH Agent (most secure — keys never leave the agent process)
+	if c.cfg.Auth.Agent {
+		sock := os.Getenv("SSH_AUTH_SOCK")
+		if sock == "" {
+			c.log.Warn("auth.agent=true but SSH_AUTH_SOCK not set")
+		} else {
+			conn, err := net.Dial("unix", sock)
+			if err != nil {
+				c.log.Warn("Could not connect to SSH agent", "error", err)
+			} else {
+				agentClient := agent.NewClient(conn)
+				methods = append(methods, ssh.PublicKeysCallback(agentClient.Signers))
+			}
+		}
+	}
+
+	// 2. Private key file
+	if c.cfg.Auth.Key != "" {
+		signer, err := loadSigner(c.cfg.Auth.Key)
+		if err != nil {
+			return nil, fmt.Errorf("load key %s: %w", c.cfg.Auth.Key, err)
+		}
+		methods = append(methods, ssh.PublicKeys(signer))
+	}
+
+	// 3. Password command (least privileged — password obtained from external tool)
+	if c.cfg.Auth.PasswordCommand != "" {
+		password, err := runPasswordCommand(c.cfg.Auth.PasswordCommand)
+		if err != nil {
+			return nil, fmt.Errorf("password_command failed: %w", err)
+		}
+		methods = append(methods, ssh.Password(password))
+		methods = append(methods, ssh.KeyboardInteractive(
+			func(user, instruction string, questions []string, echos []bool) ([]string, error) {
+				answers := make([]string, len(questions))
+				for i := range answers {
+					answers[i] = password
+				}
+				return answers, nil
+			}))
+	}
+
+	if len(methods) == 0 {
+		return nil, errors.New("no auth methods configured (set agent, key, or password_command)")
+	}
+	return methods, nil
+}
+
+// runPasswordCommand executes a shell command and returns its trimmed stdout as a password.
+func runPasswordCommand(command string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (c *SSHClient) buildSSHConfig(fset *config.ForwardSet, id string) (*ssh.ClientConfig, map[string]string, int, error) {
+	authMethods, err := c.buildAuthMethods(id)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+
+	opts := mergeOptions(c.cfg.Options, fset.Options)
+
+	var hostKeyCallback ssh.HostKeyCallback
+	if c.cfg.Auth.KnownHosts != "" {
+		hkc, err := knownhosts.New(c.cfg.Auth.KnownHosts)
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("load known_hosts %s: %w", c.cfg.Auth.KnownHosts, err)
+		}
+		hostKeyCallback = hkc
+	} else if strings.ToLower(config.GetOption(opts, "StrictHostKeyChecking")) == "no" {
+		hostKeyCallback = ssh.InsecureIgnoreHostKey()
+		c.log.Warn("StrictHostKeyChecking=no is configured. Vulnerable to MITM attacks.")
+	} else {
+		return nil, nil, 0, errors.New("known_hosts is missing. Configure auth.known_hosts or set StrictHostKeyChecking: no")
+	}
+
+	sshCfg := &ssh.ClientConfig{
+		User:            "root",
+		Auth:            authMethods,
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         15 * time.Second,
+	}
+
+	if timeoutStr := config.GetOption(opts, "ConnectTimeout"); timeoutStr != "" {
+		if t, err := strconv.Atoi(timeoutStr); err == nil {
+			sshCfg.Timeout = time.Duration(t) * time.Second
+		}
+	}
+
+	applySSHConfigOptions(&sshCfg.Config, opts)
+
+	if val := config.GetOption(opts, "HostKeyAlgorithms"); val != "" {
+		sshCfg.HostKeyAlgorithms = strings.Split(val, ",")
+	}
+
+	interactiveTos, _, err := ParseIPQoS(config.GetOption(opts, "IPQoS"))
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("invalid ipqos: %w", err)
+	}
+
+	return sshCfg, opts, interactiveTos, nil
+}
+
+// runForwardSetForTarget runs a forward set against a specific target (used by multiplex mode).
+func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.ForwardSet, target string) {
+	_, host := parseTarget(target)
+	id := c.cfg.Name + " " + host
+	if fset.Name != "" && fset.Name != "keepalive" {
+		id += " [" + fset.Name + "]"
+	}
+	state.Global.Update("connection", id, state.Starting, "")
+
+	retryInterval := 10 * time.Second
+	if c.cfg.Retry != "" {
+		if d, err := time.ParseDuration(c.cfg.Retry); err == nil {
+			retryInterval = d
+		}
+	}
+
+	sshCfg, opts, interactiveTos, err := c.buildSSHConfig(fset, id)
+	if err != nil {
+		state.Global.Update("connection", id, state.Failed, err.Error())
+		c.log.Error("SSH config failed", "target", target, "error", err)
+		return
+	}
+
+	log := c.log.With("target", target)
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		state.Global.Update("connection", id, state.Connecting, "")
+		user, hostPort := parseTarget(target)
+		if user != "" {
+			sshCfg.User = user
+		}
+
+		log.Info("Connecting")
+
+		dialer := net.Dialer{Timeout: sshCfg.Timeout, Control: dialerControlIPQoS(interactiveTos)}
+		t0 := time.Now()
+		conn, err := dialer.DialContext(ctx, "tcp", hostPort)
+		if err != nil {
+			state.Global.Update("connection", id, state.Retrying, err.Error())
+			log.Warn("Target unreachable", "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(retryDelay(retryInterval)):
+				continue
+			}
+		}
+
+		tcpKeepAlive := 30 * time.Second
+		if val := config.GetOption(opts, "TCPKeepAlive"); val != "" {
+			if seconds, err := strconv.Atoi(val); err == nil && seconds > 0 {
+				tcpKeepAlive = time.Duration(seconds) * time.Second
+			}
+		}
+		netutil.ApplyTCPKeepAlive(conn, tcpKeepAlive)
+
+		t1 := time.Now()
+		if sshCfg.Timeout > 0 {
+			conn.SetDeadline(time.Now().Add(sshCfg.Timeout))
+		}
+		sshConn, chans, reqs, err := ssh.NewClientConn(conn, hostPort, sshCfg)
+		if err != nil {
+			conn.Close()
+			state.Global.Update("connection", id, state.Retrying, err.Error())
+			log.Error("SSH handshake failed", "elapsed", time.Since(t1).Round(time.Millisecond), "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(retryDelay(retryInterval)):
+				continue
+			}
+		}
+		conn.SetDeadline(time.Time{})
+		client := ssh.NewClient(sshConn, chans, reqs)
+
+		state.Global.Update("connection", id, state.Connected, target)
+		log.Info("Connected", "tcp", t1.Sub(t0).Round(time.Millisecond), "ssh", time.Since(t1).Round(time.Millisecond))
+
+		err = c.runSession(ctx, client, fset, opts, log)
+
+		if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
+			state.Global.Update("connection", id, state.Failed, "ExitOnForwardFailure")
+			log.Error("Fatal forward failure, stopping reconnection", "error", err)
+			return
+		}
+
+		state.Global.Update("connection", id, state.Retrying, "session ended")
+		log.Warn("Session ended, reconnecting", "retry_in", retryInterval)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retryDelay(retryInterval)):
+		}
+	}
 }
 
 func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) {
@@ -268,62 +524,10 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		}
 	}
 
-	signer, err := loadSigner(c.cfg.Auth.Key)
+	sshCfg, opts, interactiveTos, err := c.buildSSHConfig(fset, id)
 	if err != nil {
 		state.Global.Update("connection", id, state.Failed, err.Error())
-		c.log.Error("load key failed", "key", c.cfg.Auth.Key, "error", err)
-		return
-	}
-
-	// 1. Evaluate options FIRST so we can use them for security policy decisions
-	opts := mergeOptions(c.cfg.Options, fset.Options)
-
-	var hostKeyCallback ssh.HostKeyCallback
-	if c.cfg.Auth.KnownHosts != "" {
-		hkc, err := knownhosts.New(c.cfg.Auth.KnownHosts)
-		if err != nil {
-			state.Global.Update("connection", id, state.Failed, err.Error())
-			c.log.Error("load known_hosts failed", "file", c.cfg.Auth.KnownHosts, "error", err)
-			return
-		}
-		hostKeyCallback = hkc
-	} else {
-		if strings.ToLower(config.GetOption(opts, "StrictHostKeyChecking")) == "no" {
-			hostKeyCallback = ssh.InsecureIgnoreHostKey()
-			c.log.Warn("StrictHostKeyChecking=no is configured. Vulnerable to MITM attacks.")
-		} else {
-			err := errors.New("known_hosts is missing. Configure auth.known_hosts or set StrictHostKeyChecking: no")
-			state.Global.Update("connection", id, state.Failed, err.Error())
-			c.log.Error("Security policy enforcement failed", "error", err)
-			return
-		}
-	}
-
-	sshCfg := &ssh.ClientConfig{
-		User:            "root",
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         15 * time.Second,
-	}
-
-	// 2. Remove the old opts declaration from down here
-	if timeoutStr := config.GetOption(opts, "ConnectTimeout"); timeoutStr != "" {
-		if t, err := strconv.Atoi(timeoutStr); err == nil {
-			sshCfg.Timeout = time.Duration(t) * time.Second
-		}
-	}
-
-	applySSHConfigOptions(&sshCfg.Config, opts)
-
-	if val := config.GetOption(opts, "HostKeyAlgorithms"); val != "" {
-		sshCfg.HostKeyAlgorithms = strings.Split(val, ",")
-	}
-
-	// Parse IPQoS for this forward set's connection
-	interactiveTos, _, err := ParseIPQoS(config.GetOption(opts, "IPQoS"))
-	if err != nil {
-		state.Global.Update("connection", id, state.Failed, err.Error())
-		c.log.Error("invalid ipqos", "set", fset.Name, "ipqos", config.GetOption(opts, "IPQoS"), "error", err)
+		c.log.Error("SSH config failed", "error", err)
 		return
 	}
 

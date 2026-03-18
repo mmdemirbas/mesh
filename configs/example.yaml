@@ -87,7 +87,14 @@ my-vps-tunnel-service:
   # 3. Outbound SSH Connections (Dial remote servers)
   # ==============================================================================
   # Act as an SSH client. You can define multiple outbound connections.
+  #
+  # Two connection modes are available:
+  #   failover (default): Tries targets in order until one succeeds. Best for HA setups.
+  #   multiplex:          Connects to ALL targets simultaneously. Best for managing fleets.
   connections:
+
+    # --- Failover Connection (default mode) ---
+    # Tries targets in order; falls back to the next if one is unreachable.
     - name: my-vps-tunnel
 
       # 'targets': A list of fallback URLs to try dialing in order.
@@ -95,13 +102,28 @@ my-vps-tunnel-service:
       targets:
         - ubuntu@my-vps.local:22  # Try mDNS first
         - ubuntu@12.34.56.78:22   # Fallback to public IP
-      
+
       # How long to wait before attempting to reconnect if the session drops.
       retry: 10s
-      
+
       # Authentication credentials for the target server(s).
+      # Multiple methods can be configured; tried in order: agent → key → password_command.
       auth:
+        # Use the SSH agent for key-based auth (most secure — keys never leave the agent).
+        # Requires SSH_AUTH_SOCK to be set.
+        # agent: true
+
+        # Path to a private key file.
         key: ~/.ssh/keys/client/key
+
+        # Shell command whose stdout is used as the password.
+        # The password never appears in the config file.
+        # Examples:
+        #   password_command: "security find-generic-password -s mesh -w"  # macOS Keychain
+        #   password_command: "pass show mesh/server"                      # pass/gpg
+        #   password_command: "op read op://vault/ssh/password"            # 1Password CLI
+
+        # Path to known_hosts file for server verification.
         known_hosts: ~/.ssh/keys/client/known_hosts
 
       # Common SSH options applied to all forwards in this connection.
@@ -110,20 +132,20 @@ my-vps-tunnel-service:
       # --------------------------------------------------------------------------
       # Forwarding Sets (Parallel SSH Sessions)
       # --------------------------------------------------------------------------
-      # 'forwards' is a list of sets. Each set establishes its own purely 
+      # 'forwards' is a list of sets. Each set establishes its own purely
       # independent physical SSH connection beneath the hood.
       # This maximizes throughput and prevents head-of-line blocking across tasks.
       forwards:
-        
+
         # --- Set A: Port Forwarding (-L / -R) ---
         - name: port-mappings
           # 'options' overrides or adds to connection-level options (e.g., QoS diffserv)
           options: { IPQoS: "lowdelay throughput" }
-          
+
           # 'local' (-L equivalent): Listen locally (8080), forward traffic TO the peer (80).
           local:
             - { type: forward, bind: "127.0.0.1:8080", target: "127.0.0.1:80" }
-          
+
           # 'remote' (-R equivalent): Listen on the peer (9090), forward traffic BACK HERE (22).
           remote:
             - { type: forward, bind: "0.0.0.0:9090", target: "127.0.0.1:22" }
@@ -136,8 +158,24 @@ my-vps-tunnel-service:
           local:
             - { type: socks, bind: "127.0.0.1:2080" }
             - { type: http,  bind: "127.0.0.1:2081", target: "127.0.0.1:2080" }
-          
+
           # 'remote' (Reverse -D): Bind a SOCKS/HTTP proxy on the peer.
           # Traffic entering the peer's proxy (3080) exits out into YOUR local network.
           remote:
             - { type: socks, bind: "127.0.0.1:3080" }
+
+    # --- Multiplex Connection (fleet management) ---
+    # Connects to ALL targets simultaneously. Each target gets its own SSH connection.
+    # Replaces docker-compose setups with dozens of sshpass containers.
+    #- name: cluster-30
+    #  mode: multiplex
+    #  targets:
+    #    - root@192.168.13.30
+    #    - root@192.168.13.66
+    #    - root@192.168.13.106
+    #    - root@192.168.13.124
+    #  retry: 10s
+    #  auth:
+    #    password_command: "pass show cluster30/ssh"
+    #  options:
+    #    StrictHostKeyChecking: "no"

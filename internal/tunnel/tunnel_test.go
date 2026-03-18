@@ -3,10 +3,13 @@ package tunnel
 import (
 	"errors"
 	"io"
+	"log/slog"
 	"net"
+	"os"
 	"testing"
 	"time"
 
+	"github.com/mmdemirbas/mesh/internal/config"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -290,3 +293,120 @@ func TestApplySSHConfigOptions_RekeyLimit(t *testing.T) {
 		t.Errorf("RekeyThreshold = %d, want %d", cfg.RekeyThreshold, 1024*1024*1024)
 	}
 }
+
+func TestRunPasswordCommand(t *testing.T) {
+	password, err := runPasswordCommand("echo hunter2")
+	if err != nil {
+		t.Fatalf("runPasswordCommand failed: %v", err)
+	}
+	if password != "hunter2" {
+		t.Errorf("password = %q, want %q", password, "hunter2")
+	}
+}
+
+func TestRunPasswordCommand_TrimsWhitespace(t *testing.T) {
+	password, err := runPasswordCommand("echo '  spaced  '")
+	if err != nil {
+		t.Fatalf("runPasswordCommand failed: %v", err)
+	}
+	if password != "spaced" {
+		t.Errorf("password = %q, want %q", password, "spaced")
+	}
+}
+
+func TestRunPasswordCommand_Failure(t *testing.T) {
+	_, err := runPasswordCommand("false")
+	if err == nil {
+		t.Error("expected error for failing command")
+	}
+}
+
+func TestBuildAuthMethods_KeyOnly(t *testing.T) {
+	// Create a temporary SSH key for testing
+	key := generateTestKey(t)
+	client := &SSHClient{
+		cfg: config.Connection{
+			Auth: config.AuthCfg{Key: key},
+		},
+		log: slog.Default(),
+	}
+	methods, err := client.buildAuthMethods("test")
+	if err != nil {
+		t.Fatalf("buildAuthMethods failed: %v", err)
+	}
+	if len(methods) != 1 {
+		t.Errorf("expected 1 auth method, got %d", len(methods))
+	}
+}
+
+func TestBuildAuthMethods_PasswordCommand(t *testing.T) {
+	client := &SSHClient{
+		cfg: config.Connection{
+			Auth: config.AuthCfg{PasswordCommand: "echo testpass"},
+		},
+		log: slog.Default(),
+	}
+	methods, err := client.buildAuthMethods("test")
+	if err != nil {
+		t.Fatalf("buildAuthMethods failed: %v", err)
+	}
+	// Should have password + keyboard-interactive
+	if len(methods) != 2 {
+		t.Errorf("expected 2 auth methods (password + keyboard-interactive), got %d", len(methods))
+	}
+}
+
+func TestBuildAuthMethods_NoAuth(t *testing.T) {
+	client := &SSHClient{
+		cfg: config.Connection{Auth: config.AuthCfg{}},
+		log: slog.Default(),
+	}
+	_, err := client.buildAuthMethods("test")
+	if err == nil {
+		t.Error("expected error when no auth methods configured")
+	}
+}
+
+func TestBuildAuthMethods_AgentWithoutSocket(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+	client := &SSHClient{
+		cfg: config.Connection{
+			Auth: config.AuthCfg{Agent: true, PasswordCommand: "echo fallback"},
+		},
+		log: slog.Default(),
+	}
+	methods, err := client.buildAuthMethods("test")
+	if err != nil {
+		t.Fatalf("buildAuthMethods failed: %v", err)
+	}
+	// Agent fails but password_command should still provide methods
+	if len(methods) < 1 {
+		t.Error("expected at least 1 auth method from password fallback")
+	}
+}
+
+// generateTestKey creates a temporary ed25519 SSH private key file for testing.
+func generateTestKey(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	keyPath := dir + "/test_key"
+	// Generate a minimal OpenSSH ed25519 key
+	key, err := ssh.ParseRawPrivateKey([]byte(testKeyPEM))
+	if err != nil {
+		t.Fatalf("failed to parse test key: %v", err)
+	}
+	_ = key
+	if err := os.WriteFile(keyPath, []byte(testKeyPEM), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return keyPath
+}
+
+// Real ed25519 private key for testing (unencrypted, OpenSSH format)
+var testKeyPEM = "-----BEGIN OPENSSH PRIVATE KEY-----\n" +
+	"b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n" +
+	"QyNTUxOQAAACDnp69QUZbotg+ywW7wDj22PysFU0yjNQNFEAcBkQVhJgAAAJDFh3iTxYd4\n" +
+	"kwAAAAtzc2gtZWQyNTUxOQAAACDnp69QUZbotg+ywW7wDj22PysFU0yjNQNFEAcBkQVhJg\n" +
+	"AAAEB901nbqWqieuIsr77JNYvv652WVn0qRTX2g1+e2JP38Oenr1BRlui2D7LBbvAOPbY/\n" +
+	"KwVTTKM1A0UQBwGRBWEmAAAACXRlc3RAdGVzdAECAwQ=\n" +
+	"-----END OPENSSH PRIVATE KEY-----\n"
