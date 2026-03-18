@@ -12,9 +12,12 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// handleSession handles an SSH session channel.
-// On Windows natively, PTY allocation via creack/pty is not fully supported in the same way.
-// We reject PTY requests but provide a basic standard pipe fallback to allow basic remote execution.
+// handleSession handles an SSH session channel on Windows.
+// Windows lacks Unix PTY support, but we accept pty-req anyway so that clients
+// (which request a PTY by default for interactive sessions) don't see
+// "PTY allocation request failed." The shell runs with plain pipes — this works
+// well for cmd.exe, PowerShell, and most CLI tools. Programs that query terminal
+// attributes (e.g., curses/ncurses) won't render correctly, but that's rare on Windows.
 func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, log *slog.Logger) {
 	if len(shellCommand) == 0 {
 		newChan.Reject(ssh.Prohibited, "shell execution disabled")
@@ -36,9 +39,17 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 		defer ch.Close()
 		for req := range reqs {
 			switch req.Type {
-			case "pty-req", "window-change":
+			case "pty-req":
+				// Accept the PTY request so clients don't error, even though
+				// we use plain pipes underneath. This is the standard approach
+				// for Go SSH servers on Windows without ConPTY.
 				if req.WantReply {
-					req.Reply(false, nil) // Reject PTY since Windows doesn't easily support it natively here
+					req.Reply(true, nil)
+				}
+			case "window-change":
+				// Acknowledge but ignore — no real PTY to resize.
+				if req.WantReply {
+					req.Reply(true, nil)
 				}
 			case "shell", "exec":
 				cmdStart.Do(func() {
