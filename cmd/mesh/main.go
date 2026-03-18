@@ -109,10 +109,10 @@ func parseIPv4Port(s, raw string) (addrKey, bool) {
 		c := s[i]
 		if c >= '0' && c <= '9' {
 			if inPort {
-				port = port*10 + int(c-'0')
-				if port > 65535 {
-					return addrKey{}, false
+				if port > 6553 || (port == 6553 && c > '5') {
+					return addrKey{}, false // prevent overflow before multiplication
 				}
+				port = port*10 + int(c-'0')
 			} else {
 				octet = octet*10 + int(c-'0')
 				if octet > 255 {

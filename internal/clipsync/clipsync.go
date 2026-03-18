@@ -3,8 +3,8 @@ package clipsync
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -38,6 +38,11 @@ const (
 	// maxRequestBodySize caps the /sync endpoint body.
 	// Allows up to ~20 files at maxSyncFileSize with base64 overhead (~33%).
 	maxRequestBodySize = maxSyncFileSize * 20 * 4 / 3
+
+	// maxPeers limits the number of dynamically discovered peers to prevent
+	// OOM from an attacker flooding unique source addresses via UDP.
+	// Kept very low — typical LAN setups have 2-10 peers.
+	maxPeers = 32
 )
 
 type FileRef struct {
@@ -252,7 +257,9 @@ func (n *Node) Broadcast(payload Payload) {
 }
 
 func (n *Node) postHTTP(addr string, data []byte) {
-	req, _ := http.NewRequest("POST", fmt.Sprintf("http://%s/sync", addr), bytes.NewReader(data))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/sync", addr), bytes.NewReader(data))
 	req.ContentLength = int64(len(data))
 	resp, err := n.httpClient.Do(req)
 	if err == nil {
@@ -266,9 +273,11 @@ func (n *Node) processPayload(p Payload, peerHostPort string) {
 	if len(p.Files) > 0 {
 		var writtenPaths []string
 		for _, f := range p.Files {
-			// Sanitize filename to prevent path traversal (e.g., "../../etc/passwd")
+			// Sanitize filename: filepath.Base strips directory components,
+			// then reject any remaining unsafe names or path separator characters.
 			safeName := filepath.Base(f.FileName)
-			if safeName == "." || safeName == ".." || safeName == "" {
+			if safeName == "." || safeName == ".." || safeName == "" ||
+				strings.ContainsAny(safeName, "/\\") {
 				slog.Warn("Rejected clipboard file with unsafe name", "file", f.FileName)
 				continue
 			}
@@ -600,7 +609,7 @@ func generateID() string {
 }
 
 func hashBytes(b []byte) string {
-	h := md5.Sum(b)
+	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
 
@@ -608,7 +617,7 @@ func hashBytes(b []byte) string {
 func hashFilePaths(paths []string) string {
 	// Fast path: single path (common case) avoids copy+sort+join.
 	if len(paths) == 1 {
-		h := md5.Sum([]byte(paths[0]))
+		h := sha256.Sum256([]byte(paths[0]))
 		return hex.EncodeToString(h[:])
 	}
 	// Check if already sorted.
@@ -623,10 +632,10 @@ func hashFilePaths(paths []string) string {
 		sorted := make([]string, len(paths))
 		copy(sorted, paths)
 		sort.Strings(sorted)
-		h := md5.Sum([]byte(strings.Join(sorted, "\n")))
+		h := sha256.Sum256([]byte(strings.Join(sorted, "\n")))
 		return hex.EncodeToString(h[:])
 	}
-	h := md5.Sum([]byte(strings.Join(paths, "\n")))
+	h := sha256.Sum256([]byte(strings.Join(paths, "\n")))
 	return hex.EncodeToString(h[:])
 }
 
@@ -634,7 +643,7 @@ func hashFilePaths(paths []string) string {
 func hashFormats(formats []ClipFormat) string {
 	// Fast path: single format (most common case) avoids copy+sort.
 	if len(formats) == 1 {
-		h := md5.New()
+		h := sha256.New()
 		h.Write([]byte(formats[0].MimeType))
 		h.Write([]byte{0})
 		h.Write(formats[0].Data)
@@ -654,7 +663,7 @@ func hashFormats(formats []ClipFormat) string {
 		copy(sorted, formats)
 		sort.Slice(sorted, func(i, j int) bool { return sorted[i].MimeType < sorted[j].MimeType })
 	}
-	h := md5.New()
+	h := sha256.New()
 	for _, f := range sorted {
 		h.Write([]byte(f.MimeType))
 		h.Write([]byte{0}) // separator
@@ -1278,7 +1287,12 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 		peerAddr := fmt.Sprintf("%s:%d", remoteAddr.IP.String(), msg.Port)
 
 		n.peersMu.Lock()
-		if _, exists := n.peers[peerAddr]; !exists {
+		_, exists := n.peers[peerAddr]
+		if !exists && len(n.peers) >= maxPeers {
+			n.peersMu.Unlock()
+			continue // reject new peers when at capacity
+		}
+		if !exists {
 			slog.Info("Discovered new peer via LAN UDP broadcast", "peer", peerAddr, "ID", msg.ID)
 			state.Global.Update("clipsync-peer", n.config.Bind+"|"+peerAddr, state.Connected, "discovered")
 		}

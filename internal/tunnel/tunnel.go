@@ -383,7 +383,8 @@ func (c *SSHClient) buildSSHConfig(fset *config.ForwardSet, id string) (*ssh.Cli
 		hostKeyCallback = ssh.InsecureIgnoreHostKey()
 		c.log.Warn("StrictHostKeyChecking=no is configured. Vulnerable to MITM attacks.")
 	} else {
-		return nil, nil, 0, errors.New("known_hosts is missing. Configure auth.known_hosts or set StrictHostKeyChecking: no")
+		return nil, nil, 0, errors.New("SSH server identity cannot be verified: auth.known_hosts is not configured and StrictHostKeyChecking is not set to 'no'. " +
+			"Set auth.known_hosts to a known_hosts file, or add StrictHostKeyChecking: 'no' to options (insecure, allows MITM attacks)")
 	}
 
 	sshCfg := &ssh.ClientConfig{

@@ -2,7 +2,7 @@ package clipsync
 
 import (
 	"bytes"
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -70,7 +70,7 @@ func TestContainsIP(t *testing.T) {
 
 func TestHashBytes(t *testing.T) {
 	input := []byte("hello world")
-	h := md5.Sum(input)
+	h := sha256.Sum256(input)
 	want := hex.EncodeToString(h[:])
 
 	got := hashBytes(input)
@@ -81,7 +81,7 @@ func TestHashBytes(t *testing.T) {
 
 func TestHashBytesEmpty(t *testing.T) {
 	got := hashBytes(nil)
-	h := md5.Sum(nil)
+	h := sha256.Sum256(nil)
 	want := hex.EncodeToString(h[:])
 	if got != want {
 		t.Errorf("hashBytes(nil) = %q, want %q", got, want)

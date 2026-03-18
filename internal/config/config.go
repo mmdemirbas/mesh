@@ -160,8 +160,22 @@ func Load(path, serviceName string) (*Config, error) {
 	return cfg, nil
 }
 
+// warnInsecurePermissions logs a warning if the config file is readable by group or others.
+// This matters when the config contains password_command or other sensitive directives.
+func warnInsecurePermissions(path string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	mode := info.Mode().Perm()
+	if mode&0077 != 0 {
+		slog.Warn("Config file has insecure permissions; consider chmod 600", "path", path, "mode", fmt.Sprintf("%04o", mode))
+	}
+}
+
 // LoadUnvalidated reads and parses a config file without checking for runtime requirements (like file existence).
 func LoadUnvalidated(path string) (map[string]*Config, error) {
+	warnInsecurePermissions(path)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
