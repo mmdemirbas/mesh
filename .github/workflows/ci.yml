@@ -37,9 +37,8 @@ jobs:
         with:
           go-version: "1.25"
 
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
+      - name: golangci-lint
+        run: go run github.com/golangci/golangci-lint/cmd/golangci-lint@latest run
 
   vuln:
     runs-on: ubuntu-latest
