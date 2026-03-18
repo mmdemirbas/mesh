@@ -59,10 +59,11 @@ type Connection struct {
 	// A list of target addresses. In failover mode, tried in order. In multiplex mode, all connected simultaneously.
 	// Format: "user@host:port" (e.g., ["root@192.168.1.50:22", "root@10.0.0.1:22"]).
 	Targets []string `yaml:"targets"`
-	// How long to wait before attempting to reconnect if the session drops (e.g., "10s").
-	Retry string `yaml:"retry"`
+	// How long to wait before attempting to reconnect if the session drops (e.g., "10s"). Defaults to 10s.
+	Retry string `yaml:"retry,omitempty"`
 	// Authentication credentials for the target server(s).
-	Auth AuthCfg `yaml:"auth"`
+	// Multiple methods can be configured; tried in order: agent → key → password_command.
+	Auth AuthCfg `yaml:"auth,omitempty"`
 	// Common SSH options applied to all forwards in this connection.
 	// Supported keys: Ciphers, MACs, KexAlgorithms, HostKeyAlgorithms, ConnectTimeout,
 	// IPQoS, TCPKeepAlive, ServerAliveInterval, ServerAliveCountMax, ExitOnForwardFailure,
@@ -75,11 +76,11 @@ type Connection struct {
 
 // ClipsyncCfg represents the YAML configuration structure.
 type ClipsyncCfg struct {
-	Bind         string   `yaml:"bind"`          // e.g., "0.0.0.0:7755"
-	LANDiscovery bool     `yaml:"lan_discovery"` // default: true
-	StaticPeers  []string `yaml:"static_peers"`
-	AllowSendTo  []string `yaml:"allow_send_to"` // "all", "none", "udp", or specific IPs
-	AllowReceive []string `yaml:"allow_receive"` // "all", "none", "udp", or specific IPs
+	Bind         string   `yaml:"bind"`                    // e.g., "0.0.0.0:7755"
+	LANDiscovery bool     `yaml:"lan_discovery,omitempty"` // default: true
+	StaticPeers  []string `yaml:"static_peers,omitempty"`
+	AllowSendTo  []string `yaml:"allow_send_to,omitempty"` // "all", "none", "udp", or specific IPs. Default: ["all"]
+	AllowReceive []string `yaml:"allow_receive,omitempty"` // "all", "none", "udp", or specific IPs. Default: ["all"]
 }
 
 // UnmarshalYAML provides default values for ClipsyncCfg.

@@ -47,24 +47,20 @@
             "type": "string"
           },
           "type": "array",
-          "description": "\"all\", \"none\", \"udp\", or specific IPs"
+          "description": "\"all\", \"none\", \"udp\", or specific IPs. Default: [\"all\"]"
         },
         "allow_receive": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "\"all\", \"none\", \"udp\", or specific IPs"
+          "description": "\"all\", \"none\", \"udp\", or specific IPs. Default: [\"all\"]"
         }
       },
       "additionalProperties": false,
       "type": "object",
       "required": [
-        "bind",
-        "lan_discovery",
-        "static_peers",
-        "allow_send_to",
-        "allow_receive"
+        "bind"
       ],
       "description": "ClipsyncCfg represents the YAML configuration structure."
     },
@@ -129,11 +125,11 @@
         },
         "retry": {
           "type": "string",
-          "description": "How long to wait before attempting to reconnect if the session drops (e.g., \"10s\")."
+          "description": "How long to wait before attempting to reconnect if the session drops (e.g., \"10s\"). Defaults to 10s."
         },
         "auth": {
           "$ref": "#/$defs/AuthCfg",
-          "description": "Authentication credentials for the target server(s)."
+          "description": "Authentication credentials for the target server(s).\nMultiple methods can be configured; tried in order: agent → key → password_command."
         },
         "options": {
           "additionalProperties": {
@@ -154,9 +150,7 @@
       "type": "object",
       "required": [
         "name",
-        "targets",
-        "retry",
-        "auth"
+        "targets"
       ],
       "description": "Connection is an outbound SSH connection to a peer or standard SSH server."
     },

@@ -96,6 +96,7 @@ my-vps-tunnel-service:
     # --- Failover Connection (default mode) ---
     # Tries targets in order; falls back to the next if one is unreachable.
     - name: my-vps-tunnel
+      mode: failover  # default; can be omitted
 
       # 'targets': A list of fallback URLs to try dialing in order.
       # Unreachable targets fail fast (3s probe timeout). .local mDNS addresses get one automatic retry.
@@ -166,16 +167,18 @@ my-vps-tunnel-service:
 
     # --- Multiplex Connection (fleet management) ---
     # Connects to ALL targets simultaneously. Each target gets its own SSH connection.
-    # Replaces docker-compose setups with dozens of sshpass containers.
-    #- name: cluster-30
-    #  mode: multiplex
-    #  targets:
-    #    - root@192.168.13.30
-    #    - root@192.168.13.66
-    #    - root@192.168.13.106
-    #    - root@192.168.13.124
-    #  retry: 10s
-    #  auth:
-    #    password_command: "pass show cluster30/ssh"
-    #  options:
-    #    StrictHostKeyChecking: "no"
+    # Useful for managing server fleets. Replaces docker-compose setups with dozens of sshpass containers.
+    # Without 'forwards', connections stay alive as keepalive tunnels.
+    - name: cluster-30
+      mode: multiplex
+      targets:
+        - root@192.168.13.30
+        - root@192.168.13.66
+        - root@192.168.13.106
+        - root@192.168.13.124
+      retry: 10s
+      auth:
+        # Password fetched from an external tool — never stored in this file.
+        password_command: "pass show cluster30/ssh"
+      options:
+        StrictHostKeyChecking: "no"  # Lab/internal environment — insecure, disables host key verification
