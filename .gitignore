@@ -1,17 +1,26 @@
 # Binaries
 /build/
 /dist/
+/mesh
+
+# Profiler output
+*.prof
+*.test
 
 # OS
 .DS_Store
+Thumbs.db
 
-# IntelliJ
+# IDE
 .idea/
+.vscode/
+*.swp
+*~
 
 # Syncthing
 .stignore
 .stfolder
 
-# Local configs
+# Local configs (allow example)
 *.yaml
 !configs/example.yaml

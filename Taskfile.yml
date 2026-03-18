@@ -43,6 +43,24 @@ tasks:
     cmds:
       - go test -bench=. -benchmem ./...
 
+  lint:
+    desc: Run linters
+    cmds:
+      - go vet ./...
+      - golangci-lint run 2>/dev/null || echo "golangci-lint not installed, skipping (go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest)"
+
+  all:
+    desc: Run lint + test + build
+    cmds:
+      - task: lint
+      - task: test
+      - task: build
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -rf build/ dist/
+
   setup:windows:
     desc: Add the build directory to Windows PATH
     platforms: [ windows ]
