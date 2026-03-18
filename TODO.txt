@@ -1,9 +1,0 @@
-LOGGING
-- Implement an optional monitoring port (configurable) and web UI with a live dashboard.
-
-PERFORMANCE
-- Allow granular control of connections without restarting the whole app. -> is this really necessary? I think NO.
-
-USABILITY
-- Consider adding config monitoring and hot-reloading feature
-- Consider implementing an "admin" feature to allow running pre-defined commands / scripts remotely
