@@ -34,3 +34,8 @@
 - **Shell completions** — bash, zsh, fish.
 - **`mesh init`** — Generate a starter config interactively.
 - **Prometheus metrics** — Optional endpoint for connection count, bytes transferred, uptime.
+
+---
+
+- cli completion support
+- 

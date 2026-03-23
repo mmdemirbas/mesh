@@ -1294,6 +1294,25 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 		if !exists {
 			slog.Info("Discovered new peer via LAN UDP broadcast", "peer", peerAddr, "ID", msg.ID)
 			state.Global.Update("clipsync-peer", n.config.Bind+"|"+peerAddr, state.Connected, "discovered")
+
+			// Send a unicast reply so the sender also discovers us.
+			// This handles asymmetric networks where broadcast only works
+			// in one direction (e.g., Windows → macOS but not macOS → Windows).
+			n.stateMu.Lock()
+			h := n.lastHash
+			n.stateMu.Unlock()
+			reply, err := json.Marshal(struct {
+				Magic string `json:"m"`
+				ID    string `json:"id"`
+				Port  int    `json:"port"`
+				Hash  string `json:"h"`
+			}{magicHeader, n.id, n.port, h})
+			if err == nil {
+				// Reply to the peer's UDP server port (same as ours), not the
+				// ephemeral source port of the beacon sender.
+				replyAddr := &net.UDPAddr{IP: remoteAddr.IP, Port: port}
+				_, _ = conn.WriteToUDP(reply, replyAddr)
+			}
 		}
 		n.peers[peerAddr] = time.Now()
 
