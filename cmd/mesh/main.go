@@ -278,6 +278,17 @@ func main() {
 	}
 
 	args := flag.Args()
+
+	// Commands that don't require a node name
+	if len(args) >= 1 && args[0] == "completion" {
+		shell := ""
+		if len(args) >= 2 {
+			shell = args[1]
+		}
+		completionCmd(shell)
+		return
+	}
+
 	if len(args) < 2 {
 		printUsage()
 		os.Exit(1)
@@ -316,10 +327,11 @@ func printUsage() {
 	fmt.Println("  mesh " + cYellow + "[-f config.yaml] " + cReset + cCyan + "<node> <command>" + cReset + " [arguments]")
 	fmt.Println()
 	fmt.Println(cBold + "Commands:" + cReset)
-	fmt.Println("  " + cBlue + "up" + cReset + "     Start the specified mesh node (live dashboard when running in a terminal)")
-	fmt.Println("  " + cBlue + "down" + cReset + "   Stop the currently running mesh node")
-	fmt.Println("  " + cBlue + "status" + cReset + " Show live status of a running node (use " + cYellow + "-w" + cReset + " for watch mode)")
-	fmt.Println("  " + cBlue + "config" + cReset + " Show the parsed configuration for a node without starting it")
+	fmt.Println("  " + cBlue + "up" + cReset + "         Start the specified mesh node (live dashboard when running in a terminal)")
+	fmt.Println("  " + cBlue + "down" + cReset + "       Stop the currently running mesh node")
+	fmt.Println("  " + cBlue + "status" + cReset + "     Show live status of a running node (use " + cYellow + "-w" + cReset + " for watch mode)")
+	fmt.Println("  " + cBlue + "config" + cReset + "     Show the parsed configuration for a node without starting it")
+	fmt.Println("  " + cBlue + "completion" + cReset + " Generate shell completion script (bash, zsh, fish)")
 	fmt.Println()
 	fmt.Println(cBold + "Examples:" + cReset)
 	fmt.Println("  " + cGray + "# Start the 'server' node using the default configuration file" + cReset)
@@ -1416,3 +1428,344 @@ func killPid(pid int, sig syscall.Signal) error {
 	}
 	return nil
 }
+
+func completionCmd(shell string) {
+	switch shell {
+	case "bash":
+		fmt.Print(completionBash)
+	case "zsh":
+		fmt.Print(completionZsh)
+	case "fish":
+		fmt.Print(completionFish)
+	default:
+		fmt.Println(cBold + "Usage:" + cReset + " mesh completion <bash|zsh|fish>")
+		fmt.Println()
+		fmt.Println("Generate a shell completion script. To load completions:")
+		fmt.Println()
+		fmt.Println(cBold + "  Bash:" + cReset)
+		fmt.Println("    source <(mesh completion bash)")
+		fmt.Println("    # Or persist: mesh completion bash > /etc/bash_completion.d/mesh")
+		fmt.Println()
+		fmt.Println(cBold + "  Zsh:" + cReset)
+		fmt.Println("    source <(mesh completion zsh)")
+		fmt.Println("    # Or persist: mesh completion zsh > \"${fpath[1]}/_mesh\"")
+		fmt.Println()
+		fmt.Println(cBold + "  Fish:" + cReset)
+		fmt.Println("    mesh completion fish | source")
+		fmt.Println("    # Or persist: mesh completion fish > ~/.config/fish/completions/mesh.fish")
+		if shell != "" {
+			fmt.Fprintf(os.Stderr, "\nUnknown shell: %s\n", shell)
+			os.Exit(1)
+		}
+	}
+}
+
+// _mesh_nodes is a helper function name used in completion scripts.
+// It parses the config file to extract node names dynamically.
+const completionBash = `# bash completion for mesh
+_mesh_completions() {
+    local cur prev words cword
+    _init_completion || return
+
+    local commands="up down status config help"
+    local flags="-f --file -w --version"
+
+    # Get node names from config
+    _mesh_nodes() {
+        local config_file=""
+        for ((i=1; i < ${#words[@]}; i++)); do
+            if [[ "${words[i]}" == "-f" || "${words[i]}" == "--file" ]] && (( i+1 < ${#words[@]} )); then
+                config_file="${words[i+1]}"
+                break
+            fi
+        done
+
+        if [[ -z "$config_file" ]]; then
+            for f in mesh.yaml mesh.yml ~/.mesh/conf/mesh.yaml ~/.mesh/conf/mesh.yml; do
+                if [[ -f "$f" ]]; then
+                    config_file="$f"
+                    break
+                fi
+            done
+        fi
+
+        if [[ -n "$config_file" && -f "$config_file" ]]; then
+            # Extract top-level YAML keys (node names)
+            grep -E '^[a-zA-Z_][a-zA-Z0-9_-]*:' "$config_file" 2>/dev/null | sed 's/:.*//'
+        fi
+    }
+
+    # Find the node name and command positions (skipping flags and their args)
+    local node_pos="" cmd_pos=""
+    local skip_next=false
+    for ((i=1; i < cword; i++)); do
+        if $skip_next; then
+            skip_next=false
+            continue
+        fi
+        case "${words[i]}" in
+            -f|--file)
+                skip_next=true
+                continue
+                ;;
+            -*)
+                continue
+                ;;
+            *)
+                if [[ -z "$node_pos" ]]; then
+                    node_pos=$i
+                elif [[ -z "$cmd_pos" ]]; then
+                    cmd_pos=$i
+                fi
+                ;;
+        esac
+    done
+
+    # Complete flags anywhere
+    if [[ "$cur" == -* ]]; then
+        COMPREPLY=($(compgen -W "$flags" -- "$cur"))
+        return
+    fi
+
+    # After -f/--file, complete file paths
+    if [[ "$prev" == "-f" || "$prev" == "--file" ]]; then
+        _filedir yaml
+        _filedir yml
+        return
+    fi
+
+    # First positional arg: node name or "completion"
+    if [[ -z "$node_pos" ]]; then
+        local nodes
+        nodes=$(_mesh_nodes)
+        COMPREPLY=($(compgen -W "$nodes completion" -- "$cur"))
+        return
+    fi
+
+    # Second positional arg: command
+    if [[ -z "$cmd_pos" ]]; then
+        COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+        return
+    fi
+}
+
+complete -F _mesh_completions mesh
+`
+
+const completionZsh = `#compdef mesh
+
+_mesh() {
+    local -a commands=(
+        'up:Start the specified mesh node'
+        'down:Stop the currently running mesh node'
+        'status:Show live status of a running node'
+        'config:Show the parsed configuration for a node'
+        'help:Show detailed help'
+    )
+
+    _mesh_nodes() {
+        local config_file=""
+        local -i i
+        for ((i=1; i < ${#words[@]}; i++)); do
+            if [[ "${words[i]}" == "-f" || "${words[i]}" == "--file" ]] && (( i+1 < ${#words[@]} )); then
+                config_file="${words[i+1]}"
+                break
+            fi
+        done
+
+        if [[ -z "$config_file" ]]; then
+            for f in mesh.yaml mesh.yml ~/.mesh/conf/mesh.yaml ~/.mesh/conf/mesh.yml; do
+                if [[ -f "$f" ]]; then
+                    config_file="$f"
+                    break
+                fi
+            done
+        fi
+
+        if [[ -n "$config_file" && -f "$config_file" ]]; then
+            local -a nodes
+            nodes=(${(f)"$(grep -E '^[a-zA-Z_][a-zA-Z0-9_-]*:' "$config_file" 2>/dev/null | sed 's/:.*//')"})
+            compadd -a nodes
+        fi
+    }
+
+    # Find positions of node and command in the current line
+    local node_pos="" cmd_pos=""
+    local skip_next=false
+    local -i i
+    for ((i=2; i < CURRENT; i++)); do
+        if $skip_next; then
+            skip_next=false
+            continue
+        fi
+        case "${words[i]}" in
+            -f|--file)
+                skip_next=true
+                continue
+                ;;
+            -*)
+                continue
+                ;;
+            *)
+                if [[ -z "$node_pos" ]]; then
+                    node_pos=$i
+                elif [[ -z "$cmd_pos" ]]; then
+                    cmd_pos=$i
+                fi
+                ;;
+        esac
+    done
+
+    # Complete flags
+    if [[ "$words[CURRENT]" == -* ]]; then
+        _arguments \
+            '(-f --file)'{-f,--file}'[Path to config file]:config file:_files -g "*.y(a|)ml"' \
+            '-w[Watch mode for status command]' \
+            '--version[Print version and exit]'
+        return
+    fi
+
+    # After -f/--file, complete file paths
+    if [[ "$words[CURRENT-1]" == "-f" || "$words[CURRENT-1]" == "--file" ]]; then
+        _files -g '*.y(a|)ml'
+        return
+    fi
+
+    # First positional: node name or "completion"
+    if [[ -z "$node_pos" ]]; then
+        _alternative \
+            'nodes:node:_mesh_nodes' \
+            'completion:completion:(completion)'
+        return
+    fi
+
+    # If first positional is "completion", complete shell names
+    if [[ "${words[node_pos]}" == "completion" ]]; then
+        compadd bash zsh fish
+        return
+    fi
+
+    # Second positional: command
+    if [[ -z "$cmd_pos" ]]; then
+        _describe 'command' commands
+        return
+    fi
+}
+
+_mesh "$@"
+`
+
+const completionFish = `# fish completion for mesh
+
+# Determine config file from command line args or default locations
+function __mesh_config_file
+    set -l args (commandline -opc)
+    for i in (seq 2 (count $args))
+        if test "$args[$i]" = "-f" -o "$args[$i]" = "--file"
+            set -l next (math $i + 1)
+            if test $next -le (count $args)
+                echo $args[$next]
+                return
+            end
+        end
+    end
+    for f in mesh.yaml mesh.yml ~/.mesh/conf/mesh.yaml ~/.mesh/conf/mesh.yml
+        if test -f $f
+            echo $f
+            return
+        end
+    end
+end
+
+# Extract node names from config
+function __mesh_nodes
+    set -l config (__mesh_config_file)
+    if test -n "$config" -a -f "$config"
+        grep -E '^[a-zA-Z_][a-zA-Z0-9_-]*:' $config 2>/dev/null | sed 's/:.*//'
+    end
+end
+
+# Check if a node name has been provided (skip flags and their args)
+function __mesh_needs_node
+    set -l args (commandline -opc)
+    set -l skip_next false
+    for i in (seq 2 (count $args))
+        if $skip_next
+            set skip_next false
+            continue
+        end
+        switch $args[$i]
+            case -f --file
+                set skip_next true
+            case '-*'
+                continue
+            case '*'
+                return 1  # node already provided
+        end
+    end
+    return 0
+end
+
+# Check if we need a command (node provided but no command yet)
+function __mesh_needs_command
+    set -l args (commandline -opc)
+    set -l skip_next false
+    set -l positionals 0
+    for i in (seq 2 (count $args))
+        if $skip_next
+            set skip_next false
+            continue
+        end
+        switch $args[$i]
+            case -f --file
+                set skip_next true
+            case '-*'
+                continue
+            case '*'
+                set positionals (math $positionals + 1)
+        end
+    end
+    test $positionals -eq 1
+end
+
+# Check if first positional is "completion"
+function __mesh_is_completion
+    set -l args (commandline -opc)
+    set -l skip_next false
+    for i in (seq 2 (count $args))
+        if $skip_next
+            set skip_next false
+            continue
+        end
+        switch $args[$i]
+            case -f --file
+                set skip_next true
+            case '-*'
+                continue
+            case '*'
+                test "$args[$i]" = "completion"
+                return $status
+        end
+    end
+    return 1
+end
+
+# Global flags
+complete -c mesh -s f -l file -rF -d 'Path to config file'
+complete -c mesh -s w -d 'Watch mode for status command'
+complete -c mesh -l version -d 'Print version and exit'
+
+# Node names (first positional)
+complete -c mesh -n __mesh_needs_node -f -a '(__mesh_nodes)' -d 'Node name'
+complete -c mesh -n __mesh_needs_node -f -a completion -d 'Generate shell completion script'
+
+# Commands (second positional)
+complete -c mesh -n __mesh_needs_command -f -a up -d 'Start the specified mesh node'
+complete -c mesh -n __mesh_needs_command -f -a down -d 'Stop the currently running mesh node'
+complete -c mesh -n __mesh_needs_command -f -a status -d 'Show live status of a running node'
+complete -c mesh -n __mesh_needs_command -f -a config -d 'Show the parsed configuration'
+complete -c mesh -n __mesh_needs_command -f -a help -d 'Show detailed help'
+
+# Shell names for "completion" subcommand
+complete -c mesh -n __mesh_is_completion -f -a 'bash zsh fish' -d 'Shell type'
+`

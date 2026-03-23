@@ -36,6 +36,3 @@
 - **Prometheus metrics** — Optional endpoint for connection count, bytes transferred, uptime.
 
 ---
-
-- cli completion support
-- 
