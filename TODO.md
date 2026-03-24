@@ -31,7 +31,6 @@
 
 - **Web UI** — HTML dashboard via admin HTTP endpoint (SSE/WebSocket). Backend is ready (`renderStatus`, admin server).
 - **Config hot-reload** — Watch config file, diff changes, restart affected components. Needs lifecycle management.
-- **Shell completions** — bash, zsh, fish.
 - **`mesh init`** — Generate a starter config interactively.
 - **Prometheus metrics** — Optional endpoint for connection count, bytes transferred, uptime.
 

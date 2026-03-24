@@ -31,12 +31,14 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 	}
 
 	var (
-		cmd      *exec.Cmd
-		cmdStart sync.Once
+		cmd       *exec.Cmd
+		cmdStart  sync.Once
+		closeOnce sync.Once
 	)
+	closeCh := func() { closeOnce.Do(func() { ch.Close() }) }
 
 	go func() {
-		defer ch.Close()
+		defer closeCh()
 		for req := range reqs {
 			switch req.Type {
 			case "pty-req":
@@ -89,7 +91,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 						msg := make([]byte, 4)
 						binary.BigEndian.PutUint32(msg, status)
 						_, _ = ch.SendRequest("exit-status", false, msg)
-						ch.Close()
+						closeCh()
 					}()
 				})
 			default:

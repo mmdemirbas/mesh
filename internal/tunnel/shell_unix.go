@@ -28,14 +28,15 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 		log.Error("Accept session channel failed", "error", err)
 		return
 	}
-	defer ch.Close()
-
 	var (
-		ptm      *os.File // pty master
-		pts      *os.File // pty slave
-		cmd      *exec.Cmd
-		cmdStart sync.Once
+		ptm       *os.File // pty master
+		pts       *os.File // pty slave
+		cmd       *exec.Cmd
+		cmdStart  sync.Once
+		closeOnce sync.Once
 	)
+	closeCh := func() { closeOnce.Do(func() { ch.Close() }) }
+	defer closeCh()
 
 	defer func() {
 		if ptm != nil {
@@ -159,7 +160,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					if req.WantReply {
 						_ = req.Reply(false, nil)
 					}
-					ch.Close()
+					closeCh()
 					return
 				}
 
@@ -202,7 +203,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					msg := make([]byte, 4)
 					binary.BigEndian.PutUint32(msg, status)
 					_, _ = ch.SendRequest("exit-status", false, msg)
-					ch.Close()
+					closeCh()
 				}()
 			})
 
