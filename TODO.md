@@ -36,15 +36,10 @@
 
 ---
 
-- We cannot track per-forwarindg metrics, right? Currently we are showing metrics per forwarding set. A forwarding set could contain multiple forwardnigs at ones. I'm more interested in that than forwarding-set level metrics. If we can achieve this, we can remove the forwarding-set level metrics.
-- Is it possible to collect metrics on the listeners also?
-- After adding that much details to the dashboard, it started feeling a bit unorganized. Let's align gray texts  properly.
-
 
 - move node name after subcommand and make it optional -> `mesh subcommand [node] [args]`
 - this change will require to support multiple nodes for the subcommands.
 - this will make the tool easier to understand and use, just like `docker compose ...`
 
-- I see 10MB memory usage in Windows task manager, and 12MB in MacOS. Feels a bit bigger than necessary. What are we using this memory for? Can we reduce it? How? Let's discuss and plan before proceeding to make any changes.
 
 - This app should be extremely lightweight and energy-efficient. Let's check where we are spending energy and how can we use it more efficiently. Let's discuss and plan before proceeding to make any changes.
