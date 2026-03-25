@@ -1069,29 +1069,37 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, no
 		for _, c := range cfg.Connections {
 			addHeader(sectionTitle(c.Name))
 
-			connectedTargets := make(map[string]state.Status)
+			type targetInfo struct {
+				status   state.Status
+				peerAddr string
+			}
+			connectedTargets := make(map[string]targetInfo)
 			for _, fset := range c.Forwards {
 				id := c.Name + " [" + fset.Name + "]"
 				_, _, comp := getComponentInfo("connection", id)
 				if comp.Message != "" {
 					existing, seen := connectedTargets[comp.Message]
 					// Connected takes priority over Connecting
-					if !seen || (comp.Status == state.Connected && existing != state.Connected) {
-						connectedTargets[comp.Message] = comp.Status
+					if !seen || (comp.Status == state.Connected && existing.status != state.Connected) {
+						connectedTargets[comp.Message] = targetInfo{status: comp.Status, peerAddr: comp.PeerAddr}
 					}
 				}
 			}
 			for _, t := range c.Targets {
 				ind := "○"
-				if st, ok := connectedTargets[t]; ok {
-					switch st {
+				suffix := ""
+				if info, ok := connectedTargets[t]; ok {
+					switch info.status {
 					case state.Connected:
 						ind = cGreen + "●" + cReset
+						if info.peerAddr != "" {
+							suffix = " " + cGray + "(" + info.peerAddr + ")" + cReset
+						}
 					case state.Connecting, state.Retrying:
 						ind = cBlink + cYellow + "●" + cReset
 					}
 				}
-				addRow(" ", ind, colorAddr(t), "", "", "")
+				addRow(" ", ind, colorAddr(t)+suffix, "", "", "")
 			}
 
 			for _, fset := range c.Forwards {

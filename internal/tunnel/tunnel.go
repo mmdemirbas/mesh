@@ -494,6 +494,7 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 		client := ssh.NewClient(sshConn, chans, reqs)
 
 		state.Global.Update("connection", id, state.Connected, target)
+		state.Global.UpdatePeer("connection", id, conn.RemoteAddr().String())
 		log.Info("Connected", "tcp", t1.Sub(t0).Round(time.Millisecond), "ssh", time.Since(t1).Round(time.Millisecond))
 
 		err = c.runSession(ctx, client, fset, opts, log)
@@ -588,6 +589,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		client := ssh.NewClient(sshConn, chans, reqs)
 
 		state.Global.Update("connection", id, state.Connected, target)
+		state.Global.UpdatePeer("connection", id, conn.RemoteAddr().String())
 		log.Info("Connected", "target", target,
 			"tcp", t1.Sub(t0).Round(time.Millisecond),
 			"ssh", time.Since(t1).Round(time.Millisecond))

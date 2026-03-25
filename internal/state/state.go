@@ -21,6 +21,7 @@ type Component struct {
 	Status    Status `json:"status"`     // current status
 	Message   string `json:"message"`    // error or target info
 	BoundAddr string `json:"bound_addr"` // active resolved listener address
+	PeerAddr  string `json:"peer_addr"`  // resolved remote peer address (connections)
 }
 
 type State struct {
@@ -50,6 +51,15 @@ func (s *State) UpdateBind(compType, id, boundAddr string) {
 	key := compType + ":" + id
 	comp := s.components[key]
 	comp.BoundAddr = boundAddr
+	s.components[key] = comp
+}
+
+func (s *State) UpdatePeer(compType, id, peerAddr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := compType + ":" + id
+	comp := s.components[key]
+	comp.PeerAddr = peerAddr
 	s.components[key] = comp
 }
 
