@@ -266,7 +266,7 @@ func TestLogRing_LinesIsACopy(t *testing.T) {
 
 func TestRenderStatus_Empty(t *testing.T) {
 	cfg := &config.Config{}
-	output := renderStatus(cfg, nil, nil, "testnode")
+	output, _ := renderStatus(cfg, nil, nil, "testnode")
 	if !strings.Contains(output, "testnode") {
 		t.Error("output should contain the node name")
 	}
@@ -286,7 +286,7 @@ func TestRenderStatus_WithListeners(t *testing.T) {
 		"proxy:127.0.0.1:1080": {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
 		"proxy:127.0.0.1:3128": {Type: "proxy", ID: "127.0.0.1:3128", Status: state.Failed, Message: "bind error"},
 	}
-	output := renderStatus(cfg, activeState, nil, "testnode")
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
 	if !strings.Contains(output, "listeners") {
 		t.Error("output should contain 'listeners' section")
 	}
@@ -318,7 +318,7 @@ func TestRenderStatus_WithConnections(t *testing.T) {
 			},
 		},
 	}
-	output := renderStatus(cfg, nil, nil, "testnode")
+	output, _ := renderStatus(cfg, nil, nil, "testnode")
 	if !strings.Contains(output, "remote") {
 		t.Error("output should contain connection name")
 	}
@@ -473,7 +473,7 @@ func TestRenderStatus_TargetSymbols(t *testing.T) {
 			Status: state.Connected, Message: "root@10.0.0.1:22",
 		},
 	}
-	output := renderStatus(cfg, activeState, nil, "testnode")
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
 	// Connected target should have green ● (with ANSI)
 	if !strings.Contains(output, "●") {
 		t.Error("connected target should show ● symbol")
@@ -503,7 +503,7 @@ func TestRenderStatus_ForwardSetPeerSymbol(t *testing.T) {
 			PeerAddr: "10.0.0.1:22",
 		},
 	}
-	output := renderStatus(cfg, activeState, nil, "testnode")
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
 	// The forward set's peer line should also have ● (not →)
 	// Count ● occurrences — should be at least 2 (target line + peer line)
 	count := strings.Count(output, "●")
@@ -531,7 +531,7 @@ func TestRenderStatus_PeerAddrHidden_WhenSameAsTarget(t *testing.T) {
 			PeerAddr: "10.0.0.1:22",
 		},
 	}
-	output := renderStatus(cfg, activeState, nil, "testnode")
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
 	// PeerAddr "10.0.0.1:22" is contained in target "root@10.0.0.1:22", so should NOT show in parens
 	if strings.Contains(output, "(10.0.0.1:22)") {
 		t.Error("peer address should be hidden when contained in target string")
@@ -557,7 +557,7 @@ func TestRenderStatus_PeerAddrShown_WhenDifferent(t *testing.T) {
 			PeerAddr: "93.184.216.34:22",
 		},
 	}
-	output := renderStatus(cfg, activeState, nil, "testnode")
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
 	if !strings.Contains(output, "93.184.216.34") {
 		t.Error("peer address should be shown when different from target")
 	}
@@ -594,21 +594,19 @@ func TestRenderStatus_WithMetrics(t *testing.T) {
 	metricsMap := map[string]*state.Metrics{
 		"forward:tunnel [fwd] 127.0.0.1:8080": m,
 	}
-	output := renderStatus(cfg, activeState, metricsMap, "testnode")
-	if !strings.Contains(output, "↑") || !strings.Contains(output, "↓") {
-		t.Error("output should contain ↑ and ↓ byte indicators")
+	rawOutput, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
+	output := stripANSI(rawOutput)
+	if !strings.Contains(output, "↑1.0M") {
+		t.Error("output should contain ↑1.0M")
 	}
-	if !strings.Contains(output, "1.0M") {
-		t.Error("output should contain formatted TX bytes")
-	}
-	if !strings.Contains(output, "2.0M") {
-		t.Error("output should contain formatted RX bytes")
+	if !strings.Contains(output, "↓2.0M") {
+		t.Error("output should contain ↓2.0M")
 	}
 	if !strings.Contains(output, "3↔") {
-		t.Error("output should contain active stream count")
+		t.Error("output should contain 3↔")
 	}
 	if !strings.Contains(output, "2h") {
-		t.Error("output should contain uptime")
+		t.Error("output should contain 2h uptime")
 	}
 }
 
@@ -673,7 +671,7 @@ func TestRenderStatus_AlwaysShowsTargetLine(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			output := renderStatus(cfg, tt.state, nil, "testnode")
+			output, _ := renderStatus(cfg, tt.state, nil, "testnode")
 			if !strings.Contains(output, tt.wantSub) {
 				t.Errorf("output should contain %q, got:\n%s", tt.wantSub, output)
 			}
@@ -697,15 +695,16 @@ func TestRenderStatus_ListenerMetrics(t *testing.T) {
 	metricsMap := map[string]*state.Metrics{
 		"proxy:127.0.0.1:1080": m,
 	}
-	output := renderStatus(cfg, activeState, metricsMap, "testnode")
+	rawOutput, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
+	output := stripANSI(rawOutput)
 	if !strings.Contains(output, "5.0M") {
-		t.Error("output should contain formatted TX bytes for listener")
+		t.Error("output should contain 5.0M TX bytes for listener")
 	}
 	if !strings.Contains(output, "1K") {
-		t.Error("output should contain formatted RX bytes for listener")
+		t.Error("output should contain 1K RX bytes for listener")
 	}
 	if !strings.Contains(output, "30m") {
-		t.Error("output should contain uptime for listener")
+		t.Error("output should contain 30m uptime for listener")
 	}
 }
 
@@ -723,8 +722,9 @@ func TestRenderStatus_DynamicPortNodeName(t *testing.T) {
 			PeerAddr: "client/tunnel/fwd",
 		},
 	}
-	output := renderStatus(cfg, activeState, nil, "testnode")
-	if !strings.Contains(output, "client/tunnel/fwd") {
+	rawOutput, _ := renderStatus(cfg, activeState, nil, "testnode")
+	output := stripANSI(rawOutput)
+	if !strings.Contains(output, "(client/tunnel/fwd)") {
 		t.Error("dynamic port should show mesh node identity in parentheses")
 	}
 	if !strings.Contains(output, "root@") {
@@ -821,7 +821,7 @@ func TestAlignment_ListenerStatusColumn(t *testing.T) {
 		"proxy:127.0.0.1:3128": {Type: "proxy", ID: "127.0.0.1:3128", Status: state.Listening},
 		"server:0.0.0.0:2222":  {Type: "server", ID: "0.0.0.0:2222", Status: state.Listening},
 	}
-	output := renderStatus(cfg, activeState, nil, "testnode")
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
 	lines := extractLines(output)
 
 	// Expect all 3 listener lines to have identical format with aligned [listening]
@@ -859,7 +859,7 @@ func TestAlignment_MetricsColumnSameAcrossRows(t *testing.T) {
 		"proxy:127.0.0.1:1080": m1,
 		"proxy:127.0.0.1:3128": m2,
 	}
-	output := renderStatus(cfg, activeState, metricsMap, "testnode")
+	output, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
 	lines := extractLines(output)
 
 	wantStatusCol := 24
@@ -903,7 +903,7 @@ func TestAlignment_ArrowsAtSameColumn(t *testing.T) {
 			Status: state.Connected, Message: "root@10.0.0.1:22",
 		},
 	}
-	output := renderStatus(cfg, activeState, nil, "testnode")
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
 	lines := extractLines(output)
 
 	wantCol := 18
@@ -948,7 +948,7 @@ func TestAlignment_MixedDirectionMetrics(t *testing.T) {
 		"forward:tunnel [fwd] 127.0.0.1:8080": m,
 		"forward:tunnel [fwd] 10.0.0.1:2222":  m,
 	}
-	output := renderStatus(cfg, activeState, metricsMap, "testnode")
+	output, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
 	lines := extractLines(output)
 
 	// Both forward lines (──▶ and ◀──) should have ↑ at the same column
@@ -979,7 +979,7 @@ func TestAlignment_StatusBeforeMetrics(t *testing.T) {
 	metricsMap := map[string]*state.Metrics{
 		"proxy:127.0.0.1:1080": m,
 	}
-	output := renderStatus(cfg, activeState, metricsMap, "testnode")
+	output, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
 	lines := extractLines(output)
 
 	for _, line := range lines {
@@ -1020,7 +1020,7 @@ func TestAlignment_AnnotationBeforeMetrics(t *testing.T) {
 		"server:0.0.0.0:2222":                 m,
 		"dynamic:127.0.0.1:1080|0.0.0.0:2222": m,
 	}
-	output := renderStatus(cfg, activeState, metricsMap, "testnode")
+	output, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
 	lines := extractLines(output)
 
 	for _, line := range lines {
@@ -1069,7 +1069,7 @@ func TestAlignment_WideContentNoOverlap(t *testing.T) {
 		"proxy:127.0.0.1:1080":                m,
 		"forward:tunnel [fwd] 127.0.0.1:8080": m,
 	}
-	output := renderStatus(cfg, activeState, metricsMap, "testnode")
+	output, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
 	lines := extractLines(output)
 
 	// Every line with both status and metrics must have status before metrics
