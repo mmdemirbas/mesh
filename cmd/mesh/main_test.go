@@ -1312,7 +1312,7 @@ func TestAlignment_MetricsColumnSameAcrossRows(t *testing.T) {
 	lines := extractLines(output)
 
 	wantStatusCol := 24
-	wantMetricsCol := 42
+	wantMetricsCol := 43
 	for _, line := range lines {
 		if !strings.Contains(line, "[listening]") {
 			continue
@@ -1325,6 +1325,51 @@ func TestAlignment_MetricsColumnSameAcrossRows(t *testing.T) {
 		if metricsCol >= 0 && metricsCol != wantMetricsCol {
 			t.Errorf("↑ at col %d, want %d in: %s", metricsCol, wantMetricsCol, line)
 		}
+	}
+}
+
+func TestAlignment_DownloadColumnAligned(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "socks", Bind: "127.0.0.1:1080"},
+			{Type: "http", Bind: "127.0.0.1:3128"},
+		},
+	}
+	activeState := map[string]state.Component{
+		"proxy:127.0.0.1:1080": {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
+		"proxy:127.0.0.1:3128": {Type: "proxy", ID: "127.0.0.1:3128", Status: state.Listening},
+	}
+	m1 := &state.Metrics{}
+	m1.StartTime.Store(time.Now().Add(-1 * time.Hour).UnixNano())
+	m1.BytesTx.Store(1048576) // "1.0M" (4 chars)
+	m1.BytesRx.Store(512)     // "512B" (4 chars)
+	m2 := &state.Metrics{}
+	m2.StartTime.Store(time.Now().Add(-30 * time.Minute).UnixNano())
+	m2.BytesTx.Store(1024)     // "1K"   (2 chars)
+	m2.BytesRx.Store(10485760) // "10.0M" (5 chars)
+	metricsMap := map[string]*state.Metrics{
+		"proxy:127.0.0.1:1080": m1,
+		"proxy:127.0.0.1:3128": m2,
+	}
+	output, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
+	lines := extractLines(output)
+
+	// Both rows should have ↓ at the same column despite different ↑ value widths
+	var downCols []int
+	for _, line := range lines {
+		if !strings.Contains(line, "[listening]") {
+			continue
+		}
+		col := findColumn(line, "↓")
+		if col >= 0 {
+			downCols = append(downCols, col)
+		}
+	}
+	if len(downCols) < 2 {
+		t.Fatalf("expected 2 lines with ↓, got %d", len(downCols))
+	}
+	if downCols[0] != downCols[1] {
+		t.Errorf("↓ columns not aligned: %d vs %d", downCols[0], downCols[1])
 	}
 }
 
@@ -1401,7 +1446,7 @@ func TestAlignment_MixedDirectionMetrics(t *testing.T) {
 	lines := extractLines(output)
 
 	// Both forward lines (──▶ and ◀──) should have ↑ at the same column
-	wantCol := 54
+	wantCol := 55
 	for _, line := range lines {
 		if !strings.Contains(line, "──▶") && !strings.Contains(line, "◀──") {
 			continue

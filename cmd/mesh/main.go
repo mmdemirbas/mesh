@@ -341,8 +341,32 @@ func formatMetricsSnap(s metricsSnapshot) string {
 	if s.uptime <= 0 && s.tx == 0 && s.rx == 0 {
 		return ""
 	}
-	r := cGray + fmt.Sprintf("%-6s", formatDuration(s.uptime))
+	r := cGray + fmt.Sprintf("%-6s ", formatDuration(s.uptime))
 	r += cCyan + "↑" + colorBytes(s.tx, cCyan) + " " + cMagenta + "↓" + colorBytes(s.rx, cMagenta)
+	if s.streams > 0 {
+		r += " " + cBold + cReset + fmt.Sprintf("%d", s.streams) + cGray + "↔"
+	}
+	r += cReset
+	return r
+}
+
+// formatMetricsAligned returns a metrics string with tx and rx padded to
+// the given widths so that ↓ and ↔ columns align across rows.
+func formatMetricsAligned(s metricsSnapshot, txWidth, rxWidth int) string {
+	if s.uptime <= 0 && s.tx == 0 && s.rx == 0 {
+		return ""
+	}
+	r := cGray + fmt.Sprintf("%-6s ", formatDuration(s.uptime))
+	txRaw := formatBytes(s.tx)
+	r += cCyan + "↑" + colorBytes(s.tx, cCyan)
+	if pad := txWidth - len(txRaw); pad > 0 {
+		r += strings.Repeat(" ", pad)
+	}
+	rxRaw := formatBytes(s.rx)
+	r += " " + cMagenta + "↓" + colorBytes(s.rx, cMagenta)
+	if pad := rxWidth - len(rxRaw); pad > 0 {
+		r += strings.Repeat(" ", pad)
+	}
 	if s.streams > 0 {
 		r += " " + cBold + cReset + fmt.Sprintf("%d", s.streams) + cGray + "↔"
 	}
@@ -1020,31 +1044,28 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		left       string
 		arrow      string
 		right      string
-		status     string // bracket status like [listening], [connected]
-		annotation string // gray info like (server/tunnel/fwd) or (peer addr)
-		metrics    string // counters like 1m0s ↑4K ↓5K
+		status     string          // bracket status like [listening], [connected]
+		annotation string          // gray info like (server/tunnel/fwd) or (peer addr)
+		metrics    string          // formatted counters (populated during layout)
+		snap       metricsSnapshot // raw metrics for deferred formatting
 	}
 	var rows []row
 
 	addHeader := func(text string) {
 		rows = append(rows, row{isHeader: true, text: text})
 	}
-	addRow := func(indent, ind, left, arrow, right, status, annotation, metrics string) {
-		rows = append(rows, row{indent: indent, indicator: ind, left: left, arrow: arrow, right: right, status: status, annotation: annotation, metrics: metrics})
+	addRow := func(indent, ind, left, arrow, right, status, annotation string, snap metricsSnapshot) {
+		rows = append(rows, row{indent: indent, indicator: ind, left: left, arrow: arrow, right: right, status: status, annotation: annotation, snap: snap})
 	}
 
 	arrowRight := cCyan + "──▶" + cReset
 	arrowLeft := cMagenta + "◀──" + cReset
 
 	// Compute grand total for the header
-	grandTotalMetrics := ""
+	var grandTotal metricsSnapshot
 	if metricsMap != nil {
-		var total metricsSnapshot
 		for _, m := range metricsMap {
-			total.add(readMetrics(m))
-		}
-		if total.tx > 0 || total.rx > 0 {
-			grandTotalMetrics = cCyan + "↑" + colorBytes(total.tx, cCyan) + " " + cMagenta + "↓" + colorBytes(total.rx, cMagenta) + cReset
+			grandTotal.add(readMetrics(m))
 		}
 	}
 	titleBase := fmt.Sprintf("%s⚙ Configuration: %s%s%s", cBold, cCyan, nodeName, cReset)
@@ -1122,7 +1143,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		addHeader(sectionTitle("clipsync"))
 		for _, cs := range cfg.Clipsync {
 			indicator, st, _ := getComponentInfo("clipsync", cs.Bind)
-			addRow("", indicator, colorAddr(cs.Bind), "", "", st, "", "")
+			addRow("", indicator, colorAddr(cs.Bind), "", "", st, "", metricsSnapshot{})
 
 			type peerEntry struct{ addr, label string }
 			var peerList []peerEntry
@@ -1144,7 +1165,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 				if p.label == "static" {
 					icon = "·"
 				}
-				addRow("   ", icon, colorAddr(p.addr), "", cGray+p.label+cReset, "", "", "")
+				addRow("   ", icon, colorAddr(p.addr), "", cGray+p.label+cReset, "", "", metricsSnapshot{})
 			}
 		}
 		addHeader("")
@@ -1165,23 +1186,20 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 				for _, comp := range ld {
 					serverAgg.add(readMetrics(metricsMap["dynamic:"+comp.ID]))
 				}
-				ms := formatMetricsSnap(serverAgg)
 				left := padForProto(colorAddr(l.Bind)) + " " + cReset + strings.ToLower(l.Type)
-				addRow("", indicator, left, "", "", st, "", ms)
+				addRow("", indicator, left, "", "", st, "", serverAgg)
 			} else if l.Type == "relay" {
 				indicator, st, _ := getComponentInfo("relay", l.Bind)
-				ms := formatMetrics(metricsMap, "relay:"+l.Bind)
-				addRow("", indicator, colorAddr(l.Bind), arrowRight, colorAddr(l.Target), st, "", ms)
+				addRow("", indicator, colorAddr(l.Bind), arrowRight, colorAddr(l.Target), st, "", readMetrics(metricsMap["relay:"+l.Bind]))
 			} else {
 				indicator, st, _ := getComponentInfo("proxy", l.Bind)
-				ms := formatMetrics(metricsMap, "proxy:"+l.Bind)
 				left := padForProto(colorAddr(l.Bind)) + " " + cReset + strings.ToLower(l.Type)
 				arrow, right := "", ""
 				if l.Target != "" {
 					right = colorAddr(l.Target)
 					arrow = arrowRight
 				}
-				addRow("", indicator, left, arrow, right, st, "", ms)
+				addRow("", indicator, left, arrow, right, st, "", readMetrics(metricsMap["proxy:"+l.Bind]))
 			}
 
 			_, searchPort, err := net.SplitHostPort(l.Bind)
@@ -1209,8 +1227,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 					if comp.PeerAddr != "" {
 						annotation = formatPeerIdentity(comp.PeerAddr)
 					}
-					ms := formatMetrics(metricsMap, "dynamic:"+comp.ID)
-					addRow("   ", "~", colorAddr(parts[0]), arrowRight, colorAddr(cleanIPv6(comp.Message)), "", annotation, ms)
+					addRow("   ", "~", colorAddr(parts[0]), arrowRight, colorAddr(cleanIPv6(comp.Message)), "", annotation, readMetrics(metricsMap["dynamic:"+comp.ID]))
 				}
 			}
 		}
@@ -1231,7 +1248,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 					connAgg.add(readMetrics(metricsMap["forward:"+compID]))
 				}
 			}
-			addRow("", "", sectionTitle(c.Name), "", "", "", "", formatMetricsSnap(connAgg))
+			addRow("", "", sectionTitle(c.Name), "", "", "", "", connAgg)
 
 			type targetInfo struct {
 				status   state.Status
@@ -1263,7 +1280,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 						ind = cBlink + cYellow + "●" + cReset
 					}
 				}
-				addRow(" ", ind, colorAddr(t), "", "", "", annotation, "")
+				addRow(" ", ind, colorAddr(t), "", "", "", annotation, metricsSnapshot{})
 			}
 
 			for _, fset := range c.Forwards {
@@ -1279,7 +1296,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
 					fsetAgg.add(readMetrics(metricsMap["forward:"+compID]))
 				}
-				addRow("", indicator, sectionTitle(fset.Name), "", "", st, "", formatMetricsSnap(fsetAgg))
+				addRow("", indicator, sectionTitle(fset.Name), "", "", st, "", fsetAgg)
 
 				// Always show a target line under each forward set
 				{
@@ -1313,41 +1330,41 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 					default:
 						targetStr = cGray + "[starting]" + cReset
 					}
-					addRow("   ", ind, targetStr, "", "", "", targetAnnotation, "")
+					addRow("   ", ind, targetStr, "", "", "", targetAnnotation, metricsSnapshot{})
 				}
 
 				indent := "   "
 				for _, fwd := range fset.Local {
 					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
 					_, _, fwdComp := getComponentInfo("forward", compID)
-					ms := formatMetrics(metricsMap, "forward:"+compID)
+					snap := readMetrics(metricsMap["forward:"+compID])
 					lStr := colorAddr(fwd.Bind)
 					if fwdComp.BoundAddr != "" && fwdComp.BoundAddr != fwd.Bind {
 						lStr = colorAddr(fwdComp.BoundAddr) + " " + cGray + "(from " + fwd.Bind + ")" + cReset
 					}
 					if fwd.Type == "forward" {
-						addRow(indent, "", lStr, arrowRight, colorAddr(fwd.Target), "", "", ms)
+						addRow(indent, "", lStr, arrowRight, colorAddr(fwd.Target), "", "", snap)
 					} else {
 						lStr = padForProto(lStr) + " " + cReset + strings.ToLower(fwd.Type)
 						rStr := cGray + "🔒 tunnel" + cReset
 						if fwd.Target != "" {
 							rStr = colorAddr(fwd.Target)
 						}
-						addRow(indent, "", lStr, arrowRight, rStr, "", "", ms)
+						addRow(indent, "", lStr, arrowRight, rStr, "", "", snap)
 					}
 				}
 				for _, fwd := range fset.Remote {
 					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
-					ms := formatMetrics(metricsMap, "forward:"+compID)
+					snap := readMetrics(metricsMap["forward:"+compID])
 					if fwd.Type == "forward" {
-						addRow(indent, "", colorAddr(fwd.Target), arrowLeft, colorAddr(fwd.Bind), "", "", ms)
+						addRow(indent, "", colorAddr(fwd.Target), arrowLeft, colorAddr(fwd.Bind), "", "", snap)
 					} else {
 						lStr := cGray + "🔒 tunnel" + cReset
 						if fwd.Target != "" {
 							lStr = colorAddr(fwd.Target)
 						}
 						rStr := padForProto(colorAddr(fwd.Bind)) + " " + cReset + strings.ToLower(fwd.Type)
-						addRow(indent, "", lStr, arrowLeft, rStr, "", "", ms)
+						addRow(indent, "", lStr, arrowLeft, rStr, "", "", snap)
 					}
 				}
 			}
@@ -1370,7 +1387,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		})
 		addHeader(cMagenta + "dynamic ports (unmapped)" + cReset)
 		for _, comp := range unmappedDynamic {
-			addRow("", "↳", colorAddr(comp.ID), arrowRight, colorAddr(cleanIPv6(comp.Message)), "", "", "")
+			addRow("", "↳", colorAddr(comp.ID), arrowRight, colorAddr(cleanIPv6(comp.Message)), "", "", metricsSnapshot{})
 		}
 		addHeader("")
 	}
@@ -1419,15 +1436,13 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		statusPadCol = 60
 	}
 
-	// Build lines up to (and including) the status text, compute metrics column.
-	type builtLine struct {
-		beforeMetrics string
-		metrics       string
-	}
 	// Compute metrics column: based on content + status + annotation width.
+	hasSnap := func(s metricsSnapshot) bool {
+		return s.uptime > 0 || s.tx > 0 || s.rx > 0
+	}
 	metricsPadCol := 0
 	for _, r := range rows {
-		if r.isHeader || r.metrics == "" {
+		if r.isHeader || !hasSnap(r.snap) {
 			continue
 		}
 		lineLen := visibleLen(r.text)
@@ -1445,13 +1460,43 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 	}
 	metricsPadCol++ // at least one space before metrics
 
+	// Compute max tx/rx byte string widths for column alignment across rows.
+	maxTxWidth, maxRxWidth := 0, 0
+	for _, r := range rows {
+		if r.isHeader || !hasSnap(r.snap) {
+			continue
+		}
+		if l := len(formatBytes(r.snap.tx)); l > maxTxWidth {
+			maxTxWidth = l
+		}
+		if l := len(formatBytes(r.snap.rx)); l > maxRxWidth {
+			maxRxWidth = l
+		}
+	}
+	if hasSnap(grandTotal) {
+		if l := len(formatBytes(grandTotal.tx)); l > maxTxWidth {
+			maxTxWidth = l
+		}
+		if l := len(formatBytes(grandTotal.rx)); l > maxRxWidth {
+			maxRxWidth = l
+		}
+	}
+
+	// Format row metrics with aligned tx/rx columns.
+	for i, r := range rows {
+		if r.isHeader || !hasSnap(r.snap) {
+			continue
+		}
+		rows[i].metrics = formatMetricsAligned(r.snap, maxTxWidth, maxRxWidth)
+	}
+
 	// Build final lines, then compute separator width from actual content.
 	var builtLines []string
 
-	// Title: align ↑↓ with the ↑↓ in row metrics (skip the 6-char duration column).
+	// Title: align ↑↓ with the ↑↓ in row metrics (skip the duration column).
 	titleLine := titleBase
-	if grandTotalMetrics != "" {
-		durationWidth := 6 // formatMetricsSnap uses %-6s for duration
+	if hasSnap(grandTotal) {
+		durationWidth := 7 // formatMetricsAligned uses "%-6s " for duration
 		padTo := metricsPadCol + durationWidth
 		titleLen := visibleLen(titleLine)
 		if titleLen < padTo {
@@ -1459,7 +1504,12 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		} else {
 			titleLine += " "
 		}
-		titleLine += grandTotalMetrics
+		txRaw := formatBytes(grandTotal.tx)
+		txPad := ""
+		if p := maxTxWidth - len(txRaw); p > 0 {
+			txPad = strings.Repeat(" ", p)
+		}
+		titleLine += cCyan + "↑" + colorBytes(grandTotal.tx, cCyan) + txPad + " " + cMagenta + "↓" + colorBytes(grandTotal.rx, cMagenta) + cReset
 	}
 	builtLines = append(builtLines, titleLine)
 
