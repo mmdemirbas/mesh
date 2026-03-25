@@ -46,6 +46,7 @@ var (
 	cMagenta = "\033[35m"
 	cCyan    = "\033[36m"
 	cGray    = "\033[90m"
+	cBlink   = "\033[5m"
 )
 
 func init() {
@@ -59,6 +60,7 @@ func init() {
 		cMagenta = ""
 		cCyan = ""
 		cGray = ""
+		cBlink = ""
 	}
 }
 
@@ -1067,18 +1069,27 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, no
 		for _, c := range cfg.Connections {
 			addHeader(sectionTitle(c.Name))
 
-			connectedTargets := make(map[string]struct{})
+			connectedTargets := make(map[string]state.Status)
 			for _, fset := range c.Forwards {
 				id := c.Name + " [" + fset.Name + "]"
 				_, _, comp := getComponentInfo("connection", id)
-				if (comp.Status == state.Connected || comp.Status == state.Connecting) && comp.Message != "" {
-					connectedTargets[comp.Message] = struct{}{}
+				if comp.Message != "" {
+					existing, seen := connectedTargets[comp.Message]
+					// Connected takes priority over Connecting
+					if !seen || (comp.Status == state.Connected && existing != state.Connected) {
+						connectedTargets[comp.Message] = comp.Status
+					}
 				}
 			}
 			for _, t := range c.Targets {
 				ind := "○"
-				if _, ok := connectedTargets[t]; ok {
-					ind = "●"
+				if st, ok := connectedTargets[t]; ok {
+					switch st {
+					case state.Connected:
+						ind = cGreen + "●" + cReset
+					case state.Connecting, state.Retrying:
+						ind = cBlink + cYellow + "●" + cReset
+					}
 				}
 				addRow(" ", ind, colorAddr(t), "", "", "")
 			}
