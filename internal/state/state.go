@@ -2,6 +2,7 @@ package state
 
 import (
 	"sync"
+	"sync/atomic"
 )
 
 type Status string
@@ -15,6 +16,16 @@ const (
 	Retrying   Status = "retrying"
 )
 
+// Metrics tracks live connection activity using lock-free atomic counters.
+// A single Metrics instance is shared across all forwards within a forward set
+// so the dashboard can show aggregate activity per connection.
+type Metrics struct {
+	BytesTx   atomic.Int64
+	BytesRx   atomic.Int64
+	Streams   atomic.Int32
+	StartTime atomic.Int64 // unix nanoseconds; reset on each reconnect
+}
+
 type Component struct {
 	Type      string `json:"type"`       // "proxy", "relay", "server", "connection"
 	ID        string `json:"id"`         // unique identifier
@@ -27,6 +38,7 @@ type Component struct {
 type State struct {
 	mu         sync.RWMutex
 	components map[string]Component
+	metrics    sync.Map // key -> *Metrics
 }
 
 var Global = &State{
@@ -63,10 +75,35 @@ func (s *State) UpdatePeer(compType, id, peerAddr string) {
 	s.components[key] = comp
 }
 
+// GetMetrics returns the Metrics for a component, creating one if needed.
+func (s *State) GetMetrics(compType, id string) *Metrics {
+	key := compType + ":" + id
+	if v, ok := s.metrics.Load(key); ok {
+		return v.(*Metrics)
+	}
+	m := &Metrics{}
+	actual, _ := s.metrics.LoadOrStore(key, m)
+	return actual.(*Metrics)
+}
+
+// SnapshotMetrics returns a point-in-time copy of all metrics keyed by component key.
+func (s *State) SnapshotMetrics() map[string]*Metrics {
+	m := make(map[string]*Metrics)
+	s.metrics.Range(func(key, value any) bool {
+		m[key.(string)] = value.(*Metrics)
+		return true
+	})
+	return m
+}
+
 func (s *State) Delete(compType, id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.components, compType+":"+id)
+}
+
+func (s *State) DeleteMetrics(compType, id string) {
+	s.metrics.Delete(compType + ":" + id)
 }
 
 func (s *State) Snapshot() map[string]Component {

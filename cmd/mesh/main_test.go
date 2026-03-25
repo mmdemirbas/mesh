@@ -265,7 +265,7 @@ func TestLogRing_LinesIsACopy(t *testing.T) {
 
 func TestRenderStatus_Empty(t *testing.T) {
 	cfg := &config.Config{}
-	output := renderStatus(cfg, nil, "testnode")
+	output := renderStatus(cfg, nil, nil, "testnode")
 	if !strings.Contains(output, "testnode") {
 		t.Error("output should contain the node name")
 	}
@@ -285,7 +285,7 @@ func TestRenderStatus_WithListeners(t *testing.T) {
 		"proxy:127.0.0.1:1080": {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
 		"proxy:127.0.0.1:3128": {Type: "proxy", ID: "127.0.0.1:3128", Status: state.Failed, Message: "bind error"},
 	}
-	output := renderStatus(cfg, activeState, "testnode")
+	output := renderStatus(cfg, activeState, nil, "testnode")
 	if !strings.Contains(output, "listeners") {
 		t.Error("output should contain 'listeners' section")
 	}
@@ -317,7 +317,7 @@ func TestRenderStatus_WithConnections(t *testing.T) {
 			},
 		},
 	}
-	output := renderStatus(cfg, nil, "testnode")
+	output := renderStatus(cfg, nil, nil, "testnode")
 	if !strings.Contains(output, "remote") {
 		t.Error("output should contain connection name")
 	}

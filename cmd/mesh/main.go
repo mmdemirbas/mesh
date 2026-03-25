@@ -258,6 +258,38 @@ func parseAddr(s string) (net.IP, int) {
 	return ip, int(k.port)
 }
 
+// formatBytes returns a human-readable byte count (e.g. "1.2M", "340K", "0").
+func formatBytes(b int64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1fG", float64(b)/float64(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1fM", float64(b)/float64(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.0fK", float64(b)/float64(1<<10))
+	case b > 0:
+		return fmt.Sprintf("%dB", b)
+	default:
+		return "0"
+	}
+}
+
+// formatDuration returns a compact duration string (e.g. "2h13m", "45s", "3d5h").
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
+	}
+	days := int(d.Hours()) / 24
+	hours := int(d.Hours()) % 24
+	return fmt.Sprintf("%dd%dh", days, hours)
+}
+
 // compareAddr compares two address strings semantically by IP then port.
 func compareAddr(a, b string) bool {
 	return makeAddrKey(a).less(makeAddrKey(b))
@@ -605,7 +637,7 @@ func upCmd(nodeName, configPath string) {
 		// Print the final static status to the normal terminal so the user sees the shutdown state.
 		// Small delay to let the alternate screen buffer exit complete.
 		time.Sleep(50 * time.Millisecond)
-		fmt.Print(renderStatus(cfg, state.Global.Snapshot(), nodeName))
+		fmt.Print(renderStatus(cfg, state.Global.Snapshot(), state.Global.SnapshotMetrics(), nodeName))
 	}
 }
 
@@ -782,7 +814,7 @@ func runDashboard(ctx context.Context, cfg *config.Config, nodeName string, conf
 		lines = append(lines, header, "")
 
 		// Status body
-		statusOutput := renderStatus(cfg, state.Global.Snapshot(), nodeName)
+		statusOutput := renderStatus(cfg, state.Global.Snapshot(), state.Global.SnapshotMetrics(), nodeName)
 		lines = append(lines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
 
 		// Log tail — fill remaining terminal height
@@ -832,7 +864,7 @@ func runDashboard(ctx context.Context, cfg *config.Config, nodeName string, conf
 // renderStatus builds the status dashboard output as a string.
 // It can be called from both the live dashboard (in-process state) and
 // the statusCmd (state fetched via HTTP from a running node).
-func renderStatus(cfg *config.Config, activeState map[string]state.Component, nodeName string) string {
+func renderStatus(cfg *config.Config, activeState map[string]state.Component, metricsMap map[string]*state.Metrics, nodeName string) string {
 	var w strings.Builder
 
 	writeln := func(s string) { w.WriteString(s); w.WriteByte('\n') }
@@ -1113,13 +1145,35 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, no
 			for _, fset := range c.Forwards {
 				id := c.Name + " [" + fset.Name + "]"
 				indicator, st, comp := getComponentInfo("connection", id)
-				addRow("", indicator, sectionTitle(fset.Name), "", "", st)
+				// Append metrics to the status line if available
+				metricsStr := ""
+				if m := metricsMap["connection:"+id]; m != nil {
+					if startNano := m.StartTime.Load(); startNano > 0 && comp.Status == state.Connected {
+						uptime := time.Since(time.Unix(0, startNano)).Truncate(time.Second)
+						tx := m.BytesTx.Load()
+						rx := m.BytesRx.Load()
+						streams := m.Streams.Load()
+						metricsStr = cGray + " " + formatDuration(uptime) + " ↑" + formatBytes(tx) + " ↓" + formatBytes(rx)
+						if streams > 0 {
+							metricsStr += " " + fmt.Sprintf("%d↔", streams)
+						}
+						metricsStr += cReset
+					}
+				}
+				addRow("", indicator, sectionTitle(fset.Name), "", "", st+metricsStr)
 				if comp.Message != "" && (comp.Status == state.Connected || comp.Status == state.Connecting || comp.Status == state.Retrying) {
 					targetStr := colorAddr(comp.Message)
 					if comp.PeerAddr != "" && !strings.Contains(comp.Message, comp.PeerAddr) {
 						targetStr += " " + cGray + "(" + comp.PeerAddr + ")" + cReset
 					}
-					addRow("   ", cGray+"→"+cReset, targetStr, "", "", "")
+					ind := "○"
+					switch comp.Status {
+					case state.Connected:
+						ind = cGreen + "●" + cReset
+					case state.Connecting, state.Retrying:
+						ind = cBlink + cYellow + "●" + cReset
+					}
+					addRow("   ", ind, targetStr, "", "", "")
 				}
 
 				indent := "   "
@@ -1291,7 +1345,7 @@ func statusCmd(nodeName, configPath string, watch bool) {
 	if !watch {
 		// One-shot mode
 		fmt.Printf("%s✔ mesh node %q is running (pid %d).%s\n\n", cGreen, nodeName, pid, cReset)
-		fmt.Print(renderStatus(cfg, fetchState(nodeName), nodeName))
+		fmt.Print(renderStatus(cfg, fetchState(nodeName), nil, nodeName))
 		os.Exit(0)
 	}
 
@@ -1314,7 +1368,7 @@ func statusCmd(nodeName, configPath string, watch bool) {
 		}
 		header := fmt.Sprintf("%s✔ mesh node %q is running (pid %d)%s | %s",
 			cGreen, nodeName, pid, cReset, time.Now().Format("15:04:05"))
-		statusOutput := renderStatus(cfg, fetchState(nodeName), nodeName)
+		statusOutput := renderStatus(cfg, fetchState(nodeName), nil, nodeName)
 		lines := []string{header, ""}
 		lines = append(lines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
 
@@ -1359,7 +1413,7 @@ func configCmd(nodeName, configPath string) {
 		os.Exit(1)
 	}
 
-	fmt.Print(renderStatus(cfg, nil, nodeName))
+	fmt.Print(renderStatus(cfg, nil, nil, nodeName))
 }
 
 func downCmd(nodeName string) {

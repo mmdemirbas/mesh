@@ -507,12 +507,18 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 		_ = conn.SetDeadline(time.Time{})
 		client := ssh.NewClient(sshConn, chans, reqs)
 
+		metrics := state.Global.GetMetrics("connection", id)
+		metrics.BytesTx.Store(0)
+		metrics.BytesRx.Store(0)
+		metrics.Streams.Store(0)
+		metrics.StartTime.Store(time.Now().UnixNano())
+
 		state.Global.Update("connection", id, state.Connected, target)
 		state.Global.UpdatePeer("connection", id, conn.RemoteAddr().String())
 
 		log.Info("Connected", "tcp", t1.Sub(t0).Round(time.Millisecond), "ssh", time.Since(t1).Round(time.Millisecond))
 
-		err = c.runSession(ctx, client, fset, opts, log)
+		err = c.runSession(ctx, client, fset, opts, log, metrics)
 
 		if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
 			state.Global.Update("connection", id, state.Failed, "ExitOnForwardFailure")
@@ -603,6 +609,12 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		_ = conn.SetDeadline(time.Time{}) // clear deadline; data flows indefinitely
 		client := ssh.NewClient(sshConn, chans, reqs)
 
+		metrics := state.Global.GetMetrics("connection", id)
+		metrics.BytesTx.Store(0)
+		metrics.BytesRx.Store(0)
+		metrics.Streams.Store(0)
+		metrics.StartTime.Store(time.Now().UnixNano())
+
 		state.Global.Update("connection", id, state.Connected, target)
 		state.Global.UpdatePeer("connection", id, conn.RemoteAddr().String())
 
@@ -610,7 +622,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 			"tcp", t1.Sub(t0).Round(time.Millisecond),
 			"ssh", time.Since(t1).Round(time.Millisecond))
 
-		err = c.runSession(ctx, client, fset, opts, log)
+		err = c.runSession(ctx, client, fset, opts, log, metrics)
 
 		if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
 			state.Global.Update("connection", id, state.Failed, "ExitOnForwardFailure")
@@ -628,7 +640,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 	}
 }
 
-func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *config.ForwardSet, opts map[string]string, log *slog.Logger) error {
+func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *config.ForwardSet, opts map[string]string, log *slog.Logger, metrics *state.Metrics) error {
 	// Announce our node name so the peer can display it in its dashboard.
 	// This is a standard SSH global request (RFC 4254 §4): implementations
 	// that don't recognise it simply ignore it, so this is safe with any sshd.
@@ -716,9 +728,9 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 			defer wg.Done()
 			var err error
 			if fwd.Type == "forward" {
-				err = c.runRemoteForward(sCtx, client, fset.Name, fwd, log)
+				err = c.runRemoteForward(sCtx, client, fset.Name, fwd, log, metrics)
 			} else {
-				err = c.runRemoteProxy(sCtx, client, fset.Name, fwd, log)
+				err = c.runRemoteProxy(sCtx, client, fset.Name, fwd, log, metrics)
 			}
 			if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
 				log.Error("Remote forward failed", "error", err)
@@ -735,9 +747,9 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 			defer wg.Done()
 			var err error
 			if fwd.Type == "forward" {
-				err = c.runLocalForward(sCtx, client, fset.Name, fwd, log)
+				err = c.runLocalForward(sCtx, client, fset.Name, fwd, log, metrics)
 			} else {
-				err = c.runLocalProxy(sCtx, client, fset.Name, fwd, log)
+				err = c.runLocalProxy(sCtx, client, fset.Name, fwd, log, metrics)
 			}
 			if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
 				log.Error("Local forward failed", "error", err)
@@ -751,7 +763,7 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 }
 
 // runRemoteForward (-R equivalent): bind on peer, forward here
-func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fsetName string, fwd config.Forward, log *slog.Logger) error {
+func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fsetName string, fwd config.Forward, log *slog.Logger, metrics *state.Metrics) error {
 	log.Info("Forward -R", "bind", fwd.Bind, "target", fwd.Target)
 	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, fwd.Bind)
 	state.Global.Update("forward", compID, state.Starting, "")
@@ -789,12 +801,12 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fs
 
 	acceptAndForward(ctx, listener, func() (net.Conn, error) {
 		return net.DialTimeout("tcp", fwd.Target, 10*time.Second)
-	}, log)
+	}, log, metrics)
 	return nil
 }
 
 // runLocalForward (-L equivalent): bind here, forward to peer
-func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fsetName string, fwd config.Forward, log *slog.Logger) error {
+func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fsetName string, fwd config.Forward, log *slog.Logger, metrics *state.Metrics) error {
 	log.Info("Forward -L", "bind", fwd.Bind, "target", fwd.Target)
 	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, fwd.Bind)
 	state.Global.Update("forward", compID, state.Starting, "")
@@ -819,12 +831,12 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fse
 
 	acceptAndForward(ctx, listener, func() (net.Conn, error) {
 		return client.Dial("tcp", fwd.Target)
-	}, log)
+	}, log, metrics)
 	return nil
 }
 
 // runRemoteProxy binds proxy on peer, traffic exits HERE.
-func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fsetName string, pxy config.Forward, log *slog.Logger) error {
+func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fsetName string, pxy config.Forward, log *slog.Logger, metrics *state.Metrics) error {
 	log.Info("Proxy remote bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
 	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, pxy.Bind)
 	state.Global.Update("forward", compID, state.Starting, "")
@@ -873,7 +885,7 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fset
 }
 
 // runLocalProxy binds proxy here, traffic exits PEER.
-func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, fsetName string, pxy config.Forward, log *slog.Logger) error {
+func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, fsetName string, pxy config.Forward, log *slog.Logger, metrics *state.Metrics) error {
 	log.Info("Proxy local bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
 	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, pxy.Bind)
 	state.Global.Update("forward", compID, state.Starting, "")
@@ -1176,7 +1188,8 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[str
 }
 
 // acceptAndForward accepts connections and forwards each to a target.
-func acceptAndForward(ctx context.Context, listener net.Listener, dialer func() (net.Conn, error), log *slog.Logger) {
+// If metrics is non-nil, bytes and active stream counts are tracked.
+func acceptAndForward(ctx context.Context, listener net.Listener, dialer func() (net.Conn, error), log *slog.Logger, metrics *state.Metrics) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -1194,7 +1207,13 @@ func acceptAndForward(ctx context.Context, listener net.Listener, dialer func() 
 				return
 			}
 			defer target.Close()
-			netutil.BiCopy(conn, target)
+			if metrics != nil {
+				metrics.Streams.Add(1)
+				defer metrics.Streams.Add(-1)
+				netutil.CountedBiCopy(conn, target, &metrics.BytesTx, &metrics.BytesRx)
+			} else {
+				netutil.BiCopy(conn, target)
+			}
 		}()
 	}
 }

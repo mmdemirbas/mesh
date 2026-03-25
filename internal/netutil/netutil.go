@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,6 +30,44 @@ var copyBufPool = sync.Pool{
 		b := make([]byte, 32*1024)
 		return &b
 	},
+}
+
+// countingWriter wraps an io.Writer and atomically counts bytes written.
+type countingWriter struct {
+	w       io.Writer
+	counter *atomic.Int64
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.counter.Add(int64(n))
+	return n, err
+}
+
+// CountedBiCopy is like BiCopy but counts bytes transferred through atomic counters.
+// tx counts bytes from a→b, rx counts bytes from b→a.
+func CountedBiCopy(a, b io.ReadWriteCloser, tx, rx *atomic.Int64) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		bufPtr := copyBufPool.Get().(*[]byte)
+		defer copyBufPool.Put(bufPtr)
+		_, _ = io.CopyBuffer(&countingWriter{w: a, counter: tx}, b, *bufPtr)
+		if c, ok := a.(interface{ CloseWrite() error }); ok {
+			_ = c.CloseWrite()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		bufPtr := copyBufPool.Get().(*[]byte)
+		defer copyBufPool.Put(bufPtr)
+		_, _ = io.CopyBuffer(&countingWriter{w: b, counter: rx}, a, *bufPtr)
+		if c, ok := b.(interface{ CloseWrite() error }); ok {
+			_ = c.CloseWrite()
+		}
+	}()
+	wg.Wait()
 }
 
 // BiCopy symmetrically copies data between a and b, and closes the write half if supported.
