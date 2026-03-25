@@ -732,6 +732,358 @@ func TestRenderStatus_DynamicPortNodeName(t *testing.T) {
 	}
 }
 
+// stripANSI removes ANSI escape sequences from a string.
+func stripANSI(s string) string {
+	return ansiStripRe.ReplaceAllString(s, "")
+}
+
+// findColumn returns the visual column of the first occurrence of substr in
+// the ANSI-stripped version of line, accounting for wide characters (emoji).
+// Returns -1 if not found.
+func findColumn(line, substr string) int {
+	stripped := stripANSI(line)
+	idx := strings.Index(stripped, substr)
+	if idx < 0 {
+		return -1
+	}
+	// Count visual columns up to the byte offset
+	col := 0
+	for _, r := range stripped[:idx] {
+		if r >= 0x1F000 {
+			col += 2
+		} else {
+			col++
+		}
+	}
+	return col
+}
+
+func TestFindColumn_EmojiWidth(t *testing.T) {
+	// 🟢 is 4 bytes but 2 visual columns
+	line := "🟢 hello ↑world"
+	col := findColumn(line, "↑")
+	// 🟢(2) + space(1) + hello(5) + space(1) = 9
+	if col != 9 {
+		t.Errorf("findColumn with emoji: got %d, want 9", col)
+	}
+
+	// No emoji
+	line2 := "abc ↑def"
+	col2 := findColumn(line2, "↑")
+	if col2 != 4 {
+		t.Errorf("findColumn without emoji: got %d, want 4", col2)
+	}
+
+	// With ANSI codes
+	line3 := "\033[32m🟢\033[0m hello \033[90m↑world\033[0m"
+	col3 := findColumn(line3, "↑")
+	if col3 != 9 {
+		t.Errorf("findColumn with ANSI+emoji: got %d, want 9", col3)
+	}
+
+	// Verify byte offset vs visual column difference
+	stripped := stripANSI("🟢 test ↑x")
+	byteIdx := strings.Index(stripped, "↑")
+	visCol := findColumn("🟢 test ↑x", "↑")
+	// byteIdx should be 11 (🟢=4, ' '=1, 'test'=4, ' '=1, ↑=here)
+	// visCol should be 8 (🟢=2, ' '=1, 'test'=4, ' '=1)
+	t.Logf("byteIdx=%d visCol=%d", byteIdx, visCol)
+	if byteIdx != 10 {
+		t.Errorf("byte index: got %d, want 10", byteIdx)
+	}
+	if visCol != 8 {
+		t.Errorf("visual column: got %d, want 8", visCol)
+	}
+}
+
+// extractLines returns ANSI-stripped, non-empty lines from rendered output.
+func extractLines(output string) []string {
+	var result []string
+	for _, line := range strings.Split(output, "\n") {
+		stripped := strings.TrimRight(stripANSI(line), " ")
+		if stripped != "" {
+			result = append(result, stripped)
+		}
+	}
+	return result
+}
+
+func TestAlignment_ListenerStatusColumn(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "socks", Bind: "127.0.0.1:1080"},
+			{Type: "http", Bind: "127.0.0.1:3128"},
+			{Type: "sshd", Bind: "0.0.0.0:2222"},
+		},
+	}
+	activeState := map[string]state.Component{
+		"proxy:127.0.0.1:1080": {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
+		"proxy:127.0.0.1:3128": {Type: "proxy", ID: "127.0.0.1:3128", Status: state.Listening},
+		"server:0.0.0.0:2222":  {Type: "server", ID: "0.0.0.0:2222", Status: state.Listening},
+	}
+	output := renderStatus(cfg, activeState, nil, "testnode")
+	lines := extractLines(output)
+
+	// Expect all 3 listener lines to have identical format with aligned [listening]
+	//   🟢 127.0.0.1:1080 socks [listening]
+	//   🟢 127.0.0.1:3128 http  [listening]
+	//   🟢 0.0.0.0:2222   sshd  [listening]
+	// The [listening] column must be identical (27 in this layout)
+	wantCol := 24
+	for _, line := range lines {
+		col := findColumn(line, "[listening]")
+		if col >= 0 && col != wantCol {
+			t.Errorf("[listening] at col %d, want %d in: %s", col, wantCol, line)
+		}
+	}
+}
+
+func TestAlignment_MetricsColumnSameAcrossRows(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "socks", Bind: "127.0.0.1:1080"},
+			{Type: "http", Bind: "127.0.0.1:3128"},
+		},
+	}
+	activeState := map[string]state.Component{
+		"proxy:127.0.0.1:1080": {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
+		"proxy:127.0.0.1:3128": {Type: "proxy", ID: "127.0.0.1:3128", Status: state.Listening},
+	}
+	m1 := &state.Metrics{}
+	m1.StartTime.Store(time.Now().Add(-1 * time.Hour).UnixNano())
+	m1.BytesTx.Store(1048576) // "1.0M"
+	m2 := &state.Metrics{}
+	m2.StartTime.Store(time.Now().Add(-30 * time.Minute).UnixNano())
+	m2.BytesTx.Store(1024) // "1K"
+	metricsMap := map[string]*state.Metrics{
+		"proxy:127.0.0.1:1080": m1,
+		"proxy:127.0.0.1:3128": m2,
+	}
+	output := renderStatus(cfg, activeState, metricsMap, "testnode")
+	lines := extractLines(output)
+
+	wantStatusCol := 24
+	wantMetricsCol := 42
+	for _, line := range lines {
+		if !strings.Contains(line, "[listening]") {
+			continue
+		}
+		statusCol := findColumn(line, "[listening]")
+		if statusCol != wantStatusCol {
+			t.Errorf("[listening] at col %d, want %d in: %s", statusCol, wantStatusCol, line)
+		}
+		metricsCol := findColumn(line, "↑")
+		if metricsCol >= 0 && metricsCol != wantMetricsCol {
+			t.Errorf("↑ at col %d, want %d in: %s", metricsCol, wantMetricsCol, line)
+		}
+	}
+}
+
+func TestAlignment_ArrowsAtSameColumn(t *testing.T) {
+	cfg := &config.Config{
+		Connections: []config.Connection{
+			{
+				Name:    "tunnel",
+				Targets: []string{"root@10.0.0.1:22"},
+				Forwards: []config.ForwardSet{
+					{
+						Name: "fwd",
+						Local: []config.Forward{
+							{Type: "forward", Bind: "127.0.0.1:80", Target: "10.0.0.1:80"},
+							{Type: "forward", Bind: "127.0.0.1:8443", Target: "10.0.0.1:443"},
+						},
+					},
+				},
+			},
+		},
+	}
+	activeState := map[string]state.Component{
+		"connection:tunnel [fwd]": {
+			Type: "connection", ID: "tunnel [fwd]",
+			Status: state.Connected, Message: "root@10.0.0.1:22",
+		},
+	}
+	output := renderStatus(cfg, activeState, nil, "testnode")
+	lines := extractLines(output)
+
+	wantCol := 18
+	for _, line := range lines {
+		col := findColumn(line, "──▶")
+		if col >= 0 && col != wantCol {
+			t.Errorf("──▶ at col %d, want %d in: %s", col, wantCol, line)
+		}
+	}
+}
+
+func TestAlignment_MixedDirectionMetrics(t *testing.T) {
+	cfg := &config.Config{
+		Connections: []config.Connection{
+			{
+				Name:    "tunnel",
+				Targets: []string{"root@10.0.0.1:22"},
+				Forwards: []config.ForwardSet{
+					{
+						Name: "fwd",
+						Local: []config.Forward{
+							{Type: "forward", Bind: "127.0.0.1:8080", Target: "10.0.0.1:80"},
+						},
+						Remote: []config.Forward{
+							{Type: "forward", Bind: "10.0.0.1:2222", Target: "127.0.0.1:22"},
+						},
+					},
+				},
+			},
+		},
+	}
+	activeState := map[string]state.Component{
+		"connection:tunnel [fwd]": {
+			Type: "connection", ID: "tunnel [fwd]",
+			Status: state.Connected, Message: "root@10.0.0.1:22",
+		},
+	}
+	m := &state.Metrics{}
+	m.StartTime.Store(time.Now().Add(-5 * time.Minute).UnixNano())
+	m.BytesTx.Store(100000)
+	metricsMap := map[string]*state.Metrics{
+		"forward:tunnel [fwd] 127.0.0.1:8080": m,
+		"forward:tunnel [fwd] 10.0.0.1:2222":  m,
+	}
+	output := renderStatus(cfg, activeState, metricsMap, "testnode")
+	lines := extractLines(output)
+
+	// Both forward lines (──▶ and ◀──) should have ↑ at the same column
+	wantCol := 54
+	for _, line := range lines {
+		if !strings.Contains(line, "──▶") && !strings.Contains(line, "◀──") {
+			continue
+		}
+		col := findColumn(line, "↑")
+		if col >= 0 && col != wantCol {
+			t.Errorf("↑ at col %d, want %d in: %s", col, wantCol, line)
+		}
+	}
+}
+
+func TestAlignment_StatusBeforeMetrics(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "socks", Bind: "127.0.0.1:1080"},
+		},
+	}
+	activeState := map[string]state.Component{
+		"proxy:127.0.0.1:1080": {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
+	}
+	m := &state.Metrics{}
+	m.StartTime.Store(time.Now().Add(-1 * time.Hour).UnixNano())
+	m.BytesTx.Store(1024)
+	metricsMap := map[string]*state.Metrics{
+		"proxy:127.0.0.1:1080": m,
+	}
+	output := renderStatus(cfg, activeState, metricsMap, "testnode")
+	lines := extractLines(output)
+
+	for _, line := range lines {
+		if !strings.Contains(line, "[listening]") {
+			continue
+		}
+		// [listening] must end before ↑ starts, with at least 1 space gap
+		statusEnd := findColumn(line, "[listening]") + len("[listening]")
+		metricsStart := findColumn(line, "↑")
+		if metricsStart < 0 {
+			t.Error("expected ↑ in listener line")
+			continue
+		}
+		if metricsStart <= statusEnd {
+			t.Errorf("[listening] ends at col %d but ↑ starts at col %d — should have gap", statusEnd, metricsStart)
+		}
+	}
+}
+
+func TestAlignment_AnnotationBeforeMetrics(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "sshd", Bind: "0.0.0.0:2222"},
+		},
+	}
+	activeState := map[string]state.Component{
+		"server:0.0.0.0:2222": {Type: "server", ID: "0.0.0.0:2222", Status: state.Listening},
+		"dynamic:127.0.0.1:1080|0.0.0.0:2222": {
+			Type: "dynamic", ID: "127.0.0.1:1080|0.0.0.0:2222",
+			Status: state.Listening, Message: "root@127.0.0.1:50000",
+			PeerAddr: "client/tunnel/fwd",
+		},
+	}
+	m := &state.Metrics{}
+	m.StartTime.Store(time.Now().Add(-10 * time.Minute).UnixNano())
+	m.BytesTx.Store(4096)
+	metricsMap := map[string]*state.Metrics{
+		"server:0.0.0.0:2222":                 m,
+		"dynamic:127.0.0.1:1080|0.0.0.0:2222": m,
+	}
+	output := renderStatus(cfg, activeState, metricsMap, "testnode")
+	lines := extractLines(output)
+
+	for _, line := range lines {
+		annEnd := strings.Index(line, "(client/tunnel/fwd)")
+		metricsStart := strings.Index(line, "↑")
+		if annEnd >= 0 && metricsStart >= 0 {
+			annEnd += len("(client/tunnel/fwd)")
+			if metricsStart < annEnd {
+				t.Errorf("annotation ends at %d but metrics starts at %d — overlap", annEnd, metricsStart)
+			}
+		}
+	}
+}
+
+func TestAlignment_WideContentNoOverlap(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "socks", Bind: "127.0.0.1:1080"},
+		},
+		Connections: []config.Connection{
+			{
+				Name:    "tunnel",
+				Targets: []string{"verylonguser@very-long-hostname.example.com:22"},
+				Forwards: []config.ForwardSet{
+					{
+						Name: "fwd",
+						Local: []config.Forward{
+							{Type: "forward", Bind: "127.0.0.1:8080", Target: "very-long-hostname.example.com:80"},
+						},
+					},
+				},
+			},
+		},
+	}
+	activeState := map[string]state.Component{
+		"proxy:127.0.0.1:1080": {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
+		"connection:tunnel [fwd]": {
+			Type: "connection", ID: "tunnel [fwd]",
+			Status: state.Connected, Message: "verylonguser@very-long-hostname.example.com:22",
+		},
+	}
+	m := &state.Metrics{}
+	m.StartTime.Store(time.Now().Add(-1 * time.Hour).UnixNano())
+	m.BytesTx.Store(1024)
+	metricsMap := map[string]*state.Metrics{
+		"proxy:127.0.0.1:1080":                m,
+		"forward:tunnel [fwd] 127.0.0.1:8080": m,
+	}
+	output := renderStatus(cfg, activeState, metricsMap, "testnode")
+	lines := extractLines(output)
+
+	// Every line with both status and metrics must have status before metrics
+	for _, line := range lines {
+		for _, status := range []string{"[connected]", "[listening]"} {
+			sIdx := strings.Index(line, status)
+			mIdx := strings.Index(line, "↑")
+			if sIdx >= 0 && mIdx >= 0 && mIdx < sIdx+len(status) {
+				t.Errorf("metrics overlaps with %s in: %s", status, line)
+			}
+		}
+	}
+}
+
 func BenchmarkCompareAddrSort(b *testing.B) {
 	sizes := []int{10, 50, 100}
 	for _, n := range sizes {

@@ -36,7 +36,6 @@
 
 ---
 
-- Forward sets should always show a target line to keep the UI stable. Sometimes it would say "no reachable target", sometimes it would show active connection or connection attempt. Maybe sometimes an error. But always there should be a line after forwarding set title.
 - We cannot track per-forwarindg metrics, right? Currently we are showing metrics per forwarding set. A forwarding set could contain multiple forwardnigs at ones. I'm more interested in that than forwarding-set level metrics. If we can achieve this, we can remove the forwarding-set level metrics.
 - Is it possible to collect metrics on the listeners also?
 - After adding that much details to the dashboard, it started feeling a bit unorganized. Let's align gray texts  properly.

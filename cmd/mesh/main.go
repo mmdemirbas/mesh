@@ -20,7 +20,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	"github.com/lmittmann/tint"
 	"github.com/mmdemirbas/mesh/internal/clipsync"
@@ -330,7 +329,7 @@ func formatMetricsSnap(s metricsSnapshot) string {
 	if s.uptime <= 0 && s.tx == 0 && s.rx == 0 {
 		return ""
 	}
-	r := " " + cGray + formatDuration(s.uptime) + " ↑" + formatBytes(s.tx) + " ↓" + formatBytes(s.rx)
+	r := cGray + fmt.Sprintf("%-6s", formatDuration(s.uptime)) + "↑" + formatBytes(s.tx) + " ↓" + formatBytes(s.rx)
 	if s.streams > 0 {
 		r += " " + fmt.Sprintf("%d↔", s.streams)
 	}
@@ -953,7 +952,17 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 	}
 
 	visibleLen := func(str string) int {
-		return utf8.RuneCountInString(ansiStripRe.ReplaceAllString(str, ""))
+		stripped := ansiStripRe.ReplaceAllString(str, "")
+		n := 0
+		for _, r := range stripped {
+			// Emoji indicators (🟢🟡🔴⚪) are 2-column-wide in terminals
+			if r >= 0x1F000 {
+				n += 2
+			} else {
+				n++
+			}
+		}
+		return n
 	}
 
 	colorAddr := func(addr string) string {
@@ -1002,7 +1011,18 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 	arrowRight := cCyan + "──▶" + cReset
 	arrowLeft := cMagenta + "◀──" + cReset
 
-	writeln(fmt.Sprintf("%s⚙ Configuration: %s%s%s", cBold, cCyan, nodeName, cReset))
+	// Compute grand total for the header
+	grandTotalStr := ""
+	if metricsMap != nil {
+		var total metricsSnapshot
+		for _, m := range metricsMap {
+			total.add(readMetrics(m))
+		}
+		if total.tx > 0 || total.rx > 0 {
+			grandTotalStr = cGray + "  ↑" + formatBytes(total.tx) + " ↓" + formatBytes(total.rx) + cReset
+		}
+	}
+	writeln(fmt.Sprintf("%s⚙ Configuration: %s%s%s%s", cBold, cCyan, nodeName, cReset, grandTotalStr))
 	writeln(cGray + strings.Repeat("─", 80) + cReset)
 
 	// Pre-scan: find the widest bind address among protocol-tagged rows for alignment.
@@ -1177,7 +1197,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 					connAgg.add(readMetrics(metricsMap["forward:"+compID]))
 				}
 			}
-			addHeader(sectionTitle(c.Name) + formatMetricsSnap(connAgg))
+			addRow("", "", sectionTitle(c.Name), "", "", "", formatMetricsSnap(connAgg))
 
 			type targetInfo struct {
 				status   state.Status
@@ -1321,17 +1341,6 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		addHeader("")
 	}
 
-	// Grand total
-	if metricsMap != nil {
-		var total metricsSnapshot
-		for _, m := range metricsMap {
-			total.add(readMetrics(m))
-		}
-		if total.tx > 0 || total.rx > 0 {
-			addHeader(cGray + "total ↑" + formatBytes(total.tx) + " ↓" + formatBytes(total.rx) + cReset)
-		}
-	}
-
 	// --- Layout alignment ---
 
 	maxTotalLeft := 0
@@ -1339,7 +1348,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		if !r.isHeader && r.left != "" && r.arrow != "" {
 			l := len(r.indent)
 			if r.indicator != "" {
-				l += 2
+				l += visibleLen(r.indicator) + 1 // indicator + space
 			}
 			l += visibleLen(r.left)
 			if l > maxTotalLeft {
@@ -1376,26 +1385,15 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		statusPadCol = 60
 	}
 
-	// Compute right-align column for metrics: based on widest line with status
-	metricsPadCol := 0
-	for _, r := range rows {
-		if r.isHeader || (r.status == "" && r.metrics == "") {
-			continue
-		}
-		lineLen := visibleLen(r.text)
-		col := statusPadCol
-		if lineLen >= col {
-			col = lineLen + 1
-		}
-		col += visibleLen(r.status)
-		if col > metricsPadCol {
-			metricsPadCol = col
-		}
+	// Build lines up to (and including) the status text, compute metrics column.
+	type builtLine struct {
+		beforeMetrics string
+		metrics       string
 	}
-
-	for _, r := range rows {
+	built := make([]builtLine, len(rows))
+	metricsPadCol := 0
+	for i, r := range rows {
 		if r.isHeader {
-			writeln(r.text)
 			continue
 		}
 		line := r.text
@@ -1407,13 +1405,30 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 				line += " "
 			}
 			line += r.status
-			if r.metrics != "" {
-				currentLen := visibleLen(line)
-				if currentLen < metricsPadCol {
-					line += strings.Repeat(" ", metricsPadCol-currentLen)
-				}
-				line += r.metrics
+		}
+		built[i] = builtLine{beforeMetrics: line, metrics: r.metrics}
+		if r.metrics != "" {
+			if col := visibleLen(line); col > metricsPadCol {
+				metricsPadCol = col
 			}
+		}
+	}
+	metricsPadCol++ // at least one space between status and metrics
+
+	for i, r := range rows {
+		if r.isHeader {
+			writeln(r.text)
+			continue
+		}
+		line := built[i].beforeMetrics
+		if built[i].metrics != "" {
+			currentLen := visibleLen(line)
+			if currentLen < metricsPadCol {
+				line += strings.Repeat(" ", metricsPadCol-currentLen)
+			} else {
+				line += " "
+			}
+			line += built[i].metrics
 		}
 		writeln(strings.TrimRight(line, " "))
 	}
