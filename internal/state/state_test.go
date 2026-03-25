@@ -112,6 +112,132 @@ func TestStatusConstants(t *testing.T) {
 	}
 }
 
+func TestUpdatePeer(t *testing.T) {
+	s := newState()
+	s.Update("connection", "c1", Connected, "target1")
+	s.UpdatePeer("connection", "c1", "10.0.0.1:22")
+
+	snap := s.Snapshot()
+	if snap["connection:c1"].PeerAddr != "10.0.0.1:22" {
+		t.Errorf("PeerAddr = %q, want %q", snap["connection:c1"].PeerAddr, "10.0.0.1:22")
+	}
+}
+
+func TestUpdatePreservesPeerAddr(t *testing.T) {
+	s := newState()
+	s.Update("connection", "c1", Connected, "target1")
+	s.UpdatePeer("connection", "c1", "10.0.0.1:22")
+	s.Update("connection", "c1", Retrying, "error")
+
+	snap := s.Snapshot()
+	if snap["connection:c1"].PeerAddr != "10.0.0.1:22" {
+		t.Errorf("PeerAddr = %q, want %q (should be preserved across Update)", snap["connection:c1"].PeerAddr, "10.0.0.1:22")
+	}
+}
+
+func TestGetMetrics_CreatesNew(t *testing.T) {
+	s := newState()
+	m := s.GetMetrics("connection", "c1")
+	if m == nil {
+		t.Fatal("GetMetrics returned nil")
+	}
+	if m.BytesTx.Load() != 0 {
+		t.Errorf("new metrics BytesTx = %d, want 0", m.BytesTx.Load())
+	}
+}
+
+func TestGetMetrics_ReturnsSame(t *testing.T) {
+	s := newState()
+	m1 := s.GetMetrics("connection", "c1")
+	m2 := s.GetMetrics("connection", "c1")
+	if m1 != m2 {
+		t.Error("GetMetrics returned different pointers for same key")
+	}
+}
+
+func TestGetMetrics_DifferentKeys(t *testing.T) {
+	s := newState()
+	m1 := s.GetMetrics("connection", "c1")
+	m2 := s.GetMetrics("connection", "c2")
+	if m1 == m2 {
+		t.Error("GetMetrics returned same pointer for different keys")
+	}
+}
+
+func TestMetrics_AtomicOperations(t *testing.T) {
+	m := &Metrics{}
+	m.BytesTx.Add(100)
+	m.BytesTx.Add(200)
+	m.BytesRx.Add(50)
+	m.Streams.Add(3)
+	m.Streams.Add(-1)
+	m.StartTime.Store(12345)
+
+	if m.BytesTx.Load() != 300 {
+		t.Errorf("BytesTx = %d, want 300", m.BytesTx.Load())
+	}
+	if m.BytesRx.Load() != 50 {
+		t.Errorf("BytesRx = %d, want 50", m.BytesRx.Load())
+	}
+	if m.Streams.Load() != 2 {
+		t.Errorf("Streams = %d, want 2", m.Streams.Load())
+	}
+	if m.StartTime.Load() != 12345 {
+		t.Errorf("StartTime = %d, want 12345", m.StartTime.Load())
+	}
+}
+
+func TestSnapshotMetrics(t *testing.T) {
+	s := newState()
+	m := s.GetMetrics("connection", "c1")
+	m.BytesTx.Store(999)
+
+	snap := s.SnapshotMetrics()
+	if snap["connection:c1"] == nil {
+		t.Fatal("SnapshotMetrics missing entry")
+	}
+	if snap["connection:c1"].BytesTx.Load() != 999 {
+		t.Errorf("BytesTx = %d, want 999", snap["connection:c1"].BytesTx.Load())
+	}
+}
+
+func TestSnapshotMetrics_Empty(t *testing.T) {
+	s := newState()
+	snap := s.SnapshotMetrics()
+	if len(snap) != 0 {
+		t.Errorf("empty metrics snapshot has %d entries", len(snap))
+	}
+}
+
+func TestDeleteMetrics(t *testing.T) {
+	s := newState()
+	s.GetMetrics("connection", "c1")
+	s.DeleteMetrics("connection", "c1")
+
+	snap := s.SnapshotMetrics()
+	if _, ok := snap["connection:c1"]; ok {
+		t.Error("metrics still present after DeleteMetrics")
+	}
+}
+
+func TestMetrics_ConcurrentAccess(t *testing.T) {
+	s := newState()
+	var wg sync.WaitGroup
+	for i := range 100 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			m := s.GetMetrics("connection", "shared")
+			m.BytesTx.Add(int64(i))
+			m.BytesRx.Add(int64(i))
+			m.Streams.Add(1)
+			m.Streams.Add(-1)
+			s.SnapshotMetrics()
+		}(i)
+	}
+	wg.Wait()
+}
+
 func TestConcurrentAccess(t *testing.T) {
 	s := newState()
 	var wg sync.WaitGroup

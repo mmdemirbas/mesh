@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mmdemirbas/mesh/internal/config"
 	"github.com/mmdemirbas/mesh/internal/state"
@@ -395,6 +396,237 @@ func TestHumanLogHandler(t *testing.T) {
 				t.Errorf("output %q should not contain %q (key should be consumed)", output, tt.wantNot)
 			}
 		})
+	}
+}
+
+func TestFormatBytes(t *testing.T) {
+	tests := []struct {
+		input int64
+		want  string
+	}{
+		{0, "0"},
+		{1, "1B"},
+		{512, "512B"},
+		{1023, "1023B"},
+		{1024, "1K"},
+		{1536, "2K"},
+		{10240, "10K"},
+		{1048576, "1.0M"},
+		{1572864, "1.5M"},
+		{10485760, "10.0M"},
+		{1073741824, "1.0G"},
+		{1610612736, "1.5G"},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%d", tt.input), func(t *testing.T) {
+			got := formatBytes(tt.input)
+			if got != tt.want {
+				t.Errorf("formatBytes(%d) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatDuration(t *testing.T) {
+	tests := []struct {
+		input time.Duration
+		want  string
+	}{
+		{0, "0s"},
+		{5 * time.Second, "5s"},
+		{59 * time.Second, "59s"},
+		{60 * time.Second, "1m0s"},
+		{90 * time.Second, "1m30s"},
+		{5*time.Minute + 15*time.Second, "5m15s"},
+		{59*time.Minute + 59*time.Second, "59m59s"},
+		{60 * time.Minute, "1h0m"},
+		{2*time.Hour + 13*time.Minute, "2h13m"},
+		{23*time.Hour + 59*time.Minute, "23h59m"},
+		{24 * time.Hour, "1d0h"},
+		{3*24*time.Hour + 5*time.Hour, "3d5h"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			got := formatDuration(tt.input)
+			if got != tt.want {
+				t.Errorf("formatDuration(%v) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderStatus_TargetSymbols(t *testing.T) {
+	cfg := &config.Config{
+		Connections: []config.Connection{
+			{
+				Name:    "tunnel",
+				Targets: []string{"root@10.0.0.1:22", "root@10.0.0.2:22"},
+				Forwards: []config.ForwardSet{
+					{Name: "fwd"},
+				},
+			},
+		},
+	}
+	activeState := map[string]state.Component{
+		"connection:tunnel [fwd]": {
+			Type: "connection", ID: "tunnel [fwd]",
+			Status: state.Connected, Message: "root@10.0.0.1:22",
+		},
+	}
+	output := renderStatus(cfg, activeState, nil, "testnode")
+	// Connected target should have green ● (with ANSI)
+	if !strings.Contains(output, "●") {
+		t.Error("connected target should show ● symbol")
+	}
+	// Disconnected target should have ○
+	if !strings.Contains(output, "○") {
+		t.Error("disconnected target should show ○ symbol")
+	}
+}
+
+func TestRenderStatus_ForwardSetPeerSymbol(t *testing.T) {
+	cfg := &config.Config{
+		Connections: []config.Connection{
+			{
+				Name:    "tunnel",
+				Targets: []string{"root@10.0.0.1:22"},
+				Forwards: []config.ForwardSet{
+					{Name: "fwd"},
+				},
+			},
+		},
+	}
+	activeState := map[string]state.Component{
+		"connection:tunnel [fwd]": {
+			Type: "connection", ID: "tunnel [fwd]",
+			Status: state.Connected, Message: "root@10.0.0.1:22",
+			PeerAddr: "10.0.0.1:22",
+		},
+	}
+	output := renderStatus(cfg, activeState, nil, "testnode")
+	// The forward set's peer line should also have ● (not →)
+	// Count ● occurrences — should be at least 2 (target line + peer line)
+	count := strings.Count(output, "●")
+	if count < 2 {
+		t.Errorf("expected at least 2 ● symbols (target + peer), got %d", count)
+	}
+}
+
+func TestRenderStatus_PeerAddrHidden_WhenSameAsTarget(t *testing.T) {
+	cfg := &config.Config{
+		Connections: []config.Connection{
+			{
+				Name:    "tunnel",
+				Targets: []string{"root@10.0.0.1:22"},
+				Forwards: []config.ForwardSet{
+					{Name: "fwd"},
+				},
+			},
+		},
+	}
+	activeState := map[string]state.Component{
+		"connection:tunnel [fwd]": {
+			Type: "connection", ID: "tunnel [fwd]",
+			Status: state.Connected, Message: "root@10.0.0.1:22",
+			PeerAddr: "10.0.0.1:22",
+		},
+	}
+	output := renderStatus(cfg, activeState, nil, "testnode")
+	// PeerAddr "10.0.0.1:22" is contained in target "root@10.0.0.1:22", so should NOT show in parens
+	if strings.Contains(output, "(10.0.0.1:22)") {
+		t.Error("peer address should be hidden when contained in target string")
+	}
+}
+
+func TestRenderStatus_PeerAddrShown_WhenDifferent(t *testing.T) {
+	cfg := &config.Config{
+		Connections: []config.Connection{
+			{
+				Name:    "tunnel",
+				Targets: []string{"root@myhost.example.com:22"},
+				Forwards: []config.ForwardSet{
+					{Name: "fwd"},
+				},
+			},
+		},
+	}
+	activeState := map[string]state.Component{
+		"connection:tunnel [fwd]": {
+			Type: "connection", ID: "tunnel [fwd]",
+			Status: state.Connected, Message: "root@myhost.example.com:22",
+			PeerAddr: "93.184.216.34:22",
+		},
+	}
+	output := renderStatus(cfg, activeState, nil, "testnode")
+	if !strings.Contains(output, "93.184.216.34") {
+		t.Error("peer address should be shown when different from target")
+	}
+}
+
+func TestRenderStatus_WithMetrics(t *testing.T) {
+	cfg := &config.Config{
+		Connections: []config.Connection{
+			{
+				Name:    "tunnel",
+				Targets: []string{"root@10.0.0.1:22"},
+				Forwards: []config.ForwardSet{
+					{Name: "fwd"},
+				},
+			},
+		},
+	}
+	activeState := map[string]state.Component{
+		"connection:tunnel [fwd]": {
+			Type: "connection", ID: "tunnel [fwd]",
+			Status: state.Connected, Message: "root@10.0.0.1:22",
+		},
+	}
+	m := &state.Metrics{}
+	m.StartTime.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	m.BytesTx.Store(1048576) // 1MB
+	m.BytesRx.Store(2097152) // 2MB
+	m.Streams.Store(3)
+	metricsMap := map[string]*state.Metrics{
+		"connection:tunnel [fwd]": m,
+	}
+	output := renderStatus(cfg, activeState, metricsMap, "testnode")
+	if !strings.Contains(output, "↑") || !strings.Contains(output, "↓") {
+		t.Error("output should contain ↑ and ↓ byte indicators")
+	}
+	if !strings.Contains(output, "1.0M") {
+		t.Error("output should contain formatted TX bytes")
+	}
+	if !strings.Contains(output, "2.0M") {
+		t.Error("output should contain formatted RX bytes")
+	}
+	if !strings.Contains(output, "3↔") {
+		t.Error("output should contain active stream count")
+	}
+	if !strings.Contains(output, "2h") {
+		t.Error("output should contain uptime")
+	}
+}
+
+func TestRenderStatus_DynamicPortNodeName(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "sshd", Bind: "0.0.0.0:2222"},
+		},
+	}
+	activeState := map[string]state.Component{
+		"server:0.0.0.0:2222": {Type: "server", ID: "0.0.0.0:2222", Status: state.Listening},
+		"dynamic:127.0.0.1:9999|0.0.0.0:2222": {
+			Type: "dynamic", ID: "127.0.0.1:9999|0.0.0.0:2222",
+			Status: state.Listening, Message: "root@127.0.0.1:54321",
+			PeerAddr: "client/tunnel/fwd",
+		},
+	}
+	output := renderStatus(cfg, activeState, nil, "testnode")
+	if !strings.Contains(output, "client/tunnel/fwd") {
+		t.Error("dynamic port should show mesh node identity in parentheses")
+	}
+	if !strings.Contains(output, "root@") {
+		t.Error("dynamic port should show SSH client address")
 	}
 }
 

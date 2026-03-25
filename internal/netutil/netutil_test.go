@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -191,6 +192,215 @@ func TestBiCopy_LargePayload(t *testing.T) {
 
 	if !bytes.Equal(got, payload) {
 		t.Errorf("payload mismatch: got %d bytes, want %d", len(got), len(payload))
+	}
+}
+
+func TestCountedBiCopy_ByteCounting(t *testing.T) {
+	// Echo server
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	serverData := []byte("hello from server!!")    // 19 bytes
+	clientData := []byte("hello from client!!!!!") // 22 bytes
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 1024)
+		n, _ := conn.Read(buf)
+		_ = n
+		_, _ = conn.Write(serverData)
+		_ = conn.(*net.TCPConn).CloseWrite()
+	}()
+
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var tx, rx atomic.Int64
+	_, _ = client.Write(clientData)
+	_ = client.(*net.TCPConn).CloseWrite()
+
+	got, _ := io.ReadAll(client)
+	client.Close()
+	wg.Wait()
+
+	if !bytes.Equal(got, serverData) {
+		t.Errorf("got %q, want %q", got, serverData)
+	}
+
+	// Now test with CountedBiCopy through a proxy relay
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln2.Close()
+
+	target, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		conn, err := target.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.Copy(conn, conn) // echo
+	}()
+
+	tx.Store(0)
+	rx.Store(0)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		cConn, err := ln2.Accept()
+		if err != nil {
+			return
+		}
+		defer cConn.Close()
+		tConn, err := net.Dial("tcp", target.Addr().String())
+		if err != nil {
+			return
+		}
+		defer tConn.Close()
+		CountedBiCopy(cConn, tConn, &tx, &rx)
+	}()
+
+	client2, err := net.DialTimeout("tcp", ln2.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testPayload := []byte("counted bytes test data")
+	_, _ = client2.Write(testPayload)
+	_ = client2.(*net.TCPConn).CloseWrite()
+	echoed, _ := io.ReadAll(client2)
+	client2.Close()
+	ln2.Close()
+	target.Close()
+	wg.Wait()
+
+	if !bytes.Equal(echoed, testPayload) {
+		t.Errorf("echo mismatch: got %d bytes, want %d", len(echoed), len(testPayload))
+	}
+
+	// tx = data written to client side (echo response), rx = data written to target side (original)
+	// In an echo proxy: client→proxy→target→proxy→client
+	// tx counts proxy→client (the echo), rx counts proxy→target (the original)
+	totalBytes := tx.Load() + rx.Load()
+	expectedTotal := int64(len(testPayload)) * 2 // sent + echoed
+	if totalBytes != expectedTotal {
+		t.Errorf("total bytes = %d (tx=%d, rx=%d), want %d", totalBytes, tx.Load(), rx.Load(), expectedTotal)
+	}
+}
+
+func TestCountedBiCopy_LargePayload(t *testing.T) {
+	target, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+
+	payload := make([]byte, 512*1024) // 512KB
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		conn, err := target.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.Copy(conn, conn) // echo
+	}()
+
+	proxy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+
+	var tx, rx atomic.Int64
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		cConn, err := proxy.Accept()
+		if err != nil {
+			return
+		}
+		defer cConn.Close()
+		tConn, err := net.Dial("tcp", target.Addr().String())
+		if err != nil {
+			return
+		}
+		defer tConn.Close()
+		CountedBiCopy(cConn, tConn, &tx, &rx)
+	}()
+
+	client, err := net.DialTimeout("tcp", proxy.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = client.Write(payload)
+	_ = client.(*net.TCPConn).CloseWrite()
+	got, _ := io.ReadAll(client)
+	client.Close()
+	proxy.Close()
+	target.Close()
+	wg.Wait()
+
+	if !bytes.Equal(got, payload) {
+		t.Errorf("payload mismatch: got %d bytes, want %d", len(got), len(payload))
+	}
+	expectedTotal := int64(len(payload)) * 2
+	totalBytes := tx.Load() + rx.Load()
+	if totalBytes != expectedTotal {
+		t.Errorf("counted bytes = %d (tx=%d, rx=%d), want %d", totalBytes, tx.Load(), rx.Load(), expectedTotal)
+	}
+}
+
+func TestCountingWriter(t *testing.T) {
+	var buf bytes.Buffer
+	var counter atomic.Int64
+	cw := &countingWriter{w: &buf, counter: &counter}
+
+	n, err := cw.Write([]byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 5 {
+		t.Errorf("Write returned %d, want 5", n)
+	}
+	if counter.Load() != 5 {
+		t.Errorf("counter = %d, want 5", counter.Load())
+	}
+
+	cw.Write([]byte(" world"))
+	if counter.Load() != 11 {
+		t.Errorf("counter = %d, want 11", counter.Load())
+	}
+	if buf.String() != "hello world" {
+		t.Errorf("buf = %q, want %q", buf.String(), "hello world")
 	}
 }
 
