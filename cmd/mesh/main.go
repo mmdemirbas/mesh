@@ -290,6 +290,29 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dd%dh", days, hours)
 }
 
+// formatMetrics returns a compact gray metrics string from a metricsMap lookup.
+// Returns "" if no metrics available for the key.
+func formatMetrics(metricsMap map[string]*state.Metrics, key string) string {
+	m := metricsMap[key]
+	if m == nil {
+		return ""
+	}
+	startNano := m.StartTime.Load()
+	if startNano <= 0 {
+		return ""
+	}
+	uptime := time.Since(time.Unix(0, startNano)).Truncate(time.Second)
+	tx := m.BytesTx.Load()
+	rx := m.BytesRx.Load()
+	streams := m.Streams.Load()
+	s := cGray + formatDuration(uptime) + " ↑" + formatBytes(tx) + " ↓" + formatBytes(rx)
+	if streams > 0 {
+		s += " " + fmt.Sprintf("%d↔", streams)
+	}
+	s += cReset
+	return s
+}
+
 // compareAddr compares two address strings semantically by IP then port.
 func compareAddr(a, b string) bool {
 	return makeAddrKey(a).less(makeAddrKey(b))
@@ -1057,20 +1080,23 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		for _, l := range cfg.Listeners {
 			if l.Type == "sshd" {
 				indicator, st, _ := getComponentInfo("server", l.Bind)
+				ms := formatMetrics(metricsMap, "server:"+l.Bind)
 				left := padForProto(colorAddr(l.Bind)) + " " + cBlue + strings.ToLower(l.Type) + cReset
-				addRow("", indicator, left, "", "", st)
+				addRow("", indicator, left, "", "", st+ms)
 			} else if l.Type == "relay" {
 				indicator, st, _ := getComponentInfo("relay", l.Bind)
-				addRow("", indicator, colorAddr(l.Bind), arrowRight, colorAddr(l.Target), st)
+				ms := formatMetrics(metricsMap, "relay:"+l.Bind)
+				addRow("", indicator, colorAddr(l.Bind), arrowRight, colorAddr(l.Target), st+ms)
 			} else {
 				indicator, st, _ := getComponentInfo("proxy", l.Bind)
+				ms := formatMetrics(metricsMap, "proxy:"+l.Bind)
 				left := padForProto(colorAddr(l.Bind)) + " " + cBlue + strings.ToLower(l.Type) + cReset
 				arrow, right := "", ""
 				if l.Target != "" {
 					right = colorAddr(l.Target)
 					arrow = arrowRight
 				}
-				addRow("", indicator, left, arrow, right, st)
+				addRow("", indicator, left, arrow, right, st+ms)
 			}
 
 			_, searchPort, err := net.SplitHostPort(l.Bind)
@@ -1094,11 +1120,11 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 					}
 					seenID[comp.ID] = true
 					parts := strings.Split(comp.ID, "|")
-					right := colorAddr(cleanIPv6(comp.Message))
+					annotation := ""
 					if comp.PeerAddr != "" {
-						right += " " + cGray + "(" + comp.PeerAddr + ")" + cReset
+						annotation = cGray + "(" + comp.PeerAddr + ")" + cReset
 					}
-					addRow("   ", "~", colorAddr(parts[0]), arrowRight, right, "")
+					addRow("   ", "~", colorAddr(parts[0]), arrowRight, colorAddr(cleanIPv6(comp.Message)), annotation)
 				}
 			}
 		}
@@ -1127,84 +1153,93 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			}
 			for _, t := range c.Targets {
 				ind := "○"
-				suffix := ""
+				annotation := ""
 				if info, ok := connectedTargets[t]; ok {
 					switch info.status {
 					case state.Connected:
 						ind = cGreen + "●" + cReset
 						if info.peerAddr != "" && !strings.Contains(t, info.peerAddr) {
-							suffix = " " + cGray + "(" + info.peerAddr + ")" + cReset
+							annotation = cGray + "(" + info.peerAddr + ")" + cReset
 						}
 					case state.Connecting, state.Retrying:
 						ind = cBlink + cYellow + "●" + cReset
 					}
 				}
-				addRow(" ", ind, colorAddr(t)+suffix, "", "", "")
+				addRow(" ", ind, colorAddr(t), "", "", annotation)
 			}
 
 			for _, fset := range c.Forwards {
 				id := c.Name + " [" + fset.Name + "]"
 				indicator, st, comp := getComponentInfo("connection", id)
-				// Append metrics to the status line if available
-				metricsStr := ""
-				if m := metricsMap["connection:"+id]; m != nil {
-					if startNano := m.StartTime.Load(); startNano > 0 && comp.Status == state.Connected {
-						uptime := time.Since(time.Unix(0, startNano)).Truncate(time.Second)
-						tx := m.BytesTx.Load()
-						rx := m.BytesRx.Load()
-						streams := m.Streams.Load()
-						metricsStr = cGray + " " + formatDuration(uptime) + " ↑" + formatBytes(tx) + " ↓" + formatBytes(rx)
-						if streams > 0 {
-							metricsStr += " " + fmt.Sprintf("%d↔", streams)
-						}
-						metricsStr += cReset
-					}
-				}
-				addRow("", indicator, sectionTitle(fset.Name), "", "", st+metricsStr)
-				if comp.Message != "" && (comp.Status == state.Connected || comp.Status == state.Connecting || comp.Status == state.Retrying) {
-					targetStr := colorAddr(comp.Message)
-					if comp.PeerAddr != "" && !strings.Contains(comp.Message, comp.PeerAddr) {
-						targetStr += " " + cGray + "(" + comp.PeerAddr + ")" + cReset
-					}
+				addRow("", indicator, sectionTitle(fset.Name), "", "", st)
+
+				// Always show a target line under each forward set
+				{
 					ind := "○"
+					var targetStr string
+					targetAnnotation := ""
 					switch comp.Status {
 					case state.Connected:
 						ind = cGreen + "●" + cReset
-					case state.Connecting, state.Retrying:
+						targetStr = colorAddr(comp.Message)
+						if comp.PeerAddr != "" && !strings.Contains(comp.Message, comp.PeerAddr) {
+							targetAnnotation = cGray + "(" + comp.PeerAddr + ")" + cReset
+						}
+					case state.Connecting:
 						ind = cBlink + cYellow + "●" + cReset
+						targetStr = cGray + "[connecting]" + cReset
+					case state.Retrying:
+						ind = cBlink + cYellow + "●" + cReset
+						if comp.Message != "" {
+							targetStr = cYellow + comp.Message + cReset
+						} else {
+							targetStr = cGray + "[retrying]" + cReset
+						}
+					case state.Failed:
+						ind = cRed + "✕" + cReset
+						if comp.Message != "" {
+							targetStr = cRed + comp.Message + cReset
+						} else {
+							targetStr = cRed + "[failed]" + cReset
+						}
+					default:
+						targetStr = cGray + "[starting]" + cReset
 					}
-					addRow("   ", ind, targetStr, "", "", "")
+					addRow("   ", ind, targetStr, "", "", targetAnnotation)
 				}
 
 				indent := "   "
 				for _, fwd := range fset.Local {
 					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
-					_, _, comp := getComponentInfo("forward", compID)
+					_, _, fwdComp := getComponentInfo("forward", compID)
+					ms := formatMetrics(metricsMap, "forward:"+compID)
 					lStr := colorAddr(fwd.Bind)
-					if comp.BoundAddr != "" && comp.BoundAddr != fwd.Bind {
-						lStr = colorAddr(comp.BoundAddr) + " " + cGray + "(from " + fwd.Bind + ")" + cReset
+					if fwdComp.BoundAddr != "" && fwdComp.BoundAddr != fwd.Bind {
+						lStr = colorAddr(fwdComp.BoundAddr) + " " + cGray + "(from " + fwd.Bind + ")" + cReset
 					}
 					if fwd.Type == "forward" {
-						addRow(indent, "", lStr, arrowRight, colorAddr(fwd.Target), "")
+						addRow(indent, "", lStr, arrowRight, colorAddr(fwd.Target), ms)
 					} else {
 						lStr = padForProto(lStr) + " " + cBlue + strings.ToLower(fwd.Type) + cReset
 						rStr := cGray + "🔒 tunnel" + cReset
 						if fwd.Target != "" {
 							rStr = colorAddr(fwd.Target)
 						}
-						addRow(indent, "", lStr, arrowRight, rStr, "")
+						addRow(indent, "", lStr, arrowRight, rStr, ms)
 					}
 				}
 				for _, fwd := range fset.Remote {
+					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
+					ms := formatMetrics(metricsMap, "forward:"+compID)
 					if fwd.Type == "forward" {
-						addRow(indent, "", colorAddr(fwd.Target), arrowLeft, colorAddr(fwd.Bind), "")
+						addRow(indent, "", colorAddr(fwd.Target), arrowLeft, colorAddr(fwd.Bind), ms)
 					} else {
 						lStr := cGray + "🔒 tunnel" + cReset
 						if fwd.Target != "" {
 							lStr = colorAddr(fwd.Target)
 						}
 						rStr := padForProto(colorAddr(fwd.Bind)) + " " + cBlue + strings.ToLower(fwd.Type) + cReset
-						addRow(indent, "", lStr, arrowLeft, rStr, "")
+						addRow(indent, "", lStr, arrowLeft, rStr, ms)
 					}
 				}
 			}

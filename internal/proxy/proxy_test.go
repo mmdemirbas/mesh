@@ -148,7 +148,7 @@ func TestServeSocks_EndToEnd(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go ServeSocks(ctx, socksLn, nil, slog.Default())
+	go ServeSocks(ctx, socksLn, nil, slog.Default(), nil)
 
 	// Client dials through the SOCKS5 proxy
 	conn, err := DialViaSocks5(net.Dial, socksLn.Addr().String(), targetLn.Addr().String())
@@ -197,7 +197,7 @@ func TestServeHTTPProxy_CONNECT(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go ServeHTTPProxy(ctx, proxyLn, "", slog.Default())
+	go ServeHTTPProxy(ctx, proxyLn, "", slog.Default(), nil)
 
 	// Connect to proxy, send HTTP CONNECT, then tunnel data
 	conn, err := net.DialTimeout("tcp", proxyLn.Addr().String(), time.Second)

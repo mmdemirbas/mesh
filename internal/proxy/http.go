@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mmdemirbas/mesh/internal/netutil"
+	"github.com/mmdemirbas/mesh/internal/state"
 )
 
 // bufferedConn wraps a net.Conn with a buffered reader and implements CloseWrite.
@@ -34,18 +35,18 @@ func (b *bufferedConn) CloseWrite() error {
 
 // ServeHTTPProxy accepts connections and handles HTTP CONNECT proxy requests.
 // Each CONNECT request is forwarded either directly or through an upstream SOCKS5 proxy.
-func ServeHTTPProxy(ctx context.Context, listener net.Listener, target string, log *slog.Logger) {
+func ServeHTTPProxy(ctx context.Context, listener net.Listener, target string, log *slog.Logger, metrics *state.Metrics) {
 	dialer := func(addr string) (net.Conn, error) {
 		if target != "" {
 			return DialViaSocks5(net.Dial, target, addr)
 		}
 		return net.Dial("tcp", addr)
 	}
-	ServeHTTPProxyWithDialer(ctx, listener, dialer, log)
+	ServeHTTPProxyWithDialer(ctx, listener, dialer, log, metrics)
 }
 
 // ServeHTTPProxyWithDialer accepts connections and uses the provided dialer for upstream targets.
-func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer func(string) (net.Conn, error), log *slog.Logger) {
+func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer func(string) (net.Conn, error), log *slog.Logger, metrics *state.Metrics) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -57,12 +58,12 @@ func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer
 			continue
 		}
 		netutil.ApplyTCPKeepAlive(conn, 0)
-		go handleHTTPProxy(conn, dialer, log)
+		go handleHTTPProxy(conn, dialer, log, metrics)
 	}
 }
 
 // handleHTTPProxy handles a single HTTP CONNECT proxy connection.
-func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *slog.Logger) {
+func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *slog.Logger, metrics *state.Metrics) {
 	defer conn.Close()
 
 	// Set a deadline for the HTTP CONNECT handshake to prevent slowloris attacks
@@ -102,7 +103,13 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 
 		_ = conn.SetDeadline(time.Time{})
 		bc := &bufferedConn{Conn: conn, r: io.MultiReader(br, conn)}
-		netutil.BiCopy(bc, remote)
+		if metrics != nil {
+			metrics.Streams.Add(1)
+			defer metrics.Streams.Add(-1)
+			netutil.CountedBiCopy(bc, remote, &metrics.BytesTx, &metrics.BytesRx)
+		} else {
+			netutil.BiCopy(bc, remote)
+		}
 		return
 	}
 
@@ -129,7 +136,13 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 		Conn: conn,
 		r:    io.MultiReader(br, conn),
 	}
-	netutil.BiCopy(bc, remote)
+	if metrics != nil {
+		metrics.Streams.Add(1)
+		defer metrics.Streams.Add(-1)
+		netutil.CountedBiCopy(bc, remote, &metrics.BytesTx, &metrics.BytesRx)
+	} else {
+		netutil.BiCopy(bc, remote)
+	}
 }
 
 // DialViaSocks5 connects to target through a SOCKS5 proxy, using baseDialer to reach SOCKS.

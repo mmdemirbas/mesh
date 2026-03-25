@@ -570,7 +570,12 @@ func TestRenderStatus_WithMetrics(t *testing.T) {
 				Name:    "tunnel",
 				Targets: []string{"root@10.0.0.1:22"},
 				Forwards: []config.ForwardSet{
-					{Name: "fwd"},
+					{
+						Name: "fwd",
+						Local: []config.Forward{
+							{Type: "forward", Bind: "127.0.0.1:8080", Target: "10.0.0.1:80"},
+						},
+					},
 				},
 			},
 		},
@@ -587,7 +592,7 @@ func TestRenderStatus_WithMetrics(t *testing.T) {
 	m.BytesRx.Store(2097152) // 2MB
 	m.Streams.Store(3)
 	metricsMap := map[string]*state.Metrics{
-		"connection:tunnel [fwd]": m,
+		"forward:tunnel [fwd] 127.0.0.1:8080": m,
 	}
 	output := renderStatus(cfg, activeState, metricsMap, "testnode")
 	if !strings.Contains(output, "↑") || !strings.Contains(output, "↓") {
@@ -604,6 +609,103 @@ func TestRenderStatus_WithMetrics(t *testing.T) {
 	}
 	if !strings.Contains(output, "2h") {
 		t.Error("output should contain uptime")
+	}
+}
+
+func TestRenderStatus_AlwaysShowsTargetLine(t *testing.T) {
+	cfg := &config.Config{
+		Connections: []config.Connection{
+			{
+				Name:    "tunnel",
+				Targets: []string{"root@10.0.0.1:22"},
+				Forwards: []config.ForwardSet{
+					{Name: "fwd"},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name    string
+		state   map[string]state.Component
+		wantSub string
+	}{
+		{
+			"starting shows starting label",
+			map[string]state.Component{
+				"connection:tunnel [fwd]": {Status: state.Starting},
+			},
+			"[starting]",
+		},
+		{
+			"connecting shows connecting label",
+			map[string]state.Component{
+				"connection:tunnel [fwd]": {Status: state.Connecting},
+			},
+			"[connecting]",
+		},
+		{
+			"retrying shows error message",
+			map[string]state.Component{
+				"connection:tunnel [fwd]": {Status: state.Retrying, Message: "no reachable target"},
+			},
+			"no reachable target",
+		},
+		{
+			"failed shows error",
+			map[string]state.Component{
+				"connection:tunnel [fwd]": {Status: state.Failed, Message: "auth failed"},
+			},
+			"auth failed",
+		},
+		{
+			"connected shows target",
+			map[string]state.Component{
+				"connection:tunnel [fwd]": {Status: state.Connected, Message: "root@10.0.0.1:22"},
+			},
+			"10.0.0.1",
+		},
+		{
+			"nil state shows starting",
+			nil,
+			"[starting]",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output := renderStatus(cfg, tt.state, nil, "testnode")
+			if !strings.Contains(output, tt.wantSub) {
+				t.Errorf("output should contain %q, got:\n%s", tt.wantSub, output)
+			}
+		})
+	}
+}
+
+func TestRenderStatus_ListenerMetrics(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "socks", Bind: "127.0.0.1:1080"},
+		},
+	}
+	activeState := map[string]state.Component{
+		"proxy:127.0.0.1:1080": {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
+	}
+	m := &state.Metrics{}
+	m.StartTime.Store(time.Now().Add(-30 * time.Minute).UnixNano())
+	m.BytesTx.Store(5242880) // 5MB
+	m.BytesRx.Store(1024)    // 1K
+	metricsMap := map[string]*state.Metrics{
+		"proxy:127.0.0.1:1080": m,
+	}
+	output := renderStatus(cfg, activeState, metricsMap, "testnode")
+	if !strings.Contains(output, "5.0M") {
+		t.Error("output should contain formatted TX bytes for listener")
+	}
+	if !strings.Contains(output, "1K") {
+		t.Error("output should contain formatted RX bytes for listener")
+	}
+	if !strings.Contains(output, "30m") {
+		t.Error("output should contain uptime for listener")
 	}
 }
 

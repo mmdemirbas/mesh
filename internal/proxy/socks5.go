@@ -10,10 +10,11 @@ import (
 	"time"
 
 	"github.com/mmdemirbas/mesh/internal/netutil"
+	"github.com/mmdemirbas/mesh/internal/state"
 )
 
 // ServeSocks accepts connections on listener and handles SOCKS5 for each.
-func ServeSocks(ctx context.Context, listener net.Listener, dialer func(string, string) (net.Conn, error), log *slog.Logger) {
+func ServeSocks(ctx context.Context, listener net.Listener, dialer func(string, string) (net.Conn, error), log *slog.Logger, metrics *state.Metrics) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -25,12 +26,12 @@ func ServeSocks(ctx context.Context, listener net.Listener, dialer func(string, 
 			continue
 		}
 		netutil.ApplyTCPKeepAlive(conn, 0)
-		go handleSocks5(conn, dialer, log)
+		go handleSocks5(conn, dialer, log, metrics)
 	}
 }
 
 // handleSocks5 handles a single SOCKS5 connection.
-func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), log *slog.Logger) {
+func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), log *slog.Logger, metrics *state.Metrics) {
 	defer conn.Close()
 
 	// Set a deadline for the SOCKS5 handshake to prevent slowloris attacks
@@ -113,7 +114,13 @@ func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), 
 	}
 	// Clear handshake deadline before entering data relay
 	_ = conn.SetDeadline(time.Time{})
-	netutil.BiCopy(conn, remote)
+	if metrics != nil {
+		metrics.Streams.Add(1)
+		defer metrics.Streams.Add(-1)
+		netutil.CountedBiCopy(conn, remote, &metrics.BytesTx, &metrics.BytesRx)
+	} else {
+		netutil.BiCopy(conn, remote)
+	}
 }
 
 func socksReply(conn net.Conn, status byte) error {

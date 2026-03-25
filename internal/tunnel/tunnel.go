@@ -140,6 +140,8 @@ func (s *SSHServer) Run(ctx context.Context) error {
 	}
 	defer listener.Close()
 	state.Global.Update("server", s.cfg.Bind, state.Listening, "")
+	serverMetrics := state.Global.GetMetrics("server", s.cfg.Bind)
+	serverMetrics.StartTime.Store(time.Now().UnixNano())
 	s.log.Info("SSH server listening")
 
 	stop := context.AfterFunc(ctx, func() { listener.Close() })
@@ -154,11 +156,11 @@ func (s *SSHServer) Run(ctx context.Context) error {
 			s.log.Error("Accept failed", "error", err)
 			continue
 		}
-		go s.handleConn(ctx, conn, sshCfg)
+		go s.handleConn(ctx, conn, sshCfg, serverMetrics)
 	}
 }
 
-func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.ServerConfig) {
+func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.ServerConfig, serverMetrics *state.Metrics) {
 	tcpKeepAlive := 30 * time.Second
 	if val := config.GetOption(s.cfg.Options, "TCPKeepAlive"); val != "" {
 		if seconds, err := strconv.Atoi(val); err == nil && seconds > 0 {
@@ -219,7 +221,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 					_ = req.Reply(true, nil)
 				}
 			case "tcpip-forward":
-				go handleTCPIPForward(connCtx, req, sshConn, &mu, listeners, s.log, s.cfg.Bind, s.cfg.Options, &clientNodeName)
+				go handleTCPIPForward(connCtx, req, sshConn, &mu, listeners, s.log, s.cfg.Bind, s.cfg.Options, &clientNodeName, serverMetrics)
 			case "cancel-tcpip-forward":
 				go handleCancelTCPIPForward(req, &mu, listeners, s.log)
 			default:
@@ -237,7 +239,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 	for newChan := range chans {
 		switch newChan.ChannelType() {
 		case "direct-tcpip":
-			go handleDirectTCPIP(newChan, s.log, s.cfg.Options)
+			go handleDirectTCPIP(newChan, s.log, s.cfg.Options, serverMetrics)
 		case "session":
 			go handleSession(connCtx, newChan, s.cfg.Shell, s.log)
 		default:
@@ -508,18 +510,12 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 		_ = conn.SetDeadline(time.Time{})
 		client := ssh.NewClient(sshConn, chans, reqs)
 
-		metrics := state.Global.GetMetrics("connection", id)
-		metrics.BytesTx.Store(0)
-		metrics.BytesRx.Store(0)
-		metrics.Streams.Store(0)
-		metrics.StartTime.Store(time.Now().UnixNano())
-
 		state.Global.Update("connection", id, state.Connected, target)
 		state.Global.UpdatePeer("connection", id, conn.RemoteAddr().String())
 
 		log.Info("Connected", "tcp", t1.Sub(t0).Round(time.Millisecond), "ssh", time.Since(t1).Round(time.Millisecond))
 
-		err = c.runSession(ctx, client, fset, opts, log, metrics)
+		err = c.runSession(ctx, client, fset, opts, log)
 
 		if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
 			state.Global.Update("connection", id, state.Failed, "ExitOnForwardFailure")
@@ -610,12 +606,6 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		_ = conn.SetDeadline(time.Time{}) // clear deadline; data flows indefinitely
 		client := ssh.NewClient(sshConn, chans, reqs)
 
-		metrics := state.Global.GetMetrics("connection", id)
-		metrics.BytesTx.Store(0)
-		metrics.BytesRx.Store(0)
-		metrics.Streams.Store(0)
-		metrics.StartTime.Store(time.Now().UnixNano())
-
 		state.Global.Update("connection", id, state.Connected, target)
 		state.Global.UpdatePeer("connection", id, conn.RemoteAddr().String())
 
@@ -623,7 +613,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 			"tcp", t1.Sub(t0).Round(time.Millisecond),
 			"ssh", time.Since(t1).Round(time.Millisecond))
 
-		err = c.runSession(ctx, client, fset, opts, log, metrics)
+		err = c.runSession(ctx, client, fset, opts, log)
 
 		if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
 			state.Global.Update("connection", id, state.Failed, "ExitOnForwardFailure")
@@ -641,7 +631,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 	}
 }
 
-func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *config.ForwardSet, opts map[string]string, log *slog.Logger, metrics *state.Metrics) error {
+func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *config.ForwardSet, opts map[string]string, log *slog.Logger) error {
 	// Announce our identity so the peer can display it in its dashboard.
 	// Format: "nodeName/connectionName/forwardSetName"
 	// This is a standard SSH global request (RFC 4254 §4): implementations
@@ -731,9 +721,9 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 			defer wg.Done()
 			var err error
 			if fwd.Type == "forward" {
-				err = c.runRemoteForward(sCtx, client, fset.Name, fwd, log, metrics)
+				err = c.runRemoteForward(sCtx, client, fset.Name, fwd, log)
 			} else {
-				err = c.runRemoteProxy(sCtx, client, fset.Name, fwd, log, metrics)
+				err = c.runRemoteProxy(sCtx, client, fset.Name, fwd, log)
 			}
 			if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
 				log.Error("Remote forward failed", "error", err)
@@ -750,9 +740,9 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 			defer wg.Done()
 			var err error
 			if fwd.Type == "forward" {
-				err = c.runLocalForward(sCtx, client, fset.Name, fwd, log, metrics)
+				err = c.runLocalForward(sCtx, client, fset.Name, fwd, log)
 			} else {
-				err = c.runLocalProxy(sCtx, client, fset.Name, fwd, log, metrics)
+				err = c.runLocalProxy(sCtx, client, fset.Name, fwd, log)
 			}
 			if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
 				log.Error("Local forward failed", "error", err)
@@ -766,9 +756,14 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 }
 
 // runRemoteForward (-R equivalent): bind on peer, forward here
-func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fsetName string, fwd config.Forward, log *slog.Logger, metrics *state.Metrics) error {
+func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fsetName string, fwd config.Forward, log *slog.Logger) error {
 	log.Info("Forward -R", "bind", fwd.Bind, "target", fwd.Target)
 	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, fwd.Bind)
+	metrics := state.Global.GetMetrics("forward", compID)
+	metrics.BytesTx.Store(0)
+	metrics.BytesRx.Store(0)
+	metrics.Streams.Store(0)
+	metrics.StartTime.Store(time.Now().UnixNano())
 	state.Global.Update("forward", compID, state.Starting, "")
 
 	var listener net.Listener
@@ -809,9 +804,14 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fs
 }
 
 // runLocalForward (-L equivalent): bind here, forward to peer
-func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fsetName string, fwd config.Forward, log *slog.Logger, metrics *state.Metrics) error {
+func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fsetName string, fwd config.Forward, log *slog.Logger) error {
 	log.Info("Forward -L", "bind", fwd.Bind, "target", fwd.Target)
 	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, fwd.Bind)
+	metrics := state.Global.GetMetrics("forward", compID)
+	metrics.BytesTx.Store(0)
+	metrics.BytesRx.Store(0)
+	metrics.Streams.Store(0)
+	metrics.StartTime.Store(time.Now().UnixNano())
 	state.Global.Update("forward", compID, state.Starting, "")
 
 	listener, err := netutil.ListenReusable(ctx, "tcp", fwd.Bind)
@@ -839,9 +839,14 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fse
 }
 
 // runRemoteProxy binds proxy on peer, traffic exits HERE.
-func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fsetName string, pxy config.Forward, log *slog.Logger, metrics *state.Metrics) error {
+func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fsetName string, pxy config.Forward, log *slog.Logger) error {
 	log.Info("Proxy remote bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
 	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, pxy.Bind)
+	metrics := state.Global.GetMetrics("forward", compID)
+	metrics.BytesTx.Store(0)
+	metrics.BytesRx.Store(0)
+	metrics.Streams.Store(0)
+	metrics.StartTime.Store(time.Now().UnixNano())
 	state.Global.Update("forward", compID, state.Starting, "")
 
 	var listener net.Listener
@@ -877,20 +882,25 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fset
 
 	switch pxy.Type {
 	case "socks":
-		proxy.ServeSocks(ctx, listener, nil, log) // nil dialer = exit locally
+		proxy.ServeSocks(ctx, listener, nil, log, metrics) // nil dialer = exit locally
 	case "http":
 		httpDialer := func(addr string) (net.Conn, error) {
 			return net.DialTimeout("tcp", addr, 10*time.Second) // exits HERE
 		}
-		proxy.ServeHTTPProxyWithDialer(ctx, listener, httpDialer, log)
+		proxy.ServeHTTPProxyWithDialer(ctx, listener, httpDialer, log, metrics)
 	}
 	return nil
 }
 
 // runLocalProxy binds proxy here, traffic exits PEER.
-func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, fsetName string, pxy config.Forward, log *slog.Logger, metrics *state.Metrics) error {
+func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, fsetName string, pxy config.Forward, log *slog.Logger) error {
 	log.Info("Proxy local bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
 	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, pxy.Bind)
+	metrics := state.Global.GetMetrics("forward", compID)
+	metrics.BytesTx.Store(0)
+	metrics.BytesRx.Store(0)
+	metrics.Streams.Store(0)
+	metrics.StartTime.Store(time.Now().UnixNano())
 	state.Global.Update("forward", compID, state.Starting, "")
 
 	listener, err := netutil.ListenReusable(ctx, "tcp", pxy.Bind)
@@ -918,7 +928,7 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, fsetN
 
 	switch pxy.Type {
 	case "socks":
-		proxy.ServeSocks(ctx, listener, sshDialer, log)
+		proxy.ServeSocks(ctx, listener, sshDialer, log, metrics)
 	case "http":
 		// Wrap the upstream SOCKS or target destination in the SSH dialer
 		httpDialer := func(addr string) (net.Conn, error) {
@@ -927,7 +937,7 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, fsetN
 			}
 			return sshDialer("tcp", addr)
 		}
-		proxy.ServeHTTPProxyWithDialer(ctx, listener, httpDialer, log)
+		proxy.ServeHTTPProxyWithDialer(ctx, listener, httpDialer, log, metrics)
 	}
 	return nil
 }
@@ -978,7 +988,7 @@ func (c *SSHClient) probeTarget(ctx context.Context, handshakeTimeout time.Durat
 // --- Shared forwarding helpers ---
 
 // handleTCPIPForward handles tcpip-forward global requests on the server side.
-func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.ServerConn, mu *sync.Mutex, listeners map[string]net.Listener, log *slog.Logger, parentBind string, options map[string]string, clientNodeName *atomic.Value) {
+func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.ServerConn, mu *sync.Mutex, listeners map[string]net.Listener, log *slog.Logger, parentBind string, options map[string]string, clientNodeName *atomic.Value, metrics *state.Metrics) {
 	var fwdReq struct {
 		BindAddr string
 		BindPort uint32
@@ -1091,7 +1101,13 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 				return
 			}
 			go ssh.DiscardRequests(reqs)
-			netutil.BiCopy(conn, ch)
+			if metrics != nil {
+				metrics.Streams.Add(1)
+				defer metrics.Streams.Add(-1)
+				netutil.CountedBiCopy(conn, ch, &metrics.BytesTx, &metrics.BytesRx)
+			} else {
+				netutil.BiCopy(conn, ch)
+			}
 			ch.Close()
 		}()
 	}
@@ -1121,7 +1137,7 @@ func handleCancelTCPIPForward(req *ssh.Request, mu *sync.Mutex, listeners map[st
 	log.Info("tcpip-forward cancelled", "addr", addr)
 }
 
-func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[string]string) {
+func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[string]string, metrics *state.Metrics) {
 	var req struct {
 		DestAddr string
 		DestPort uint32
@@ -1185,7 +1201,13 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[str
 		return
 	}
 	go ssh.DiscardRequests(chReqs)
-	netutil.BiCopy(ch, conn)
+	if metrics != nil {
+		metrics.Streams.Add(1)
+		defer metrics.Streams.Add(-1)
+		netutil.CountedBiCopy(ch, conn, &metrics.BytesTx, &metrics.BytesRx)
+	} else {
+		netutil.BiCopy(ch, conn)
+	}
 	ch.Close()
 	conn.Close()
 }

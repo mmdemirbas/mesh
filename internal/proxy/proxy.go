@@ -38,13 +38,15 @@ func RunStandaloneProxies(ctx context.Context, proxies []config.Listener, log *s
 			defer stop()
 
 			state.Global.Update("proxy", p.Bind, state.Listening, "")
+			metrics := state.Global.GetMetrics("proxy", p.Bind)
+			metrics.StartTime.Store(time.Now().UnixNano())
 			pLog.Info("Standalone proxy listening")
 
 			switch p.Type {
 			case "socks":
-				ServeSocks(ctx, ln, nil, pLog)
+				ServeSocks(ctx, ln, nil, pLog, metrics)
 			case "http":
-				ServeHTTPProxy(ctx, ln, p.Target, pLog)
+				ServeHTTPProxy(ctx, ln, p.Target, pLog, metrics)
 			}
 		}()
 	}
@@ -75,6 +77,8 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Listener, log *slo
 			defer stop()
 
 			state.Global.Update("relay", r.Bind, state.Listening, "")
+			metrics := state.Global.GetMetrics("relay", r.Bind)
+			metrics.StartTime.Store(time.Now().UnixNano())
 			rLog.Info("TCP relay listening")
 
 			for {
@@ -96,7 +100,9 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Listener, log *slo
 					}
 					netutil.ApplyTCPKeepAlive(targetConn, 0)
 					defer targetConn.Close()
-					netutil.BiCopy(c, targetConn)
+					metrics.Streams.Add(1)
+					netutil.CountedBiCopy(c, targetConn, &metrics.BytesTx, &metrics.BytesRx)
+					metrics.Streams.Add(-1)
 				}(conn)
 			}
 		}()
