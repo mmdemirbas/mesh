@@ -1039,7 +1039,10 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 	if v := clientNodeName.Load(); v != nil {
 		state.Global.UpdatePeer("dynamic", compID, v.(string))
 	}
-	defer state.Global.Delete("dynamic", compID)
+	defer func() {
+		state.Global.Delete("dynamic", compID)
+		log.Info("tcpip-forward closed", "addr", addr)
+	}()
 
 	log.Info("tcpip-forward active", "addr", addr)
 	if req.WantReply {

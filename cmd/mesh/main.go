@@ -1100,7 +1100,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, no
 					switch info.status {
 					case state.Connected:
 						ind = cGreen + "●" + cReset
-						if info.peerAddr != "" {
+						if info.peerAddr != "" && !strings.Contains(t, info.peerAddr) {
 							suffix = " " + cGray + "(" + info.peerAddr + ")" + cReset
 						}
 					case state.Connecting, state.Retrying:
@@ -1112,8 +1112,15 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, no
 
 			for _, fset := range c.Forwards {
 				id := c.Name + " [" + fset.Name + "]"
-				indicator, st, _ := getComponentInfo("connection", id)
+				indicator, st, comp := getComponentInfo("connection", id)
 				addRow("", indicator, sectionTitle(fset.Name), "", "", st)
+				if comp.Message != "" && (comp.Status == state.Connected || comp.Status == state.Connecting || comp.Status == state.Retrying) {
+					targetStr := colorAddr(comp.Message)
+					if comp.PeerAddr != "" && !strings.Contains(comp.Message, comp.PeerAddr) {
+						targetStr += " " + cGray + "(" + comp.PeerAddr + ")" + cReset
+					}
+					addRow("   ", cGray+"→"+cReset, targetStr, "", "", "")
+				}
 
 				indent := "   "
 				for _, fwd := range fset.Local {
