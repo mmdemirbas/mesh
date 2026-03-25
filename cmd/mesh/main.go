@@ -1155,7 +1155,17 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		for _, l := range cfg.Listeners {
 			if l.Type == "sshd" {
 				indicator, st, _ := getComponentInfo("server", l.Bind)
-				ms := formatMetrics(metricsMap, "server:"+l.Bind)
+				// Aggregate server's own metrics + all dynamic reverse forward metrics
+				serverAgg := readMetrics(metricsMap["server:"+l.Bind])
+				_, sp, _ := net.SplitHostPort(l.Bind)
+				ld := dynamicByParent[l.Bind]
+				if len(ld) == 0 {
+					ld = dynamicByParent[sp]
+				}
+				for _, comp := range ld {
+					serverAgg.add(readMetrics(metricsMap["dynamic:"+comp.ID]))
+				}
+				ms := formatMetricsSnap(serverAgg)
 				left := padForProto(colorAddr(l.Bind)) + " " + cReset + strings.ToLower(l.Type)
 				addRow("", indicator, left, "", "", st, "", ms)
 			} else if l.Type == "relay" {

@@ -708,6 +708,455 @@ func TestRenderStatus_ListenerMetrics(t *testing.T) {
 	}
 }
 
+// TestRenderStatus_SshdAggregatesDynamicMetrics verifies the sshd listener row
+// shows aggregated metrics from both server-level (direct-tcpip) and all dynamic
+// reverse forward components.
+func TestRenderStatus_SshdAggregatesDynamicMetrics(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "sshd", Bind: "0.0.0.0:2222"},
+		},
+	}
+	activeState := map[string]state.Component{
+		"server:0.0.0.0:2222": {Type: "server", ID: "0.0.0.0:2222", Status: state.Listening},
+		"dynamic:127.0.0.1:11111|0.0.0.0:2222": {
+			Type: "dynamic", ID: "127.0.0.1:11111|0.0.0.0:2222",
+			Status: state.Listening, Message: "root@10.0.0.1:22",
+		},
+		"dynamic:127.0.0.1:18384|0.0.0.0:2222": {
+			Type: "dynamic", ID: "127.0.0.1:18384|0.0.0.0:2222",
+			Status: state.Listening, Message: "root@10.0.0.1:22",
+		},
+	}
+
+	// Server metrics: 1K tx, 2K rx (from direct-tcpip)
+	serverM := &state.Metrics{}
+	serverM.StartTime.Store(time.Now().Add(-1 * time.Hour).UnixNano())
+	serverM.BytesTx.Store(1024)
+	serverM.BytesRx.Store(2048)
+	serverM.Streams.Store(1)
+
+	// Dynamic forward 1: 10K tx, 6MB rx, 1 stream (syncthing traffic)
+	dyn1M := &state.Metrics{}
+	dyn1M.StartTime.Store(time.Now().Add(-50 * time.Minute).UnixNano())
+	dyn1M.BytesTx.Store(10240)
+	dyn1M.BytesRx.Store(6291456) // 6MB
+	dyn1M.Streams.Store(1)
+
+	// Dynamic forward 2: 0 tx/rx (idle)
+	dyn2M := &state.Metrics{}
+	dyn2M.StartTime.Store(time.Now().Add(-50 * time.Minute).UnixNano())
+
+	metricsMap := map[string]*state.Metrics{
+		"server:0.0.0.0:2222":                  serverM,
+		"dynamic:127.0.0.1:11111|0.0.0.0:2222": dyn1M,
+		"dynamic:127.0.0.1:18384|0.0.0.0:2222": dyn2M,
+	}
+
+	rawOutput, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
+	lines := extractLines(rawOutput)
+
+	// Find the sshd listener line (contains "sshd")
+	var sshdLine string
+	for _, line := range lines {
+		if strings.Contains(line, "sshd") {
+			sshdLine = line
+			break
+		}
+	}
+	if sshdLine == "" {
+		t.Fatal("sshd listener line not found in output")
+	}
+
+	// Aggregated: tx = 1024 + 10240 = 11264 → "11K", rx = 2048 + 6291456 = 6293504 → "6.0M"
+	// Streams: 1 + 1 + 0 = 2
+	if !strings.Contains(sshdLine, "11K") {
+		t.Errorf("sshd line should show aggregated ↑11K, got: %s", sshdLine)
+	}
+	if !strings.Contains(sshdLine, "6.0M") {
+		t.Errorf("sshd line should show aggregated ↓6.0M, got: %s", sshdLine)
+	}
+	if !strings.Contains(sshdLine, "2↔") {
+		t.Errorf("sshd line should show aggregated 2↔ streams, got: %s", sshdLine)
+	}
+}
+
+// TestRenderStatus_DynamicMetricsShownIndividually verifies each dynamic reverse
+// forward row shows its own metrics, not the aggregated parent total.
+func TestRenderStatus_DynamicMetricsShownIndividually(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "sshd", Bind: "0.0.0.0:2222"},
+		},
+	}
+	activeState := map[string]state.Component{
+		"server:0.0.0.0:2222": {Type: "server", ID: "0.0.0.0:2222", Status: state.Listening},
+		"dynamic:127.0.0.1:11111|0.0.0.0:2222": {
+			Type: "dynamic", ID: "127.0.0.1:11111|0.0.0.0:2222",
+			Status: state.Listening, Message: "root@10.0.0.1:22",
+		},
+		"dynamic:127.0.0.1:18384|0.0.0.0:2222": {
+			Type: "dynamic", ID: "127.0.0.1:18384|0.0.0.0:2222",
+			Status: state.Listening, Message: "root@10.0.0.1:22",
+		},
+	}
+
+	dyn1M := &state.Metrics{}
+	dyn1M.StartTime.Store(time.Now().Add(-10 * time.Minute).UnixNano())
+	dyn1M.BytesTx.Store(9000)
+	dyn1M.BytesRx.Store(6291456) // 6MB
+	dyn1M.Streams.Store(1)
+
+	dyn2M := &state.Metrics{}
+	dyn2M.StartTime.Store(time.Now().Add(-10 * time.Minute).UnixNano())
+	dyn2M.BytesTx.Store(0)
+	dyn2M.BytesRx.Store(0)
+
+	metricsMap := map[string]*state.Metrics{
+		"dynamic:127.0.0.1:11111|0.0.0.0:2222": dyn1M,
+		"dynamic:127.0.0.1:18384|0.0.0.0:2222": dyn2M,
+	}
+
+	rawOutput, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
+	lines := extractLines(rawOutput)
+
+	// Find the dynamic forward lines (contain "~")
+	var dyn11111Line, dyn18384Line string
+	for _, line := range lines {
+		if strings.Contains(line, "11111") && strings.Contains(line, "~") {
+			dyn11111Line = line
+		}
+		if strings.Contains(line, "18384") && strings.Contains(line, "~") {
+			dyn18384Line = line
+		}
+	}
+
+	if dyn11111Line == "" {
+		t.Fatal("dynamic 11111 line not found")
+	}
+	if dyn18384Line == "" {
+		t.Fatal("dynamic 18384 line not found")
+	}
+
+	// Dynamic forward 1 should show its own metrics: ↑9K ↓6.0M 1↔
+	if !strings.Contains(dyn11111Line, "9K") {
+		t.Errorf("dynamic 11111 should show ↑9K, got: %s", dyn11111Line)
+	}
+	if !strings.Contains(dyn11111Line, "6.0M") {
+		t.Errorf("dynamic 11111 should show ↓6.0M, got: %s", dyn11111Line)
+	}
+	if !strings.Contains(dyn11111Line, "1↔") {
+		t.Errorf("dynamic 11111 should show 1↔, got: %s", dyn11111Line)
+	}
+
+	// Dynamic forward 2 should show its own (zero) metrics — just uptime, no byte counters
+	if strings.Contains(dyn18384Line, "↑") && !strings.Contains(dyn18384Line, "↑0") {
+		t.Errorf("dynamic 18384 should show ↑0, got: %s", dyn18384Line)
+	}
+}
+
+// TestRenderStatus_SshdDynamicOnlyMetrics verifies sshd aggregation works when
+// the server itself has no metrics (no direct-tcpip traffic) but dynamic
+// forwards have traffic.
+func TestRenderStatus_SshdDynamicOnlyMetrics(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "sshd", Bind: "0.0.0.0:2222"},
+		},
+	}
+	activeState := map[string]state.Component{
+		"server:0.0.0.0:2222": {Type: "server", ID: "0.0.0.0:2222", Status: state.Listening},
+		"dynamic:127.0.0.1:11111|0.0.0.0:2222": {
+			Type: "dynamic", ID: "127.0.0.1:11111|0.0.0.0:2222",
+			Status: state.Listening, Message: "root@10.0.0.1:22",
+		},
+	}
+
+	// No server metrics at all — only dynamic
+	dynM := &state.Metrics{}
+	dynM.StartTime.Store(time.Now().Add(-5 * time.Minute).UnixNano())
+	dynM.BytesTx.Store(50000)
+	dynM.BytesRx.Store(100000)
+	dynM.Streams.Store(2)
+
+	metricsMap := map[string]*state.Metrics{
+		"dynamic:127.0.0.1:11111|0.0.0.0:2222": dynM,
+	}
+
+	rawOutput, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
+	lines := extractLines(rawOutput)
+
+	var sshdLine string
+	for _, line := range lines {
+		if strings.Contains(line, "sshd") {
+			sshdLine = line
+			break
+		}
+	}
+	if sshdLine == "" {
+		t.Fatal("sshd listener line not found")
+	}
+
+	// sshd should show the dynamic forward's metrics: ↑49K ↓98K 2↔
+	if !strings.Contains(sshdLine, "49K") {
+		t.Errorf("sshd line should show dynamic ↑49K, got: %s", sshdLine)
+	}
+	if !strings.Contains(sshdLine, "98K") {
+		t.Errorf("sshd line should show dynamic ↓98K, got: %s", sshdLine)
+	}
+	if !strings.Contains(sshdLine, "2↔") {
+		t.Errorf("sshd line should show dynamic 2↔ streams, got: %s", sshdLine)
+	}
+}
+
+// TestRenderStatus_GrandTotalNoDoubleCounting verifies the grand total in the
+// title bar doesn't double-count bytes that appear in both server and dynamic
+// metrics. Server metrics should only contain direct-tcpip traffic; dynamic
+// metrics should only contain reverse forward traffic.
+func TestRenderStatus_GrandTotalNoDoubleCounting(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "sshd", Bind: "0.0.0.0:2222"},
+		},
+	}
+	activeState := map[string]state.Component{
+		"server:0.0.0.0:2222": {Type: "server", ID: "0.0.0.0:2222", Status: state.Listening},
+		"dynamic:127.0.0.1:11111|0.0.0.0:2222": {
+			Type: "dynamic", ID: "127.0.0.1:11111|0.0.0.0:2222",
+			Status: state.Listening, Message: "root@10.0.0.1:22",
+		},
+	}
+
+	// Server: 1K tx, 2K rx (direct-tcpip only, no propagated bytes)
+	serverM := &state.Metrics{}
+	serverM.StartTime.Store(time.Now().Add(-1 * time.Hour).UnixNano())
+	serverM.BytesTx.Store(1024)
+	serverM.BytesRx.Store(2048)
+
+	// Dynamic: 10K tx, 20K rx (reverse forward traffic)
+	dynM := &state.Metrics{}
+	dynM.StartTime.Store(time.Now().Add(-30 * time.Minute).UnixNano())
+	dynM.BytesTx.Store(10240)
+	dynM.BytesRx.Store(20480)
+
+	metricsMap := map[string]*state.Metrics{
+		"server:0.0.0.0:2222":                  serverM,
+		"dynamic:127.0.0.1:11111|0.0.0.0:2222": dynM,
+	}
+
+	rawOutput, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
+	output := stripANSI(rawOutput)
+
+	// Grand total: tx = 1024 + 10240 = 11264 → "11K", rx = 2048 + 20480 = 22528 → "22K"
+	// The title line has the grand total
+	lines := extractLines(rawOutput)
+	if len(lines) == 0 {
+		t.Fatal("no output lines")
+	}
+	titleLine := lines[0]
+
+	if !strings.Contains(titleLine, "11K") {
+		t.Errorf("grand total should show ↑11K (1K server + 10K dynamic), got title: %s", titleLine)
+	}
+	if !strings.Contains(titleLine, "22K") {
+		t.Errorf("grand total should show ↓22K (2K server + 20K dynamic), got title: %s", titleLine)
+	}
+
+	// Verify it does NOT show doubled values (↑21K or ↓42K would indicate double-counting)
+	if strings.Contains(output, "↑21K") || strings.Contains(output, "↑20K") {
+		t.Error("grand total appears to double-count TX bytes")
+	}
+	if strings.Contains(output, "↓42K") || strings.Contains(output, "↓40K") {
+		t.Error("grand total appears to double-count RX bytes")
+	}
+}
+
+// TestRenderStatus_ConnectionVsSshdAggregation verifies that connection-level
+// and sshd-level aggregation follow the same pattern: parent row shows sum of
+// child metrics.
+func TestRenderStatus_ConnectionVsSshdAggregation(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "sshd", Bind: "0.0.0.0:2222"},
+		},
+		Connections: []config.Connection{
+			{
+				Name:    "tunnel",
+				Targets: []string{"root@10.0.0.1:22"},
+				Forwards: []config.ForwardSet{
+					{
+						Name: "fwd",
+						Local: []config.Forward{
+							{Type: "forward", Bind: "127.0.0.1:8080", Target: "10.0.0.1:80"},
+							{Type: "forward", Bind: "127.0.0.1:8081", Target: "10.0.0.1:81"},
+						},
+					},
+				},
+			},
+		},
+	}
+	activeState := map[string]state.Component{
+		"server:0.0.0.0:2222": {Type: "server", ID: "0.0.0.0:2222", Status: state.Listening},
+		"dynamic:127.0.0.1:11111|0.0.0.0:2222": {
+			Type: "dynamic", ID: "127.0.0.1:11111|0.0.0.0:2222",
+			Status: state.Listening, Message: "root@10.0.0.1:22",
+		},
+		"connection:tunnel [fwd]": {
+			Type: "connection", ID: "tunnel [fwd]",
+			Status: state.Connected, Message: "root@10.0.0.1:22",
+		},
+	}
+
+	// Dynamic forward: 5K tx, 10K rx
+	dynM := &state.Metrics{}
+	dynM.StartTime.Store(time.Now().Add(-20 * time.Minute).UnixNano())
+	dynM.BytesTx.Store(5120)
+	dynM.BytesRx.Store(10240)
+	dynM.Streams.Store(1)
+
+	// Connection forward 1: 3K tx, 7K rx
+	fwd1M := &state.Metrics{}
+	fwd1M.StartTime.Store(time.Now().Add(-20 * time.Minute).UnixNano())
+	fwd1M.BytesTx.Store(3072)
+	fwd1M.BytesRx.Store(7168)
+	fwd1M.Streams.Store(2)
+
+	// Connection forward 2: 2K tx, 3K rx
+	fwd2M := &state.Metrics{}
+	fwd2M.StartTime.Store(time.Now().Add(-20 * time.Minute).UnixNano())
+	fwd2M.BytesTx.Store(2048)
+	fwd2M.BytesRx.Store(3072)
+	fwd2M.Streams.Store(1)
+
+	metricsMap := map[string]*state.Metrics{
+		"dynamic:127.0.0.1:11111|0.0.0.0:2222": dynM,
+		"forward:tunnel [fwd] 127.0.0.1:8080":  fwd1M,
+		"forward:tunnel [fwd] 127.0.0.1:8081":  fwd2M,
+	}
+
+	rawOutput, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
+	lines := extractLines(rawOutput)
+
+	// Find sshd and connection lines
+	var sshdLine, connLine string
+	for _, line := range lines {
+		if strings.Contains(line, "sshd") {
+			sshdLine = line
+		}
+		if strings.Contains(line, "tunnel") && !strings.Contains(line, "fwd") && !strings.Contains(line, "10.0.0.1") {
+			connLine = line
+		}
+	}
+
+	// sshd should aggregate: ↑5K ↓10K 1↔
+	if sshdLine == "" {
+		t.Fatal("sshd line not found")
+	}
+	if !strings.Contains(sshdLine, "5K") {
+		t.Errorf("sshd should show ↑5K from dynamic, got: %s", sshdLine)
+	}
+	if !strings.Contains(sshdLine, "10K") {
+		t.Errorf("sshd should show ↓10K from dynamic, got: %s", sshdLine)
+	}
+	if !strings.Contains(sshdLine, "1↔") {
+		t.Errorf("sshd should show 1↔ from dynamic, got: %s", sshdLine)
+	}
+
+	// Connection should aggregate: tx = 3072 + 2048 = 5120 → ↑5K, rx = 7168 + 3072 = 10240 → ↑10K
+	if connLine == "" {
+		t.Fatal("connection line not found")
+	}
+	if !strings.Contains(connLine, "5K") {
+		t.Errorf("connection should show aggregated ↑5K, got: %s", connLine)
+	}
+	if !strings.Contains(connLine, "10K") {
+		t.Errorf("connection should show aggregated ↓10K, got: %s", connLine)
+	}
+	if !strings.Contains(connLine, "3↔") {
+		t.Errorf("connection should show aggregated 3↔, got: %s", connLine)
+	}
+}
+
+// TestMetricsSnapshot_Add verifies aggregation arithmetic including streams.
+func TestMetricsSnapshot_Add(t *testing.T) {
+	a := metricsSnapshot{uptime: 5 * time.Minute, tx: 100, rx: 200, streams: 2}
+	b := metricsSnapshot{uptime: 10 * time.Minute, tx: 300, rx: 400, streams: 3}
+	a.add(b)
+	if a.tx != 400 {
+		t.Errorf("tx = %d, want 400", a.tx)
+	}
+	if a.rx != 600 {
+		t.Errorf("rx = %d, want 600", a.rx)
+	}
+	if a.streams != 5 {
+		t.Errorf("streams = %d, want 5", a.streams)
+	}
+	if a.uptime != 10*time.Minute {
+		t.Errorf("uptime = %v, want 10m", a.uptime)
+	}
+}
+
+// TestReadMetrics_NilSafe verifies readMetrics handles nil without panic.
+func TestReadMetrics_NilSafe(t *testing.T) {
+	snap := readMetrics(nil)
+	if snap.tx != 0 || snap.rx != 0 || snap.streams != 0 || snap.uptime != 0 {
+		t.Error("readMetrics(nil) should return zero snapshot")
+	}
+}
+
+// TestReadMetrics_ReadsAtomics verifies readMetrics reads all atomic fields correctly.
+func TestReadMetrics_ReadsAtomics(t *testing.T) {
+	m := &state.Metrics{}
+	m.BytesTx.Store(1000)
+	m.BytesRx.Store(2000)
+	m.Streams.Store(5)
+	m.StartTime.Store(time.Now().Add(-1 * time.Hour).UnixNano())
+
+	snap := readMetrics(m)
+	if snap.tx != 1000 {
+		t.Errorf("tx = %d, want 1000", snap.tx)
+	}
+	if snap.rx != 2000 {
+		t.Errorf("rx = %d, want 2000", snap.rx)
+	}
+	if snap.streams != 5 {
+		t.Errorf("streams = %d, want 5", snap.streams)
+	}
+	if snap.uptime < 59*time.Minute || snap.uptime > 61*time.Minute {
+		t.Errorf("uptime = %v, want ~1h", snap.uptime)
+	}
+}
+
+// TestFormatMetricsSnap_StreamsWithZeroBytes verifies streams display even when
+// bytes are zero (as long as uptime > 0).
+func TestFormatMetricsSnap_StreamsWithZeroBytes(t *testing.T) {
+	snap := metricsSnapshot{
+		uptime:  1 * time.Minute,
+		tx:      0,
+		rx:      0,
+		streams: 3,
+	}
+	output := stripANSI(formatMetricsSnap(snap))
+	if !strings.Contains(output, "3↔") {
+		t.Errorf("should show 3↔ streams even with zero bytes, got: %q", output)
+	}
+}
+
+// TestFormatMetricsSnap_ZeroUptimeWithStreams verifies that non-zero streams
+// alone are NOT enough to produce output (uptime or bytes required).
+func TestFormatMetricsSnap_ZeroUptimeWithStreams(t *testing.T) {
+	snap := metricsSnapshot{
+		uptime:  0,
+		tx:      0,
+		rx:      0,
+		streams: 3,
+	}
+	output := formatMetricsSnap(snap)
+	if output != "" {
+		t.Errorf("zero uptime + zero bytes should produce empty string even with streams, got: %q", stripANSI(output))
+	}
+}
+
 func TestRenderStatus_DynamicPortNodeName(t *testing.T) {
 	cfg := &config.Config{
 		Listeners: []config.Listener{

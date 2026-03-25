@@ -404,6 +404,189 @@ func TestCountingWriter(t *testing.T) {
 	}
 }
 
+// TestCountedBiCopy_DynamicForwardPattern simulates the metrics tracking pattern
+// used in handleTCPIPForward: multiple concurrent connections through a shared
+// dynamic forward, each tracked on the same atomic counters via GetMetrics.
+func TestCountedBiCopy_DynamicForwardPattern(t *testing.T) {
+	// Echo target (like peer's syncthing)
+	target, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+
+	var echoWg sync.WaitGroup
+	go func() {
+		for {
+			conn, err := target.Accept()
+			if err != nil {
+				return
+			}
+			echoWg.Add(1)
+			go func() {
+				defer echoWg.Done()
+				defer conn.Close()
+				_, _ = io.Copy(conn, conn) // echo
+			}()
+		}
+	}()
+
+	// Dynamic forward listener (like the sshd's tcpip-forward listener)
+	dynLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Shared metrics per dynamic forward (like dm in handleTCPIPForward)
+	var dynTx, dynRx atomic.Int64
+	var dynStreams atomic.Int32
+
+	var proxyWg sync.WaitGroup
+	go func() {
+		for {
+			conn, err := dynLn.Accept()
+			if err != nil {
+				return
+			}
+			proxyWg.Add(1)
+			go func() {
+				defer proxyWg.Done()
+				defer conn.Close()
+				// Simulate: open SSH channel -> dial target
+				tgt, err := net.Dial("tcp", target.Addr().String())
+				if err != nil {
+					return
+				}
+				defer tgt.Close()
+				dynStreams.Add(1)
+				defer dynStreams.Add(-1)
+				CountedBiCopy(conn, tgt, &dynTx, &dynRx)
+			}()
+		}
+	}()
+
+	// Send data through 3 concurrent connections (like 3 syncthing transfers)
+	payload := []byte("dynamic forward test payload - simulating syncthing data")
+	var clientWg sync.WaitGroup
+	for range 3 {
+		clientWg.Add(1)
+		go func() {
+			defer clientWg.Done()
+			conn, err := net.DialTimeout("tcp", dynLn.Addr().String(), time.Second)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			_, _ = conn.Write(payload)
+			_ = conn.(*net.TCPConn).CloseWrite()
+			_, _ = io.ReadAll(conn) // read echo
+			conn.Close()
+		}()
+	}
+
+	clientWg.Wait()
+	dynLn.Close()
+	proxyWg.Wait()
+	target.Close()
+	echoWg.Wait()
+
+	// Verify metrics were tracked correctly
+	expectedPerConn := int64(len(payload)) * 2 // sent + echoed
+	expectedTotal := expectedPerConn * 3       // 3 connections
+	totalBytes := dynTx.Load() + dynRx.Load()
+	if totalBytes != expectedTotal {
+		t.Errorf("total bytes = %d (tx=%d, rx=%d), want %d",
+			totalBytes, dynTx.Load(), dynRx.Load(), expectedTotal)
+	}
+
+	// After all connections close, streams should be 0
+	if s := dynStreams.Load(); s != 0 {
+		t.Errorf("streams after close = %d, want 0", s)
+	}
+}
+
+// TestCountedBiCopy_StreamsTrackedDuringTransfer verifies that stream counts
+// are visible while data is being transferred (not just after completion).
+func TestCountedBiCopy_StreamsTrackedDuringTransfer(t *testing.T) {
+	// Slow echo: holds connections open so we can observe active streams
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	ready := make(chan struct{})
+	release := make(chan struct{})
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 1024)
+		n, _ := conn.Read(buf) // read first chunk
+		close(ready)           // signal that we have data
+		<-release              // wait for test to check metrics
+		_, _ = conn.Write(buf[:n])
+		conn.(*net.TCPConn).CloseWrite()
+	}()
+
+	proxy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var tx, rx atomic.Int64
+	var streams atomic.Int32
+	var proxyDone sync.WaitGroup
+	proxyDone.Add(1)
+	go func() {
+		defer proxyDone.Done()
+		cConn, err := proxy.Accept()
+		if err != nil {
+			return
+		}
+		defer cConn.Close()
+		tConn, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			return
+		}
+		defer tConn.Close()
+		streams.Add(1)
+		defer streams.Add(-1)
+		CountedBiCopy(cConn, tConn, &tx, &rx)
+	}()
+
+	client, err := net.DialTimeout("tcp", proxy.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = client.Write([]byte("mid-flight"))
+	_ = client.(*net.TCPConn).CloseWrite()
+
+	<-ready // wait for data to arrive at target
+
+	// While transfer is in progress: stream count should be 1
+	if s := streams.Load(); s != 1 {
+		t.Errorf("active streams during transfer = %d, want 1", s)
+	}
+	// tx should have counted client→target bytes
+	if tx.Load() == 0 && rx.Load() == 0 {
+		t.Error("no bytes counted during active transfer")
+	}
+
+	close(release)            // let the transfer complete
+	_, _ = io.ReadAll(client) // drain echo
+	client.Close()
+	proxy.Close()
+	proxyDone.Wait()
+
+	if s := streams.Load(); s != 0 {
+		t.Errorf("streams after close = %d, want 0", s)
+	}
+}
+
 func TestApplyTCPKeepAlive_TCPConn(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

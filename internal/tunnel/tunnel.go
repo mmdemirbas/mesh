@@ -221,7 +221,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 					_ = req.Reply(true, nil)
 				}
 			case "tcpip-forward":
-				go handleTCPIPForward(connCtx, req, sshConn, &mu, listeners, s.log, s.cfg.Bind, s.cfg.Options, &clientNodeName, serverMetrics)
+				go handleTCPIPForward(connCtx, req, sshConn, &mu, listeners, s.log, s.cfg.Bind, s.cfg.Options, &clientNodeName)
 			case "cancel-tcpip-forward":
 				go handleCancelTCPIPForward(req, &mu, listeners, s.log)
 			default:
@@ -988,7 +988,7 @@ func (c *SSHClient) probeTarget(ctx context.Context, handshakeTimeout time.Durat
 // --- Shared forwarding helpers ---
 
 // handleTCPIPForward handles tcpip-forward global requests on the server side.
-func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.ServerConn, mu *sync.Mutex, listeners map[string]net.Listener, log *slog.Logger, parentBind string, options map[string]string, clientNodeName *atomic.Value, metrics *state.Metrics) {
+func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.ServerConn, mu *sync.Mutex, listeners map[string]net.Listener, log *slog.Logger, parentBind string, options map[string]string, clientNodeName *atomic.Value) {
 	var fwdReq struct {
 		BindAddr string
 		BindPort uint32
@@ -1100,24 +1100,14 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 
 			ch, reqs, err := sshConn.OpenChannel("forwarded-tcpip", payload)
 			if err != nil {
+				log.Debug("forwarded-tcpip channel open failed", "addr", actualAddr, "origin", origin, "error", err)
 				return
 			}
 			go ssh.DiscardRequests(reqs)
 			dm := state.Global.GetMetrics("dynamic", compID)
 			dm.Streams.Add(1)
 			defer dm.Streams.Add(-1)
-			if metrics != nil {
-				metrics.Streams.Add(1)
-				defer metrics.Streams.Add(-1)
-			}
-			txBefore := dm.BytesTx.Load()
-			rxBefore := dm.BytesRx.Load()
 			netutil.CountedBiCopy(conn, ch, &dm.BytesTx, &dm.BytesRx)
-			// Propagate to server-level metrics
-			if metrics != nil {
-				metrics.BytesTx.Add(dm.BytesTx.Load() - txBefore)
-				metrics.BytesRx.Add(dm.BytesRx.Load() - rxBefore)
-			}
 			ch.Close()
 		}()
 	}
