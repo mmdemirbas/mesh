@@ -590,7 +590,7 @@ func upCmd(nodeName, configPath string) {
 
 	// 4. Live dashboard or block until signal
 	if useDashboard {
-		go runDashboard(ctx, cfg, nodeName, logFilePath, ring)
+		go runDashboard(ctx, cfg, nodeName, configPath, logFilePath, ring)
 	}
 
 	<-ctx.Done()
@@ -757,7 +757,7 @@ func (r *logRing) Lines() []string {
 // dashboard doesn't pollute scrollback and the user's previous terminal content
 // is restored when the dashboard exits. Rendering overwrites in-place line by
 // line to avoid flicker — no full screen clear is needed.
-func runDashboard(ctx context.Context, cfg *config.Config, nodeName string, logFilePath string, ring *logRing) {
+func runDashboard(ctx context.Context, cfg *config.Config, nodeName string, configPath string, logFilePath string, ring *logRing) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -771,6 +771,9 @@ func runDashboard(ctx context.Context, cfg *config.Config, nodeName string, logF
 		// Header
 		header := fmt.Sprintf("%s%smesh %s%s | pid %d | %s",
 			cBold, cCyan, nodeName, cReset, os.Getpid(), time.Now().Format("15:04:05"))
+		if configPath != "" {
+			header += fmt.Sprintf(" | config: %s%s%s", cGray, configPath, cReset)
+		}
 		if logFilePath != "" {
 			header += fmt.Sprintf(" | log: %s%s%s", cGray, logFilePath, cReset)
 		}
