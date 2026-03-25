@@ -1058,7 +1058,11 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, no
 					}
 					seenID[comp.ID] = true
 					parts := strings.Split(comp.ID, "|")
-					addRow("   ", "~", colorAddr(parts[0]), arrowRight, colorAddr(cleanIPv6(comp.Message)), "")
+					right := colorAddr(cleanIPv6(comp.Message))
+					if comp.PeerAddr != "" {
+						right += " " + cGray + "(" + comp.PeerAddr + ")" + cReset
+					}
+					addRow("   ", "~", colorAddr(parts[0]), arrowRight, right, "")
 				}
 			}
 		}

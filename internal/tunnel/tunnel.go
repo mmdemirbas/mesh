@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -190,6 +191,11 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 
 	s.log.Info("Client connected", "remote", sshConn.RemoteAddr(), "user", sshConn.User())
 
+	// Per-connection identity announced by mesh peers via a standard SSH
+	// global request. Non-mesh clients simply won't send it — the fallback
+	// is the TCP address as before.
+	var clientNodeName atomic.Value
+
 	var mu sync.Mutex
 	listeners := make(map[string]net.Listener)
 	defer func() {
@@ -200,12 +206,20 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 		mu.Unlock()
 	}()
 
-	// Handle global requests (tcpip-forward)
+	// Handle global requests (tcpip-forward, mesh identity, keepalive)
 	go func() {
 		for req := range reqs {
 			switch req.Type {
+			case "mesh-node-name@mesh":
+				if len(req.Payload) > 0 {
+					clientNodeName.Store(string(req.Payload))
+					s.log.Info("Client identified", "remote", sshConn.RemoteAddr(), "node", string(req.Payload))
+				}
+				if req.WantReply {
+					_ = req.Reply(true, nil)
+				}
 			case "tcpip-forward":
-				go handleTCPIPForward(connCtx, req, sshConn, &mu, listeners, s.log, s.cfg.Bind, s.cfg.Options)
+				go handleTCPIPForward(connCtx, req, sshConn, &mu, listeners, s.log, s.cfg.Bind, s.cfg.Options, &clientNodeName)
 			case "cancel-tcpip-forward":
 				go handleCancelTCPIPForward(req, &mu, listeners, s.log)
 			default:
@@ -495,6 +509,7 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 
 		state.Global.Update("connection", id, state.Connected, target)
 		state.Global.UpdatePeer("connection", id, conn.RemoteAddr().String())
+
 		log.Info("Connected", "tcp", t1.Sub(t0).Round(time.Millisecond), "ssh", time.Since(t1).Round(time.Millisecond))
 
 		err = c.runSession(ctx, client, fset, opts, log)
@@ -590,6 +605,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 
 		state.Global.Update("connection", id, state.Connected, target)
 		state.Global.UpdatePeer("connection", id, conn.RemoteAddr().String())
+
 		log.Info("Connected", "target", target,
 			"tcp", t1.Sub(t0).Round(time.Millisecond),
 			"ssh", time.Since(t1).Round(time.Millisecond))
@@ -613,6 +629,11 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 }
 
 func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *config.ForwardSet, opts map[string]string, log *slog.Logger) error {
+	// Announce our node name so the peer can display it in its dashboard.
+	// This is a standard SSH global request (RFC 4254 §4): implementations
+	// that don't recognise it simply ignore it, so this is safe with any sshd.
+	_, _, _ = client.SendRequest("mesh-node-name@mesh", false, []byte(c.cfg.Name))
+
 	var wg sync.WaitGroup
 	sCtx, sCancel := context.WithCancel(ctx)
 	defer sCancel()
@@ -942,7 +963,7 @@ func (c *SSHClient) probeTarget(ctx context.Context, handshakeTimeout time.Durat
 // --- Shared forwarding helpers ---
 
 // handleTCPIPForward handles tcpip-forward global requests on the server side.
-func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.ServerConn, mu *sync.Mutex, listeners map[string]net.Listener, log *slog.Logger, parentBind string, options map[string]string) {
+func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.ServerConn, mu *sync.Mutex, listeners map[string]net.Listener, log *slog.Logger, parentBind string, options map[string]string, clientNodeName *atomic.Value) {
 	var fwdReq struct {
 		BindAddr string
 		BindPort uint32
@@ -1009,6 +1030,10 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 
 	compID := actualAddr + "|" + parentBind
 	state.Global.Update("dynamic", compID, state.Listening, peerAddr)
+	// Store mesh node name (if announced) so the dashboard can show it
+	if v := clientNodeName.Load(); v != nil {
+		state.Global.UpdatePeer("dynamic", compID, v.(string))
+	}
 	defer state.Global.Delete("dynamic", compID)
 
 	log.Info("tcpip-forward active", "addr", addr)
