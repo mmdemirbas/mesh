@@ -602,7 +602,7 @@ func upCmd(nodeName, configPath string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c := tunnel.NewSSHClient(conn, log)
+			c := tunnel.NewSSHClient(conn, nodeName, log)
 			if err := c.Run(ctx); err != nil {
 				log.Error("Connection failed", "name", conn.Name, "error", err)
 			}

@@ -252,12 +252,13 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 
 // SSHClient connects to a remote SSH server and manages forwarding + proxies.
 type SSHClient struct {
-	cfg config.Connection
-	log *slog.Logger
+	cfg      config.Connection
+	nodeName string // node name from config (e.g. "client", "server")
+	log      *slog.Logger
 }
 
-func NewSSHClient(cfg config.Connection, log *slog.Logger) *SSHClient {
-	return &SSHClient{cfg: cfg, log: log.With("component", "ssh", "name", cfg.Name)}
+func NewSSHClient(cfg config.Connection, nodeName string, log *slog.Logger) *SSHClient {
+	return &SSHClient{cfg: cfg, nodeName: nodeName, log: log.With("component", "ssh", "name", cfg.Name)}
 }
 
 func (c *SSHClient) Run(ctx context.Context) error {
@@ -641,10 +642,12 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 }
 
 func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *config.ForwardSet, opts map[string]string, log *slog.Logger, metrics *state.Metrics) error {
-	// Announce our node name so the peer can display it in its dashboard.
+	// Announce our identity so the peer can display it in its dashboard.
+	// Format: "nodeName/connectionName/forwardSetName"
 	// This is a standard SSH global request (RFC 4254 §4): implementations
 	// that don't recognise it simply ignore it, so this is safe with any sshd.
-	_, _, _ = client.SendRequest("mesh-node-name@mesh", false, []byte(c.cfg.Name))
+	identity := c.nodeName + "/" + c.cfg.Name + "/" + fset.Name
+	_, _, _ = client.SendRequest("mesh-node-name@mesh", false, []byte(identity))
 
 	var wg sync.WaitGroup
 	sCtx, sCancel := context.WithCancel(ctx)
