@@ -1064,6 +1064,8 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 	if v := clientNodeName.Load(); v != nil {
 		state.Global.UpdatePeer("dynamic", compID, v.(string))
 	}
+	dm := state.Global.GetMetrics("dynamic", compID)
+	dm.StartTime.Store(time.Now().UnixNano())
 	defer func() {
 		state.Global.Delete("dynamic", compID)
 		log.Info("tcpip-forward closed", "addr", addr)
@@ -1101,12 +1103,20 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 				return
 			}
 			go ssh.DiscardRequests(reqs)
+			dm := state.Global.GetMetrics("dynamic", compID)
+			dm.Streams.Add(1)
+			defer dm.Streams.Add(-1)
 			if metrics != nil {
 				metrics.Streams.Add(1)
 				defer metrics.Streams.Add(-1)
-				netutil.CountedBiCopy(conn, ch, &metrics.BytesTx, &metrics.BytesRx)
-			} else {
-				netutil.BiCopy(conn, ch)
+			}
+			txBefore := dm.BytesTx.Load()
+			rxBefore := dm.BytesRx.Load()
+			netutil.CountedBiCopy(conn, ch, &dm.BytesTx, &dm.BytesRx)
+			// Propagate to server-level metrics
+			if metrics != nil {
+				metrics.BytesTx.Add(dm.BytesTx.Load() - txBefore)
+				metrics.BytesRx.Add(dm.BytesRx.Load() - rxBefore)
 			}
 			ch.Close()
 		}()
