@@ -875,19 +875,23 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, no
 		if addr == "" {
 			return ""
 		}
-		idx := strings.LastIndex(addr, ":")
-		if idx == -1 {
+		// Extract optional user@ prefix
+		user := ""
+		hostPort := addr
+		if atIdx := strings.Index(addr, "@"); atIdx != -1 {
+			user = addr[:atIdx]
+			hostPort = addr[atIdx+1:]
+		}
+		host, port, err := net.SplitHostPort(hostPort)
+		if err != nil {
+			// No port — plain host or unparseable
 			return cCyan + addr + cReset
 		}
-		host := addr[:idx]
-		port := addr[idx+1:]
-		atIdx := strings.Index(host, "@")
-		if atIdx != -1 {
-			user := host[:atIdx]
-			host = host[atIdx+1:]
-			return cGray + user + "@" + cReset + cCyan + host + cReset + cGray + ":" + cReset + cMagenta + port + cReset
+		prefix := ""
+		if user != "" {
+			prefix = cGray + user + "@" + cReset
 		}
-		return cCyan + host + cReset + cGray + ":" + cReset + cMagenta + port + cReset
+		return prefix + cCyan + host + cReset + cGray + ":" + cReset + cMagenta + port + cReset
 	}
 
 	type row struct {
@@ -965,15 +969,15 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, no
 		}
 	}
 
+	// Strip IPv6 zone IDs (e.g. %en0) which are interface-specific and noisy.
 	cleanIPv6 := func(peer string) string {
-		peer = strings.ReplaceAll(peer, "[", "")
-		peer = strings.ReplaceAll(peer, "]", "")
 		if idx := strings.Index(peer, "%"); idx != -1 {
-			if colonIdx := strings.LastIndex(peer, ":"); colonIdx != -1 {
-				peer = peer[:idx] + peer[colonIdx:]
-			} else {
-				peer = peer[:idx]
+			// Find the closing bracket or port separator after the zone
+			rest := ""
+			if endIdx := strings.IndexAny(peer[idx:], "]:"); endIdx != -1 {
+				rest = peer[idx+endIdx:]
 			}
+			peer = peer[:idx] + rest
 		}
 		return peer
 	}

@@ -1014,11 +1014,16 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 
 	var peerIP string
 	if tcpAddr, ok := sshConn.RemoteAddr().(*net.TCPAddr); ok {
-		if ip4 := tcpAddr.IP.To4(); ip4 != nil {
-			peerIP = net.JoinHostPort(ip4.String(), strconv.Itoa(tcpAddr.Port))
-		} else {
-			peerIP = tcpAddr.String()
+		ip := tcpAddr.IP
+		if ip4 := ip.To4(); ip4 != nil {
+			ip = ip4
 		}
+		// Strip zone ID (e.g. %en0) — it's interface-specific and clutters display
+		ipStr := ip.String()
+		if idx := strings.Index(ipStr, "%"); idx != -1 {
+			ipStr = ipStr[:idx]
+		}
+		peerIP = net.JoinHostPort(ipStr, strconv.Itoa(tcpAddr.Port))
 	} else {
 		peerIP = sshConn.RemoteAddr().String()
 	}
