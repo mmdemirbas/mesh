@@ -87,13 +87,14 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 				continue
 			}
 
-			// Parse terminal dimensions
+			// Parse terminal dimensions (RFC 4254 Section 6.2)
 			var dim struct {
 				Term     string
 				Cols     uint32
 				Rows     uint32
 				WidthPx  uint32
 				HeightPx uint32
+				Modes    string // encoded terminal modes (opcode-value pairs)
 			}
 			if err := ssh.Unmarshal(req.Payload, &dim); err != nil {
 				log.Warn("Failed to parse pty-req payload", "error", err)
