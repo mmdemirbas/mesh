@@ -79,7 +79,7 @@ mynode:
 **2. Start:**
 
 ```bash
-mesh mynode up
+mesh up mynode
 ```
 
 A live dashboard appears showing connection status, listeners, and recent log lines. Logs go to `~/.mesh/log/mynode.log`.
@@ -87,12 +87,13 @@ A live dashboard appears showing connection status, listeners, and recent log li
 **3. Other commands:**
 
 ```bash
-mesh mynode status       # one-shot status check
-mesh mynode status -w    # live watch mode
-mesh mynode config       # show parsed config without starting
-mesh mynode down         # graceful shutdown
+mesh status mynode       # one-shot status check
+mesh status mynode -w    # live watch mode
+mesh config mynode       # show parsed config without starting
+mesh down mynode         # graceful shutdown
+mesh up                  # start all nodes in the config file
 mesh --version           # print version
-mesh mynode help         # detailed help with all SSH options
+mesh help                # detailed help with all SSH options
 ```
 
 ## Configuration
@@ -101,7 +102,7 @@ mesh uses YAML with a JSON schema for IDE autocompletion. Config is looked up in
 
 1. `./mesh.yaml` or `./mesh.yml`
 2. `~/.mesh/conf/mesh.yaml` or `~/.mesh/conf/mesh.yml`
-3. Explicit: `mesh -f /path/to/config.yaml mynode up`
+3. Explicit: `mesh -f /path/to/config.yaml up mynode`
 
 ### IDE Autocompletion
 

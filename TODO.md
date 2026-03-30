@@ -2,8 +2,10 @@
 
 ## Security
 
-- **TLS for Clipsync** — Clipboard sync uses unencrypted HTTP. Most impactful remaining security improvement.
-  - Design needed: mTLS vs pre-shared keys, cert management, config schema, backward compat for local-only setups.
+- **TLS for Clipsync** — Clipboard sync uses unencrypted HTTP. Most impactful remaining security
+  improvement.
+    - Design needed: mTLS vs pre-shared keys, cert management, config schema, backward compat for
+      local-only setups.
 
 ## Release
 
@@ -24,22 +26,26 @@
 ## Testing
 
 - Integration tests — real SSH client↔server handshake, real clipsync between two nodes
-- Fuzz testing — `go test -fuzz` on parsers (`parseIPv4Port`, `parseByteSize`, `parseTarget`, config YAML)
+- Fuzz testing — `go test -fuzz` on parsers (`parseIPv4Port`, `parseByteSize`, `parseTarget`, config
+  YAML)
 - Benchmark CI — track regressions across commits
 
 ## Features
 
-- **Web UI** — HTML dashboard via admin HTTP endpoint (SSE/WebSocket). Backend is ready (`renderStatus`, admin server).
-- **Config hot-reload** — Watch config file, diff changes, restart affected components. Needs lifecycle management.
+- **Web UI** — HTML dashboard via admin HTTP endpoint (SSE/WebSocket). Backend is ready (
+  `renderStatus`, admin server).
+- **Config hot-reload** — Watch config file, diff changes, restart affected components. Needs
+  lifecycle management.
 - **`mesh init`** — Generate a starter config interactively.
 - **Prometheus metrics** — Optional endpoint for connection count, bytes transferred, uptime.
 
 ---
 
+- add client subcommands to emulate ssh behaviour to quickly run on-the-fly connections without
+  requiring yaml changes.
 
-- move node name after subcommand and make it optional -> `mesh subcommand [node] [args]`
-- this change will require to support multiple nodes for the subcommands.
-- this will make the tool easier to understand and use, just like `docker compose ...`
+- support remote shells
 
+- report duplicate names in schema
 
-- This app should be extremely lightweight and energy-efficient. Let's check where we are spending energy and how can we use it more efficiently. Let's discuss and plan before proceeding to make any changes.
+- DECIDE - relay vs forward => standardize the terminology

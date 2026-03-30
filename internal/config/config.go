@@ -155,7 +155,7 @@ func Load(path, serviceName string) (*Config, error) {
 	if !ok {
 		return nil, fmt.Errorf("service %q not found in config", serviceName)
 	}
-	if err := cfg.validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("service %q validation failed: %w", serviceName, err)
 	}
 	return cfg, nil
@@ -249,7 +249,7 @@ func WarnUnsupportedOptions(cfg *Config) {
 	}
 }
 
-func (c *Config) validate() error {
+func (c *Config) Validate() error {
 
 	for i, l := range c.Listeners {
 		if l.Bind == "" {

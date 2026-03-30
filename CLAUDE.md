@@ -39,15 +39,18 @@ configs/            Example YAML + JSON schema
 ## CLI
 
 ```
-mesh [-f config.yaml] <node> <command> [arguments]
+mesh [-f config.yaml] <command> [node...] [flags]
 ```
+
+When no node names are given, all nodes in the config file are used.
+Multiple nodes can be specified and will run within a single process.
 
 | Command | Purpose |
 |---|---|
-| `up` | Start node with live dashboard (alternate screen when TTY) |
-| `down` | Stop running node (SIGTERM + wait) |
-| `status [-w]` | Show node status; `-w` for watch mode |
-| `config` | Show parsed config without starting |
+| `up [node...]` | Start nodes with live dashboard (alternate screen when TTY) |
+| `down [node...]` | Stop running nodes (SIGTERM + wait) |
+| `status [node...] [-w]` | Show node status; `-w` for watch mode |
+| `config [node...]` | Show parsed config without starting |
 | `completion` | Generate shell completions (bash, zsh, fish) |
 | `help` | Detailed help with SSH options |
 

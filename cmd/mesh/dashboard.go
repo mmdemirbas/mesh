@@ -63,7 +63,7 @@ func (r *logRing) Lines() []string {
 // dashboard doesn't pollute scrollback and the user's previous terminal content
 // is restored when the dashboard exits. Rendering overwrites in-place line by
 // line to avoid flicker — no full screen clear is needed.
-func runDashboard(ctx context.Context, cfg *config.Config, nodeName string, configPath string, logFilePath string, ring *logRing) {
+func runDashboard(ctx context.Context, cfgs map[string]*config.Config, nodeNames []string, configPath string, logFilePath string, ring *logRing) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -78,8 +78,9 @@ func runDashboard(ctx context.Context, cfg *config.Config, nodeName string, conf
 
 		// Header
 		uptime := time.Since(startTime).Truncate(time.Second)
+		nodesLabel := strings.Join(nodeNames, ", ")
 		header := fmt.Sprintf("%s%smesh %s%s | pid %d | %s | up %s",
-			cBold, cCyan, nodeName, cReset, os.Getpid(), time.Now().Format("15:04:05"), uptime)
+			cBold, cCyan, nodesLabel, cReset, os.Getpid(), time.Now().Format("15:04:05"), uptime)
 		lines = append(lines, header)
 		if configPath != "" {
 			lines = append(lines, fmt.Sprintf("  %sconfig: %s%s", cGray, configPath, cReset))
@@ -89,9 +90,17 @@ func runDashboard(ctx context.Context, cfg *config.Config, nodeName string, conf
 		}
 		lines = append(lines, "")
 
-		// Status body
-		statusOutput, statusWidth := renderStatus(cfg, state.Global.Snapshot(), state.Global.SnapshotMetrics(), nodeName)
-		lines = append(lines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
+		// Status body — render each node
+		snap := state.Global.Snapshot()
+		metrics := state.Global.SnapshotMetrics()
+		var maxWidth int
+		for _, name := range nodeNames {
+			statusOutput, statusWidth := renderStatus(cfgs[name], snap, metrics, name)
+			lines = append(lines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
+			if statusWidth > maxWidth {
+				maxWidth = statusWidth
+			}
+		}
 
 		// Log tail — fill remaining terminal height
 		logLines := ring.Lines()
@@ -105,7 +114,7 @@ func runDashboard(ctx context.Context, cfg *config.Config, nodeName string, conf
 				available = len(logLines)
 			}
 			if available > 0 {
-				lines = append(lines, cGray+strings.Repeat("─", statusWidth)+cReset)
+				lines = append(lines, cGray+strings.Repeat("─", maxWidth)+cReset)
 				lines = append(lines, logLines[len(logLines)-available:]...)
 			}
 		}

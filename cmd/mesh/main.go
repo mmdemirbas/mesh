@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,24 +48,13 @@ func main() {
 	}
 
 	args := flag.Args()
-
-	// Commands that don't require a node name
-	if len(args) >= 1 && args[0] == "completion" {
-		shell := ""
-		if len(args) >= 2 {
-			shell = args[1]
-		}
-		completionCmd(shell)
-		return
-	}
-
-	if len(args) < 2 {
+	if len(args) < 1 {
 		printUsage()
 		os.Exit(1)
 	}
 
-	nodeName := args[0]
-	command := args[1]
+	command := args[0]
+	nodeArgs := args[1:]
 
 	if configPath == "" {
 		configPath = getDefaultConfigPath()
@@ -72,13 +62,19 @@ func main() {
 
 	switch command {
 	case "up":
-		upCmd(nodeName, configPath)
+		upCmd(resolveNodes(nodeArgs, configPath), configPath)
 	case "status":
-		statusCmd(nodeName, configPath, watchMode)
+		statusCmd(resolveNodes(nodeArgs, configPath), configPath, watchMode)
 	case "config":
-		configCmd(nodeName, configPath)
+		configCmd(resolveNodes(nodeArgs, configPath), configPath)
 	case "down":
-		downCmd(nodeName)
+		downCmd(resolveNodes(nodeArgs, configPath))
+	case "completion":
+		shell := ""
+		if len(nodeArgs) >= 1 {
+			shell = nodeArgs[0]
+		}
+		completionCmd(shell)
 	case "help":
 		printHelp()
 	default:
@@ -87,30 +83,56 @@ func main() {
 	}
 }
 
+// resolveNodes returns the node names to operate on.
+// If explicit names are given, they are returned as-is.
+// Otherwise, all nodes from the config file are returned in sorted order.
+func resolveNodes(args []string, configPath string) []string {
+	if len(args) > 0 {
+		return args
+	}
+	cfgs, err := config.LoadUnvalidated(configPath)
+	if err != nil {
+		fmt.Printf("%s⨯ Could not load configuration: %v%s\n", cRed, err, cReset)
+		os.Exit(1)
+	}
+	if len(cfgs) == 0 {
+		fmt.Printf("%s⨯ No nodes defined in %s%s\n", cRed, configPath, cReset)
+		os.Exit(1)
+	}
+	names := make([]string, 0, len(cfgs))
+	for name := range cfgs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func printUsage() {
 	fmt.Println(cBold + cCyan + "mesh" + cReset + " " + cGray + version + cReset + " - Human-friendly networking tool")
 	fmt.Println()
 	fmt.Println("All-in-one replacement for ssh, sshd, autossh, socat, and SOCKS/HTTP proxy servers.")
 	fmt.Println()
 	fmt.Println(cBold + "Usage:" + cReset)
-	fmt.Println("  mesh " + cYellow + "[-f config.yaml] " + cReset + cCyan + "<node> <command>" + cReset + " [arguments]")
+	fmt.Println("  mesh " + cYellow + "[-f config.yaml] " + cReset + cCyan + "<command>" + cReset + " [node...] [flags]")
 	fmt.Println()
 	fmt.Println(cBold + "Commands:" + cReset)
-	fmt.Println("  " + cBlue + "up" + cReset + "         Start the specified mesh node (live dashboard when running in a terminal)")
-	fmt.Println("  " + cBlue + "down" + cReset + "       Stop the currently running mesh node")
-	fmt.Println("  " + cBlue + "status" + cReset + "     Show live status of a running node (use " + cYellow + "-w" + cReset + " for watch mode)")
-	fmt.Println("  " + cBlue + "config" + cReset + "     Show the parsed configuration for a node without starting it")
+	fmt.Println("  " + cBlue + "up" + cReset + "         Start mesh nodes (live dashboard when running in a terminal)")
+	fmt.Println("  " + cBlue + "down" + cReset + "       Stop running mesh nodes")
+	fmt.Println("  " + cBlue + "status" + cReset + "     Show live status of running nodes (use " + cYellow + "-w" + cReset + " for watch mode)")
+	fmt.Println("  " + cBlue + "config" + cReset + "     Show the parsed configuration for nodes without starting them")
 	fmt.Println("  " + cBlue + "completion" + cReset + " Generate shell completion script (bash, zsh, fish)")
 	fmt.Println()
-	fmt.Println(cBold + "Examples:" + cReset)
-	fmt.Println("  " + cGray + "# Start the 'server' node using the default configuration file" + cReset)
-	fmt.Println("  mesh server " + cBlue + "up" + cReset + " &")
+	fmt.Println("  When no node names are given, all nodes in the config file are used.")
 	fmt.Println()
-	fmt.Println("  " + cGray + "# Start utilizing a specific configuration file" + cReset)
-	fmt.Println("  mesh " + cYellow + "-f" + cReset + " configs/example.yml server " + cBlue + "up" + cReset)
+	fmt.Println(cBold + "Examples:" + cReset)
+	fmt.Println("  " + cGray + "# Start the 'server' node" + cReset)
+	fmt.Println("  mesh " + cBlue + "up" + cReset + " server &")
+	fmt.Println()
+	fmt.Println("  " + cGray + "# Start all nodes from a specific configuration file" + cReset)
+	fmt.Println("  mesh " + cYellow + "-f" + cReset + " configs/example.yml " + cBlue + "up" + cReset)
 	fmt.Println()
 	fmt.Println("  " + cGray + "# Gracefully stop the 'server' node" + cReset)
-	fmt.Println("  mesh server " + cBlue + "down" + cReset)
+	fmt.Println("  mesh " + cBlue + "down" + cReset + " server")
 	fmt.Println()
 }
 
@@ -118,25 +140,26 @@ func printHelp() {
 	printUsage()
 	fmt.Println(cBold + "Command Details:" + cReset)
 	fmt.Println()
-	fmt.Println(cBold + "  up" + cReset)
-	fmt.Println("    Starts all configured listeners, connections, and clipsync for the node.")
+	fmt.Println(cBold + "  up" + cReset + " [node...]")
+	fmt.Println("    Starts all configured listeners, connections, and clipsync for the given nodes.")
+	fmt.Println("    Without node names, starts all nodes defined in the config file.")
+	fmt.Println("    Multiple nodes run within a single process.")
 	fmt.Println("    When running in a terminal, shows a live dashboard that auto-refreshes.")
 	fmt.Println("    Logs are written to " + cGray + "~/.mesh/log/<node>.log" + cReset + ".")
 	fmt.Println("    When stdout is not a terminal (piped or backgrounded), logs go to stderr.")
 	fmt.Println("    Press Ctrl+C to stop gracefully.")
 	fmt.Println()
-	fmt.Println(cBold + "  status" + cReset + " [" + cYellow + "-w" + cReset + "]")
-	fmt.Println("    Shows the current status of a running node (listeners, connections, peers).")
+	fmt.Println(cBold + "  status" + cReset + " [node...] [" + cYellow + "-w" + cReset + "]")
+	fmt.Println("    Shows the current status of running nodes (listeners, connections, peers).")
 	fmt.Println("    Use " + cYellow + "-w" + cReset + " for watch mode: continuously refreshes like 'top'.")
 	fmt.Println("    Without " + cYellow + "-w" + cReset + ", prints once and exits.")
 	fmt.Println()
-	fmt.Println(cBold + "  config" + cReset)
-	fmt.Println("    Displays the parsed configuration for a node without starting it.")
+	fmt.Println(cBold + "  config" + cReset + " [node...]")
+	fmt.Println("    Displays the parsed configuration for the given nodes without starting them.")
 	fmt.Println("    Useful for verifying config changes before running 'up'.")
-	fmt.Println("    If the node is not found, lists all available nodes in the config file.")
 	fmt.Println()
-	fmt.Println(cBold + "  down" + cReset)
-	fmt.Println("    Sends SIGTERM to the running node and waits for graceful shutdown.")
+	fmt.Println(cBold + "  down" + cReset + " [node...]")
+	fmt.Println("    Sends SIGTERM to the running nodes and waits for graceful shutdown.")
 	fmt.Println()
 	fmt.Println(cBold + "  help" + cReset)
 	fmt.Println("    Shows this detailed help.")
@@ -192,11 +215,14 @@ func getDefaultConfigPath() string {
 	return "mesh.yaml"
 }
 
-func upCmd(nodeName, configPath string) {
-	pid, err := readPidFile(nodeName)
-	if err == nil && pid != 0 && checkPid(pid) {
-		fmt.Printf("⨯ mesh node %q is already running (pid %d).\n", nodeName, pid)
-		os.Exit(1)
+func upCmd(nodeNames []string, configPath string) {
+	// Check for already-running nodes
+	for _, name := range nodeNames {
+		pid, err := readPidFile(name)
+		if err == nil && pid != 0 && checkPid(pid) {
+			fmt.Printf("⨯ mesh node %q is already running (pid %d).\n", name, pid)
+			os.Exit(1)
+		}
 	}
 
 	// Determine whether to use the live dashboard (TTY) or classic log-to-stderr mode.
@@ -210,22 +236,44 @@ func upCmd(nodeName, configPath string) {
 	log := slog.New(&humanLogHandler{Handler: logHandler})
 	slog.SetDefault(log)
 
-	cfg, err := config.Load(configPath, nodeName)
+	// Load and validate all requested node configs
+	allCfgs, err := config.LoadUnvalidated(configPath)
 	if err != nil {
 		log.Error("Config load failed", "path", configPath, "error", err)
 		os.Exit(1)
 	}
 
-	var logLevel slog.Level
-	switch strings.ToLower(cfg.LogLevel) {
-	case "debug":
-		logLevel = slog.LevelDebug
-	case "warn":
-		logLevel = slog.LevelWarn
-	case "error":
-		logLevel = slog.LevelError
-	default:
-		logLevel = slog.LevelInfo
+	cfgs := make(map[string]*config.Config, len(nodeNames))
+	for _, name := range nodeNames {
+		cfg, ok := allCfgs[name]
+		if !ok {
+			log.Error("Node not found in config", "node", name, "path", configPath)
+			os.Exit(1)
+		}
+		if err := cfg.Validate(); err != nil {
+			log.Error("Config validation failed", "node", name, "error", err)
+			os.Exit(1)
+		}
+		cfgs[name] = cfg
+	}
+
+	// Use the most verbose log level across all nodes
+	logLevel := slog.LevelError
+	for _, cfg := range cfgs {
+		var level slog.Level
+		switch strings.ToLower(cfg.LogLevel) {
+		case "debug":
+			level = slog.LevelDebug
+		case "warn":
+			level = slog.LevelWarn
+		case "error":
+			level = slog.LevelError
+		default:
+			level = slog.LevelInfo
+		}
+		if level < logLevel {
+			logLevel = level
+		}
 	}
 
 	// Phase 2: Set up log destination — file (dashboard mode) or stderr (classic mode).
@@ -236,7 +284,12 @@ func upCmd(nodeName, configPath string) {
 		home, _ := os.UserHomeDir()
 		logDir := filepath.Join(home, ".mesh", "log")
 		_ = os.MkdirAll(logDir, 0755)
-		logFilePath = filepath.Join(logDir, nodeName+".log")
+		// Single node uses node name for log file; multi-node uses "mesh.log"
+		logFileName := "mesh.log"
+		if len(nodeNames) == 1 {
+			logFileName = nodeNames[0] + ".log"
+		}
+		logFilePath = filepath.Join(logDir, logFileName)
 		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not open log file %s: %v (falling back to stderr)\n", logFilePath, err)
@@ -244,8 +297,6 @@ func upCmd(nodeName, configPath string) {
 			logFilePath = ""
 		} else {
 			defer logFile.Close()
-			// File gets plain text, ring gets colored text for the dashboard.
-			// humanLogHandler inlines attrs into the message for readability.
 			logHandler = tint.NewHandler(logFile, &tint.Options{
 				Level:      logLevel,
 				TimeFormat: "15:04:05.000",
@@ -269,12 +320,16 @@ func upCmd(nodeName, configPath string) {
 		slog.SetDefault(log)
 	}
 
-	log.Info("mesh starting", "version", version, "node", nodeName, "config", configPath)
+	log.Info("mesh starting", "version", version, "nodes", strings.Join(nodeNames, ","), "config", configPath)
 
-	if err := writePidFile(nodeName); err != nil {
-		log.Error("Failed to write pidfile", "error", err)
-	} else {
-		defer removePidFile(nodeName)
+	// Write PID files for all nodes (same PID)
+	for _, name := range nodeNames {
+		if err := writePidFile(name); err != nil {
+			log.Error("Failed to write pidfile", "node", name, "error", err)
+		} else {
+			name := name
+			defer removePidFile(name)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -288,11 +343,16 @@ func upCmd(nodeName, configPath string) {
 		cancel()
 	}()
 
+	// Single admin HTTP endpoint — write port file for each node (same port)
 	adminLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err == nil {
 		port := adminLn.Addr().(*net.TCPAddr).Port
-		_ = os.WriteFile(portFilePath(nodeName), []byte(strconv.Itoa(port)), 0600)
-		defer os.Remove(portFilePath(nodeName))
+		portStr := []byte(strconv.Itoa(port))
+		for _, name := range nodeNames {
+			_ = os.WriteFile(portFilePath(name), portStr, 0600)
+			name := name
+			defer os.Remove(portFilePath(name))
+		}
 
 		adminSrv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -304,62 +364,68 @@ func upCmd(nodeName, configPath string) {
 
 	var wg sync.WaitGroup
 
-	// 1. Listeners (proxies, relays, ssh servers)
-	var proxies, relays []config.Listener
-	for _, l := range cfg.Listeners {
-		switch l.Type {
-		case "socks", "http":
-			proxies = append(proxies, l)
-		case "relay":
-			relays = append(relays, l)
-		case "sshd":
-			l := l
+	// Start components for each node
+	for _, nodeName := range nodeNames {
+		cfg := cfgs[nodeName]
+
+		// 1. Listeners (proxies, relays, ssh servers)
+		var proxies, relays []config.Listener
+		for _, l := range cfg.Listeners {
+			switch l.Type {
+			case "socks", "http":
+				proxies = append(proxies, l)
+			case "relay":
+				relays = append(relays, l)
+			case "sshd":
+				l := l
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					s := tunnel.NewSSHServer(l, log)
+					if err := s.Run(ctx); err != nil {
+						log.Error("SSH server failed", "listen", l.Bind, "error", err)
+					}
+				}()
+			}
+		}
+		if len(proxies) > 0 {
+			proxy.RunStandaloneProxies(ctx, proxies, log, &wg)
+		}
+		if len(relays) > 0 {
+			proxy.RunStandaloneRelays(ctx, relays, log, &wg)
+		}
+
+		// 2. Outbound connections (Multi-set forwards)
+		for _, conn := range cfg.Connections {
+			conn := conn
+			nodeName := nodeName
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				s := tunnel.NewSSHServer(l, log)
-				if err := s.Run(ctx); err != nil {
-					log.Error("SSH server failed", "listen", l.Bind, "error", err)
+				c := tunnel.NewSSHClient(conn, nodeName, log)
+				if err := c.Run(ctx); err != nil {
+					log.Error("Connection failed", "name", conn.Name, "error", err)
+				}
+			}()
+		}
+
+		// 3. Clipsync
+		for _, cs := range cfg.Clipsync {
+			cs := cs
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, err := clipsync.Start(ctx, cs)
+				if err != nil {
+					log.Error("Clipsync failed to start", "error", err)
 				}
 			}()
 		}
 	}
-	if len(proxies) > 0 {
-		proxy.RunStandaloneProxies(ctx, proxies, log, &wg)
-	}
-	if len(relays) > 0 {
-		proxy.RunStandaloneRelays(ctx, relays, log, &wg)
-	}
-
-	// 2. Outbound connections (Multi-set forwards)
-	for _, conn := range cfg.Connections {
-		conn := conn
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			c := tunnel.NewSSHClient(conn, nodeName, log)
-			if err := c.Run(ctx); err != nil {
-				log.Error("Connection failed", "name", conn.Name, "error", err)
-			}
-		}()
-	}
-
-	// 3. Clipsync
-	for _, cs := range cfg.Clipsync {
-		cs := cs
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, err := clipsync.Start(ctx, cs)
-			if err != nil {
-				log.Error("Clipsync failed to start", "error", err)
-			}
-		}()
-	}
 
 	// 4. Live dashboard or block until signal
 	if useDashboard {
-		go runDashboard(ctx, cfg, nodeName, configPath, logFilePath, ring)
+		go runDashboard(ctx, cfgs, nodeNames, configPath, logFilePath, ring)
 	}
 
 	<-ctx.Done()
@@ -372,8 +438,12 @@ func upCmd(nodeName, configPath string) {
 		// Print the final static status to the normal terminal so the user sees the shutdown state.
 		// Small delay to let the alternate screen buffer exit complete.
 		time.Sleep(50 * time.Millisecond)
-		s, _ := renderStatus(cfg, state.Global.Snapshot(), state.Global.SnapshotMetrics(), nodeName)
-		fmt.Print(s)
+		snap := state.Global.Snapshot()
+		metrics := state.Global.SnapshotMetrics()
+		for _, name := range nodeNames {
+			s, _ := renderStatus(cfgs[name], snap, metrics, name)
+			fmt.Print(s)
+		}
 	}
 }
 
@@ -494,16 +564,27 @@ func fetchState(nodeName string) map[string]state.Component {
 	return s
 }
 
-func statusCmd(nodeName, configPath string, watch bool) {
-	pid, err := readPidFile(nodeName)
-	if err != nil || pid == 0 {
-		fmt.Printf("%s⨯ mesh node %q is not running.%s\n", cRed, nodeName, cReset)
-		os.Exit(3)
+func statusCmd(nodeNames []string, configPath string, watch bool) {
+	// Check which nodes are running and collect their PIDs
+	type nodeInfo struct {
+		name string
+		pid  int
 	}
-
-	if !checkPid(pid) {
-		fmt.Printf("%s⨯ mesh node %q is dead but pidfile exists (pid %d).%s\n", cRed, nodeName, pid, cReset)
-		os.Exit(1)
+	var running []nodeInfo
+	for _, name := range nodeNames {
+		pid, err := readPidFile(name)
+		if err != nil || pid == 0 {
+			fmt.Printf("%s⨯ mesh node %q is not running.%s\n", cRed, name, cReset)
+			continue
+		}
+		if !checkPid(pid) {
+			fmt.Printf("%s⨯ mesh node %q is dead but pidfile exists (pid %d).%s\n", cRed, name, pid, cReset)
+			continue
+		}
+		running = append(running, nodeInfo{name, pid})
+	}
+	if len(running) == 0 {
+		os.Exit(3)
 	}
 
 	logHandler := tint.NewHandler(os.Stderr, &tint.Options{
@@ -513,22 +594,24 @@ func statusCmd(nodeName, configPath string, watch bool) {
 	log := slog.New(&humanLogHandler{Handler: logHandler})
 	slog.SetDefault(log)
 
-	cfgs, err := config.LoadUnvalidated(configPath)
+	allCfgs, err := config.LoadUnvalidated(configPath)
 	if err != nil {
 		fmt.Printf("%s⚠ Could not load configuration to show details: %v%s\n", cYellow, err, cReset)
-		os.Exit(0)
-	}
-	cfg, ok := cfgs[nodeName]
-	if !ok {
-		fmt.Printf("%s⚠ Node %q not found in config%s\n", cYellow, nodeName, cReset)
 		os.Exit(0)
 	}
 
 	if !watch {
 		// One-shot mode
-		fmt.Printf("%s✔ mesh node %q is running (pid %d).%s\n\n", cGreen, nodeName, pid, cReset)
-		s, _ := renderStatus(cfg, fetchState(nodeName), nil, nodeName)
-		fmt.Print(s)
+		for _, n := range running {
+			cfg, ok := allCfgs[n.name]
+			if !ok {
+				fmt.Printf("%s⚠ Node %q not found in config%s\n", cYellow, n.name, cReset)
+				continue
+			}
+			fmt.Printf("%s✔ mesh node %q is running (pid %d).%s\n\n", cGreen, n.name, n.pid, cReset)
+			s, _ := renderStatus(cfg, fetchState(n.name), nil, n.name)
+			fmt.Print(s)
+		}
 		os.Exit(0)
 	}
 
@@ -544,16 +627,21 @@ func statusCmd(nodeName, configPath string, watch bool) {
 	defer fmt.Print("\033[?25h\033[?1049l")
 
 	render := func() {
-		if !checkPid(pid) {
-			fmt.Print("\033[?25h\033[?1049l") // restore screen
-			fmt.Printf("%s⨯ mesh node %q has stopped.%s\n", cRed, nodeName, cReset)
-			os.Exit(0)
+		var lines []string
+		for _, n := range running {
+			if !checkPid(n.pid) {
+				fmt.Print("\033[?25h\033[?1049l") // restore screen
+				fmt.Printf("%s⨯ mesh node %q has stopped.%s\n", cRed, n.name, cReset)
+				os.Exit(0)
+			}
+			header := fmt.Sprintf("%s✔ mesh node %q is running (pid %d)%s | %s",
+				cGreen, n.name, n.pid, cReset, time.Now().Format("15:04:05"))
+			lines = append(lines, header, "")
+			if cfg, ok := allCfgs[n.name]; ok {
+				statusOutput, _ := renderStatus(cfg, fetchState(n.name), nil, n.name)
+				lines = append(lines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
+			}
 		}
-		header := fmt.Sprintf("%s✔ mesh node %q is running (pid %d)%s | %s",
-			cGreen, nodeName, pid, cReset, time.Now().Format("15:04:05"))
-		statusOutput, _ := renderStatus(cfg, fetchState(nodeName), nil, nodeName)
-		lines := []string{header, ""}
-		lines = append(lines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
 
 		var buf strings.Builder
 		buf.WriteString("\033[H") // cursor home
@@ -578,56 +666,79 @@ func statusCmd(nodeName, configPath string, watch bool) {
 	}
 }
 
-func configCmd(nodeName, configPath string) {
-	cfgs, err := config.LoadUnvalidated(configPath)
+func configCmd(nodeNames []string, configPath string) {
+	allCfgs, err := config.LoadUnvalidated(configPath)
 	if err != nil {
 		fmt.Printf("%s⨯ Could not load configuration: %v%s\n", cRed, err, cReset)
 		os.Exit(1)
 	}
 
-	cfg, ok := cfgs[nodeName]
-	if !ok {
-		// If the requested node doesn't exist, list available nodes
-		fmt.Printf("%s⨯ Node %q not found in %s%s\n\n", cRed, nodeName, configPath, cReset)
-		fmt.Printf("%sAvailable nodes:%s\n", cBold, cReset)
-		for name := range cfgs {
-			fmt.Printf("  %s%s%s\n", cCyan, name, cReset)
+	exitCode := 0
+	for _, name := range nodeNames {
+		cfg, ok := allCfgs[name]
+		if !ok {
+			fmt.Printf("%s⨯ Node %q not found in %s%s\n\n", cRed, name, configPath, cReset)
+			fmt.Printf("%sAvailable nodes:%s\n", cBold, cReset)
+			for n := range allCfgs {
+				fmt.Printf("  %s%s%s\n", cCyan, n, cReset)
+			}
+			exitCode = 1
+			continue
 		}
-		os.Exit(1)
+		s, _ := renderStatus(cfg, nil, nil, name)
+		fmt.Print(s)
 	}
-
-	s, _ := renderStatus(cfg, nil, nil, nodeName)
-	fmt.Print(s)
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 }
 
-func downCmd(nodeName string) {
-	pid, err := readPidFile(nodeName)
-	if err != nil || pid == 0 {
-		fmt.Printf("mesh node %q is not running.\n", nodeName)
-		return
-	}
+func downCmd(nodeNames []string) {
+	// Deduplicate PIDs — multi-node up writes the same PID for all nodes.
+	killedPids := make(map[int]bool)
 
-	if !checkPid(pid) {
-		fmt.Printf("mesh node %q is not running (stale pidfile).\n", nodeName)
-		removePidFile(nodeName)
-		return
-	}
-
-	fmt.Printf("Stopping mesh node %q (pid %d)...\n", nodeName, pid)
-	if err := killPid(pid, syscall.SIGTERM); err != nil {
-		fmt.Printf("Error sending SIGTERM: %v\n", err)
-		os.Exit(1)
-	}
-	// Wait for the process to actually exit (up to 10 seconds)
-	for i := 0; i < 100; i++ {
-		if !checkPid(pid) {
-			removePidFile(nodeName)
-			fmt.Println("Stopped.")
-			return
+	for _, name := range nodeNames {
+		pid, err := readPidFile(name)
+		if err != nil || pid == 0 {
+			fmt.Printf("mesh node %q is not running.\n", name)
+			continue
 		}
-		time.Sleep(100 * time.Millisecond)
+
+		if !checkPid(pid) {
+			fmt.Printf("mesh node %q is not running (stale pidfile).\n", name)
+			removePidFile(name)
+			continue
+		}
+
+		if killedPids[pid] {
+			// Already sent SIGTERM to this PID via another node
+			removePidFile(name)
+			continue
+		}
+
+		fmt.Printf("Stopping mesh node %q (pid %d)...\n", name, pid)
+		if err := killPid(pid, syscall.SIGTERM); err != nil {
+			fmt.Printf("Error sending SIGTERM: %v\n", err)
+			os.Exit(1)
+		}
+		killedPids[pid] = true
+
+		// Wait for the process to actually exit (up to 10 seconds)
+		stopped := false
+		for i := 0; i < 100; i++ {
+			if !checkPid(pid) {
+				stopped = true
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if stopped {
+			removePidFile(name)
+			fmt.Println("Stopped.")
+		} else {
+			fmt.Println("Warning: process did not exit within 10 seconds.")
+		}
 	}
-	fmt.Println("Warning: process did not exit within 10 seconds.")
 }
 
 func portFilePath(nodeName string) string {
@@ -742,7 +853,7 @@ _mesh_completions() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="up down status config help"
+    local commands="up down status config help completion"
     local flags="-f --file -w --version"
 
     # Get node names from config
@@ -765,13 +876,12 @@ _mesh_completions() {
         fi
 
         if [[ -n "$config_file" && -f "$config_file" ]]; then
-            # Extract top-level YAML keys (node names)
             grep -E '^[a-zA-Z_][a-zA-Z0-9_-]*:' "$config_file" 2>/dev/null | sed 's/:.*//'
         fi
     }
 
-    # Find the node name and command positions (skipping flags and their args)
-    local node_pos="" cmd_pos=""
+    # Find the command position (first positional, skipping flags and their args)
+    local cmd_pos=""
     local skip_next=false
     for ((i=1; i < cword; i++)); do
         if $skip_next; then
@@ -787,11 +897,10 @@ _mesh_completions() {
                 continue
                 ;;
             *)
-                if [[ -z "$node_pos" ]]; then
-                    node_pos=$i
-                elif [[ -z "$cmd_pos" ]]; then
+                if [[ -z "$cmd_pos" ]]; then
                     cmd_pos=$i
                 fi
+                break
                 ;;
         esac
     done
@@ -809,19 +918,22 @@ _mesh_completions() {
         return
     fi
 
-    # First positional arg: node name or "completion"
-    if [[ -z "$node_pos" ]]; then
-        local nodes
-        nodes=$(_mesh_nodes)
-        COMPREPLY=($(compgen -W "$nodes completion" -- "$cur"))
-        return
-    fi
-
-    # Second positional arg: command
+    # First positional arg: command
     if [[ -z "$cmd_pos" ]]; then
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
         return
     fi
+
+    # After "completion" command: shell names
+    if [[ "${words[cmd_pos]}" == "completion" ]]; then
+        COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur"))
+        return
+    fi
+
+    # After other commands: node names (repeatable)
+    local nodes
+    nodes=$(_mesh_nodes)
+    COMPREPLY=($(compgen -W "$nodes" -- "$cur"))
 }
 
 complete -F _mesh_completions mesh
@@ -831,11 +943,12 @@ const completionZsh = `#compdef mesh
 
 _mesh() {
     local -a commands=(
-        'up:Start the specified mesh node'
-        'down:Stop the currently running mesh node'
-        'status:Show live status of a running node'
-        'config:Show the parsed configuration for a node'
+        'up:Start mesh nodes'
+        'down:Stop running mesh nodes'
+        'status:Show live status of running nodes'
+        'config:Show the parsed configuration for nodes'
         'help:Show detailed help'
+        'completion:Generate shell completion script'
     )
 
     _mesh_nodes() {
@@ -864,8 +977,8 @@ _mesh() {
         fi
     }
 
-    # Find positions of node and command in the current line
-    local node_pos="" cmd_pos=""
+    # Find command position (first positional, skipping flags and their args)
+    local cmd_pos=""
     local skip_next=false
     local -i i
     for ((i=2; i < CURRENT; i++)); do
@@ -882,11 +995,10 @@ _mesh() {
                 continue
                 ;;
             *)
-                if [[ -z "$node_pos" ]]; then
-                    node_pos=$i
-                elif [[ -z "$cmd_pos" ]]; then
+                if [[ -z "$cmd_pos" ]]; then
                     cmd_pos=$i
                 fi
+                break
                 ;;
         esac
     done
@@ -906,25 +1018,20 @@ _mesh() {
         return
     fi
 
-    # First positional: node name or "completion"
-    if [[ -z "$node_pos" ]]; then
-        _alternative \
-            'nodes:node:_mesh_nodes' \
-            'completion:completion:(completion)'
-        return
-    fi
-
-    # If first positional is "completion", complete shell names
-    if [[ "${words[node_pos]}" == "completion" ]]; then
-        compadd bash zsh fish
-        return
-    fi
-
-    # Second positional: command
+    # First positional: command
     if [[ -z "$cmd_pos" ]]; then
         _describe 'command' commands
         return
     fi
+
+    # After "completion" command: shell names
+    if [[ "${words[cmd_pos]}" == "completion" ]]; then
+        compadd bash zsh fish
+        return
+    fi
+
+    # After other commands: node names (repeatable)
+    _mesh_nodes
 }
 
 _mesh "$@"
@@ -960,8 +1067,8 @@ function __mesh_nodes
     end
 end
 
-# Check if a node name has been provided (skip flags and their args)
-function __mesh_needs_node
+# Check if a command has been provided (first positional, skipping flags)
+function __mesh_needs_command
     set -l args (commandline -opc)
     set -l skip_next false
     for i in (seq 2 (count $args))
@@ -975,17 +1082,16 @@ function __mesh_needs_node
             case '-*'
                 continue
             case '*'
-                return 1  # node already provided
+                return 1  # command already provided
         end
     end
     return 0
 end
 
-# Check if we need a command (node provided but no command yet)
-function __mesh_needs_command
+# Check if a command has been provided and it accepts node names
+function __mesh_has_command_wants_nodes
     set -l args (commandline -opc)
     set -l skip_next false
-    set -l positionals 0
     for i in (seq 2 (count $args))
         if $skip_next
             set skip_next false
@@ -996,11 +1102,13 @@ function __mesh_needs_command
                 set skip_next true
             case '-*'
                 continue
+            case up down status config
+                return 0
             case '*'
-                set positionals (math $positionals + 1)
+                return 1
         end
     end
-    test $positionals -eq 1
+    return 1
 end
 
 # Check if first positional is "completion"
@@ -1030,16 +1138,16 @@ complete -c mesh -s f -l file -rF -d 'Path to config file'
 complete -c mesh -s w -d 'Watch mode for status command'
 complete -c mesh -l version -d 'Print version and exit'
 
-# Node names (first positional)
-complete -c mesh -n __mesh_needs_node -f -a '(__mesh_nodes)' -d 'Node name'
-complete -c mesh -n __mesh_needs_node -f -a completion -d 'Generate shell completion script'
-
-# Commands (second positional)
-complete -c mesh -n __mesh_needs_command -f -a up -d 'Start the specified mesh node'
-complete -c mesh -n __mesh_needs_command -f -a down -d 'Stop the currently running mesh node'
-complete -c mesh -n __mesh_needs_command -f -a status -d 'Show live status of a running node'
+# Commands (first positional)
+complete -c mesh -n __mesh_needs_command -f -a up -d 'Start mesh nodes'
+complete -c mesh -n __mesh_needs_command -f -a down -d 'Stop running mesh nodes'
+complete -c mesh -n __mesh_needs_command -f -a status -d 'Show live status of running nodes'
 complete -c mesh -n __mesh_needs_command -f -a config -d 'Show the parsed configuration'
 complete -c mesh -n __mesh_needs_command -f -a help -d 'Show detailed help'
+complete -c mesh -n __mesh_needs_command -f -a completion -d 'Generate shell completion script'
+
+# Node names (after command, repeatable)
+complete -c mesh -n __mesh_has_command_wants_nodes -f -a '(__mesh_nodes)' -d 'Node name'
 
 # Shell names for "completion" subcommand
 complete -c mesh -n __mesh_is_completion -f -a 'bash zsh fish' -d 'Shell type'

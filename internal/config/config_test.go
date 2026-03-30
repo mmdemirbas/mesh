@@ -454,7 +454,7 @@ func TestValidate_ListenerMissingBind(t *testing.T) {
 	cfg := &Config{
 		Listeners: []Listener{{Type: "socks"}},
 	}
-	if err := cfg.validate(); err == nil {
+	if err := cfg.Validate(); err == nil {
 		t.Error("expected error for missing bind")
 	}
 }
@@ -463,7 +463,7 @@ func TestValidate_ListenerMissingType(t *testing.T) {
 	cfg := &Config{
 		Listeners: []Listener{{Bind: "127.0.0.1:1080"}},
 	}
-	if err := cfg.validate(); err == nil {
+	if err := cfg.Validate(); err == nil {
 		t.Error("expected error for missing type")
 	}
 }
@@ -472,7 +472,7 @@ func TestValidate_ListenerUnknownType(t *testing.T) {
 	cfg := &Config{
 		Listeners: []Listener{{Bind: "127.0.0.1:1080", Type: "tcp"}},
 	}
-	if err := cfg.validate(); err == nil {
+	if err := cfg.Validate(); err == nil {
 		t.Error("expected error for unknown type")
 	}
 }
@@ -481,7 +481,7 @@ func TestValidate_RelayMissingTarget(t *testing.T) {
 	cfg := &Config{
 		Listeners: []Listener{{Bind: "127.0.0.1:1080", Type: "relay"}},
 	}
-	if err := cfg.validate(); err == nil {
+	if err := cfg.Validate(); err == nil {
 		t.Error("expected error for relay missing target")
 	}
 }
@@ -490,7 +490,7 @@ func TestValidate_ConnectionMissingTargets(t *testing.T) {
 	cfg := &Config{
 		Connections: []Connection{{Name: "test"}},
 	}
-	if err := cfg.validate(); err == nil {
+	if err := cfg.Validate(); err == nil {
 		t.Error("expected error for missing targets")
 	}
 }
@@ -509,7 +509,7 @@ func TestValidate_InvalidRetryDuration(t *testing.T) {
 			Auth:    AuthCfg{Key: f, KnownHosts: kh},
 		}},
 	}
-	if err := cfg.validate(); err == nil {
+	if err := cfg.Validate(); err == nil {
 		t.Error("expected error for invalid retry duration")
 	}
 }
@@ -544,7 +544,7 @@ func TestValidate_ConnectionNoAuth(t *testing.T) {
 			Auth:    AuthCfg{},
 		}},
 	}
-	if err := cfg.validate(); err == nil {
+	if err := cfg.Validate(); err == nil {
 		t.Error("expected error when no auth methods configured")
 	}
 }
@@ -558,7 +558,7 @@ func TestValidate_ConnectionAgentAuth(t *testing.T) {
 		}},
 	}
 	// Should not fail on missing key file — agent is sufficient
-	err := cfg.validate()
+	err := cfg.Validate()
 	if err != nil {
 		t.Errorf("validate with agent auth should not fail: %v", err)
 	}
@@ -572,7 +572,7 @@ func TestValidate_ConnectionPasswordCommandAuth(t *testing.T) {
 			Auth:    AuthCfg{PasswordCommand: "echo secret"},
 		}},
 	}
-	err := cfg.validate()
+	err := cfg.Validate()
 	if err != nil {
 		t.Errorf("validate with password_command should not fail: %v", err)
 	}
@@ -590,7 +590,7 @@ func TestValidate_InvalidMode(t *testing.T) {
 			Auth:    AuthCfg{Key: f},
 		}},
 	}
-	if err := cfg.validate(); err == nil {
+	if err := cfg.Validate(); err == nil {
 		t.Error("expected error for invalid mode")
 	}
 }
@@ -604,7 +604,7 @@ func TestValidate_MultiplexMode(t *testing.T) {
 			Auth:    AuthCfg{PasswordCommand: "echo pass"},
 		}},
 	}
-	err := cfg.validate()
+	err := cfg.Validate()
 	if err != nil {
 		t.Errorf("validate multiplex mode should not fail: %v", err)
 	}
@@ -619,7 +619,7 @@ func TestValidate_FailoverModeExplicit(t *testing.T) {
 			Auth:    AuthCfg{Agent: true},
 		}},
 	}
-	err := cfg.validate()
+	err := cfg.Validate()
 	if err != nil {
 		t.Errorf("validate explicit failover mode should not fail: %v", err)
 	}
