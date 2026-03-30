@@ -24,3 +24,6 @@ Thumbs.db
 # Local configs (allow example)
 *.yaml
 !configs/example.yaml
+
+# Obsidian
+.obsidian/
