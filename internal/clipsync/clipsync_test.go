@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -424,6 +425,31 @@ func newTestNode(t *testing.T, allowReceive []string) (*Node, string, func()) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(data)
+	})
+	mux.HandleFunc("/discover", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !n.canReceiveFrom(r.RemoteAddr) {
+			http.Error(w, "Forbidden by ACL", http.StatusForbidden)
+			return
+		}
+		var msg struct {
+			ID   string `json:"id"`
+			Port int    `json:"port"`
+			Hash string `json:"h"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&msg); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if msg.ID == n.id {
+			return
+		}
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		peerAddr := net.JoinHostPort(host, fmt.Sprintf("%d", msg.Port))
+		n.registerPeer(peerAddr, msg.Hash, "http")
 	})
 	fileServer := http.StripPrefix("/files/", http.FileServer(http.Dir(n.filesDir)))
 	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
@@ -1054,5 +1080,255 @@ func TestMatchesIPList(t *testing.T) {
 	}
 	if matchesIPList(nil, "192.168.1.1") {
 		t.Error("nil list should not match anything")
+	}
+}
+
+func TestRegisterPeer(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(*Node)
+		peerAddr  string
+		hash      string
+		wantNew   bool
+		wantPull  bool
+		wantCount int
+	}{
+		{
+			name:      "new peer without hash",
+			peerAddr:  "192.168.1.10:7755",
+			hash:      "",
+			wantNew:   true,
+			wantPull:  false,
+			wantCount: 1,
+		},
+		{
+			name:      "new peer with differing hash",
+			peerAddr:  "192.168.1.10:7755",
+			hash:      "abc123",
+			wantNew:   true,
+			wantPull:  true,
+			wantCount: 1,
+		},
+		{
+			name: "new peer with same hash as ours",
+			setup: func(n *Node) {
+				n.lastHash = "abc123"
+			},
+			peerAddr:  "192.168.1.10:7755",
+			hash:      "abc123",
+			wantNew:   true,
+			wantPull:  false,
+			wantCount: 1,
+		},
+		{
+			name: "existing peer refreshes timestamp",
+			setup: func(n *Node) {
+				n.peers["192.168.1.10:7755"] = time.Now().Add(-10 * time.Second)
+			},
+			peerAddr:  "192.168.1.10:7755",
+			hash:      "",
+			wantNew:   false,
+			wantPull:  false,
+			wantCount: 1,
+		},
+		{
+			name: "existing peer with new hash triggers pull",
+			setup: func(n *Node) {
+				n.peers["192.168.1.10:7755"] = time.Now()
+				n.peerHashes["192.168.1.10:7755"] = "old"
+			},
+			peerAddr:  "192.168.1.10:7755",
+			hash:      "new",
+			wantNew:   false,
+			wantPull:  true,
+			wantCount: 1,
+		},
+		{
+			name: "existing peer with same hash skips pull",
+			setup: func(n *Node) {
+				n.peers["192.168.1.10:7755"] = time.Now()
+				n.peerHashes["192.168.1.10:7755"] = "same"
+			},
+			peerAddr:  "192.168.1.10:7755",
+			hash:      "same",
+			wantNew:   false,
+			wantPull:  false,
+			wantCount: 1,
+		},
+		{
+			name: "rejected at capacity",
+			setup: func(n *Node) {
+				for i := 0; i < maxPeers; i++ {
+					n.peers[fmt.Sprintf("10.0.0.%d:7755", i)] = time.Now()
+				}
+			},
+			peerAddr:  "192.168.1.10:7755",
+			hash:      "",
+			wantNew:   false,
+			wantPull:  false,
+			wantCount: maxPeers,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n := &Node{
+				config:     config.ClipsyncCfg{Bind: "0.0.0.0:7755"},
+				id:         "test-self",
+				peers:      make(map[string]time.Time),
+				peerHashes: make(map[string]string),
+			}
+			if tt.setup != nil {
+				tt.setup(n)
+			}
+
+			isNew, needsPull := n.registerPeer(tt.peerAddr, tt.hash, "test")
+			if isNew != tt.wantNew {
+				t.Errorf("isNew = %v, want %v", isNew, tt.wantNew)
+			}
+			if needsPull != tt.wantPull {
+				t.Errorf("needsPull = %v, want %v", needsPull, tt.wantPull)
+			}
+			if len(n.peers) != tt.wantCount {
+				t.Errorf("peer count = %d, want %d", len(n.peers), tt.wantCount)
+			}
+		})
+	}
+}
+
+func TestDiscoverEndpoint_RegistersPeer(t *testing.T) {
+	n, url, cleanup := newTestNode(t, []string{"all"})
+	defer cleanup()
+
+	body, _ := json.Marshal(struct {
+		ID   string `json:"id"`
+		Port int    `json:"port"`
+		Hash string `json:"h"`
+	}{"remote-node", 7755, "hash-abc"})
+
+	resp, err := http.Post(url+"/discover", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /discover failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("POST /discover status = %d, want 200", resp.StatusCode)
+	}
+
+	n.peersMu.RLock()
+	defer n.peersMu.RUnlock()
+	if len(n.peers) != 1 {
+		t.Fatalf("peer count = %d, want 1", len(n.peers))
+	}
+	// The peer address should use the sender's IP and the port from the body.
+	for addr := range n.peers {
+		if !strings.HasSuffix(addr, ":7755") {
+			t.Errorf("peer addr = %q, want suffix :7755", addr)
+		}
+	}
+}
+
+func TestDiscoverEndpoint_RejectsSelf(t *testing.T) {
+	n, url, cleanup := newTestNode(t, []string{"all"})
+	defer cleanup()
+
+	// Send discover with the node's own ID — should be ignored.
+	body, _ := json.Marshal(struct {
+		ID   string `json:"id"`
+		Port int    `json:"port"`
+		Hash string `json:"h"`
+	}{n.id, 7755, ""})
+
+	resp, err := http.Post(url+"/discover", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /discover failed: %v", err)
+	}
+	resp.Body.Close()
+
+	n.peersMu.RLock()
+	defer n.peersMu.RUnlock()
+	if len(n.peers) != 0 {
+		t.Errorf("peer count = %d, want 0 (self-discovery should be ignored)", len(n.peers))
+	}
+}
+
+func TestDiscoverEndpoint_ACLBlocks(t *testing.T) {
+	_, url, cleanup := newTestNode(t, []string{"none"})
+	defer cleanup()
+
+	body, _ := json.Marshal(struct {
+		ID   string `json:"id"`
+		Port int    `json:"port"`
+		Hash string `json:"h"`
+	}{"remote-node", 7755, ""})
+
+	resp, err := http.Post(url+"/discover", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /discover failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestDiscoverEndpoint_RejectsGET(t *testing.T) {
+	_, url, cleanup := newTestNode(t, []string{"all"})
+	defer cleanup()
+
+	resp, err := http.Get(url + "/discover")
+	if err != nil {
+		t.Fatalf("GET /discover failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestRegisterPeerHTTP_SendsDiscoverRequest(t *testing.T) {
+	var received atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/discover" || r.Method != http.MethodPost {
+			http.Error(w, "unexpected", http.StatusBadRequest)
+			return
+		}
+		data, _ := io.ReadAll(r.Body)
+		received.Store(data)
+	}))
+	defer srv.Close()
+
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	peerAddr := net.JoinHostPort("127.0.0.1", port)
+
+	n := &Node{
+		id:         "sender-node",
+		port:       7755,
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	n.lastHash = "myhash"
+
+	n.registerPeerHTTP(peerAddr)
+
+	raw, ok := received.Load().([]byte)
+	if !ok || raw == nil {
+		t.Fatal("peer never received the /discover request")
+	}
+	var msg struct {
+		ID   string `json:"id"`
+		Port int    `json:"port"`
+		Hash string `json:"h"`
+	}
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if msg.ID != "sender-node" {
+		t.Errorf("ID = %q, want %q", msg.ID, "sender-node")
+	}
+	if msg.Port != 7755 {
+		t.Errorf("Port = %d, want 7755", msg.Port)
+	}
+	if msg.Hash != "myhash" {
+		t.Errorf("Hash = %q, want %q", msg.Hash, "myhash")
 	}
 }

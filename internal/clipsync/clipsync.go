@@ -132,6 +132,7 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 		go n.runUDPServer(ctx, magicHeader, port)
 		go n.runUDPBeacon(ctx, magicHeader, port)
 		go n.cleanupPeers(ctx)
+		go n.refreshHTTPRegistration(ctx)
 	}
 
 	state.Global.Update("clipsync", cfg.Bind, state.Listening, "")
@@ -377,6 +378,39 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(data)
+	})
+
+	// HTTP-based peer discovery for firewall-blocked networks.
+	// When a peer discovers us via UDP, it calls this endpoint so we
+	// also register it — even if our UDP replies cannot reach it.
+	mux.HandleFunc("/discover", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !n.canReceiveFrom(r.RemoteAddr) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		var msg struct {
+			ID   string `json:"id"`
+			Port int    `json:"port"`
+			Hash string `json:"h"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&msg); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if msg.ID == n.id {
+			return // self-discovery
+		}
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		peerAddr := net.JoinHostPort(host, fmt.Sprintf("%d", msg.Port))
+
+		_, needsPull := n.registerPeer(peerAddr, msg.Hash, "http")
+		if needsPull {
+			go n.pullHTTP(peerAddr)
+		}
 	})
 
 	// Serve files for peers to download, with ACL check
@@ -1285,16 +1319,8 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 		}
 		peerAddr := fmt.Sprintf("%s:%d", remoteAddr.IP.String(), msg.Port)
 
-		n.peersMu.Lock()
-		_, exists := n.peers[peerAddr]
-		if !exists && len(n.peers) >= maxPeers {
-			n.peersMu.Unlock()
-			continue // reject new peers when at capacity
-		}
-		if !exists {
-			slog.Info("Discovered new peer via LAN UDP broadcast", "peer", peerAddr, "ID", msg.ID)
-			state.Global.Update("clipsync-peer", n.config.Bind+"|"+peerAddr, state.Connected, "discovered")
-
+		isNew, needsPull := n.registerPeer(peerAddr, msg.Hash, "udp")
+		if isNew {
 			// Send a unicast reply so the sender also discovers us.
 			// This handles asymmetric networks where broadcast only works
 			// in one direction (e.g., Windows → macOS but not macOS → Windows).
@@ -1313,22 +1339,11 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 				replyAddr := &net.UDPAddr{IP: remoteAddr.IP, Port: port}
 				_, _ = conn.WriteToUDP(reply, replyAddr)
 			}
+			// Also register ourselves via HTTP as a firewall-safe fallback.
+			// UDP unicast replies may be blocked by firewalls; HTTP connections
+			// are outgoing from our side, so they pass through.
+			go n.registerPeerHTTP(peerAddr)
 		}
-		n.peers[peerAddr] = time.Now()
-
-		needsPull := false
-		if msg.Hash != "" {
-			if lastH, ok := n.peerHashes[peerAddr]; !ok || lastH != msg.Hash {
-				n.peerHashes[peerAddr] = msg.Hash
-				n.stateMu.Lock()
-				if n.lastHash != msg.Hash {
-					needsPull = true
-				}
-				n.stateMu.Unlock()
-			}
-		}
-		n.peersMu.Unlock()
-
 		if needsPull {
 			slog.Debug("Peer advertised new clipboard hash, triggering pull", "peer", peerAddr, "hash", msg.Hash)
 			go n.pullHTTP(peerAddr)
@@ -1471,5 +1486,97 @@ func (n *Node) cleanupPeers(ctx context.Context) {
 			}
 		}
 		n.peersMu.Unlock()
+	}
+}
+
+// registerPeer adds or refreshes a peer in the discovery map.
+// Returns isNew=true for first-time peers, needsPull=true when the
+// peer's clipboard hash differs from ours.
+func (n *Node) registerPeer(peerAddr, hash, source string) (isNew, needsPull bool) {
+	n.peersMu.Lock()
+	_, exists := n.peers[peerAddr]
+	if !exists && len(n.peers) >= maxPeers {
+		n.peersMu.Unlock()
+		return false, false
+	}
+	isNew = !exists
+	n.peers[peerAddr] = time.Now()
+
+	if isNew {
+		state.Global.Update("clipsync-peer", n.config.Bind+"|"+peerAddr, state.Connected, "discovered")
+	}
+
+	if hash != "" {
+		if lastH, ok := n.peerHashes[peerAddr]; !ok || lastH != hash {
+			n.peerHashes[peerAddr] = hash
+			n.stateMu.Lock()
+			if n.lastHash != hash {
+				needsPull = true
+			}
+			n.stateMu.Unlock()
+		}
+	}
+	n.peersMu.Unlock()
+
+	if isNew {
+		slog.Info("Discovered new peer", "peer", peerAddr, "source", source)
+	}
+	return
+}
+
+// registerPeerHTTP sends an HTTP POST to the peer's /discover endpoint
+// so the peer registers us as a discovered node. This is a firewall-safe
+// fallback for networks where UDP unicast replies are blocked.
+func (n *Node) registerPeerHTTP(peerAddr string) {
+	n.stateMu.Lock()
+	h := n.lastHash
+	n.stateMu.Unlock()
+
+	body, err := json.Marshal(struct {
+		ID   string `json:"id"`
+		Port int    `json:"port"`
+		Hash string `json:"h"`
+	}{n.id, n.port, h})
+	if err != nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/discover", peerAddr), bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := n.httpClient.Do(req)
+	if err != nil {
+		slog.Debug("HTTP peer registration failed", "peer", peerAddr, "error", err)
+		return
+	}
+	resp.Body.Close()
+}
+
+// refreshHTTPRegistration periodically re-registers this node with all
+// known peers via HTTP. This keeps us alive in peers that cannot receive
+// our UDP beacons (e.g., firewalled hosts).
+func (n *Node) refreshHTTPRegistration(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		n.peersMu.RLock()
+		addrs := make([]string, 0, len(n.peers))
+		for addr := range n.peers {
+			addrs = append(addrs, addr)
+		}
+		n.peersMu.RUnlock()
+
+		for _, addr := range addrs {
+			go n.registerPeerHTTP(addr)
+		}
 	}
 }
