@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/user"
 	"sync"
 	"syscall"
 
@@ -16,13 +17,35 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// defaultShell returns the user's login shell or /bin/sh as fallback.
+func defaultShell() string {
+	if sh := os.Getenv("SHELL"); sh != "" {
+		return sh
+	}
+	return "/bin/sh"
+}
+
+// sessionEnv builds environment variables for a shell session, similar to sshd.
+func sessionEnv(shell, termName string) []string {
+	env := []string{
+		"SHELL=" + shell,
+		"TERM=" + termName,
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		env = append(env, "HOME="+home)
+	}
+	if u, err := user.Current(); err == nil {
+		env = append(env, "USER="+u.Username)
+		env = append(env, "LOGNAME="+u.Username)
+	}
+	if path := os.Getenv("PATH"); path != "" {
+		env = append(env, "PATH="+path)
+	}
+	return env
+}
+
 // handleSession handles an SSH session channel, which includes PTY allocation and shell execution.
 func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, log *slog.Logger) {
-	if len(shellCommand) == 0 {
-		_ = newChan.Reject(ssh.Prohibited, "shell execution disabled")
-		return
-	}
-
 	ch, reqs, err := newChan.Accept()
 	if err != nil {
 		log.Error("Accept session channel failed", "error", err)
@@ -34,6 +57,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 		cmd       *exec.Cmd
 		cmdStart  sync.Once
 		closeOnce sync.Once
+		termName  = "xterm" // default; updated by pty-req
 	)
 	closeCh := func() { closeOnce.Do(func() { ch.Close() }) }
 	defer closeCh()
@@ -46,6 +70,12 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 			pts.Close()
 		}
 	}()
+
+	// Resolve the shell to use for interactive sessions
+	shell := defaultShell()
+	if len(shellCommand) > 0 {
+		shell = shellCommand[0]
+	}
 
 	for req := range reqs {
 		switch req.Type {
@@ -71,6 +101,11 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					_ = req.Reply(false, nil)
 				}
 				continue
+			}
+
+			termName = dim.Term
+			if termName == "" {
+				termName = "xterm"
 			}
 
 			var err error
@@ -118,15 +153,35 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 
 		case "shell", "exec":
 			cmdStart.Do(func() {
-				// Only use the configured shell command, ignore client's requested exec payload for security.
-				name := shellCommand[0]
+				var name string
 				var args []string
-				if len(shellCommand) > 1 {
-					args = shellCommand[1:]
+
+				if req.Type == "exec" {
+					// Run the client's command via shell -c
+					var payload struct{ Command string }
+					if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+						log.Warn("Failed to parse exec payload", "error", err)
+						if req.WantReply {
+							_ = req.Reply(false, nil)
+						}
+						return
+					}
+					name = shell
+					args = []string{"-c", payload.Command}
+				} else {
+					// Interactive shell session
+					name = shell
+					if len(shellCommand) > 1 {
+						args = shellCommand[1:]
+					}
 				}
 
 				// Utilize context to enforce reaping on daemon exit
 				cmd = exec.CommandContext(ctx, name, args...)
+				cmd.Env = sessionEnv(shell, termName)
+				if home, err := os.UserHomeDir(); err == nil {
+					cmd.Dir = home
+				}
 
 				if pts != nil {
 					cmd.Stdin = pts
@@ -156,7 +211,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 
 				err := cmd.Start()
 				if err != nil {
-					log.Error("Start shell failed", "command", shellCommand, "error", err)
+					log.Error("Start shell failed", "command", name, "error", err)
 					if req.WantReply {
 						_ = req.Reply(false, nil)
 					}
