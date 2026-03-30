@@ -46,6 +46,4 @@
 
 - support remote shells
 
-- report duplicate names in schema
-
 - DECIDE - relay vs forward => standardize the terminology

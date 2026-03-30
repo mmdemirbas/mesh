@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -622,5 +623,92 @@ func TestValidate_FailoverModeExplicit(t *testing.T) {
 	err := cfg.Validate()
 	if err != nil {
 		t.Errorf("validate explicit failover mode should not fail: %v", err)
+	}
+}
+
+func TestValidate_DuplicateNames(t *testing.T) {
+	validConn := func(name string) Connection {
+		return Connection{
+			Name:    name,
+			Targets: []string{"host:22"},
+			Auth:    AuthCfg{Agent: true},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{
+			name: "duplicate connection names",
+			cfg: Config{
+				Connections: []Connection{validConn("vpn"), validConn("vpn")},
+			},
+			wantErr: `duplicate connection name "vpn": connections[0] and connections[1]`,
+		},
+		{
+			name: "duplicate forward set names",
+			cfg: Config{
+				Connections: []Connection{{
+					Name:    "conn",
+					Targets: []string{"host:22"},
+					Auth:    AuthCfg{Agent: true},
+					Forwards: []ForwardSet{
+						{Name: "fwd", Local: []Forward{{Type: "forward", Bind: "127.0.0.1:8080", Target: "127.0.0.1:80"}}},
+						{Name: "fwd", Local: []Forward{{Type: "forward", Bind: "127.0.0.1:9090", Target: "127.0.0.1:90"}}},
+					},
+				}},
+			},
+			wantErr: `duplicate forward set name "fwd": forwards[0] and forwards[1]`,
+		},
+		{
+			name: "duplicate listener names",
+			cfg: Config{
+				Listeners: []Listener{
+					{Name: "proxy", Type: "socks", Bind: "127.0.0.1:1080"},
+					{Name: "proxy", Type: "http", Bind: "127.0.0.1:1081"},
+				},
+			},
+			wantErr: `duplicate listener name "proxy": listeners[0] and listeners[1]`,
+		},
+		{
+			name: "unique names pass",
+			cfg: Config{
+				Connections: []Connection{validConn("vpn"), validConn("office")},
+				Listeners: []Listener{
+					{Name: "socks", Type: "socks", Bind: "127.0.0.1:1080"},
+					{Name: "http", Type: "http", Bind: "127.0.0.1:1081"},
+				},
+			},
+			wantErr: "",
+		},
+		{
+			name: "empty listener names are not checked",
+			cfg: Config{
+				Listeners: []Listener{
+					{Type: "socks", Bind: "127.0.0.1:1080"},
+					{Type: "socks", Bind: "127.0.0.1:1081"},
+				},
+			},
+			wantErr: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Errorf("expected error containing %q, got nil", tt.wantErr)
+				} else if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("expected error containing %q, got %q", tt.wantErr, err.Error())
+				}
+			}
+		})
 	}
 }

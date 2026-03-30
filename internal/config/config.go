@@ -317,11 +317,51 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Check for duplicate names
+	if err := c.checkDuplicateNames(); err != nil {
+		return err
+	}
+
 	// Check for duplicate bind addresses across all components
 	if err := c.checkDuplicateBinds(); err != nil {
 		return err
 	}
 
+	return nil
+}
+
+// checkDuplicateNames detects name collisions within connection names,
+// forward set names (per connection), and listener names.
+func (c *Config) checkDuplicateNames() error {
+	connNames := make(map[string]int)
+	for i, conn := range c.Connections {
+		if prev, ok := connNames[conn.Name]; ok {
+			return fmt.Errorf("duplicate connection name %q: connections[%d] and connections[%d]", conn.Name, prev, i)
+		}
+		connNames[conn.Name] = i
+
+		fsetNames := make(map[string]int)
+		for j, fset := range conn.Forwards {
+			if fset.Name == "" {
+				continue
+			}
+			if prev, ok := fsetNames[fset.Name]; ok {
+				return fmt.Errorf("connections[%d] %q: duplicate forward set name %q: forwards[%d] and forwards[%d]", i, conn.Name, fset.Name, prev, j)
+			}
+			fsetNames[fset.Name] = j
+		}
+	}
+
+	listenerNames := make(map[string]int)
+	for i, l := range c.Listeners {
+		if l.Name == "" {
+			continue
+		}
+		if prev, ok := listenerNames[l.Name]; ok {
+			return fmt.Errorf("duplicate listener name %q: listeners[%d] and listeners[%d]", l.Name, prev, i)
+		}
+		listenerNames[l.Name] = i
+	}
 	return nil
 }
 
