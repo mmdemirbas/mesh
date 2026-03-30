@@ -1578,6 +1578,70 @@ func TestAlignment_WideContentNoOverlap(t *testing.T) {
 	}
 }
 
+func TestAlignment_StatusRightAligned_SingleSpaceBeforeMetrics(t *testing.T) {
+	// Two listeners with metrics: [listening] (11 chars) and a connection
+	// with [retrying] (10 chars). The gap between the END of each status
+	// and the start of metrics must always be exactly 1 space.
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "socks", Bind: "127.0.0.1:1080"},
+		},
+		Connections: []config.Connection{
+			{
+				Name:    "tunnel",
+				Targets: []string{"root@10.0.0.1:22"},
+				Forwards: []config.ForwardSet{
+					{
+						Name: "fwd",
+						Local: []config.Forward{
+							{Type: "forward", Bind: "127.0.0.1:8080", Target: "10.0.0.1:80"},
+						},
+					},
+				},
+			},
+		},
+	}
+	activeState := map[string]state.Component{
+		"proxy:127.0.0.1:1080": {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
+		"connection:tunnel [fwd]": {
+			Type: "connection", ID: "tunnel [fwd]",
+			Status: state.Retrying, Message: "dial timeout",
+		},
+	}
+	m := &state.Metrics{}
+	m.StartTime.Store(time.Now().Add(-5 * time.Minute).UnixNano())
+	m.BytesTx.Store(1024)
+	metricsMap := map[string]*state.Metrics{
+		"proxy:127.0.0.1:1080":                m,
+		"forward:tunnel [fwd] 127.0.0.1:8080": m,
+	}
+	output, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
+	lines := extractLines(output)
+
+	// All status texts should end at the same visual column, and the gap
+	// between that column and the duration field should be exactly 1 space.
+	var statusEndCols []int
+	for _, line := range lines {
+		for _, status := range []string{"[listening]", "[retrying (dial timeout)]"} {
+			col := findColumn(line, status)
+			if col < 0 {
+				continue
+			}
+			endCol := col + len(status)
+			statusEndCols = append(statusEndCols, endCol)
+		}
+	}
+	if len(statusEndCols) < 2 {
+		t.Fatalf("expected at least 2 status texts, got %d", len(statusEndCols))
+	}
+	// All status end columns must be the same (right-aligned)
+	for i := 1; i < len(statusEndCols); i++ {
+		if statusEndCols[i] != statusEndCols[0] {
+			t.Errorf("status end columns differ: %d vs %d (all should be equal for right-alignment)", statusEndCols[0], statusEndCols[i])
+		}
+	}
+}
+
 func BenchmarkCompareAddrSort(b *testing.B) {
 	sizes := []int{10, 50, 100}
 	for _, n := range sizes {

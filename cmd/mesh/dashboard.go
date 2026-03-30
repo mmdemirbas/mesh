@@ -689,27 +689,54 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 	}
 	builtLines = append(builtLines, titleLine)
 
+	// When metrics are present, right-align status+annotation so they end
+	// exactly one space before the metrics column. This keeps the gap between
+	// status and metrics consistent across rows with different status widths.
+	anyMetrics := metricsPadCol > 1
+
 	for _, r := range rows {
 		if r.isHeader {
 			builtLines = append(builtLines, r.text)
 			continue
 		}
 		line := r.text
-		hasTrailing := r.status != "" || r.annotation != "" || r.metrics != ""
-		if hasTrailing {
+
+		// Build status block: status + optional annotation (when either status
+		// or annotation should be right-aligned alongside metrics).
+		statusBlock := ""
+		if r.status != "" && r.annotation != "" {
+			statusBlock = r.status + " " + r.annotation
+		} else if r.status != "" {
+			statusBlock = r.status
+		} else if r.annotation != "" && r.metrics != "" {
+			// Annotation without status, but with metrics: treat annotation as
+			// part of the right-aligned block so it stays close to metrics.
+			statusBlock = r.annotation
+		}
+
+		if anyMetrics && statusBlock != "" {
+			// Right-align: status block ends at metricsPadCol - 1.
+			sbWidth := visibleLen(statusBlock)
+			targetStart := metricsPadCol - 1 - sbWidth
+			lineLen := visibleLen(line)
+			if targetStart > lineLen {
+				line += strings.Repeat(" ", targetStart-lineLen)
+			} else {
+				line += " "
+			}
+			line += statusBlock
+		} else if statusBlock != "" {
+			// No metrics context — left-align status at statusPadCol.
 			lineLen := visibleLen(line)
 			if lineLen < statusPadCol {
 				line += strings.Repeat(" ", statusPadCol-lineLen)
 			} else {
 				line += " "
 			}
-			line += r.status
+			line += statusBlock
 		}
+
 		if r.metrics != "" {
-			if r.annotation != "" {
-				line += " " + r.annotation
-			}
-			// Pad to metrics column
 			currentLen := visibleLen(line)
 			if currentLen < metricsPadCol {
 				line += strings.Repeat(" ", metricsPadCol-currentLen)
@@ -717,9 +744,15 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 				line += " "
 			}
 			line += r.metrics
-		} else if r.annotation != "" {
+		} else if r.annotation != "" && r.status == "" && !anyMetrics {
+			// Annotation-only row without metrics context: append inline.
+			line += " " + r.annotation
+		} else if r.annotation != "" && r.status == "" && statusBlock == "" {
+			// Annotation-only row (no metrics on this row, but metrics elsewhere):
+			// still append inline since it's not part of a right-aligned block.
 			line += " " + r.annotation
 		}
+
 		builtLines = append(builtLines, strings.TrimRight(line, " "))
 	}
 
