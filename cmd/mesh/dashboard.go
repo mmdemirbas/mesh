@@ -67,6 +67,8 @@ func runDashboard(ctx context.Context, cfg *config.Config, nodeName string, conf
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
+	startTime := time.Now()
+
 	// Enter alternate screen buffer and hide cursor
 	fmt.Print("\033[?1049h\033[?25l")
 	defer fmt.Print("\033[?25h\033[?1049l") // show cursor, leave alternate screen
@@ -75,15 +77,17 @@ func runDashboard(ctx context.Context, cfg *config.Config, nodeName string, conf
 		var lines []string
 
 		// Header
-		header := fmt.Sprintf("%s%smesh %s%s | pid %d | %s",
-			cBold, cCyan, nodeName, cReset, os.Getpid(), time.Now().Format("15:04:05"))
+		uptime := time.Since(startTime).Truncate(time.Second)
+		header := fmt.Sprintf("%s%smesh %s%s | pid %d | %s | up %s",
+			cBold, cCyan, nodeName, cReset, os.Getpid(), time.Now().Format("15:04:05"), uptime)
+		lines = append(lines, header)
 		if configPath != "" {
-			header += fmt.Sprintf(" | config: %s%s%s", cGray, configPath, cReset)
+			lines = append(lines, fmt.Sprintf("  %sconfig: %s%s", cGray, configPath, cReset))
 		}
 		if logFilePath != "" {
-			header += fmt.Sprintf(" | log: %s%s%s", cGray, logFilePath, cReset)
+			lines = append(lines, fmt.Sprintf("  %slog:    %s%s", cGray, logFilePath, cReset))
 		}
-		lines = append(lines, header, "")
+		lines = append(lines, "")
 
 		// Status body
 		statusOutput, statusWidth := renderStatus(cfg, state.Global.Snapshot(), state.Global.SnapshotMetrics(), nodeName)

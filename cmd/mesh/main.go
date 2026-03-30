@@ -229,7 +229,7 @@ func upCmd(nodeName, configPath string) {
 	}
 
 	// Phase 2: Set up log destination — file (dashboard mode) or stderr (classic mode).
-	ring := newLogRing(15)
+	ring := newLogRing(10)
 	var logFilePath string
 
 	if useDashboard {
