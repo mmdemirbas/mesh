@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -297,6 +298,9 @@ func upCmd(nodeNames []string, configPath string) {
 			logFilePath = ""
 		} else {
 			defer logFile.Close()
+			// Redirect runtime crash output (panics) to the log file so they
+			// are not lost when running in dashboard (alternate screen) mode.
+			_ = debug.SetCrashOutput(logFile, debug.CrashOptions{})
 			logHandler = tint.NewHandler(logFile, &tint.Options{
 				Level:      logLevel,
 				TimeFormat: "15:04:05.000",
