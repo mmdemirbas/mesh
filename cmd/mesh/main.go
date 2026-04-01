@@ -363,10 +363,7 @@ func upCmd(nodeNames []string, configPath string) {
 			defer func(n string) { _ = os.Remove(portFilePath(n)) }(name)
 		}
 
-		adminSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(state.Global.Snapshot())
-		})}
+		adminSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: buildAdminMux(ring)}
 		go func() { _ = adminSrv.Serve(adminLn) }()
 		context.AfterFunc(ctx, func() { _ = adminSrv.Close() })
 	}
