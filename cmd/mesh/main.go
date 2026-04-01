@@ -366,7 +366,9 @@ func upCmd(nodeNames []string, configPath string) {
 	// Disabled when admin_addr is "off" in the node config.
 	if adminAddr != "off" {
 		adminLn, err := net.Listen("tcp", adminAddr)
-		if err == nil {
+		if err != nil {
+			log.Warn("admin server failed to start", "addr", adminAddr, "err", err)
+		} else {
 			port := adminLn.Addr().(*net.TCPAddr).Port
 			portStr := []byte(strconv.Itoa(port))
 			for _, name := range nodeNames {
