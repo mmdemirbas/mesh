@@ -31,6 +31,22 @@ import (
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
+// SSH server rate limiting and eviction constants.
+const (
+	// rateLimitPerSec / rateLimitBurst cap auth attempts per remote IP.
+	rateLimitPerSec = 5
+	rateLimitBurst  = 5
+
+	// limiterEvictInterval is how often the eviction goroutine runs.
+	limiterEvictInterval = 5 * time.Minute
+	// limiterStaleAfter is the idle duration before normal eviction.
+	limiterStaleAfter = 10 * time.Minute
+	// limiterPressureAfter is the idle duration used when the map is at capacity.
+	limiterPressureAfter = 2 * time.Minute
+	// limiterMaxEntries is the maximum number of per-IP limiters before aggressive eviction.
+	limiterMaxEntries = 10000
+)
+
 // authFailuresByIP tracks cumulative SSH auth rejection counts per remote IP.
 // Values are *atomic.Int64 to allow lock-free increments.
 var authFailuresByIP sync.Map
@@ -82,7 +98,7 @@ func (s *SSHServer) Run(ctx context.Context) error {
 
 	// Periodically evict stale rate limiter entries to prevent unbounded memory growth.
 	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(limiterEvictInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -91,7 +107,7 @@ func (s *SSHServer) Run(ctx context.Context) error {
 			case <-ticker.C:
 				limitersMu.Lock()
 				for ip, entry := range limiters {
-					if time.Since(entry.lastSeen) > 10*time.Minute {
+					if time.Since(entry.lastSeen) > limiterStaleAfter {
 						delete(limiters, ip)
 					}
 				}
@@ -110,20 +126,20 @@ func (s *SSHServer) Run(ctx context.Context) error {
 			limitersMu.Lock()
 			entry, exists := limiters[ip]
 			if !exists {
-				if len(limiters) > 10000 {
-					// Aggressive eviction: remove entries older than 2 minutes under pressure
+				if len(limiters) > limiterMaxEntries {
+					// Aggressive eviction: remove entries older than limiterPressureAfter under capacity pressure.
 					for eIP, e := range limiters {
-						if time.Since(e.lastSeen) > 2*time.Minute {
+						if time.Since(e.lastSeen) > limiterPressureAfter {
 							delete(limiters, eIP)
 						}
 					}
-					if len(limiters) > 10000 {
+					if len(limiters) > limiterMaxEntries {
 						limitersMu.Unlock()
 						s.log.Warn("Rate limiter map at capacity after eviction, rejecting new IP", "ip", ip, "size", len(limiters))
 						return nil, fmt.Errorf("server under heavy load, connection rejected")
 					}
 				}
-				entry = &limiterEntry{limiter: rate.NewLimiter(5, 5)}
+				entry = &limiterEntry{limiter: rate.NewLimiter(rateLimitPerSec, rateLimitBurst)}
 				limiters[ip] = entry
 			}
 			entry.lastSeen = time.Now()
