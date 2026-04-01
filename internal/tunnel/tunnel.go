@@ -87,7 +87,7 @@ func (s *SSHServer) Run(ctx context.Context) error {
 	}()
 
 	sshCfg := &ssh.ServerConfig{
-		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) { //nolint:gosec // G408: rate-limiter state is shared by design; key verification happens inside this callback
 			tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr)
 			if !ok {
 				return nil, fmt.Errorf("unsupported address type: %T", conn.RemoteAddr())
@@ -373,7 +373,7 @@ func (c *SSHClient) buildAuthMethods(id string) ([]ssh.AuthMethod, error) {
 func runPasswordCommand(command string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: intentional — runs user-configured password_command
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -472,7 +472,7 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 
 		dialer := net.Dialer{Timeout: sshCfg.Timeout, Control: dialerControlIPQoS(interactiveTos)}
 		t0 := time.Now()
-		conn, err := dialer.DialContext(ctx, "tcp", hostPort)
+		conn, err := dialer.DialContext(ctx, "tcp", hostPort) //nolint:gosec // G704: host is user-configured SSH target, not untrusted input
 		if err != nil {
 			state.Global.Update("connection", id, state.Retrying, err.Error())
 			log.Warn("Target unreachable", "error", err)
@@ -1303,7 +1303,7 @@ func parseTarget(target string) (user, host string) {
 // retryDelay returns the base duration plus random jitter up to 25% of base,
 // preventing thundering herd reconnection storms.
 func retryDelay(base time.Duration) time.Duration {
-	jitter := time.Duration(rand.Int63n(int64(base / 4)))
+	jitter := time.Duration(rand.Int63n(int64(base / 4))) //nolint:gosec // G404: non-cryptographic jitter for retry backoff
 	return base + jitter
 }
 

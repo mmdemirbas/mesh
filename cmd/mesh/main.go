@@ -790,7 +790,7 @@ func removePidFile(nodeName string) {
 func checkPid(pid int) bool {
 	if runtime.GOOS == "windows" {
 		// FindProcess always succeeds on Windows. Instead, explicitly poll tasklist.
-		cmd := exec.Command("tasklist", "/NH", "/FI", fmt.Sprintf("PID eq %d", pid))
+		cmd := exec.Command("tasklist", "/NH", "/FI", fmt.Sprintf("PID eq %d", pid)) //nolint:gosec // G204: pid is int, format string is fixed
 		output, err := cmd.Output()
 		if err != nil {
 			return false

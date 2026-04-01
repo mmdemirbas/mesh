@@ -312,7 +312,7 @@ func (n *Node) processPayload(p Payload, peerHostPort string) {
 
 func (n *Node) pullHTTP(peerAddr string) {
 	slog.Debug("Making outbound HTTP GET pull request", "peer", peerAddr)
-	resp, err := n.httpClient.Get(fmt.Sprintf("http://%s/clip", peerAddr))
+	resp, err := n.httpClient.Get(fmt.Sprintf("http://%s/clip", peerAddr)) //nolint:gosec // G704: peer addresses are user-configured, not untrusted input
 	if err != nil || resp.StatusCode != 200 {
 		status := 0
 		if resp != nil {
@@ -451,7 +451,7 @@ func (n *Node) downloadFile(fileID, fileName, peerAddr string) error {
 		return fmt.Errorf("unsafe file name: %q", fileName)
 	}
 
-	resp, err := n.httpClient.Get(fmt.Sprintf("http://%s/files/%s", peerAddr, safeID))
+	resp, err := n.httpClient.Get(fmt.Sprintf("http://%s/files/%s", peerAddr, safeID)) //nolint:gosec // G704: peer addresses are user-configured, not untrusted input
 	if err != nil || resp.StatusCode != 200 {
 		return err
 	}
@@ -652,7 +652,7 @@ func hashFilePaths(paths []string) string {
 	// Fast path: single path (common case) avoids copy+sort+join.
 	if len(paths) == 1 {
 		h := sha256.Sum256([]byte(paths[0]))
-		return hex.EncodeToString(h[:])
+		return hex.EncodeToString(h[:]) //nolint:gosec // G602: false positive — sha256.Sum256 always returns [32]byte
 	}
 	// Check if already sorted.
 	needsSort := false
@@ -732,7 +732,7 @@ var utf8Env = sync.OnceValue(func() []string {
 
 // clipCmd creates an exec.Cmd with UTF-8 locale forced.
 func clipCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: intentional — runs OS clipboard tool with known fixed arguments
 
 	// Deep copy the environment slice to prevent StartProcess memory violations
 	// when the OS level iterates over the slice concurrently.

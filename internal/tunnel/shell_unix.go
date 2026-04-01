@@ -178,7 +178,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 				}
 
 				// Utilize context to enforce reaping on daemon exit
-				cmd = exec.CommandContext(ctx, name, args...)
+				cmd = exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: intentional — launches user's login shell
 				cmd.Env = sessionEnv(shell, termName)
 				if home, err := os.UserHomeDir(); err == nil {
 					cmd.Dir = home
