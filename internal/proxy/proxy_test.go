@@ -59,6 +59,57 @@ func TestDialViaSocks5_Success(t *testing.T) {
 	}
 }
 
+// TestDialViaSocks5_IPv6BindResponse verifies the client handles a SOCKS5
+// server that returns an IPv6 bind address in its CONNECT response (atyp=0x04).
+// This exercises the 18-byte read path; a 10-byte buffer would panic here.
+func TestDialViaSocks5_IPv6BindResponse(t *testing.T) {
+	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer targetLn.Close()
+
+	go func() {
+		conn, err := targetLn.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.Copy(conn, conn)
+		_ = conn.(*net.TCPConn).CloseWrite()
+	}()
+
+	socksLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socksLn.Close()
+
+	go func() {
+		conn, err := socksLn.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		mockSocks5ServerIPv6Bind(t, conn, targetLn.Addr().String())
+	}()
+
+	conn, err := DialViaSocks5(net.Dial, socksLn.Addr().String(), targetLn.Addr().String())
+	if err != nil {
+		t.Fatalf("DialViaSocks5 with IPv6 bind addr failed: %v", err)
+	}
+	defer conn.Close()
+
+	testData := []byte("ipv6-bind-response")
+	_, _ = conn.Write(testData)
+	_ = conn.(*net.TCPConn).CloseWrite()
+
+	got, _ := io.ReadAll(conn)
+	if string(got) != string(testData) {
+		t.Errorf("round-trip got %q, want %q", got, testData)
+	}
+}
+
 func TestDialViaSocks5_ConnectionRefused(t *testing.T) {
 	socksLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -292,4 +343,49 @@ func mockSocks5ServerReject(conn net.Conn) {
 	}
 
 	_, _ = conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+}
+
+// mockSocks5ServerIPv6Bind responds to CONNECT with an IPv6 bind address
+// (atyp=0x04, 16-byte addr + 2-byte port) then relays traffic to targetAddr.
+func mockSocks5ServerIPv6Bind(t *testing.T, conn net.Conn, targetAddr string) {
+	t.Helper()
+	buf := make([]byte, 258)
+
+	_, _ = io.ReadFull(conn, buf[:2])
+	_, _ = io.ReadFull(conn, buf[:buf[1]])
+	_, _ = conn.Write([]byte{0x05, 0x00})
+
+	_, _ = io.ReadFull(conn, buf[:4])
+	switch buf[3] {
+	case 0x01:
+		_, _ = io.ReadFull(conn, buf[:6])
+	case 0x03:
+		_, _ = io.ReadFull(conn, buf[:1])
+		_, _ = io.ReadFull(conn, buf[:buf[0]+2])
+	case 0x04:
+		_, _ = io.ReadFull(conn, buf[:18])
+	}
+
+	targetConn, err := net.DialTimeout("tcp", targetAddr, time.Second)
+	if err != nil {
+		// Reply with IPv6 bind addr but failed status
+		_, _ = conn.Write(append([]byte{0x05, 0x05, 0x00, 0x04}, make([]byte, 18)...))
+		return
+	}
+	defer targetConn.Close()
+
+	// Success reply with IPv6 bind address (atyp=0x04): ver=5, rep=0, rsv=0, atyp=4, addr=16×0, port=2×0
+	resp := make([]byte, 4+16+2)
+	resp[0], resp[1], resp[2], resp[3] = 0x05, 0x00, 0x00, 0x04
+	_, _ = conn.Write(resp)
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(targetConn, conn)
+		_ = targetConn.(*net.TCPConn).CloseWrite()
+		close(done)
+	}()
+	_, _ = io.Copy(conn, targetConn)
+	_ = conn.(*net.TCPConn).CloseWrite()
+	<-done
 }

@@ -193,7 +193,7 @@ func DialViaSocks5(baseDialer func(string, string) (net.Conn, error), socksAddr,
 		return nil, fmt.Errorf("socks5 connect write: %w", err)
 	}
 
-	resp := make([]byte, 10)
+	resp := make([]byte, 18) // 18 = max bind addr response: IPv6 (16) + port (2)
 	if _, err := io.ReadFull(conn, resp[:4]); err != nil {
 		conn.Close()
 		return nil, err
