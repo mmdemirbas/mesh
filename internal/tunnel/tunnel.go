@@ -1448,14 +1448,19 @@ func startKeepAlive(ctx context.Context, conn ssh.Conn, options map[string]strin
 
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
+	keepAliveLoop(ctx, ticker.C, conn, reqType, countMax, log)
+}
 
+// keepAliveLoop sends periodic heartbeat requests on conn until ctx is cancelled,
+// the connection is closed, or consecutive failures exceed countMax.
+// Extracted for testability: callers inject the tick channel so tests run without real timers.
+func keepAliveLoop(ctx context.Context, tick <-chan time.Time, conn ssh.Conn, reqType string, countMax int, log *slog.Logger) {
 	failCount := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			// Send global request as heartbeat
+		case <-tick:
 			_, _, err := conn.SendRequest(reqType, true, nil)
 			if err != nil {
 				failCount++

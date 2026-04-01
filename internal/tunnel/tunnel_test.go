@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
@@ -8,12 +9,15 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/mmdemirbas/mesh/internal/config"
+	"github.com/mmdemirbas/mesh/internal/state"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -605,5 +609,489 @@ func TestRecordAuthFailure_Concurrent(t *testing.T) {
 	}
 	if got := v.(*atomic.Int64).Load(); got != n {
 		t.Errorf("concurrent count = %d, want %d", got, n)
+	}
+}
+
+// --- stubSSHConn: minimal ssh.Conn implementation for keepAlive tests ---
+
+type stubSSHConn struct {
+	sendFn func(name string, wantReply bool, payload []byte) (bool, []byte, error)
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newStubConn(sendFn func(string, bool, []byte) (bool, []byte, error)) *stubSSHConn {
+	return &stubSSHConn{sendFn: sendFn, closed: make(chan struct{})}
+}
+
+func (s *stubSSHConn) SendRequest(name string, wantReply bool, payload []byte) (bool, []byte, error) {
+	return s.sendFn(name, wantReply, payload)
+}
+func (s *stubSSHConn) Close() error {
+	s.once.Do(func() { close(s.closed) })
+	return nil
+}
+func (s *stubSSHConn) RemoteAddr() net.Addr                                               { return &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 22} }
+func (s *stubSSHConn) LocalAddr() net.Addr                                                { return &net.TCPAddr{} }
+func (s *stubSSHConn) User() string                                                       { return "" }
+func (s *stubSSHConn) SessionID() []byte                                                  { return nil }
+func (s *stubSSHConn) ClientVersion() []byte                                              { return nil }
+func (s *stubSSHConn) ServerVersion() []byte                                              { return nil }
+func (s *stubSSHConn) OpenChannel(string, []byte) (ssh.Channel, <-chan *ssh.Request, error) {
+	return nil, nil, errors.New("not implemented")
+}
+func (s *stubSSHConn) Wait() error { return nil }
+
+// --- startKeepAlive (options parsing) ---
+
+func TestStartKeepAlive_ZeroIntervalReturnsImmediately(t *testing.T) {
+	conn := newStubConn(func(string, bool, []byte) (bool, []byte, error) {
+		t.Error("SendRequest must not be called when interval is 0")
+		return true, nil, nil
+	})
+	done := make(chan struct{})
+	go func() {
+		startKeepAlive(context.Background(), conn, nil, false, slog.Default())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("startKeepAlive did not return immediately for zero interval")
+	}
+}
+
+func TestStartKeepAlive_NegativeIntervalReturnsImmediately(t *testing.T) {
+	conn := newStubConn(func(string, bool, []byte) (bool, []byte, error) {
+		t.Error("SendRequest must not be called when interval is negative")
+		return true, nil, nil
+	})
+	done := make(chan struct{})
+	go func() {
+		opts := map[string]string{"ServerAliveInterval": "-1"}
+		startKeepAlive(context.Background(), conn, opts, false, slog.Default())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("startKeepAlive did not return immediately for negative interval")
+	}
+}
+
+// --- keepAliveLoop ---
+
+func TestKeepAliveLoop_ContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	tick := make(chan time.Time)
+	conn := newStubConn(func(string, bool, []byte) (bool, []byte, error) {
+		return true, nil, nil
+	})
+	done := make(chan struct{})
+	go func() {
+		keepAliveLoop(ctx, tick, conn, "keepalive@openssh.com", 3, slog.Default())
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("keepAliveLoop did not stop after context cancellation")
+	}
+	select {
+	case <-conn.closed:
+		t.Error("connection should not be closed on clean context cancellation")
+	default:
+	}
+}
+
+func TestKeepAliveLoop_SendsRequestType(t *testing.T) {
+	tick := make(chan time.Time, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	var gotType string
+	conn := newStubConn(func(name string, _ bool, _ []byte) (bool, []byte, error) {
+		gotType = name
+		cancel() // stop after first send
+		return true, nil, nil
+	})
+	tick <- time.Time{}
+	keepAliveLoop(ctx, tick, conn, "keepalive@golang.org", 3, slog.Default())
+	if gotType != "keepalive@golang.org" {
+		t.Errorf("request type = %q, want %q", gotType, "keepalive@golang.org")
+	}
+}
+
+func TestKeepAliveLoop_SoftErrorsCloseAfterCountMax(t *testing.T) {
+	// countMax=2: failures 1 and 2 are tolerated; failure 3 closes connection.
+	tick := make(chan time.Time, 10)
+	conn := newStubConn(func(string, bool, []byte) (bool, []byte, error) {
+		return false, nil, errors.New("soft error")
+	})
+	go keepAliveLoop(context.Background(), tick, conn, "keepalive", 2, slog.Default())
+	tick <- time.Time{}
+	tick <- time.Time{}
+	tick <- time.Time{}
+	select {
+	case <-conn.closed:
+	case <-time.After(time.Second):
+		t.Fatal("connection not closed after exceeding countMax")
+	}
+}
+
+func TestKeepAliveLoop_HardErrorClosesImmediately(t *testing.T) {
+	tick := make(chan time.Time, 1)
+	conn := newStubConn(func(string, bool, []byte) (bool, []byte, error) {
+		return false, nil, io.EOF // io.EOF is a hard error
+	})
+	done := make(chan struct{})
+	go func() {
+		keepAliveLoop(context.Background(), tick, conn, "keepalive", 100, slog.Default())
+		close(done)
+	}()
+	tick <- time.Time{}
+	select {
+	case <-conn.closed:
+	case <-time.After(time.Second):
+		t.Fatal("connection not closed immediately after hard error")
+	}
+	<-done
+}
+
+func TestKeepAliveLoop_SuccessResetsfailCount(t *testing.T) {
+	// 2 soft failures, then 1 success, then 1 more soft failure.
+	// With countMax=2, the connection must NOT be closed: after the reset, only 1
+	// failure has accumulated, which is below the threshold.
+	tick := make(chan time.Time, 4)
+	processed := make(chan struct{}, 4)
+	callNum := 0
+	conn := newStubConn(func(string, bool, []byte) (bool, []byte, error) {
+		callNum++
+		n := callNum
+		defer func() { processed <- struct{}{} }()
+		if n == 3 {
+			return true, nil, nil // success on 3rd call resets failCount
+		}
+		return false, nil, errors.New("soft")
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go keepAliveLoop(ctx, tick, conn, "keepalive", 2, slog.Default())
+
+	for range 4 {
+		tick <- time.Time{}
+	}
+	for range 4 {
+		select {
+		case <-processed:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for tick to be processed")
+		}
+	}
+	select {
+	case <-conn.closed:
+		t.Error("connection closed unexpectedly after fail count was reset by success")
+	default:
+	}
+}
+
+// --- loadSigner ---
+
+func TestLoadSigner_ValidKey(t *testing.T) {
+	path := generateTestKey(t)
+	signer, err := loadSigner(path)
+	if err != nil {
+		t.Fatalf("loadSigner returned error: %v", err)
+	}
+	if signer == nil {
+		t.Fatal("loadSigner returned nil signer")
+	}
+	if signer.PublicKey() == nil {
+		t.Error("signer has nil public key")
+	}
+}
+
+func TestLoadSigner_FileNotFound(t *testing.T) {
+	_, err := loadSigner(t.TempDir() + "/nonexistent_key")
+	if err == nil {
+		t.Error("expected error for missing file, got nil")
+	}
+}
+
+func TestLoadSigner_InvalidData(t *testing.T) {
+	path := t.TempDir() + "/bad_key"
+	if err := os.WriteFile(path, []byte("this is not a private key"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadSigner(path)
+	if err == nil {
+		t.Error("expected error for invalid key data, got nil")
+	}
+}
+
+// --- loadAuthorizedKeys ---
+
+func writeAuthorizedKeys(t *testing.T, keys ...ssh.PublicKey) string {
+	t.Helper()
+	var sb strings.Builder
+	for _, k := range keys {
+		sb.Write(ssh.MarshalAuthorizedKey(k))
+	}
+	path := t.TempDir() + "/authorized_keys"
+	if err := os.WriteFile(path, []byte(sb.String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLoadAuthorizedKeys_SingleKey(t *testing.T) {
+	key := newTestPublicKey(t)
+	path := writeAuthorizedKeys(t, key)
+	got, err := loadAuthorizedKeys(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+}
+
+func TestLoadAuthorizedKeys_MultipleKeys(t *testing.T) {
+	keys := []ssh.PublicKey{newTestPublicKey(t), newTestPublicKey(t), newTestPublicKey(t)}
+	path := writeAuthorizedKeys(t, keys...)
+	got, err := loadAuthorizedKeys(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+}
+
+func TestLoadAuthorizedKeys_SkipsBlankAndCommentLines(t *testing.T) {
+	key := newTestPublicKey(t)
+	content := "\n# this is a comment\n\n" + string(ssh.MarshalAuthorizedKey(key)) + "\n# another comment\n"
+	path := t.TempDir() + "/authorized_keys"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadAuthorizedKeys(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+}
+
+func TestLoadAuthorizedKeys_ContinuesPastInvalidLine(t *testing.T) {
+	key := newTestPublicKey(t)
+	content := string(ssh.MarshalAuthorizedKey(key)) + "not-a-valid-key\n" + string(ssh.MarshalAuthorizedKey(key))
+	path := t.TempDir() + "/authorized_keys"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadAuthorizedKeys(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The two valid keys are loaded; the invalid line is skipped.
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2 (invalid line should be skipped)", len(got))
+	}
+}
+
+func TestLoadAuthorizedKeys_EmptyFile(t *testing.T) {
+	path := t.TempDir() + "/authorized_keys"
+	if err := os.WriteFile(path, []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadAuthorizedKeys(path)
+	if err == nil {
+		t.Error("expected error for empty file, got nil")
+	}
+}
+
+func TestLoadAuthorizedKeys_OnlyComments(t *testing.T) {
+	path := t.TempDir() + "/authorized_keys"
+	if err := os.WriteFile(path, []byte("# comment only\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadAuthorizedKeys(path)
+	if err == nil {
+		t.Error("expected error for comment-only file, got nil")
+	}
+}
+
+func TestLoadAuthorizedKeys_FileNotFound(t *testing.T) {
+	_, err := loadAuthorizedKeys(t.TempDir() + "/nonexistent")
+	if err == nil {
+		t.Error("expected error for missing file, got nil")
+	}
+}
+
+// --- handleCancelTCPIPForward ---
+
+// cancelPayload returns a properly marshalled tcpip-forward cancel payload.
+func cancelPayload(t *testing.T, addr string) []byte {
+	t.Helper()
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", addr, err)
+	}
+	port, _ := strconv.Atoi(portStr)
+	return ssh.Marshal(struct {
+		BindAddr string
+		BindPort uint32
+	}{host, uint32(port)})
+}
+
+func TestHandleCancelTCPIPForward_ClosesAndRemovesListener(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	var mu sync.Mutex
+	listeners := map[string]net.Listener{addr: ln}
+
+	req := &ssh.Request{WantReply: false, Payload: cancelPayload(t, addr)}
+	handleCancelTCPIPForward(req, &mu, listeners, slog.Default())
+
+	if len(listeners) != 0 {
+		t.Errorf("listeners map should be empty after cancel, got %v", listeners)
+	}
+	// Listener must be closed: Accept should return an error immediately.
+	_, err = ln.Accept()
+	if err == nil {
+		t.Error("expected error from closed listener, got nil")
+	}
+}
+
+func TestHandleCancelTCPIPForward_UnknownAddrNoOp(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	// Use a different addr in the payload — not in the map.
+	other, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherAddr := other.Addr().String()
+	other.Close()
+
+	var mu sync.Mutex
+	listeners := map[string]net.Listener{ln.Addr().String(): ln}
+
+	req := &ssh.Request{WantReply: false, Payload: cancelPayload(t, otherAddr)}
+	handleCancelTCPIPForward(req, &mu, listeners, slog.Default())
+
+	if len(listeners) != 1 {
+		t.Errorf("listeners map should be unchanged for unknown addr, got %v", listeners)
+	}
+}
+
+func TestHandleCancelTCPIPForward_BadPayload(t *testing.T) {
+	var mu sync.Mutex
+	listeners := map[string]net.Listener{}
+	// Malformed payload must not panic; WantReply=false avoids the nil-mux Reply call.
+	req := &ssh.Request{WantReply: false, Payload: []byte("garbage")}
+	handleCancelTCPIPForward(req, &mu, listeners, slog.Default())
+	if len(listeners) != 0 {
+		t.Error("bad payload must not modify the listeners map")
+	}
+}
+
+// --- acceptAndForward ---
+
+func TestAcceptAndForward_DataForwarded(t *testing.T) {
+	fwdLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Use net.Pipe for the target side: test controls both ends without a second TCP listener.
+	targetSide, dialerSide := net.Pipe()
+	dialer := func() (net.Conn, error) { return dialerSide, nil }
+
+	go acceptAndForward(context.Background(), fwdLn, dialer, slog.Default(), nil)
+	t.Cleanup(func() { fwdLn.Close() })
+
+	client, err := net.Dial("tcp", fwdLn.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	defer targetSide.Close()
+
+	if _, err := client.Write([]byte("hello")); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(targetSide, buf); err != nil {
+		t.Fatalf("target read: %v", err)
+	}
+	if string(buf) != "hello" {
+		t.Errorf("got %q, want %q", buf, "hello")
+	}
+}
+
+func TestAcceptAndForward_DialerErrorDropsConnection(t *testing.T) {
+	fwdLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialer := func() (net.Conn, error) { return nil, errors.New("dial failed") }
+
+	go acceptAndForward(context.Background(), fwdLn, dialer, slog.Default(), nil)
+	t.Cleanup(func() { fwdLn.Close() })
+
+	client, err := net.Dial("tcp", fwdLn.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	// When the dialer fails, acceptAndForward closes the accepted conn.
+	// The client should see EOF or a connection reset.
+	buf := make([]byte, 1)
+	_, err = client.Read(buf)
+	if err == nil {
+		t.Error("expected EOF after dialer failure, got nil")
+	}
+}
+
+func TestAcceptAndForward_StreamsMetric(t *testing.T) {
+	fwdLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetSide, dialerSide := net.Pipe()
+	dialer := func() (net.Conn, error) { return dialerSide, nil }
+
+	m := &state.Metrics{}
+	go acceptAndForward(context.Background(), fwdLn, dialer, slog.Default(), m)
+	t.Cleanup(func() { fwdLn.Close() })
+
+	client, err := net.Dial("tcp", fwdLn.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	defer targetSide.Close()
+
+	// Write data so we can confirm the forwarding goroutine has started
+	// (Streams.Add(1) is called before CountedBiCopy, so it has run by the
+	// time the first byte reaches the target side).
+	if _, err := client.Write([]byte("x")); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	buf := make([]byte, 1)
+	if _, err := io.ReadFull(targetSide, buf); err != nil {
+		t.Fatalf("target read: %v", err)
+	}
+	if got := m.Streams.Load(); got != 1 {
+		t.Errorf("streams = %d, want 1 while connection is active", got)
 	}
 }
