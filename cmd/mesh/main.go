@@ -320,7 +320,12 @@ func upCmd(nodeNames []string, configPath string) {
 			Level:      logLevel,
 			TimeFormat: "15:04:05.000",
 		})
-		log = slog.New(&humanLogHandler{Handler: logHandler})
+		ringHandler := tint.NewHandler(ring, &tint.Options{
+			Level:      logLevel,
+			TimeFormat: "15:04:05.000",
+			NoColor:    true,
+		})
+		log = slog.New(&humanLogHandler{Handler: &multiHandler{plain: logHandler, color: ringHandler}})
 		slog.SetDefault(log)
 	}
 
