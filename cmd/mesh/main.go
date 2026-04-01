@@ -284,7 +284,7 @@ func upCmd(nodeNames []string, configPath string) {
 	if useDashboard {
 		home, _ := os.UserHomeDir()
 		logDir := filepath.Join(home, ".mesh", "log")
-		_ = os.MkdirAll(logDir, 0755)
+		_ = os.MkdirAll(logDir, 0750)
 		// Single node uses node name for log file; multi-node uses "mesh.log"
 		logFileName := "mesh.log"
 		if len(nodeNames) == 1 {
@@ -358,7 +358,7 @@ func upCmd(nodeNames []string, configPath string) {
 			defer os.Remove(portFilePath(name))
 		}
 
-		adminSrv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		adminSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(state.Global.Snapshot())
 		})}

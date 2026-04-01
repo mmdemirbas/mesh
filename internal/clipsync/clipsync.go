@@ -103,7 +103,7 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 		return nil, fmt.Errorf("clipsync: cannot determine home directory: %w", err)
 	}
 	filesDir := filepath.Join(home, ".mesh", "clipsync")
-	if err := os.MkdirAll(filesDir, 0755); err != nil {
+	if err := os.MkdirAll(filesDir, 0750); err != nil {
 		return nil, fmt.Errorf("clipsync: cannot create files directory: %w", err)
 	}
 
@@ -284,7 +284,7 @@ func (n *Node) processPayload(p Payload, peerHostPort string) {
 			}
 			destPath := filepath.Join(n.filesDir, safeName)
 			if len(f.Data) > 0 {
-				if err := os.WriteFile(destPath, f.Data, 0644); err != nil {
+				if err := os.WriteFile(destPath, f.Data, 0600); err != nil {
 					slog.Warn("Failed to save clipboard file", "file", f.FileName, "error", err)
 					continue
 				}
@@ -560,7 +560,7 @@ func (n *Node) handleFileBroadcast(paths []string) {
 			slog.Warn("Failed to read clipboard file", "path", src, "error", err)
 			continue
 		}
-		if err := os.WriteFile(dest, input, 0644); err != nil {
+		if err := os.WriteFile(dest, input, 0600); err != nil {
 			slog.Warn("Failed to store clipboard file", "path", dest, "error", err)
 			continue
 		}
