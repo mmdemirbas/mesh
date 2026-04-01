@@ -457,7 +457,7 @@ func (n *Node) downloadFile(fileID, fileName, peerAddr string) error {
 	}
 	defer resp.Body.Close()
 
-	dst, err := os.Create(filepath.Join(n.filesDir, safeName))
+	dst, err := os.Create(filepath.Join(n.filesDir, safeName)) //nolint:gosec // G304: safeName is filepath.Base-sanitized above
 	if err != nil {
 		return err
 	}
@@ -555,12 +555,12 @@ func (n *Node) handleFileBroadcast(paths []string) {
 
 		fileID := generateID() + filepath.Ext(fileName)
 		dest := filepath.Join(n.filesDir, fileID)
-		input, err := os.ReadFile(src)
+		input, err := os.ReadFile(src) //nolint:gosec // G304: src is a local clipboard file path returned by the OS, not user input
 		if err != nil {
 			slog.Warn("Failed to read clipboard file", "path", src, "error", err)
 			continue
 		}
-		if err := os.WriteFile(dest, input, 0600); err != nil {
+		if err := os.WriteFile(dest, input, 0600); err != nil { //nolint:gosec // G703: dest = filesDir+generateID()+safe-ext; no traversal possible
 			slog.Warn("Failed to store clipboard file", "path", dest, "error", err)
 			continue
 		}
@@ -651,8 +651,8 @@ func hashBytes(b []byte) string {
 func hashFilePaths(paths []string) string {
 	// Fast path: single path (common case) avoids copy+sort+join.
 	if len(paths) == 1 {
-		h := sha256.Sum256([]byte(paths[0]))
-		return hex.EncodeToString(h[:]) //nolint:gosec // G602: false positive — sha256.Sum256 always returns [32]byte
+		h := sha256.Sum256([]byte(paths[0])) //nolint:gosec // G602: false positive — len(paths)==1 is checked above; sha256 always returns [32]byte
+		return hex.EncodeToString(h[:])
 	}
 	// Check if already sorted.
 	needsSort := false
@@ -831,7 +831,7 @@ func readClipboardFormats() (formats []ClipFormat) {
 func loadFormatsFromDir(dir string) []ClipFormat {
 	var formats []ClipFormat
 	for _, entry := range clipFormatTable {
-		data, err := os.ReadFile(filepath.Join(dir, entry.fileName))
+		data, err := os.ReadFile(filepath.Join(dir, entry.fileName)) //nolint:gosec // G304: dir is the node's private filesDir; entry.fileName is a fixed constant
 		if err != nil || len(data) == 0 {
 			continue
 		}
@@ -843,7 +843,7 @@ func loadFormatsFromDir(dir string) []ClipFormat {
 
 	// Windows stores CF_HTML in a wrapper; extract the fragment.
 	if runtime.GOOS == "windows" {
-		cfdata, err := os.ReadFile(filepath.Join(dir, "text_html_cf"))
+		cfdata, err := os.ReadFile(filepath.Join(dir, "text_html_cf")) //nolint:gosec // G304: dir is the node's private filesDir; filename is a fixed constant
 		if err == nil && len(cfdata) > 0 {
 			if frag := extractCFHTMLFragment(string(cfdata)); frag != "" {
 				formats = append(formats, ClipFormat{MimeType: "text/html", Data: []byte(frag)})
@@ -1357,7 +1357,7 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 			// Also register ourselves via HTTP as a firewall-safe fallback.
 			// UDP unicast replies may be blocked by firewalls; HTTP connections
 			// are outgoing from our side, so they pass through.
-			go n.registerPeerHTTP(peerAddr)
+			go n.registerPeerHTTP(peerAddr) //nolint:gosec // G118: intentional background op; must outlive UDP packet handler
 		}
 		if needsPull {
 			slog.Debug("Peer advertised new clipboard hash, triggering pull", "peer", peerAddr, "hash", msg.Hash)
@@ -1591,7 +1591,7 @@ func (n *Node) refreshHTTPRegistration(ctx context.Context) {
 		n.peersMu.RUnlock()
 
 		for _, addr := range addrs {
-			go n.registerPeerHTTP(addr)
+			go n.registerPeerHTTP(addr) //nolint:gosec // G118: intentional background op; must outlive UDP beacon tick
 		}
 	}
 }

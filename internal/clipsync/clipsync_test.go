@@ -565,7 +565,7 @@ func TestSyncEndpoint_PushFilesWithoutData_PullBack(t *testing.T) {
 
 	// Pre-stage a file on the "sender" node's filesDir so /files/ can serve it
 	fileContent := []byte("pullable content")
-	_ = os.WriteFile(filepath.Join(n.filesDir, "pullme.txt"), fileContent, 0644)
+	_ = os.WriteFile(filepath.Join(n.filesDir, "pullme.txt"), fileContent, 0600)
 
 	// Now simulate a payload where Data is empty (receiver must pull)
 	payload := Payload{
@@ -666,7 +666,7 @@ func TestFilesEndpoint_ServesFiles(t *testing.T) {
 	defer cleanup()
 
 	content := []byte("served file content")
-	_ = os.WriteFile(filepath.Join(n.filesDir, "test.txt"), content, 0644)
+	_ = os.WriteFile(filepath.Join(n.filesDir, "test.txt"), content, 0600)
 
 	resp, err := http.Get(url + "/files/test.txt")
 	if err != nil {
@@ -686,7 +686,7 @@ func TestFilesEndpoint_ACLBlocks(t *testing.T) {
 	n, url, cleanup := newTestNode(t, []string{"none"})
 	defer cleanup()
 
-	_ = os.WriteFile(filepath.Join(n.filesDir, "secret.txt"), []byte("secret"), 0644)
+	_ = os.WriteFile(filepath.Join(n.filesDir, "secret.txt"), []byte("secret"), 0600)
 
 	resp, err := http.Get(url + "/files/secret.txt")
 	if err != nil {
@@ -887,9 +887,9 @@ func TestLoadFormatsFromDir(t *testing.T) {
 	dir := t.TempDir()
 
 	// Write some format files matching clipFormatTable entries
-	_ = os.WriteFile(filepath.Join(dir, "text_plain"), []byte("hello"), 0644)
-	_ = os.WriteFile(filepath.Join(dir, "text_html"), []byte("<b>hi</b>"), 0644)
-	_ = os.WriteFile(filepath.Join(dir, "image_png"), []byte("PNG-DATA"), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "text_plain"), []byte("hello"), 0600)
+	_ = os.WriteFile(filepath.Join(dir, "text_html"), []byte("<b>hi</b>"), 0600)
+	_ = os.WriteFile(filepath.Join(dir, "image_png"), []byte("PNG-DATA"), 0600)
 
 	formats := loadFormatsFromDir(dir)
 
@@ -923,7 +923,7 @@ func TestLoadFormatsFromDir_EmptyDir(t *testing.T) {
 
 func TestLoadFormatsFromDir_SkipsEmptyFiles(t *testing.T) {
 	dir := t.TempDir()
-	_ = os.WriteFile(filepath.Join(dir, "text_plain"), []byte{}, 0644)
+	_ = os.WriteFile(filepath.Join(dir, "text_plain"), []byte{}, 0600)
 
 	formats := loadFormatsFromDir(dir)
 	if len(formats) != 0 {
@@ -933,8 +933,8 @@ func TestLoadFormatsFromDir_SkipsEmptyFiles(t *testing.T) {
 
 func TestLoadFormatsFromDir_IgnoresUnknownFiles(t *testing.T) {
 	dir := t.TempDir()
-	_ = os.WriteFile(filepath.Join(dir, "unknown_format"), []byte("data"), 0644)
-	_ = os.WriteFile(filepath.Join(dir, "text_plain"), []byte("real"), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "unknown_format"), []byte("data"), 0600)
+	_ = os.WriteFile(filepath.Join(dir, "text_plain"), []byte("real"), 0600)
 
 	formats := loadFormatsFromDir(dir)
 	if len(formats) != 1 {
@@ -1022,8 +1022,8 @@ func TestSetWrittenHash(t *testing.T) {
 
 func TestPurgeFilesDir(t *testing.T) {
 	dir := t.TempDir()
-	_ = os.WriteFile(filepath.Join(dir, "old1.txt"), []byte("old"), 0644)
-	_ = os.WriteFile(filepath.Join(dir, "old2.txt"), []byte("old"), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "old1.txt"), []byte("old"), 0600)
+	_ = os.WriteFile(filepath.Join(dir, "old2.txt"), []byte("old"), 0600)
 
 	n := &Node{filesDir: dir}
 	n.purgeFilesDir()
@@ -1038,8 +1038,8 @@ func TestClearCurrentFiles(t *testing.T) {
 	dir := t.TempDir()
 	f1 := filepath.Join(dir, "a.txt")
 	f2 := filepath.Join(dir, "b.txt")
-	_ = os.WriteFile(f1, []byte("a"), 0644)
-	_ = os.WriteFile(f2, []byte("b"), 0644)
+	_ = os.WriteFile(f1, []byte("a"), 0600)
+	_ = os.WriteFile(f2, []byte("b"), 0600)
 
 	n := &Node{currentFiles: []string{f1, f2}}
 	n.clearCurrentFiles()

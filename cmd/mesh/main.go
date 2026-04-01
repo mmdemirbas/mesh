@@ -291,7 +291,7 @@ func upCmd(nodeNames []string, configPath string) {
 			logFileName = nodeNames[0] + ".log"
 		}
 		logFilePath = filepath.Join(logDir, logFileName)
-		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600) //nolint:gosec // G304: logFilePath is constructed from UserHomeDir + fixed path components
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not open log file %s: %v (falling back to stderr)\n", logFilePath, err)
 			useDashboard = false

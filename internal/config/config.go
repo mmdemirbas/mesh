@@ -177,7 +177,7 @@ func warnInsecurePermissions(path string) {
 // LoadUnvalidated reads and parses a config file without checking for runtime requirements (like file existence).
 func LoadUnvalidated(path string) (map[string]*Config, error) {
 	warnInsecurePermissions(path)
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is the user-specified config file path from the CLI
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}

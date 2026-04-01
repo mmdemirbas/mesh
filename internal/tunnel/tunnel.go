@@ -327,7 +327,7 @@ func (c *SSHClient) buildAuthMethods(id string) ([]ssh.AuthMethod, error) {
 		if sock == "" {
 			c.log.Warn("auth.agent=true but SSH_AUTH_SOCK not set")
 		} else {
-			conn, err := net.Dial("unix", sock)
+			conn, err := net.Dial("unix", sock) //nolint:gosec // G704: sock is SSH_AUTH_SOCK env var, not untrusted network input
 			if err != nil {
 				c.log.Warn("Could not connect to SSH agent", "error", err)
 			} else {
@@ -1247,7 +1247,7 @@ func acceptAndForward(ctx context.Context, listener net.Listener, dialer func() 
 // --- Utility functions ---
 
 func loadSigner(path string) (ssh.Signer, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is the user-configured SSH private key path
 	if err != nil {
 		return nil, err
 	}
@@ -1255,7 +1255,7 @@ func loadSigner(path string) (ssh.Signer, error) {
 }
 
 func loadAuthorizedKeys(path string) ([]ssh.PublicKey, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is the user-configured authorized_keys file path
 	if err != nil {
 		return nil, err
 	}
