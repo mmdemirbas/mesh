@@ -38,9 +38,7 @@ func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), 
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	if dialer == nil {
-		dialer = func(network, addr string) (net.Conn, error) {
-			return net.Dial(network, addr)
-		}
+		dialer = net.Dial
 	}
 
 	buf := make([]byte, 258)

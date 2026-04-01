@@ -390,16 +390,17 @@ func (c *SSHClient) buildSSHConfig(fset *config.ForwardSet, id string) (*ssh.Cli
 	opts := mergeOptions(c.cfg.Options, fset.Options)
 
 	var hostKeyCallback ssh.HostKeyCallback
-	if c.cfg.Auth.KnownHosts != "" {
+	switch {
+	case c.cfg.Auth.KnownHosts != "":
 		hkc, err := knownhosts.New(c.cfg.Auth.KnownHosts)
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("load known_hosts %s: %w", c.cfg.Auth.KnownHosts, err)
 		}
 		hostKeyCallback = hkc
-	} else if strings.ToLower(config.GetOption(opts, "StrictHostKeyChecking")) == "no" {
-		hostKeyCallback = ssh.InsecureIgnoreHostKey()
+	case strings.ToLower(config.GetOption(opts, "StrictHostKeyChecking")) == "no":
+		hostKeyCallback = ssh.InsecureIgnoreHostKey() //nolint:gosec // G106: explicit user opt-out via StrictHostKeyChecking=no
 		c.log.Warn("StrictHostKeyChecking=no is configured. Vulnerable to MITM attacks.")
-	} else {
+	default:
 		return nil, nil, 0, errors.New("SSH server identity cannot be verified: auth.known_hosts is not configured and StrictHostKeyChecking is not set to 'no'. " +
 			"Set auth.known_hosts to a known_hosts file, or add StrictHostKeyChecking: 'no' to options (insecure, allows MITM attacks)")
 	}

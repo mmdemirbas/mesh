@@ -363,11 +363,6 @@ func formatPeerIdentity(identity string) string {
 	return cGray + "(" + identity + ")" + cReset
 }
 
-// formatMetrics returns a compact gray metrics string from a metricsMap lookup.
-func formatMetrics(metricsMap map[string]*state.Metrics, key string) string {
-	return formatMetricsSnap(readMetrics(metricsMap[key]))
-}
-
 // compareAddr compares two address strings semantically by IP then port.
 func compareAddr(a, b string) bool {
 	return makeAddrKey(a).less(makeAddrKey(b))

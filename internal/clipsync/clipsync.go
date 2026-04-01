@@ -1210,7 +1210,7 @@ func writeFiles(paths []string) {
 		sb.WriteString("set urls to current application's NSMutableArray's new()\n")
 		for _, p := range paths {
 			esc := strings.ReplaceAll(strings.ReplaceAll(p, "\\", "\\\\"), "\"", "\\\"")
-			sb.WriteString(fmt.Sprintf("urls's addObject:(current application's NSURL's fileURLWithPath:\"%s\")\n", esc))
+			fmt.Fprintf(&sb, "urls's addObject:(current application's NSURL's fileURLWithPath:\"%s\")\n", esc)
 		}
 		sb.WriteString("pb's writeObjects:urls\n")
 		_ = clipCmd(ctx, "osascript", "-e", sb.String()).Run()
@@ -1221,7 +1221,7 @@ func writeFiles(paths []string) {
 		for i, p := range paths {
 			// PowerShell string escape to prevent command injection
 			safePath := strings.ReplaceAll(p, "'", "''")
-			sb.WriteString(fmt.Sprintf("'%s'", safePath))
+			fmt.Fprintf(&sb, "'%s'", safePath)
 			if i < len(paths)-1 {
 				sb.WriteString(",")
 			}
@@ -1231,7 +1231,7 @@ func writeFiles(paths []string) {
 	case "linux":
 		var sb strings.Builder
 		for _, p := range paths {
-			sb.WriteString(fmt.Sprintf("file://%s\r\n", p))
+			fmt.Fprintf(&sb, "file://%s\r\n", p)
 		}
 		uriList := sb.String()
 

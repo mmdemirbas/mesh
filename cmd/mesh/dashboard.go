@@ -205,9 +205,8 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		// Extract optional user@ prefix
 		user := ""
 		hostPort := addr
-		if atIdx := strings.Index(addr, "@"); atIdx != -1 {
-			user = addr[:atIdx]
-			hostPort = addr[atIdx+1:]
+		if u, h, ok := strings.Cut(addr, "@"); ok {
+			user, hostPort = u, h
 		}
 		host, port, err := net.SplitHostPort(hostPort)
 		if err != nil {
@@ -248,10 +247,8 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 
 	// Compute grand total for the header
 	var grandTotal metricsSnapshot
-	if metricsMap != nil {
-		for _, m := range metricsMap {
-			grandTotal.add(readMetrics(m))
-		}
+	for _, m := range metricsMap {
+		grandTotal.add(readMetrics(m))
 	}
 	titleBase := fmt.Sprintf("%s⚙ Configuration: %s%s%s", cBold, cCyan, nodeName, cReset)
 
@@ -359,7 +356,8 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 	if len(cfg.Listeners) > 0 {
 		addHeader(sectionTitle("listeners"))
 		for _, l := range cfg.Listeners {
-			if l.Type == "sshd" {
+			switch l.Type {
+			case "sshd":
 				indicator, st, _ := getComponentInfo("server", l.Bind)
 				// Aggregate server's own metrics + all dynamic reverse forward metrics
 				serverAgg := readMetrics(metricsMap["server:"+l.Bind])
@@ -373,10 +371,10 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 				}
 				left := padForProto(colorAddr(l.Bind)) + " " + cReset + strings.ToLower(l.Type)
 				addRow("", indicator, left, "", "", st, "", serverAgg)
-			} else if l.Type == "relay" {
+			case "relay":
 				indicator, st, _ := getComponentInfo("relay", l.Bind)
 				addRow("", indicator, colorAddr(l.Bind), arrowRight, colorAddr(l.Target), st, "", readMetrics(metricsMap["relay:"+l.Bind]))
-			} else {
+			default:
 				indicator, st, _ := getComponentInfo("proxy", l.Bind)
 				left := padForProto(colorAddr(l.Bind)) + " " + cReset + strings.ToLower(l.Type)
 				arrow, right := "", ""
@@ -713,11 +711,12 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		// Build status block: status + optional annotation (when either status
 		// or annotation should be right-aligned alongside metrics).
 		statusBlock := ""
-		if r.status != "" && r.annotation != "" {
+		switch {
+		case r.status != "" && r.annotation != "":
 			statusBlock = r.status + " " + r.annotation
-		} else if r.status != "" {
+		case r.status != "":
 			statusBlock = r.status
-		} else if r.annotation != "" && r.metrics != "" {
+		case r.annotation != "" && r.metrics != "":
 			// Annotation without status, but with metrics: treat annotation as
 			// part of the right-aligned block so it stays close to metrics.
 			statusBlock = r.annotation
