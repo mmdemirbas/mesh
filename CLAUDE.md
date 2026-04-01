@@ -36,6 +36,8 @@ configs/            Example YAML + JSON schema
 
 **Config precedence** — Hardcoded defaults → config file (YAML) → environment variables (`os.ExpandEnv` in config loading) → CLI flags. Validation at load time with actionable errors.
 
+**Admin server** — Every `mesh up` starts a local HTTP server on `127.0.0.1:0` (random port). Port written to `~/.mesh/run/<node>.port`. Endpoints: `GET /` and `/api/state` (JSON state), `GET /api/logs` (recent log lines), `GET /metrics` (Prometheus text), `GET /ui` (browser dashboard). Configure with `admin_addr` in node config; set to `"off"` to disable. Auth failures are tracked in `tunnel.authFailuresByIP` and exposed via `tunnel.SnapshotAuthFailures()` for the metrics endpoint.
+
 ## CLI
 
 ```
@@ -60,7 +62,7 @@ Shell completions dynamically resolve node names from the config file.
 
 - **ANSI colors** — Package-level vars (`cReset`, `cBold`, etc.), disabled when `NO_COLOR` is set.
 - **Address sorting** — `compareAddr()` with `addrKey` pre-parsed into `uint64` pairs for zero-allocation IPv4 comparison.
-- **Log handler chain** — `humanLogHandler` wraps tint. In dashboard mode: `humanLogHandler → multiHandler → {tint(file), tint(ring)}`.
+- **Log handler chain** — `humanLogHandler` wraps tint. Dashboard mode: `humanLogHandler → multiHandler → {tint(file), tint(ring)}`. Non-TTY mode: `humanLogHandler → multiHandler → {tint(stderr), tint(ring)}`. The ring is always populated regardless of mode so `/api/logs` has data.
 - **Platform code** — Build-tagged files (`_unix.go`, `_windows.go`), never `runtime.GOOS` in core logic.
 - **Config validation** — `validate()` checks at load time. Auth requires at least one method. `known_hosts` or `StrictHostKeyChecking: no` required for SSH.
 - **Tests** — Table-driven. Real TCP/HTTP for integration tests (`httptest.NewServer`). No `time.Sleep` — use channels/atomic. Race detector always on.
