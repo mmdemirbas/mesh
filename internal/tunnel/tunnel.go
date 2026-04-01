@@ -31,6 +31,20 @@ import (
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
+// authFailuresByIP tracks cumulative SSH auth rejection counts per remote IP.
+// Values are *atomic.Int64 to allow lock-free increments.
+var authFailuresByIP sync.Map
+
+// SnapshotAuthFailures returns a point-in-time copy of auth failure counts keyed by remote IP.
+func SnapshotAuthFailures() map[string]int64 {
+	out := make(map[string]int64)
+	authFailuresByIP.Range(func(k, v any) bool {
+		out[k.(string)] = v.(*atomic.Int64).Load()
+		return true
+	})
+	return out
+}
+
 // --- SSH Server (accepts incoming connections) ---
 
 // SSHServer listens for incoming SSH connections and handles forwarding requests.
@@ -129,6 +143,8 @@ func (s *SSHServer) Run(ctx context.Context) error {
 			}
 
 			s.log.Debug("Auth rejected", "remote", conn.RemoteAddr(), "user", conn.User(), "fingerprint", ssh.FingerprintSHA256(key))
+			counter, _ := authFailuresByIP.LoadOrStore(ip, &atomic.Int64{})
+			counter.(*atomic.Int64).Add(1)
 			return nil, fmt.Errorf("unknown public key for %q", conn.User())
 		},
 	}
