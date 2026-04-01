@@ -92,14 +92,14 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Listener, log *slo
 				netutil.ApplyTCPKeepAlive(conn, 0)
 
 				go func(c net.Conn) {
-					defer c.Close()
+					defer func() { _ = c.Close() }()
 					targetConn, err := net.DialTimeout("tcp", r.Target, 10*time.Second)
 					if err != nil {
 						rLog.Debug("Relay dial failed", "error", err)
 						return
 					}
 					netutil.ApplyTCPKeepAlive(targetConn, 0)
-					defer targetConn.Close()
+					defer func() { _ = targetConn.Close() }()
 					metrics.Streams.Add(1)
 					netutil.CountedBiCopy(c, targetConn, &metrics.BytesTx, &metrics.BytesRx)
 					metrics.Streams.Add(-1)

@@ -59,15 +59,15 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 		closeOnce sync.Once
 		termName  = "xterm" // default; updated by pty-req
 	)
-	closeCh := func() { closeOnce.Do(func() { ch.Close() }) }
+	closeCh := func() { closeOnce.Do(func() { _ = ch.Close() }) }
 	defer closeCh()
 
 	defer func() {
 		if ptm != nil {
-			ptm.Close()
+			_ = ptm.Close()
 		}
 		if pts != nil {
-			pts.Close()
+			_ = pts.Close()
 		}
 	}()
 
@@ -222,7 +222,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 
 				if pts != nil {
 					// We started the PTY slave above, we can close it from our process now that the child has it.
-					pts.Close()
+					_ = pts.Close()
 					pts = nil
 				}
 

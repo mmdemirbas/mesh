@@ -264,7 +264,7 @@ func (n *Node) postHTTP(addr string, data []byte) {
 	req.ContentLength = int64(len(data))
 	resp, err := n.httpClient.Do(req)
 	if err == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 }
 
@@ -332,7 +332,7 @@ func (n *Node) pullHTTP(peerAddr string) {
 		slog.Debug("Failed to pull from peer", "peer", cleanLogStr(peerAddr), "error", err, "status", status) //nolint:gosec // G706: sanitized via cleanLogStr
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var p Payload
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxRequestBodySize)).Decode(&p); err != nil {
@@ -445,7 +445,7 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 
 	go func() {
 		<-ctx.Done()
-		srv.Close()
+		_ = srv.Close()
 	}()
 
 	slog.Info("Clipsync HTTP listening", "bind", n.config.Bind)
@@ -466,13 +466,13 @@ func (n *Node) downloadFile(fileID, fileName, peerAddr string) error {
 	if err != nil || resp.StatusCode != 200 {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	dst, err := os.Create(filepath.Join(n.filesDir, safeName)) //nolint:gosec // G304: safeName is filepath.Base-sanitized above
 	if err != nil {
 		return err
 	}
-	defer dst.Close()
+	defer func() { _ = dst.Close() }()
 	_, err = io.Copy(dst, io.LimitReader(resp.Body, maxSyncFileSize))
 	return err
 }
@@ -630,7 +630,7 @@ func (n *Node) purgeFilesDir() {
 		return
 	}
 	for _, e := range entries {
-		os.Remove(filepath.Join(n.filesDir, e.Name()))
+		_ = os.Remove(filepath.Join(n.filesDir, e.Name()))
 	}
 	if len(entries) > 0 {
 		slog.Debug("Purged leftover clipsync files from previous session", "count", len(entries))
@@ -791,7 +791,7 @@ var clipTmpDir = sync.OnceValue(func() string {
 func clearDir(dir string) {
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
-		os.Remove(filepath.Join(dir, e.Name()))
+		_ = os.Remove(filepath.Join(dir, e.Name()))
 	}
 }
 
@@ -1300,18 +1300,18 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 		slog.Error("Clipsync UDP listen failed", "error", err)
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	go func() {
 		<-ctx.Done()
-		conn.Close()
+		_ = conn.Close()
 	}()
 
 	// 2. Increase buffer slightly to prevent edge-case payload truncation
 	buf := make([]byte, 2048)
 	go func() {
 		<-ctx.Done()
-		conn.Close()
+		_ = conn.Close()
 	}()
 
 	for {
@@ -1384,7 +1384,7 @@ func (n *Node) runUDPBeacon(ctx context.Context, magicHeader string, port int) {
 		slog.Error("Clipsync UDP Beacon binding failed", "error", err)
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
@@ -1579,7 +1579,7 @@ func (n *Node) registerPeerHTTP(peerAddr string) {
 		slog.Debug("HTTP peer registration failed", "peer", peerAddr, "error", err)
 		return
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }
 
 // refreshHTTPRegistration periodically re-registers this node with all

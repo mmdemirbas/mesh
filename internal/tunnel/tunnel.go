@@ -138,13 +138,13 @@ func (s *SSHServer) Run(ctx context.Context) error {
 		state.Global.Update("server", s.cfg.Bind, state.Failed, err.Error())
 		return fmt.Errorf("listen %s: %w", s.cfg.Bind, err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	state.Global.Update("server", s.cfg.Bind, state.Listening, "")
 	serverMetrics := state.Global.GetMetrics("server", s.cfg.Bind)
 	serverMetrics.StartTime.Store(time.Now().UnixNano())
 	s.log.Info("SSH server listening")
 
-	stop := context.AfterFunc(ctx, func() { listener.Close() })
+	stop := context.AfterFunc(ctx, func() { _ = listener.Close() })
 	defer stop()
 
 	for {
@@ -184,7 +184,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 		return
 	}
 	_ = conn.SetDeadline(time.Time{}) // clear deadline; data flows indefinitely
-	defer sshConn.Close()
+	defer func() { _ = sshConn.Close() }()
 
 	// Per-connection context so background goroutines (keep-alive, forwarding)
 	// stop when this connection ends rather than running until server shutdown.
@@ -203,7 +203,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 	defer func() {
 		mu.Lock()
 		for _, l := range listeners {
-			l.Close()
+			_ = l.Close()
 		}
 		mu.Unlock()
 	}()
@@ -786,7 +786,7 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fs
 		state.Global.Update("forward", compID, state.Failed, err.Error())
 		return err
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	state.Global.Update("forward", compID, state.Listening, "")
 	state.Global.UpdateBind("forward", compID, listener.Addr().String())
@@ -794,7 +794,7 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fs
 	// Guarantee immediate closure when session aborts, breaking accept loops
 	go func() {
 		<-ctx.Done()
-		listener.Close()
+		_ = listener.Close()
 		state.Global.Delete("forward", compID)
 	}()
 
@@ -821,7 +821,7 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fse
 		state.Global.Update("forward", compID, state.Failed, err.Error())
 		return err
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	state.Global.Update("forward", compID, state.Listening, "")
 	state.Global.UpdateBind("forward", compID, listener.Addr().String())
@@ -829,7 +829,7 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fse
 	// Guarantee immediate closure when session aborts, breaking accept loops
 	go func() {
 		<-ctx.Done()
-		listener.Close()
+		_ = listener.Close()
 		state.Global.Delete("forward", compID)
 	}()
 
@@ -869,7 +869,7 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fset
 		state.Global.Update("forward", compID, state.Failed, err.Error())
 		return err
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	state.Global.Update("forward", compID, state.Listening, "")
 	state.Global.UpdateBind("forward", compID, listener.Addr().String())
@@ -877,7 +877,7 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fset
 	// Guarantee immediate closure when session aborts, breaking accept loops
 	go func() {
 		<-ctx.Done()
-		listener.Close()
+		_ = listener.Close()
 		state.Global.Delete("forward", compID)
 	}()
 
@@ -910,7 +910,7 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, fsetN
 		state.Global.Update("forward", compID, state.Failed, err.Error())
 		return err
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	state.Global.Update("forward", compID, state.Listening, "")
 	state.Global.UpdateBind("forward", compID, listener.Addr().String())
@@ -918,7 +918,7 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, fsetN
 	// Guarantee immediate closure when session aborts, breaking accept loops
 	go func() {
 		<-ctx.Done()
-		listener.Close()
+		_ = listener.Close()
 		state.Global.Delete("forward", compID)
 	}()
 
@@ -1109,7 +1109,7 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 			dm.Streams.Add(1)
 			defer dm.Streams.Add(-1)
 			netutil.CountedBiCopy(conn, ch, &dm.BytesTx, &dm.BytesRx)
-			ch.Close()
+			_ = ch.Close()
 		}()
 	}
 }
@@ -1128,7 +1128,7 @@ func handleCancelTCPIPForward(req *ssh.Request, mu *sync.Mutex, listeners map[st
 	addr := net.JoinHostPort(r.BindAddr, strconv.FormatUint(uint64(r.BindPort), 10))
 	mu.Lock()
 	if l, ok := listeners[addr]; ok {
-		l.Close()
+		_ = l.Close()
 		delete(listeners, addr)
 	}
 	mu.Unlock()
@@ -1209,8 +1209,8 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[str
 	} else {
 		netutil.BiCopy(ch, conn)
 	}
-	ch.Close()
-	conn.Close()
+	_ = ch.Close()
+	_ = conn.Close()
 }
 
 // acceptAndForward accepts connections and forwards each to a target.

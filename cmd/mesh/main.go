@@ -297,7 +297,7 @@ func upCmd(nodeNames []string, configPath string) {
 			useDashboard = false
 			logFilePath = ""
 		} else {
-			defer logFile.Close()
+			defer func() { _ = logFile.Close() }()
 			// Redirect runtime crash output (panics) to the log file so they
 			// are not lost when running in dashboard (alternate screen) mode.
 			_ = debug.SetCrashOutput(logFile, debug.CrashOptions{})
@@ -355,7 +355,7 @@ func upCmd(nodeNames []string, configPath string) {
 		for _, name := range nodeNames {
 			_ = os.WriteFile(portFilePath(name), portStr, 0600)
 			name := name
-			defer os.Remove(portFilePath(name))
+			defer func(n string) { _ = os.Remove(portFilePath(n)) }(name)
 		}
 
 		adminSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -363,7 +363,7 @@ func upCmd(nodeNames []string, configPath string) {
 			_ = json.NewEncoder(w).Encode(state.Global.Snapshot())
 		})}
 		go func() { _ = adminSrv.Serve(adminLn) }()
-		context.AfterFunc(ctx, func() { adminSrv.Close() })
+		context.AfterFunc(ctx, func() { _ = adminSrv.Close() })
 	}
 
 	var wg sync.WaitGroup
@@ -562,7 +562,7 @@ func fetchState(nodeName string) map[string]state.Component {
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var s map[string]state.Component
 	_ = json.NewDecoder(resp.Body).Decode(&s)
 	return s
@@ -784,7 +784,7 @@ func readPidFile(nodeName string) (int, error) {
 }
 
 func removePidFile(nodeName string) {
-	os.Remove(pidFilePath(nodeName))
+	_ = os.Remove(pidFilePath(nodeName))
 }
 
 func checkPid(pid int) bool {

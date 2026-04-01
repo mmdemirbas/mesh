@@ -94,7 +94,7 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 			_, _ = conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 			return
 		}
-		defer remote.Close()
+		defer func() { _ = remote.Close() }()
 
 		req.RequestURI = "" // Must be empty for client requests
 		if err := req.Write(remote); err != nil {
@@ -124,10 +124,10 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 		_, _ = conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
 	}
-	defer remote.Close()
+	defer func() { _ = remote.Close() }()
 
 	if _, err := conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")); err != nil {
-		remote.Close()
+		_ = remote.Close()
 		return
 	}
 	// Clear handshake deadline before entering data relay

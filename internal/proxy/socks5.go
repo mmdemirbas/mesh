@@ -105,7 +105,7 @@ func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), 
 		_ = socksReply(conn, 0x05)
 		return
 	}
-	defer remote.Close()
+	defer func() { _ = remote.Close() }()
 
 	if err := socksReply(conn, 0x00); err != nil {
 		return
