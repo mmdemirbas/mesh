@@ -96,6 +96,10 @@
             "error"
           ],
           "description": "Log level: \"debug\", \"info\", \"warn\", or \"error\". Defaults to \"info\"."
+        },
+        "admin_addr": {
+          "type": "string",
+          "description": "Admin server listen address for the local HTTP API (/api/state, /metrics, /ui).\nDefaults to \"127.0.0.1:0\" (random port, localhost only).\nSet to a fixed address (e.g., \"127.0.0.1:2225\") for stable Prometheus scraping.\nSet to \"\" to use the default. Set to \"off\" to disable entirely."
         }
       },
       "additionalProperties": false,

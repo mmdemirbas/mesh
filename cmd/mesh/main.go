@@ -352,20 +352,33 @@ func upCmd(nodeNames []string, configPath string) {
 		cancel()
 	}()
 
-	// Single admin HTTP endpoint — write port file for each node (same port)
-	adminLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err == nil {
-		port := adminLn.Addr().(*net.TCPAddr).Port
-		portStr := []byte(strconv.Itoa(port))
-		for _, name := range nodeNames {
-			_ = os.WriteFile(portFilePath(name), portStr, 0600)
-			name := name
-			defer func(n string) { _ = os.Remove(portFilePath(n)) }(name)
+	// Determine admin server address: first non-empty admin_addr across nodes wins.
+	// "off" disables the admin server. Default: random localhost port.
+	adminAddr := "127.0.0.1:0"
+	for _, cfg := range cfgs {
+		if cfg.AdminAddr != "" {
+			adminAddr = cfg.AdminAddr
+			break
 		}
+	}
 
-		adminSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: buildAdminMux(ring)}
-		go func() { _ = adminSrv.Serve(adminLn) }()
-		context.AfterFunc(ctx, func() { _ = adminSrv.Close() })
+	// Single admin HTTP endpoint — write port file for each node (same port).
+	// Disabled when admin_addr is "off" in the node config.
+	if adminAddr != "off" {
+		adminLn, err := net.Listen("tcp", adminAddr)
+		if err == nil {
+			port := adminLn.Addr().(*net.TCPAddr).Port
+			portStr := []byte(strconv.Itoa(port))
+			for _, name := range nodeNames {
+				_ = os.WriteFile(portFilePath(name), portStr, 0600)
+				name := name
+				defer func(n string) { _ = os.Remove(portFilePath(n)) }(name)
+			}
+
+			adminSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: buildAdminMux(ring)}
+			go func() { _ = adminSrv.Serve(adminLn) }()
+			context.AfterFunc(ctx, func() { _ = adminSrv.Close() })
+		}
 	}
 
 	var wg sync.WaitGroup
