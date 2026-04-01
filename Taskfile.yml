@@ -55,6 +55,13 @@ tasks:
       - go vet ./...
       - golangci-lint run 2>/dev/null || echo "golangci-lint not installed, skipping (go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest)"
 
+  quality:
+    desc: Quality gate — tests with race+coverage, then lint
+    cmds:
+      - go test -race -coverprofile=cover.out ./...
+      - go tool cover -func=cover.out | tail -1
+      - golangci-lint run --output.tab.path stdout ./...
+
   all:
     desc: Run lint + test + build
     cmds:

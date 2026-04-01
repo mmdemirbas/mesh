@@ -6,6 +6,7 @@
 # Profiler output
 *.prof
 *.test
+cover.out
 
 # OS
 .DS_Store
