@@ -43,8 +43,11 @@ func buildAdminMux(ring *logRing) *http.ServeMux {
 	// GET /metrics — Prometheus text format. All data is derived from existing
 	// atomic counters and state snapshots; no additional instrumentation needed.
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		snap := state.Global.Snapshot()
-		metrics := state.Global.SnapshotMetrics()
+		// SnapshotFull takes components and metrics under the same lock to avoid
+		// cardinality divergence. Auth failures are snapshot separately; a brief
+		// divergence there is harmless for Prometheus.
+		full := state.Global.SnapshotFull()
+		snap, metrics := full.Components, full.Metrics
 		authFails := tunnel.SnapshotAuthFailures()
 		now := time.Now().UnixNano()
 

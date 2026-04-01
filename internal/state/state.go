@@ -96,6 +96,31 @@ func (s *State) SnapshotMetrics() map[string]*Metrics {
 	return m
 }
 
+// FullSnapshot holds a consistent view of components and their metrics.
+type FullSnapshot struct {
+	Components map[string]Component
+	Metrics    map[string]*Metrics
+}
+
+// SnapshotFull returns components and metrics taken under the same lock to
+// avoid cardinality divergence between the two maps. Callers that need
+// additional data from other packages (e.g. auth failures from tunnel)
+// should snapshot those separately immediately after.
+func (s *State) SnapshotFull() FullSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	comps := make(map[string]Component, len(s.components))
+	for k, v := range s.components {
+		comps[k] = v
+	}
+	metrics := make(map[string]*Metrics)
+	s.metrics.Range(func(key, value any) bool {
+		metrics[key.(string)] = value.(*Metrics)
+		return true
+	})
+	return FullSnapshot{Components: comps, Metrics: metrics}
+}
+
 func (s *State) Delete(compType, id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
