@@ -28,6 +28,12 @@ tasks:
       - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags '{{.LDFLAGS}}' -buildvcs=false -o dist/mesh-linux-amd64 ./cmd/mesh/
       - CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags '{{.LDFLAGS}}' -buildvcs=false -o dist/mesh-windows-amd64.exe ./cmd/mesh/
 
+  install:
+    desc: Copy the dist binary for the current platform (dist/mesh-OS-ARCH) to build/
+    cmds:
+      - mkdir -p build
+      - cp dist/mesh-{{OS}}-{{ARCH}}{{exeExt}} build/mesh{{exeExt}}
+
   test:
     desc: "Run all tests"
     cmds:

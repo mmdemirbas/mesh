@@ -909,7 +909,16 @@ if ($img) {
 })
 
 func readClipboardWindows(ctx context.Context) {
-	_ = clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", windowsReadScript()).Run()
+	// Run powershell in a fresh goroutine to prevent the long-lived pollClipboard goroutine
+	// from accumulating a corrupted syscall.StartProcess stack frame (Go runtime bug on
+	// Windows where stack reallocation for CGo-path frames can corrupt return addresses,
+	// causing GC to crash with "unexpected return pc for syscall.StartProcess").
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", windowsReadScript()).Run()
+	}()
+	<-done
 }
 
 func readClipboardLinux(ctx context.Context, dir string) {
@@ -1066,7 +1075,13 @@ func writeClipboardWindows(ctx context.Context, fmtMap map[string][]byte) {
 		cfhtml := buildCFHTML(string(html))
 		_ = os.WriteFile(filepath.Join(clipTmpDir(), "text_html_cf"), []byte(cfhtml), 0600)
 	}
-	_ = clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", windowsWriteScript()).Run()
+	// Same goroutine isolation as readClipboardWindows — see comment there.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = clipCmd(ctx, "powershell", "-NoProfile", "-STA", "-Command", windowsWriteScript()).Run()
+	}()
+	<-done
 }
 
 func writeClipboardLinux(ctx context.Context, formats []ClipFormat) {
