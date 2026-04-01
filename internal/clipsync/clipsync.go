@@ -268,6 +268,17 @@ func (n *Node) postHTTP(addr string, data []byte) {
 	}
 }
 
+// cleanLogStr replaces ASCII control characters (including newlines) with '?'
+// to prevent log injection when logging peer-supplied strings.
+func cleanLogStr(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, s)
+}
+
 // ─── HTTP Server & File Handling ─────────────────────────────────────────────
 
 func (n *Node) processPayload(p Payload, peerHostPort string) {
@@ -279,17 +290,17 @@ func (n *Node) processPayload(p Payload, peerHostPort string) {
 			safeName := filepath.Base(f.FileName)
 			if safeName == "." || safeName == ".." || safeName == "" ||
 				strings.ContainsAny(safeName, "/\\") {
-				slog.Warn("Rejected clipboard file with unsafe name", "file", f.FileName)
+				slog.Warn("Rejected clipboard file with unsafe name", "file", cleanLogStr(f.FileName))
 				continue
 			}
 			destPath := filepath.Join(n.filesDir, safeName)
 			if len(f.Data) > 0 {
 				if err := os.WriteFile(destPath, f.Data, 0600); err != nil {
-					slog.Warn("Failed to save clipboard file", "file", f.FileName, "error", err)
+					slog.Warn("Failed to save clipboard file", "file", cleanLogStr(f.FileName), "error", err)
 					continue
 				}
 			} else if err := n.downloadFile(f.FileID, f.FileName, peerHostPort); err != nil {
-				slog.Warn("Failed to download clipboard file", "file", f.FileName, "peer", peerHostPort, "error", err)
+				slog.Warn("Failed to download clipboard file", "file", cleanLogStr(f.FileName), "peer", cleanLogStr(peerHostPort), "error", err) //nolint:gosec // G706: values sanitized via cleanLogStr above
 				continue
 			}
 			writtenPaths = append(writtenPaths, destPath)
@@ -311,25 +322,25 @@ func (n *Node) processPayload(p Payload, peerHostPort string) {
 }
 
 func (n *Node) pullHTTP(peerAddr string) {
-	slog.Debug("Making outbound HTTP GET pull request", "peer", peerAddr)
+	slog.Debug("Making outbound HTTP GET pull request", "peer", cleanLogStr(peerAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
 	resp, err := n.httpClient.Get(fmt.Sprintf("http://%s/clip", peerAddr)) //nolint:gosec // G704: peer addresses are user-configured, not untrusted input
 	if err != nil || resp.StatusCode != 200 {
 		status := 0
 		if resp != nil {
 			status = resp.StatusCode
 		}
-		slog.Debug("Failed to pull from peer", "peer", peerAddr, "error", err, "status", status)
+		slog.Debug("Failed to pull from peer", "peer", cleanLogStr(peerAddr), "error", err, "status", status) //nolint:gosec // G706: sanitized via cleanLogStr
 		return
 	}
 	defer resp.Body.Close()
 
 	var p Payload
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxRequestBodySize)).Decode(&p); err != nil {
-		slog.Debug("Failed to decode pulled payload", "peer", peerAddr, "error", err)
+		slog.Debug("Failed to decode pulled payload", "peer", cleanLogStr(peerAddr), "error", err) //nolint:gosec // G706: sanitized via cleanLogStr
 		return
 	}
 
-	slog.Info("Successfully pulled and ingested payload", "formats", len(p.Formats), "files", len(p.Files), "peer", peerAddr)
+	slog.Info("Successfully pulled and ingested payload", "formats", len(p.Formats), "files", len(p.Files), "peer", cleanLogStr(peerAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
 	n.processPayload(p, peerAddr)
 }
 
@@ -346,7 +357,7 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 		var p Payload
 		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 			if err.Error() == "http: request body too large" {
-				slog.Warn("Rejected oversized sync payload", "from", r.RemoteAddr)
+				slog.Warn("Rejected oversized sync payload", "from", cleanLogStr(r.RemoteAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
 				http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
 			} else {
 				http.Error(w, "bad request", http.StatusBadRequest)
@@ -357,7 +368,7 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
 		peerHostPort := net.JoinHostPort(host, fmt.Sprintf("%d", n.port))
 
-		slog.Info("Received pushed payload via HTTP POST", "formats", len(p.Formats), "from", r.RemoteAddr)
+		slog.Info("Received pushed payload via HTTP POST", "formats", len(p.Formats), "from", cleanLogStr(r.RemoteAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
 		n.processPayload(p, peerHostPort)
 	})
 
@@ -1534,7 +1545,7 @@ func (n *Node) registerPeer(peerAddr, hash, source string) (isNew, needsPull boo
 	n.peersMu.Unlock()
 
 	if isNew {
-		slog.Info("Discovered new peer", "peer", peerAddr, "source", source)
+		slog.Info("Discovered new peer", "peer", cleanLogStr(peerAddr), "source", cleanLogStr(source)) //nolint:gosec // G706: sanitized via cleanLogStr
 	}
 	return
 }
