@@ -1,11 +1,15 @@
 package tunnel
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -410,3 +414,196 @@ var testKeyPEM = "-----BEGIN OPENSSH PRIVATE KEY-----\n" +
 	"AAAEB901nbqWqieuIsr77JNYvv652WVn0qRTX2g1+e2JP38Oenr1BRlui2D7LBbvAOPbY/\n" +
 	"KwVTTKM1A0UQBwGRBWEmAAAACXRlc3RAdGVzdAECAwQ=\n" +
 	"-----END OPENSSH PRIVATE KEY-----\n"
+
+// newTestPublicKey generates a fresh in-process ed25519 public key for testing.
+func newTestPublicKey(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ed25519 key: %v", err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("new signer from key: %v", err)
+	}
+	return signer.PublicKey()
+}
+
+// --- evictOldLimiters ---
+
+func TestEvictOldLimiters(t *testing.T) {
+	now := time.Now()
+	maxAge := 10 * time.Minute
+
+	tests := []struct {
+		name        string
+		ages        map[string]time.Duration // ip -> age at call time
+		wantRemoved []string
+		wantKept    []string
+	}{
+		{
+			name:        "removes entries older than maxAge",
+			ages:        map[string]time.Duration{"stale": 11 * time.Minute, "fresh": 5 * time.Minute},
+			wantRemoved: []string{"stale"},
+			wantKept:    []string{"fresh"},
+		},
+		{
+			name:     "keeps all fresh entries",
+			ages:     map[string]time.Duration{"a": 1 * time.Minute, "b": 9 * time.Minute},
+			wantKept: []string{"a", "b"},
+		},
+		{
+			name:        "removes all stale entries",
+			ages:        map[string]time.Duration{"x": 20 * time.Minute, "y": 15 * time.Minute},
+			wantRemoved: []string{"x", "y"},
+		},
+		{
+			name: "empty map does not panic",
+			ages: map[string]time.Duration{},
+		},
+		{
+			name:     "entry exactly at maxAge is kept (condition is strictly greater)",
+			ages:     map[string]time.Duration{"edge": 10 * time.Minute},
+			wantKept: []string{"edge"},
+		},
+		{
+			name:        "one nanosecond over maxAge is removed",
+			ages:        map[string]time.Duration{"over": 10*time.Minute + time.Nanosecond},
+			wantRemoved: []string{"over"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lims := make(map[string]*limiterEntry)
+			for ip, age := range tt.ages {
+				lims[ip] = &limiterEntry{lastSeen: now.Add(-age)}
+			}
+			evictOldLimiters(lims, maxAge, now)
+			for _, ip := range tt.wantRemoved {
+				if _, ok := lims[ip]; ok {
+					t.Errorf("%q should have been evicted but remains", ip)
+				}
+			}
+			for _, ip := range tt.wantKept {
+				if _, ok := lims[ip]; !ok {
+					t.Errorf("%q should remain but was evicted", ip)
+				}
+			}
+			wantLen := len(tt.wantKept)
+			if len(lims) != wantLen {
+				t.Errorf("map len = %d, want %d", len(lims), wantLen)
+			}
+		})
+	}
+}
+
+func TestEvictOldLimiters_DoesNotTouchFreshUnderPressure(t *testing.T) {
+	// Simulate the pressure-eviction scenario: map is over limiterMaxEntries.
+	// Only entries older than pressureAfter should be removed; fresh ones survive.
+	now := time.Now()
+	lims := make(map[string]*limiterEntry)
+	lims["old"] = &limiterEntry{lastSeen: now.Add(-3 * time.Minute)}
+	lims["fresh"] = &limiterEntry{lastSeen: now.Add(-30 * time.Second)}
+
+	evictOldLimiters(lims, limiterPressureAfter, now) // pressureAfter = 2 minutes
+
+	if _, ok := lims["old"]; ok {
+		t.Error("entry older than pressureAfter should be evicted")
+	}
+	if _, ok := lims["fresh"]; !ok {
+		t.Error("entry younger than pressureAfter should remain")
+	}
+}
+
+// --- matchesAnyAuthorizedKey ---
+
+func TestMatchesAnyAuthorizedKey(t *testing.T) {
+	keyA := newTestPublicKey(t)
+	keyB := newTestPublicKey(t)
+	keyC := newTestPublicKey(t)
+
+	tests := []struct {
+		name       string
+		incoming   ssh.PublicKey
+		authorized []ssh.PublicKey
+		want       bool
+	}{
+		{"match first", keyA, []ssh.PublicKey{keyA, keyB}, true},
+		{"match last", keyB, []ssh.PublicKey{keyA, keyB}, true},
+		{"match middle", keyB, []ssh.PublicKey{keyA, keyB, keyC}, true},
+		{"no match", keyC, []ssh.PublicKey{keyA, keyB}, false},
+		{"empty authorized list", keyA, []ssh.PublicKey{}, false},
+		{"single key matches", keyA, []ssh.PublicKey{keyA}, true},
+		{"single key no match", keyB, []ssh.PublicKey{keyA}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchesAnyAuthorizedKey(tt.incoming, tt.authorized)
+			if got != tt.want {
+				t.Errorf("matchesAnyAuthorizedKey = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMatchesAnyAuthorizedKey_DifferentKeyTypesDoNotMatch(t *testing.T) {
+	// Generate two independent ed25519 keys; their public bytes must differ.
+	keyA := newTestPublicKey(t)
+	keyB := newTestPublicKey(t)
+	if matchesAnyAuthorizedKey(keyA, []ssh.PublicKey{keyB}) {
+		t.Error("two distinct keys should not match")
+	}
+}
+
+// --- recordAuthFailure ---
+
+func TestRecordAuthFailure(t *testing.T) {
+	var m sync.Map
+
+	if got := recordAuthFailure(&m, "10.0.0.1"); got != 1 {
+		t.Errorf("first failure = %d, want 1", got)
+	}
+	if got := recordAuthFailure(&m, "10.0.0.1"); got != 2 {
+		t.Errorf("second failure = %d, want 2", got)
+	}
+	if got := recordAuthFailure(&m, "10.0.0.1"); got != 3 {
+		t.Errorf("third failure = %d, want 3", got)
+	}
+}
+
+func TestRecordAuthFailure_IndependentPerIP(t *testing.T) {
+	var m sync.Map
+
+	recordAuthFailure(&m, "10.0.0.1")
+	recordAuthFailure(&m, "10.0.0.1")
+
+	// A different IP starts at 1, not inheriting the count of 10.0.0.1.
+	if got := recordAuthFailure(&m, "10.0.0.2"); got != 1 {
+		t.Errorf("first failure for new IP = %d, want 1", got)
+	}
+}
+
+func TestRecordAuthFailure_Concurrent(t *testing.T) {
+	var m sync.Map
+	const n = 100
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for range n {
+		go func() {
+			defer wg.Done()
+			recordAuthFailure(&m, "192.168.1.1")
+		}()
+	}
+	wg.Wait()
+
+	v, ok := m.Load("192.168.1.1")
+	if !ok {
+		t.Fatal("key not found after concurrent writes")
+	}
+	if got := v.(*atomic.Int64).Load(); got != n {
+		t.Errorf("concurrent count = %d, want %d", got, n)
+	}
+}

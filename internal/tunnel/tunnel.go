@@ -61,6 +61,39 @@ func SnapshotAuthFailures() map[string]int64 {
 	return out
 }
 
+// limiterEntry holds a per-IP rate limiter and the time it was last used.
+type limiterEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+// evictOldLimiters deletes entries from limiters whose lastSeen is older than maxAge,
+// measured from now. The caller must hold the map lock.
+func evictOldLimiters(limiters map[string]*limiterEntry, maxAge time.Duration, now time.Time) {
+	for ip, e := range limiters {
+		if now.Sub(e.lastSeen) > maxAge {
+			delete(limiters, ip)
+		}
+	}
+}
+
+// matchesAnyAuthorizedKey reports whether incoming matches any key in authorized.
+func matchesAnyAuthorizedKey(incoming ssh.PublicKey, authorized []ssh.PublicKey) bool {
+	inBytes := incoming.Marshal()
+	for _, ak := range authorized {
+		if bytes.Equal(inBytes, ak.Marshal()) {
+			return true
+		}
+	}
+	return false
+}
+
+// recordAuthFailure increments the failure counter for ip in m and returns the new total.
+func recordAuthFailure(m *sync.Map, ip string) int64 {
+	counter, _ := m.LoadOrStore(ip, &atomic.Int64{})
+	return counter.(*atomic.Int64).Add(1)
+}
+
 // --- SSH Server (accepts incoming connections) ---
 
 // SSHServer listens for incoming SSH connections and handles forwarding requests.
@@ -87,10 +120,6 @@ func (s *SSHServer) Run(ctx context.Context) error {
 		return fmt.Errorf("load authorized keys %s: %w", s.cfg.AuthorizedKeys, err)
 	}
 
-	type limiterEntry struct {
-		limiter  *rate.Limiter
-		lastSeen time.Time
-	}
 	var (
 		limitersMu sync.Mutex
 		limiters   = make(map[string]*limiterEntry)
@@ -106,11 +135,7 @@ func (s *SSHServer) Run(ctx context.Context) error {
 				return
 			case <-ticker.C:
 				limitersMu.Lock()
-				for ip, entry := range limiters {
-					if time.Since(entry.lastSeen) > limiterStaleAfter {
-						delete(limiters, ip)
-					}
-				}
+				evictOldLimiters(limiters, limiterStaleAfter, time.Now())
 				limitersMu.Unlock()
 			}
 		}
@@ -128,11 +153,7 @@ func (s *SSHServer) Run(ctx context.Context) error {
 			if !exists {
 				if len(limiters) > limiterMaxEntries {
 					// Aggressive eviction: remove entries older than limiterPressureAfter under capacity pressure.
-					for eIP, e := range limiters {
-						if time.Since(e.lastSeen) > limiterPressureAfter {
-							delete(limiters, eIP)
-						}
-					}
+					evictOldLimiters(limiters, limiterPressureAfter, time.Now())
 					if len(limiters) > limiterMaxEntries {
 						limitersMu.Unlock()
 						s.log.Warn("Rate limiter map at capacity after eviction, rejecting new IP", "ip", ip, "size", len(limiters))
@@ -151,16 +172,13 @@ func (s *SSHServer) Run(ctx context.Context) error {
 				return nil, err
 			}
 
-			for _, ak := range authorizedKeys {
-				if bytes.Equal(key.Marshal(), ak.Marshal()) {
-					s.log.Debug("Auth accepted", "remote", conn.RemoteAddr(), "user", conn.User())
-					return &ssh.Permissions{}, nil
-				}
+			if matchesAnyAuthorizedKey(key, authorizedKeys) {
+				s.log.Debug("Auth accepted", "remote", conn.RemoteAddr(), "user", conn.User())
+				return &ssh.Permissions{}, nil
 			}
 
 			s.log.Debug("Auth rejected", "remote", conn.RemoteAddr(), "user", conn.User(), "fingerprint", ssh.FingerprintSHA256(key))
-			counter, _ := authFailuresByIP.LoadOrStore(ip, &atomic.Int64{})
-			counter.(*atomic.Int64).Add(1)
+			recordAuthFailure(&authFailuresByIP, ip)
 			return nil, fmt.Errorf("unknown public key for %q", conn.User())
 		},
 	}
