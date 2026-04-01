@@ -24,7 +24,7 @@ func buildAdminMux(ring *logRing) *http.ServeMux {
 	// GET /api/state — same, versioned alias.
 	stateHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(state.Global.Snapshot())
+		_ = json.NewEncoder(w).Encode(state.Global.Snapshot()) // write error: headers already sent, nothing to do
 	})
 	mux.Handle("/", stateHandler)
 	mux.Handle("/api/state", stateHandler)
@@ -37,7 +37,7 @@ func buildAdminMux(ring *logRing) *http.ServeMux {
 			plain[i] = ansiEscape.ReplaceAllString(l, "")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(plain)
+		_ = json.NewEncoder(w).Encode(plain) // write error: headers already sent, nothing to do
 	})
 
 	// GET /metrics — Prometheus text format. All data is derived from existing
@@ -108,13 +108,13 @@ func buildAdminMux(ring *logRing) *http.ServeMux {
 			fmt.Fprintf(&b, "mesh_auth_failures_total{remote_ip=%q} %d\n", ip, count)
 		}
 
-		_, _ = fmt.Fprint(w, b.String())
+		_, _ = fmt.Fprint(w, b.String()) // write error: headers already sent, nothing to do
 	})
 
 	// GET /ui — browser dashboard; polls /api/state and /api/logs every second.
 	mux.HandleFunc("/ui", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = fmt.Fprint(w, adminUI)
+		_, _ = fmt.Fprint(w, adminUI) // write error: headers already sent, nothing to do
 	})
 
 	return mux
