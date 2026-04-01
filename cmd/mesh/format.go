@@ -102,7 +102,8 @@ func parseIPv4Port(s, raw string) (addrKey, bool) {
 
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if c >= '0' && c <= '9' {
+		switch {
+		case c >= '0' && c <= '9':
 			if inPort {
 				if port > 6553 || (port == 6553 && c > '5') {
 					return addrKey{}, false // prevent overflow before multiplication
@@ -115,7 +116,7 @@ func parseIPv4Port(s, raw string) (addrKey, bool) {
 				}
 				digits++
 			}
-		} else if c == '.' && !inPort {
+		case c == '.' && !inPort:
 			if digits == 0 || dots >= 3 {
 				return addrKey{}, false
 			}
@@ -123,10 +124,10 @@ func parseIPv4Port(s, raw string) (addrKey, bool) {
 			dots++
 			octet = 0
 			digits = 0
-		} else if c == ':' && !inPort && dots == 3 && digits > 0 {
+		case c == ':' && !inPort && dots == 3 && digits > 0:
 			ip[3] = byte(octet)
 			inPort = true
-		} else {
+		default:
 			return addrKey{}, false
 		}
 	}
@@ -159,13 +160,14 @@ func parseIPv4(s string) [4]byte {
 	digits := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if c >= '0' && c <= '9' {
+		switch {
+		case c >= '0' && c <= '9':
 			octet = octet*10 + int(c-'0')
 			if octet > 255 {
 				return [4]byte{}
 			}
 			digits++
-		} else if c == '.' {
+		case c == '.':
 			if digits == 0 || dots >= 3 {
 				return [4]byte{}
 			}
@@ -173,7 +175,7 @@ func parseIPv4(s string) [4]byte {
 			dots++
 			octet = 0
 			digits = 0
-		} else {
+		default:
 			return [4]byte{}
 		}
 	}

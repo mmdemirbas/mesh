@@ -744,7 +744,8 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			line += statusBlock
 		}
 
-		if r.metrics != "" {
+		switch {
+		case r.metrics != "":
 			currentLen := visibleLen(line)
 			if currentLen < metricsPadCol {
 				line += strings.Repeat(" ", metricsPadCol-currentLen)
@@ -752,10 +753,10 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 				line += " "
 			}
 			line += r.metrics
-		} else if r.annotation != "" && r.status == "" && !anyMetrics {
+		case r.annotation != "" && r.status == "" && !anyMetrics:
 			// Annotation-only row without metrics context: append inline.
 			line += " " + r.annotation
-		} else if r.annotation != "" && r.status == "" && statusBlock == "" {
+		case r.annotation != "" && r.status == "" && statusBlock == "":
 			// Annotation-only row (no metrics on this row, but metrics elsewhere):
 			// still append inline since it's not part of a right-aligned block.
 			line += " " + r.annotation
