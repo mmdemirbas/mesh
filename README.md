@@ -1,7 +1,7 @@
 # mesh
 
 [![CI](https://github.com/mmdemirbas/mesh/actions/workflows/ci.yml/badge.svg)](https://github.com/mmdemirbas/mesh/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 A single-binary, cross-platform networking tool that replaces `ssh`, `sshd`, `autossh`, `socat`, and SOCKS/HTTP proxy servers.
@@ -34,7 +34,7 @@ A single-binary, cross-platform networking tool that replaces `ssh`, `sshd`, `au
 
 ### From source
 
-Requires Go 1.25+ and [Task](https://taskfile.dev/).
+Requires Go 1.26+ and [Task](https://taskfile.dev/).
 
 ```bash
 # macOS

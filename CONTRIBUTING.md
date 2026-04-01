@@ -2,7 +2,7 @@
 
 ## Getting Started
 
-1. Install Go 1.25+ and [Task](https://taskfile.dev/)
+1. Install Go 1.26+ and [Task](https://taskfile.dev/)
 2. Clone the repo and run `task build`
 3. Run tests: `task test`
 
