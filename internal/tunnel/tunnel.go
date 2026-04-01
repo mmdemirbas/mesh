@@ -180,7 +180,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 		} else {
 			s.log.Error("Handshake failed", "remote", conn.RemoteAddr(), "error", err)
 		}
-		conn.Close()
+		_ = conn.Close()
 		return
 	}
 	_ = conn.SetDeadline(time.Time{}) // clear deadline; data flows indefinitely
@@ -498,7 +498,7 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 		}
 		sshConn, chans, reqs, err := ssh.NewClientConn(conn, hostPort, sshCfg)
 		if err != nil {
-			conn.Close()
+			_ = conn.Close()
 			state.Global.Update("connection", id, state.Retrying, err.Error())
 			log.Error("SSH handshake failed", "elapsed", time.Since(t1).Round(time.Millisecond), "error", err)
 			select {
@@ -594,7 +594,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		}
 		sshConn, chans, reqs, err := ssh.NewClientConn(conn, host, sshCfg)
 		if err != nil {
-			conn.Close()
+			_ = conn.Close()
 			state.Global.Update("connection", id, state.Retrying, err.Error())
 			log.Error("SSH handshake failed", "target", target, "elapsed", time.Since(t1).Round(time.Millisecond), "error", err)
 			select {
@@ -645,7 +645,7 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 	defer sCancel()
 
 	var closeOnce sync.Once
-	closeClient := func() { closeOnce.Do(func() { client.Close() }) }
+	closeClient := func() { closeOnce.Do(func() { _ = client.Close() }) }
 	defer closeClient()
 
 	var fatalErr error
@@ -1077,7 +1077,7 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 		_ = req.Reply(true, ssh.Marshal(struct{ Port uint32 }{actualPort}))
 	}
 
-	stop := context.AfterFunc(ctx, func() { ln.Close() })
+	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
 
 	for {
@@ -1087,7 +1087,7 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 		}
 		netutil.ApplyTCPKeepAlive(conn, 0)
 		go func() {
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			origin, ok := conn.RemoteAddr().(*net.TCPAddr)
 			if !ok {
 				return
@@ -1198,7 +1198,7 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[str
 
 	ch, chReqs, err := newChan.Accept()
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return
 	}
 	go ssh.DiscardRequests(chReqs)
@@ -1226,13 +1226,13 @@ func acceptAndForward(ctx context.Context, listener net.Listener, dialer func() 
 		}
 		netutil.ApplyTCPKeepAlive(conn, 0)
 		go func() {
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			target, err := dialer()
 			if err != nil {
 				log.Debug("Forward dial failed", "error", err)
 				return
 			}
-			defer target.Close()
+			defer func() { _ = target.Close() }()
 			if metrics != nil {
 				metrics.Streams.Add(1)
 				defer metrics.Streams.Add(-1)
@@ -1409,7 +1409,7 @@ func startKeepAlive(ctx context.Context, conn ssh.Conn, options map[string]strin
 				failCount++
 				if failCount > countMax || isHardConnError(err) {
 					log.Warn("Keep-alive failed, closing connection", "remote", conn.RemoteAddr(), "error", err, "fail_count", failCount)
-					conn.Close()
+					_ = conn.Close()
 					return
 				}
 			} else {

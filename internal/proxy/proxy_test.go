@@ -15,21 +15,21 @@ func TestDialViaSocks5_Success(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer socksLn.Close()
+	defer func() { _ = socksLn.Close() }()
 
 	// Start a target echo server
 	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer targetLn.Close()
+	defer func() { _ = targetLn.Close() }()
 
 	go func() {
 		conn, err := targetLn.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, _ = io.Copy(conn, conn)
 		_ = conn.(*net.TCPConn).CloseWrite()
 	}()
@@ -39,7 +39,7 @@ func TestDialViaSocks5_Success(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		mockSocks5Server(t, conn, targetLn.Addr().String())
 	}()
 
@@ -47,7 +47,7 @@ func TestDialViaSocks5_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialViaSocks5 failed: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	testData := []byte("through socks5")
 	_, _ = conn.Write(testData)
@@ -67,14 +67,14 @@ func TestDialViaSocks5_IPv6BindResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer targetLn.Close()
+	defer func() { _ = targetLn.Close() }()
 
 	go func() {
 		conn, err := targetLn.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, _ = io.Copy(conn, conn)
 		_ = conn.(*net.TCPConn).CloseWrite()
 	}()
@@ -83,14 +83,14 @@ func TestDialViaSocks5_IPv6BindResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer socksLn.Close()
+	defer func() { _ = socksLn.Close() }()
 
 	go func() {
 		conn, err := socksLn.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		mockSocks5ServerIPv6Bind(t, conn, targetLn.Addr().String())
 	}()
 
@@ -98,7 +98,7 @@ func TestDialViaSocks5_IPv6BindResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialViaSocks5 with IPv6 bind addr failed: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	testData := []byte("ipv6-bind-response")
 	_, _ = conn.Write(testData)
@@ -115,14 +115,14 @@ func TestDialViaSocks5_ConnectionRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer socksLn.Close()
+	defer func() { _ = socksLn.Close() }()
 
 	go func() {
 		conn, err := socksLn.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		mockSocks5ServerReject(conn)
 	}()
 
@@ -149,14 +149,14 @@ func TestDialViaSocks5_InvalidTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer socksLn.Close()
+	defer func() { _ = socksLn.Close() }()
 
 	go func() {
 		conn, err := socksLn.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		// Read greeting + respond
 		buf := make([]byte, 258)
 		_, _ = io.ReadFull(conn, buf[:2])
@@ -177,14 +177,14 @@ func TestServeSocks_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer targetLn.Close()
+	defer func() { _ = targetLn.Close() }()
 
 	go func() {
 		conn, err := targetLn.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, _ = io.Copy(conn, conn)
 		_ = conn.(*net.TCPConn).CloseWrite()
 	}()
@@ -194,7 +194,7 @@ func TestServeSocks_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer socksLn.Close()
+	defer func() { _ = socksLn.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -206,7 +206,7 @@ func TestServeSocks_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialViaSocks5 failed: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	testData := []byte("end-to-end socks test")
 	_, _ = conn.Write(testData)
@@ -224,14 +224,14 @@ func TestServeHTTPProxy_CONNECT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer targetLn.Close()
+	defer func() { _ = targetLn.Close() }()
 
 	go func() {
 		conn, err := targetLn.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		// Read whatever the client sends, then respond
 		buf := make([]byte, 1024)
 		n, _ := conn.Read(buf)
@@ -243,7 +243,7 @@ func TestServeHTTPProxy_CONNECT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer proxyLn.Close()
+	defer func() { _ = proxyLn.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -255,7 +255,7 @@ func TestServeHTTPProxy_CONNECT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Send CONNECT request
 	connectReq := "CONNECT " + targetLn.Addr().String() + " HTTP/1.1\r\nHost: " + targetLn.Addr().String() + "\r\n\r\n"
@@ -309,7 +309,7 @@ func mockSocks5Server(t *testing.T, conn net.Conn, targetAddr string) {
 		_, _ = conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
-	defer targetConn.Close()
+	defer func() { _ = targetConn.Close() }()
 
 	_, _ = conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 
@@ -372,7 +372,7 @@ func mockSocks5ServerIPv6Bind(t *testing.T, conn net.Conn, targetAddr string) {
 		_, _ = conn.Write(append([]byte{0x05, 0x05, 0x00, 0x04}, make([]byte, 18)...))
 		return
 	}
-	defer targetConn.Close()
+	defer func() { _ = targetConn.Close() }()
 
 	// Success reply with IPv6 bind address (atyp=0x04): ver=5, rep=0, rsv=0, atyp=4, addr=16×0, port=2×0
 	resp := make([]byte, 4+16+2)

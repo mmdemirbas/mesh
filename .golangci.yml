@@ -1,0 +1,36 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    # Correctness
+    - errcheck      # unchecked errors
+    - govet         # go vet
+    - staticcheck   # semantic analysis (SA*, S*, ST*, QF*)
+    # Security
+    - gosec         # OWASP-aligned security checks
+    # Complexity
+    - gocognit      # cognitive complexity (nesting-aware)
+    - cyclop        # cyclomatic complexity
+    - funlen        # function length
+    # Quality
+    - gocritic      # style and correctness patterns
+    - unused        # unused code
+
+  settings:
+    gocognit:
+      min-complexity: 15
+    cyclop:
+      max-complexity: 10
+    funlen:
+      lines: 80
+      statements: 60
+    gosec:
+      excludes:
+        - G115  # integer overflow on conversion — too noisy for systems code
+
+issues:
+  exclude-rules:
+    - path: "_test\\.go"
+      linters:
+        - errcheck

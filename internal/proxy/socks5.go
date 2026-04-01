@@ -32,7 +32,7 @@ func ServeSocks(ctx context.Context, listener net.Listener, dialer func(string, 
 
 // handleSocks5 handles a single SOCKS5 connection.
 func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), log *slog.Logger, metrics *state.Metrics) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Set a deadline for the SOCKS5 handshake to prevent slowloris attacks
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))

@@ -64,7 +64,7 @@ func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer
 
 // handleHTTPProxy handles a single HTTP CONNECT proxy connection.
 func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *slog.Logger, metrics *state.Metrics) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Set a deadline for the HTTP CONNECT handshake to prevent slowloris attacks
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
@@ -157,31 +157,31 @@ func DialViaSocks5(baseDialer func(string, string) (net.Conn, error), socksAddr,
 	defer func() { _ = conn.SetDeadline(time.Time{}) }()
 
 	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil { // v5, 1 method, no auth
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("socks5 greeting write: %w", err)
 	}
 	buf := make([]byte, 2)
 	if _, err := io.ReadFull(conn, buf); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 	if buf[0] != 0x05 || buf[1] != 0x00 {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("socks5: server rejected no-auth method (got %#x %#x)", buf[0], buf[1])
 	}
 
 	host, portStr, err := net.SplitHostPort(target)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 	if len(host) > 255 {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("socks5: hostname too long (%d bytes, max 255)", len(host))
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("socks5: invalid port %q: %w", portStr, err)
 	}
 
@@ -189,43 +189,43 @@ func DialViaSocks5(baseDialer func(string, string) (net.Conn, error), socksAddr,
 	req = append(req, []byte(host)...)
 	req = append(req, byte(port>>8), byte(port&0xff))
 	if _, err := conn.Write(req); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("socks5 connect write: %w", err)
 	}
 
 	resp := make([]byte, 18) // 18 = max bind addr response: IPv6 (16) + port (2)
 	if _, err := io.ReadFull(conn, resp[:4]); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 	if resp[1] != 0x00 {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("socks5: connect failed (status %d)", resp[1])
 	}
 
 	switch resp[3] {
 	case 0x01: // IPv4
 		if _, err := io.ReadFull(conn, resp[:4+2]); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, fmt.Errorf("socks5: reading IPv4 bind addr: %w", err)
 		}
 	case 0x03: // Domain
 		if _, err := io.ReadFull(conn, resp[:1]); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, fmt.Errorf("socks5: reading domain length: %w", err)
 		}
 		domain := make([]byte, resp[0]+2)
 		if _, err := io.ReadFull(conn, domain); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, fmt.Errorf("socks5: reading domain bind addr: %w", err)
 		}
 	case 0x04: // IPv6
 		if _, err := io.ReadFull(conn, resp[:16+2]); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, fmt.Errorf("socks5: reading IPv6 bind addr: %w", err)
 		}
 	default:
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("socks5: unsupported bind address type %d", resp[3])
 	}
 

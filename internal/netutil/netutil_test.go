@@ -16,7 +16,7 @@ func TestBiCopy_BidirectionalData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	serverData := []byte("server says hello")
 	clientData := []byte("client says hello")
@@ -31,7 +31,7 @@ func TestBiCopy_BidirectionalData(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		buf := make([]byte, 1024)
 		n, _ := conn.Read(buf)
 		serverGot = buf[:n]
@@ -48,7 +48,7 @@ func TestBiCopy_BidirectionalData(t *testing.T) {
 	_ = client.(*net.TCPConn).CloseWrite()
 
 	clientGot, _ := io.ReadAll(client)
-	client.Close()
+	_ = client.Close()
 	wg.Wait()
 
 	if !bytes.Equal(serverGot, clientData) {
@@ -68,7 +68,7 @@ func TestBiCopy_RelayThroughProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer target.Close()
+	defer func() { _ = target.Close() }()
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -78,7 +78,7 @@ func TestBiCopy_RelayThroughProxy(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, _ = io.Copy(conn, conn) // echo
 	}()
 
@@ -87,7 +87,7 @@ func TestBiCopy_RelayThroughProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
 	wg.Add(1)
 	go func() {
@@ -96,13 +96,13 @@ func TestBiCopy_RelayThroughProxy(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer clientConn.Close()
+		defer func() { _ = clientConn.Close() }()
 
 		targetConn, err := net.Dial("tcp", target.Addr().String())
 		if err != nil {
 			return
 		}
-		defer targetConn.Close()
+		defer func() { _ = targetConn.Close() }()
 
 		BiCopy(clientConn, targetConn)
 	}()
@@ -118,10 +118,10 @@ func TestBiCopy_RelayThroughProxy(t *testing.T) {
 	_ = client.(*net.TCPConn).CloseWrite()
 
 	got, _ := io.ReadAll(client)
-	client.Close()
+	_ = client.Close()
 
-	proxy.Close()
-	target.Close()
+	_ = proxy.Close()
+	_ = target.Close()
 	wg.Wait()
 
 	if !bytes.Equal(got, testData) {
@@ -135,7 +135,7 @@ func TestBiCopy_LargePayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer target.Close()
+	defer func() { _ = target.Close() }()
 
 	payload := make([]byte, 1024*1024)
 	for i := range payload {
@@ -150,7 +150,7 @@ func TestBiCopy_LargePayload(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, _ = io.Copy(conn, conn) // echo
 	}()
 
@@ -158,7 +158,7 @@ func TestBiCopy_LargePayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
 	wg.Add(1)
 	go func() {
@@ -167,12 +167,12 @@ func TestBiCopy_LargePayload(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer cConn.Close()
+		defer func() { _ = cConn.Close() }()
 		tConn, err := net.Dial("tcp", target.Addr().String())
 		if err != nil {
 			return
 		}
-		defer tConn.Close()
+		defer func() { _ = tConn.Close() }()
 		BiCopy(cConn, tConn)
 	}()
 
@@ -185,9 +185,9 @@ func TestBiCopy_LargePayload(t *testing.T) {
 	_ = client.(*net.TCPConn).CloseWrite()
 
 	got, _ := io.ReadAll(client)
-	client.Close()
-	proxy.Close()
-	target.Close()
+	_ = client.Close()
+	_ = proxy.Close()
+	_ = target.Close()
 	wg.Wait()
 
 	if !bytes.Equal(got, payload) {
@@ -201,7 +201,7 @@ func TestCountedBiCopy_ByteCounting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	serverData := []byte("hello from server!!")    // 19 bytes
 	clientData := []byte("hello from client!!!!!") // 22 bytes
@@ -214,7 +214,7 @@ func TestCountedBiCopy_ByteCounting(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		buf := make([]byte, 1024)
 		n, _ := conn.Read(buf)
 		_ = n
@@ -232,7 +232,7 @@ func TestCountedBiCopy_ByteCounting(t *testing.T) {
 	_ = client.(*net.TCPConn).CloseWrite()
 
 	got, _ := io.ReadAll(client)
-	client.Close()
+	_ = client.Close()
 	wg.Wait()
 
 	if !bytes.Equal(got, serverData) {
@@ -244,13 +244,13 @@ func TestCountedBiCopy_ByteCounting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln2.Close()
+	defer func() { _ = ln2.Close() }()
 
 	target, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer target.Close()
+	defer func() { _ = target.Close() }()
 
 	wg.Add(1)
 	go func() {
@@ -259,7 +259,7 @@ func TestCountedBiCopy_ByteCounting(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, _ = io.Copy(conn, conn) // echo
 	}()
 
@@ -273,12 +273,12 @@ func TestCountedBiCopy_ByteCounting(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer cConn.Close()
+		defer func() { _ = cConn.Close() }()
 		tConn, err := net.Dial("tcp", target.Addr().String())
 		if err != nil {
 			return
 		}
-		defer tConn.Close()
+		defer func() { _ = tConn.Close() }()
 		CountedBiCopy(cConn, tConn, &tx, &rx)
 	}()
 
@@ -291,9 +291,9 @@ func TestCountedBiCopy_ByteCounting(t *testing.T) {
 	_, _ = client2.Write(testPayload)
 	_ = client2.(*net.TCPConn).CloseWrite()
 	echoed, _ := io.ReadAll(client2)
-	client2.Close()
-	ln2.Close()
-	target.Close()
+	_ = client2.Close()
+	_ = ln2.Close()
+	_ = target.Close()
 	wg.Wait()
 
 	if !bytes.Equal(echoed, testPayload) {
@@ -315,7 +315,7 @@ func TestCountedBiCopy_LargePayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer target.Close()
+	defer func() { _ = target.Close() }()
 
 	payload := make([]byte, 512*1024) // 512KB
 	for i := range payload {
@@ -330,7 +330,7 @@ func TestCountedBiCopy_LargePayload(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, _ = io.Copy(conn, conn) // echo
 	}()
 
@@ -338,7 +338,7 @@ func TestCountedBiCopy_LargePayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
 	var tx, rx atomic.Int64
 	wg.Add(1)
@@ -348,12 +348,12 @@ func TestCountedBiCopy_LargePayload(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer cConn.Close()
+		defer func() { _ = cConn.Close() }()
 		tConn, err := net.Dial("tcp", target.Addr().String())
 		if err != nil {
 			return
 		}
-		defer tConn.Close()
+		defer func() { _ = tConn.Close() }()
 		CountedBiCopy(cConn, tConn, &tx, &rx)
 	}()
 
@@ -364,9 +364,9 @@ func TestCountedBiCopy_LargePayload(t *testing.T) {
 	_, _ = client.Write(payload)
 	_ = client.(*net.TCPConn).CloseWrite()
 	got, _ := io.ReadAll(client)
-	client.Close()
-	proxy.Close()
-	target.Close()
+	_ = client.Close()
+	_ = proxy.Close()
+	_ = target.Close()
 	wg.Wait()
 
 	if !bytes.Equal(got, payload) {
@@ -395,7 +395,7 @@ func TestCountingWriter(t *testing.T) {
 		t.Errorf("counter = %d, want 5", counter.Load())
 	}
 
-	cw.Write([]byte(" world"))
+	_, _ = cw.Write([]byte(" world"))
 	if counter.Load() != 11 {
 		t.Errorf("counter = %d, want 11", counter.Load())
 	}
@@ -413,7 +413,7 @@ func TestCountedBiCopy_DynamicForwardPattern(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer target.Close()
+	defer func() { _ = target.Close() }()
 
 	var echoWg sync.WaitGroup
 	go func() {
@@ -425,7 +425,7 @@ func TestCountedBiCopy_DynamicForwardPattern(t *testing.T) {
 			echoWg.Add(1)
 			go func() {
 				defer echoWg.Done()
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 				_, _ = io.Copy(conn, conn) // echo
 			}()
 		}
@@ -451,13 +451,13 @@ func TestCountedBiCopy_DynamicForwardPattern(t *testing.T) {
 			proxyWg.Add(1)
 			go func() {
 				defer proxyWg.Done()
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 				// Simulate: open SSH channel -> dial target
 				tgt, err := net.Dial("tcp", target.Addr().String())
 				if err != nil {
 					return
 				}
-				defer tgt.Close()
+				defer func() { _ = tgt.Close() }()
 				dynStreams.Add(1)
 				defer dynStreams.Add(-1)
 				CountedBiCopy(conn, tgt, &dynTx, &dynRx)
@@ -480,14 +480,14 @@ func TestCountedBiCopy_DynamicForwardPattern(t *testing.T) {
 			_, _ = conn.Write(payload)
 			_ = conn.(*net.TCPConn).CloseWrite()
 			_, _ = io.ReadAll(conn) // read echo
-			conn.Close()
+			_ = conn.Close()
 		}()
 	}
 
 	clientWg.Wait()
-	dynLn.Close()
+	_ = dynLn.Close()
 	proxyWg.Wait()
-	target.Close()
+	_ = target.Close()
 	echoWg.Wait()
 
 	// Verify metrics were tracked correctly
@@ -513,7 +513,7 @@ func TestCountedBiCopy_StreamsTrackedDuringTransfer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	ready := make(chan struct{})
 	release := make(chan struct{})
@@ -523,13 +523,13 @@ func TestCountedBiCopy_StreamsTrackedDuringTransfer(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		buf := make([]byte, 1024)
 		n, _ := conn.Read(buf) // read first chunk
 		close(ready)           // signal that we have data
 		<-release              // wait for test to check metrics
 		_, _ = conn.Write(buf[:n])
-		conn.(*net.TCPConn).CloseWrite()
+		_ = conn.(*net.TCPConn).CloseWrite()
 	}()
 
 	proxy, err := net.Listen("tcp", "127.0.0.1:0")
@@ -547,12 +547,12 @@ func TestCountedBiCopy_StreamsTrackedDuringTransfer(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer cConn.Close()
+		defer func() { _ = cConn.Close() }()
 		tConn, err := net.Dial("tcp", ln.Addr().String())
 		if err != nil {
 			return
 		}
-		defer tConn.Close()
+		defer func() { _ = tConn.Close() }()
 		streams.Add(1)
 		defer streams.Add(-1)
 		CountedBiCopy(cConn, tConn, &tx, &rx)
@@ -578,8 +578,8 @@ func TestCountedBiCopy_StreamsTrackedDuringTransfer(t *testing.T) {
 
 	close(release)            // let the transfer complete
 	_, _ = io.ReadAll(client) // drain echo
-	client.Close()
-	proxy.Close()
+	_ = client.Close()
+	_ = proxy.Close()
 	proxyDone.Wait()
 
 	if s := streams.Load(); s != 0 {
@@ -592,12 +592,12 @@ func TestApplyTCPKeepAlive_TCPConn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	go func() {
 		conn, _ := ln.Accept()
 		if conn != nil {
-			conn.Close()
+			_ = conn.Close()
 		}
 	}()
 
@@ -605,7 +605,7 @@ func TestApplyTCPKeepAlive_TCPConn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Should not panic on a TCP connection
 	ApplyTCPKeepAlive(conn, 15*time.Second)
@@ -617,8 +617,8 @@ func TestApplyTCPKeepAlive_NonTCP(t *testing.T) {
 	// Should be a no-op for non-TCP connections, not panic
 	r, w := io.Pipe()
 	ApplyTCPKeepAlive(&fakeConn{r: r, w: w}, 0)
-	r.Close()
-	w.Close()
+	_ = r.Close()
+	_ = w.Close()
 }
 
 // fakeConn implements net.Conn for testing the non-TCP no-op path

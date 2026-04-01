@@ -479,7 +479,7 @@ func TestSyncEndpoint_PushFormats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /sync failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("POST /sync status = %d, want 200", resp.StatusCode)
 	}
@@ -512,7 +512,7 @@ func TestSyncEndpoint_PushFilesEmbedded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /sync failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("POST /sync status = %d, want 200", resp.StatusCode)
 	}
@@ -543,7 +543,7 @@ func TestSyncEndpoint_PushFilesEmbedded_MultipleFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /sync failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	for _, f := range payload.Files {
 		got, err := os.ReadFile(filepath.Join(n.filesDir, f.FileName))
@@ -611,7 +611,7 @@ func TestClipEndpoint_ReturnsLastPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /clip failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
 		t.Fatalf("GET /clip status = %d, want 200", resp.StatusCode)
 	}
@@ -636,7 +636,7 @@ func TestClipEndpoint_EmptyReturns404(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /clip failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Errorf("GET /clip status = %d, want 404 when no content", resp.StatusCode)
 	}
@@ -655,7 +655,7 @@ func TestSyncEndpoint_ACLBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /sync failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("POST /sync status = %d, want 403", resp.StatusCode)
 	}
@@ -672,7 +672,7 @@ func TestFilesEndpoint_ServesFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /files/test.txt failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
 		t.Fatalf("GET /files/test.txt status = %d, want 200", resp.StatusCode)
 	}
@@ -692,7 +692,7 @@ func TestFilesEndpoint_ACLBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /files/secret.txt failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("GET /files/secret.txt status = %d, want 403", resp.StatusCode)
 	}
@@ -713,7 +713,7 @@ func TestSyncEndpoint_RejectsPathTraversal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /sync failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// The file should NOT be written outside filesDir
 	if _, err := os.Stat(filepath.Join(n.filesDir, "..", "..", "etc", "passwd")); err == nil {
@@ -1210,7 +1210,7 @@ func TestDiscoverEndpoint_RegistersPeer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /discover failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("POST /discover status = %d, want 200", resp.StatusCode)
 	}
@@ -1243,7 +1243,7 @@ func TestDiscoverEndpoint_RejectsSelf(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /discover failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	n.peersMu.RLock()
 	defer n.peersMu.RUnlock()
@@ -1266,7 +1266,7 @@ func TestDiscoverEndpoint_ACLBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /discover failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
 	}
@@ -1280,7 +1280,7 @@ func TestDiscoverEndpoint_RejectsGET(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /discover failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
 	}
