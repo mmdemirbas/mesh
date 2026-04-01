@@ -55,7 +55,7 @@ func buildAdminMux(ring *logRing) *http.ServeMux {
 		// mesh_component_up
 		b.WriteString("# HELP mesh_component_up Whether the component is up (1) or down (0).\n")
 		b.WriteString("# TYPE mesh_component_up gauge\n")
-		for key, comp := range snap {
+		for _, comp := range snap {
 			up := 0
 			switch comp.Status {
 			case state.Listening, state.Connected:
@@ -63,7 +63,6 @@ func buildAdminMux(ring *logRing) *http.ServeMux {
 			}
 			fmt.Fprintf(&b, "mesh_component_up{type=%q,id=%q,status=%q} %d\n",
 				comp.Type, comp.ID, string(comp.Status), up)
-			_ = key
 		}
 
 		// mesh_bytes_tx_total, mesh_bytes_rx_total, mesh_active_streams, mesh_uptime_seconds
