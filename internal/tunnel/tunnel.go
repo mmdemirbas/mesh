@@ -123,10 +123,12 @@ func (s *SSHServer) Run(ctx context.Context) error {
 
 			for _, ak := range authorizedKeys {
 				if bytes.Equal(key.Marshal(), ak.Marshal()) {
+					s.log.Debug("Auth accepted", "remote", conn.RemoteAddr(), "user", conn.User())
 					return &ssh.Permissions{}, nil
 				}
 			}
 
+			s.log.Debug("Auth rejected", "remote", conn.RemoteAddr(), "user", conn.User(), "fingerprint", ssh.FingerprintSHA256(key))
 			return nil, fmt.Errorf("unknown public key for %q", conn.User())
 		},
 	}
