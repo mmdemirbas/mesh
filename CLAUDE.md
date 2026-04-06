@@ -15,8 +15,10 @@ internal/
   tunnel/           SSH client + server, port forwarding, keepalives
   proxy/            SOCKS5 + HTTP CONNECT proxy servers
   netutil/          TCP helpers (BiCopy, keepalive, reusable listeners)
-  clipsync/         Clipboard sync (UDP discovery, HTTP push/pull, OS clipboard I/O)
-  filesync/         Syncthing-style folder sync (protobuf index exchange, fsnotify, HTTP file transfer)
+  clipsync/         Clipboard sync (UDP discovery, protobuf HTTP push/pull, OS clipboard I/O)
+  clipsync/proto/   Protobuf definitions for clipsync (SyncPayload, Beacon, DiscoverRequest)
+  filesync/         Syncthing-style folder sync (protobuf index exchange, delta sync, fsnotify)
+  filesync/proto/   Protobuf definitions for filesync (IndexExchange, BlockSignatures, DeltaResponse)
   state/            Thread-safe component state (Global singleton with Snapshot())
 configs/            Example YAML + JSON schema
 ```
@@ -31,13 +33,13 @@ configs/            Example YAML + JSON schema
 
 **Auth method order** — `buildAuthMethods()` tries: SSH agent → private key → password_command. Multiple methods can be configured; they're all offered to the server.
 
-**Clipsync protocol** — Push-based via HTTP POST. The sender embeds file data directly in the payload for one-way connectivity (receiver can't pull back). Pull-back via `/files/` endpoint is a fallback for when the receiver CAN reach the sender. UDP discovery uses broadcast beacons (10s interval) with unicast reply for asymmetric networks. Clipboard polling interval is configurable via `poll_interval` (default 3s).
+**Clipsync protocol** — Push-based via HTTP POST with protobuf serialization (`SyncPayload`, `Beacon`, `DiscoverRequest` in `clipsync/proto/`). The sender embeds file data directly in the payload for one-way connectivity (receiver can't pull back). Pull-back via `/files/` endpoint is a fallback for when the receiver CAN reach the sender. UDP discovery uses broadcast beacons (10s interval) with unicast reply for asymmetric networks. Group isolation via `group` config field — peers with different groups ignore each other. Clipboard polling interval is configurable via `poll_interval` (default 3s).
 
 **Dashboard** — Uses terminal alternate screen buffer (`\033[?1049h`). Overwrites in-place line by line (`\033[K` per line, `\033[J` to clear remainder). Header (uptime/clock) always written; body (status + logs) skipped when unchanged. No scrollback pollution, no flicker.
 
 **Config precedence** — Hardcoded defaults → config file (YAML) → environment variables (`os.ExpandEnv` in config loading) → CLI flags. Validation at load time with actionable errors.
 
-**Filesync** — Syncthing-style folder sync with explicit peer configuration (no broadcast discovery). Protobuf index exchange for efficiency. Dual change detection: fsnotify for real-time + periodic scan as safety net. Conflict resolution uses Syncthing naming (`.sync-conflict-*`). Transfer resume via `.mesh-tmp-*` temp files with offset-based HTTP GET. Index persisted as YAML in `~/.mesh/filesync/<folder-id>/`. Uses `.stignore` (Syncthing-compatible) for ignore patterns. Folder marker `.stfolder` for managed folder identification. Web UI at `/ui/filesync` on the admin port.
+**Filesync** — Syncthing-style folder sync with explicit peer configuration (no broadcast discovery). Protobuf index exchange with delta mode (`since` field skips unchanged entries). Block-level delta transfer via `POST /delta` — receiver sends SHA-256 block signatures (128 KB blocks), sender returns only changed blocks, avoiding full-file retransmission on edits. Bandwidth throttling via `max_bandwidth` config (token-bucket rate limiter on both upload and download). Dual change detection: fsnotify for real-time + periodic scan as safety net. Conflict resolution uses Syncthing naming (`.sync-conflict-*`). Transfer resume via `.mesh-tmp-*` temp files with offset-based HTTP GET. Index persisted as YAML in `~/.mesh/filesync/<folder-id>/`. Uses `.stignore` (Syncthing-compatible) for ignore patterns. Folder marker `.stfolder` for managed folder identification. Web UI at `/ui/filesync` on the admin port.
 
 **Admin server** — Every `mesh up` starts a local HTTP server on `127.0.0.1:0` (random port). Port written to `<UserCacheDir>/mesh/mesh-<node>.port` (e.g., `~/Library/Caches/mesh/mesh-mynode.port` on macOS). Endpoints: `GET /` and `/api/state` (JSON state), `GET /api/logs` (recent log lines), `GET /metrics` (Prometheus text), `GET /ui` (browser dashboard). Configure with `admin_addr` in node config; set to `"off"` to disable. Auth failures are tracked in `tunnel.authFailuresByIP` and exposed via `tunnel.SnapshotAuthFailures()` for the metrics endpoint.
 
