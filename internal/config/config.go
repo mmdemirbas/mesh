@@ -396,7 +396,7 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("filesync[%d]: invalid scan_interval %q: %w", i, fs.ScanInterval, err)
 			}
 		}
-		if fs.MaxConcurrent < 0 {
+		if fs.MaxConcurrent <= 0 {
 			return fmt.Errorf("filesync[%d]: max_concurrent must be positive", i)
 		}
 		folderIDs := make(map[string]int)

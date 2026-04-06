@@ -712,3 +712,25 @@ func TestValidate_DuplicateNames(t *testing.T) {
 		})
 	}
 }
+
+func TestValidate_FilesyncMaxConcurrentZero(t *testing.T) {
+	cfg := &Config{
+		Filesync: []FilesyncCfg{{
+			Bind:          "0.0.0.0:7756",
+			MaxConcurrent: 0,
+			Folders: []FolderCfg{{
+				ID:        "docs",
+				Path:      t.TempDir(),
+				Peers:     []string{"192.168.1.10:7756"},
+				Direction: "send-receive",
+			}},
+		}},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for max_concurrent=0")
+	}
+	if !strings.Contains(err.Error(), "max_concurrent must be positive") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}

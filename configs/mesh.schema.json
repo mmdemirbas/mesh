@@ -188,6 +188,7 @@
         },
         "max_concurrent": {
           "type": "integer",
+          "minimum": 1,
           "description": "Maximum concurrent file transfers per sync cycle. Default: 4."
         }
       },
