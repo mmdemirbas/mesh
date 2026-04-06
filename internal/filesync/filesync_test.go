@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -438,9 +439,20 @@ func TestResolveConflict_LocalWins(t *testing.T) {
 
 func TestDownloadFile_PathTraversal(t *testing.T) {
 	client := &http.Client{}
-	_, err := downloadFile(client, "127.0.0.1:9999", "test", "../../../etc/passwd", "abc", t.TempDir())
+	_, err := downloadFile(client, "127.0.0.1:9999", "test", "../../../etc/passwd", "abcdef0123456789abcdef0123456789", t.TempDir())
 	if err == nil {
 		t.Error("expected error for path traversal")
+	}
+}
+
+func TestDownloadFile_ShortHash(t *testing.T) {
+	client := &http.Client{}
+	_, err := downloadFile(client, "127.0.0.1:9999", "test", "file.txt", "abc", t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for short hash")
+	}
+	if !strings.Contains(err.Error(), "too short") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 

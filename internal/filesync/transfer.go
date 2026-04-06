@@ -28,6 +28,10 @@ func downloadFile(client *http.Client, peerAddr, folderID, relPath, expectedHash
 		return "", fmt.Errorf("invalid file path: %q", relPath)
 	}
 
+	if len(expectedHash) < 16 {
+		return "", fmt.Errorf("invalid hash for %q: too short (%d chars)", relPath, len(expectedHash))
+	}
+
 	destPath := filepath.Join(folderRoot, clean)
 
 	// Ensure parent directory exists.
