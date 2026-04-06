@@ -1,16 +1,12 @@
 package filesync
 
 import (
-	"bufio"
-	"os"
 	"path/filepath"
 	"strings"
 )
 
 // builtinIgnores are always excluded from sync and scanning.
 var builtinIgnores = []string{
-	".stfolder",
-	".stignore",
 	".mesh-tmp-*",
 }
 
@@ -25,8 +21,8 @@ type ignorePattern struct {
 	dirOnly  bool // trailing / means only match directories
 }
 
-// newIgnoreMatcher builds a matcher from config patterns and a .stignore file.
-func newIgnoreMatcher(configPatterns []string, folderRoot string) *ignoreMatcher {
+// newIgnoreMatcher builds a matcher from config-level ignore patterns.
+func newIgnoreMatcher(configPatterns []string) *ignoreMatcher {
 	var patterns []ignorePattern
 
 	// Built-in ignores first (highest priority, non-negatable).
@@ -34,20 +30,7 @@ func newIgnoreMatcher(configPatterns []string, folderRoot string) *ignoreMatcher
 		patterns = append(patterns, ignorePattern{pattern: p})
 	}
 
-	// .stignore file (Syncthing-compatible).
-	stignorePath := filepath.Join(folderRoot, ".stignore")
-	if f, err := os.Open(stignorePath); err == nil { //nolint:gosec // G304: path is constructed from user-configured folder root
-		defer func() { _ = f.Close() }()
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if p, ok := parseLine(line); ok {
-				patterns = append(patterns, p)
-			}
-		}
-	}
-
-	// Config-level patterns.
+	// Config-level patterns (gitignore-style).
 	for _, raw := range configPatterns {
 		if p, ok := parseLine(raw); ok {
 			patterns = append(patterns, p)
