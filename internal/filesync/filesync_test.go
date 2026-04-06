@@ -456,6 +456,34 @@ func TestDownloadFile_ShortHash(t *testing.T) {
 	}
 }
 
+func TestSafePath(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "valid.txt", "ok")
+	writeFile(t, root, "sub/nested.txt", "ok")
+
+	tests := []struct {
+		name    string
+		relPath string
+		wantErr bool
+	}{
+		{"simple file", "valid.txt", false},
+		{"nested file", "sub/nested.txt", false},
+		{"dotdot prefix", "../escape.txt", true},
+		{"dotdot mid", "sub/../../escape.txt", true},
+		{"absolute path", "/etc/passwd", true},
+		{"null byte", "file\x00.txt", true},
+		{"empty path", "", false}, // resolves to root itself, which is allowed
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := safePath(root, tt.relPath)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("safePath(%q) error=%v, wantErr=%v", tt.relPath, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestDeleteFile(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "a.txt", "content")

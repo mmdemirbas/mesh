@@ -21,17 +21,14 @@ const (
 // resuming from an existing temp file if present.
 // Returns the local path of the completed file.
 func downloadFile(client *http.Client, peerAddr, folderID, relPath, expectedHash string, folderRoot string) (string, error) {
-	// Validate the path to prevent traversal.
-	clean := filepath.FromSlash(relPath)
-	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || strings.Contains(clean, "\x00") {
-		return "", fmt.Errorf("invalid file path: %q", relPath)
+	destPath, err := safePath(folderRoot, relPath)
+	if err != nil {
+		return "", err
 	}
 
 	if len(expectedHash) < 16 {
 		return "", fmt.Errorf("invalid hash for %q: too short (%d chars)", relPath, len(expectedHash))
 	}
-
-	destPath := filepath.Join(folderRoot, clean)
 
 	// Ensure parent directory exists.
 	if err := os.MkdirAll(filepath.Dir(destPath), 0750); err != nil {
@@ -114,14 +111,35 @@ func downloadFile(client *http.Client, peerAddr, folderID, relPath, expectedHash
 	return destPath, nil
 }
 
+// safePath validates a relative path against traversal and resolves it within
+// folderRoot. Returns the absolute path or an error.
+func safePath(folderRoot, relPath string) (string, error) {
+	clean := filepath.FromSlash(relPath)
+	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || strings.Contains(clean, "\x00") {
+		return "", fmt.Errorf("invalid file path: %q", relPath)
+	}
+	full := filepath.Join(folderRoot, clean)
+	absRoot, err := filepath.Abs(folderRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve root: %w", err)
+	}
+	absPath, err := filepath.Abs(full)
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+	if absPath != absRoot && !strings.HasPrefix(absPath, absRoot+string(filepath.Separator)) {
+		return "", fmt.Errorf("path traversal: %q resolves outside root", relPath)
+	}
+	return full, nil
+}
+
 // deleteFile removes a local file, creating a tombstone in the index.
 func deleteFile(folderRoot, relPath string) error {
-	clean := filepath.FromSlash(relPath)
-	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") {
-		return fmt.Errorf("invalid file path: %q", relPath)
+	path, err := safePath(folderRoot, relPath)
+	if err != nil {
+		return err
 	}
-	path := filepath.Join(folderRoot, clean)
-	err := os.Remove(path)
+	err = os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("delete %s: %w", relPath, err)
 	}

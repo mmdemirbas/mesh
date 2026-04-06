@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -114,24 +113,13 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Path traversal protection.
-	clean := filepath.FromSlash(relPath)
-	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || strings.Contains(clean, "\x00") {
-		http.Error(w, "invalid path", http.StatusBadRequest)
+	fullPath, err := safePath(folder.cfg.Path, relPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	fullPath := filepath.Join(folder.cfg.Path, clean)
-
-	// Verify the resolved path is still within the folder root.
-	absRoot, _ := filepath.Abs(folder.cfg.Path)
-	absPath, _ := filepath.Abs(fullPath)
-	if !strings.HasPrefix(absPath, absRoot+string(filepath.Separator)) && absPath != absRoot {
-		http.Error(w, "path traversal", http.StatusForbidden)
-		return
-	}
-
-	f, err := os.Open(fullPath) //nolint:gosec // G304: validated above
+	f, err := os.Open(fullPath) //nolint:gosec // G304: validated by safePath
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "not found", http.StatusNotFound)
