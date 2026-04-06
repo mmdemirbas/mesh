@@ -211,6 +211,7 @@ func (idx *FileIndex) scan(folderRoot string, ignore *ignoreMatcher) (bool, erro
 		if _, ok := seen[rel]; !ok {
 			idx.Sequence++
 			entry.Deleted = true
+			entry.MtimeNS = time.Now().UnixNano() // deletion time, not last-modification time
 			entry.Sequence = idx.Sequence
 			idx.Files[rel] = entry
 			changed = true

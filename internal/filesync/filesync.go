@@ -527,6 +527,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			fs.index.Sequence++
 			if entry, ok := fs.index.Files[action.Path]; ok {
 				entry.Deleted = true
+				entry.MtimeNS = time.Now().UnixNano() // deletion time for tombstone age
 				entry.Sequence = fs.index.Sequence
 				fs.index.Files[action.Path] = entry
 			}

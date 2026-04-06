@@ -221,6 +221,46 @@ func TestScanDetectsDeletion(t *testing.T) {
 	}
 }
 
+func TestScanDeletion_TombstoneMtimeIsNow(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "old.txt", "data")
+
+	// Backdate the file to 60 days ago.
+	oldTime := time.Now().Add(-60 * 24 * time.Hour)
+	_ = os.Chtimes(filepath.Join(dir, "old.txt"), oldTime, oldTime)
+
+	idx := newFileIndex()
+	ignore := &ignoreMatcher{}
+	_, _ = idx.scan(dir, ignore)
+
+	// Verify the indexed mtime reflects the backdated time.
+	entry := idx.Files["old.txt"]
+	if entry.MtimeNS > time.Now().Add(-59*24*time.Hour).UnixNano() {
+		t.Fatal("pre-condition: file mtime should be ~60 days ago")
+	}
+
+	// Delete the file and re-scan.
+	_ = os.Remove(filepath.Join(dir, "old.txt"))
+	_, _ = idx.scan(dir, ignore)
+
+	entry = idx.Files["old.txt"]
+	if !entry.Deleted {
+		t.Fatal("expected tombstone")
+	}
+
+	// Tombstone MtimeNS should be recent (within last minute), not 60 days ago.
+	oneMinuteAgo := time.Now().Add(-1 * time.Minute).UnixNano()
+	if entry.MtimeNS < oneMinuteAgo {
+		t.Errorf("tombstone MtimeNS should be recent, got %d (threshold %d)", entry.MtimeNS, oneMinuteAgo)
+	}
+
+	// A 30-day purge must NOT remove this freshly-created tombstone.
+	idx.purgeTombstones(30 * 24 * time.Hour)
+	if _, ok := idx.Files["old.txt"]; !ok {
+		t.Error("fresh tombstone should survive purge")
+	}
+}
+
 func TestScanRespectsIgnore(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "keep.txt", "keep")
