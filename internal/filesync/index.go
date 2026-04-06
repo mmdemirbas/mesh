@@ -29,6 +29,7 @@ type FileEntry struct {
 
 // FileIndex is the in-memory index for a single folder.
 type FileIndex struct {
+	Path     string               `yaml:"path"`
 	Sequence int64                `yaml:"sequence"`
 	Files    map[string]FileEntry `yaml:"files"`
 }

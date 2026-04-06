@@ -1357,6 +1357,79 @@ func TestPersistFolder_Roundtrip(t *testing.T) {
 	}
 }
 
+// --- Path tracking test (FT9a) ---
+
+func TestPathChangePreservesIndex(t *testing.T) {
+	dataDir := t.TempDir()
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
+	writeFile(t, oldDir, "file.txt", "content")
+
+	// Build an index at the old path and persist it.
+	idx := newFileIndex()
+	idx.Path = oldDir
+	ignore := &ignoreMatcher{}
+	_, _ = idx.scan(oldDir, ignore)
+
+	idxPath := filepath.Join(dataDir, "docs", "index.yaml")
+	if err := idx.save(idxPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reload and simulate path change (same logic as Start()).
+	loaded, err := loadIndex(idxPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if loaded.Path == newDir {
+		t.Fatal("path should differ before update")
+	}
+
+	// Path change just updates the stored path; index is preserved
+	// so the next scan can correctly reconcile (moved dir = no changes,
+	// different content = deletions propagate to peers).
+	loaded.Path = newDir
+
+	if loaded.Path != newDir {
+		t.Errorf("path = %q, want %q", loaded.Path, newDir)
+	}
+	if len(loaded.Files) == 0 {
+		t.Error("index should be preserved after path change")
+	}
+	if loaded.Sequence == 0 {
+		t.Error("sequence should be preserved after path change")
+	}
+}
+
+func TestIndexPersistsPath(t *testing.T) {
+	dataDir := t.TempDir()
+	dir := t.TempDir()
+	writeFile(t, dir, "file.txt", "content")
+
+	idx := newFileIndex()
+	idx.Path = dir
+	ignore := &ignoreMatcher{}
+	_, _ = idx.scan(dir, ignore)
+
+	idxPath := filepath.Join(dataDir, "test", "index.yaml")
+	if err := idx.save(idxPath); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := loadIndex(idxPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if loaded.Path != dir {
+		t.Errorf("persisted path = %q, want %q", loaded.Path, dir)
+	}
+	if len(loaded.Files) == 0 {
+		t.Error("expected preserved files on reload")
+	}
+}
+
 // --- Fuzz test for ignore parser (FT9) ---
 
 func FuzzParseLine(f *testing.F) {

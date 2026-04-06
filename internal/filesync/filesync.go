@@ -192,6 +192,15 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			peers = make(map[string]PeerState)
 		}
 
+		// Detect path change and warn. The scan will handle the rest correctly:
+		// moved dir → same files, no changes; different content → deletions
+		// propagate to peers, which is the correct behavior.
+		if idx.Path != "" && idx.Path != fcfg.Path {
+			slog.Warn("folder path changed, next scan will reconcile",
+				"folder", fcfg.ID, "old_path", idx.Path, "new_path", fcfg.Path)
+		}
+		idx.Path = fcfg.Path
+
 		ignore := newIgnoreMatcher(fcfg.IgnorePatterns)
 
 		fs := &folderState{
