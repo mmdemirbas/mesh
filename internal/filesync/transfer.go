@@ -13,9 +13,8 @@ import (
 )
 
 const (
-	transferTimeout = 10 * time.Minute
-	connectTimeout  = 10 * time.Second
 	maxTempFileAge  = 24 * time.Hour
+	maxSyncFileSize = 4 * 1024 * 1024 * 1024 // 4 GB per file
 )
 
 // downloadFile fetches a file from a peer and writes it to the folder,
@@ -89,7 +88,7 @@ func downloadFile(client *http.Client, peerAddr, folderID, relPath, expectedHash
 		return "", fmt.Errorf("open temp file: %w", err)
 	}
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	if _, err := io.Copy(f, io.LimitReader(resp.Body, maxSyncFileSize)); err != nil {
 		_ = f.Close()
 		return "", fmt.Errorf("write file data: %w", err)
 	}
