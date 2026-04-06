@@ -372,7 +372,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			indicator, st, _ := getComponentInfo("filesync", fs.Bind)
 			addRow("", indicator, colorAddr(fs.Bind), "", "", st, "", readMetrics(metricsMap["filesync:"+fs.Bind]))
 
-			for _, folder := range fs.Folders {
+			for _, folder := range fs.ResolvedFolders {
 				fIndicator, fSt, _ := getComponentInfo("filesync-folder", folder.ID)
 				pathLabel := cGray + folder.Path + cReset
 				addRow("  ", fIndicator, folder.ID+" "+pathLabel, "", "", fSt, "", metricsSnapshot{})

@@ -170,15 +170,11 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	}
 
 	// Initialize folders.
-	for _, fcfg := range cfg.Folders {
+	for _, fcfg := range cfg.ResolvedFolders {
 		// Ensure folder root exists.
 		if _, err := os.Stat(fcfg.Path); err != nil {
 			return fmt.Errorf("folder %q path %q: %w", fcfg.ID, fcfg.Path, err)
 		}
-
-		// Create .stfolder marker.
-		stfolder := filepath.Join(fcfg.Path, ".stfolder")
-		_ = os.MkdirAll(stfolder, 0750)
 
 		// Load or create index.
 		idxPath := filepath.Join(dataDir, fcfg.ID, "index.yaml")
@@ -196,7 +192,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			peers = make(map[string]PeerState)
 		}
 
-		ignore := newIgnoreMatcher(fcfg.IgnorePatterns, fcfg.Path)
+		ignore := newIgnoreMatcher(fcfg.IgnorePatterns)
 
 		fs := &folderState{
 			cfg:    fcfg,
@@ -230,7 +226,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		return fmt.Errorf("listen %s: %w", cfg.Bind, err)
 	}
 
-	slog.Info("filesync listening", "bind", ln.Addr().String(), "device_id", deviceID, "folders", len(cfg.Folders))
+	slog.Info("filesync listening", "bind", ln.Addr().String(), "device_id", deviceID, "folders", len(cfg.ResolvedFolders))
 
 	var wg sync.WaitGroup
 
@@ -243,7 +239,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	context.AfterFunc(ctx, func() { _ = httpSrv.Close() })
 
 	// Filesystem watcher.
-	roots := make([]string, 0, len(cfg.Folders))
+	roots := make([]string, 0, len(cfg.ResolvedFolders))
 	ignoreMap := make(map[string]*ignoreMatcher)
 	for _, fs := range n.folders {
 		roots = append(roots, fs.cfg.Path)
@@ -294,7 +290,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	wg.Wait()
 
 	// Clean up state.
-	for _, fcfg := range cfg.Folders {
+	for _, fcfg := range cfg.ResolvedFolders {
 		state.Global.Delete("filesync-folder", fcfg.ID)
 		for _, peer := range fcfg.Peers {
 			state.Global.Delete("filesync-peer", fcfg.ID+"|"+peer)

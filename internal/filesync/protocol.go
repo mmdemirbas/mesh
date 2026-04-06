@@ -251,7 +251,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"device_id": s.node.deviceID,
-		"folders":   len(s.node.cfg.Folders),
+		"folders":   len(s.node.cfg.ResolvedFolders),
 	})
 }
 
