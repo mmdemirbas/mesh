@@ -7,27 +7,27 @@ Items ordered by priority within each tier.
 
 ## Tier 1 — Bugs
 
-| ID | Item                                      | Location                       | Notes                                                                                                                                                                                                   |
-|----|-------------------------------------------|--------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| B3 | Clipboard overwritten without user intent | `clipsync.go` `processPayload` | Needs design. No inbound write gate — any allowed peer can push at any time. Possible mitigations: rate-limit inbound writes, receive window, or configurable sync direction. Needs reproduction first. |
+| ID | Component | Item                                      | Notes                                                                                                                                                                                                   |
+|----|-----------|-------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| B3 | clipsync  | Clipboard overwritten without user intent | Needs design. No inbound write gate — any allowed peer can push at any time. Possible mitigations: rate-limit inbound writes, receive window, or configurable sync direction. Needs reproduction first. |
 
 ---
 
 ## Tier 2 — Security
 
-| ID  | Item                                      | Location                           | Notes                                                                                                                                                                                                          |
-|-----|-------------------------------------------|------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| S1  | No TLS for clipsync HTTP                  | `clipsync.go` `runHTTPServer`      | Needs design. Options: mTLS, pre-shared key over TLS, or opportunistic TLS with self-signed certs. Config schema needs `tls_cert`/`tls_key` fields. Must remain backward-compatible for localhost-only setups. |
-| FS4 | No TLS / auth for filesync HTTP           | `filesync/protocol.go`            | Same design as S1 — share the solution. Peer validation is IP-only. Any machine with the right IP gets full read/write access. |
+| ID  | Component | Item                            | Notes                                                                                                                                                                                                          |
+|-----|-----------|---------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| S1  | clipsync  | No TLS for clipsync HTTP        | Needs design. Options: mTLS, pre-shared key over TLS, or opportunistic TLS with self-signed certs. Config schema needs `tls_cert`/`tls_key` fields. Must remain backward-compatible for localhost-only setups. |
+| FS4 | filesync  | No TLS / auth for filesync HTTP | Same design as S1 — share the solution. Peer validation is IP-only. Any machine with the right IP gets full read/write access. |
 
 ---
 
 ## Tier 3 — Testing
 
-| ID | Item                                             | Location                         | Notes                                                                                                                                         |
-|----|--------------------------------------------------|----------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| T2 | Tunnel package coverage gaps                     | `internal/tunnel/tunnel_test.go` | Remaining gaps: `runLocalForward`, `runRemoteForward`, `buildAuthMethods`, full SSH client lifecycle, multiplex mode, `ExitOnForwardFailure`. |
-| T3 | Integration tests: real SSH handshake + clipsync | New test file(s)                 | Full client-server SSH roundtrip. Clipsync push/pull between two in-process nodes.                                                            |
+| ID | Component | Item                                    | Notes                                                                                                                                         |
+|----|-----------|-----------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| T2 | tunnel    | Tunnel package coverage gaps            | Remaining gaps: `runLocalForward`, `runRemoteForward`, `buildAuthMethods`, full SSH client lifecycle, multiplex mode, `ExitOnForwardFailure`. |
+| T3 | all       | Integration tests: real SSH + clipsync  | Full client-server SSH roundtrip. Clipsync push/pull between two in-process nodes.                                                            |
 
 ---
 
@@ -35,30 +35,30 @@ Items ordered by priority within each tier.
 
 Ordered by estimated value and complexity. Each needs design before implementation.
 
-| ID  | Item                             | Complexity  | Notes                                                                                                                                                                         |
-|-----|----------------------------------|-------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| F14 | Clipsync: group isolation        | Low-Medium  | All LAN mesh instances currently discover and sync with each other. Add a `group` field to `ClipsyncCfg` and embed it in UDP beacons and HTTP `/discover` bodies. Peers with mismatched group keys ignore each other. Details below. |
-| F15 | Clipsync: protobuf protocol      | Medium      | Replace JSON serialization in clipsync with protobuf for efficiency. 5 message types across 9 serialization sites. Details below. |
-| F16 | Filesync: delta index exchange   | Medium      | Full index (up to 200K entries) is sent every 30s. Implement sequence-based filtering to send only entries changed since last sync. Details below. |
-| F17 | Filesync: block-level delta sync | High        | Currently transfers entire files on any change. rsync-style rolling hash + block transfer would reduce bandwidth for edits to large files. Details below. |
-| F18 | Filesync: bandwidth throttling   | Low-Medium  | No rate limiting on file transfers. Can saturate the link during large initial syncs. Details below. |
-| F13 | Clipsync payload size limit      | Low         | Network side partially capped (`maxRequestBodySize`). Gap: local clipboard read has no cap. A large image can OOM the sender. Add a per-format size check in `pollClipboard`. |
-| F7  | sshd: env var forwarding         | Low         | Handle `"env"` request type. Collect before `"shell"/"exec"`, apply configurable allowlist (`AcceptEnv`), append to `cmd.Env`.                                                |
-| F9  | sshd: exit-signal reporting      | Low         | Check `WaitStatus.Signaled()`, map to SSH signal name, send `exit-signal` instead of `exit-status`.                                                                           |
-| F10 | sshd: banner and MOTD            | Low         | `ssh.ServerConfig.BannerCallback` for pre-auth. Channel data write before shell for post-auth MOTD. Config: `banner` and `motd` fields.                                       |
-| F8  | sshd: signal forwarding          | Medium      | Handle `"signal"` request type for non-PTY sessions. Map SSH signal names to `syscall.Signal`. Send to process group via `syscall.Kill(-pgid, sig)`.                          |
-| F12 | Windows shell default            | Decision    | Current: `cmd.exe` via `COMSPEC`. PowerShell (`pwsh.exe`) is modern but not universally available. Decide and document. No ConPTY support yet.                                |
-| F2  | `mesh init` command              | Medium      | Interactive config generator. Scaffolds a starter YAML with common patterns.                                                                                                  |
-| F5  | sshd: SFTP subsystem             | Medium      | Handle `"subsystem"` request with `sftp` name. Requires `github.com/pkg/sftp` dependency (new). Enables `scp`, `sftp`, `rsync`.                                               |
-| F6  | sshd: SSH agent forwarding       | Medium      | Handle `auth-agent-req@openssh.com`. Create per-session Unix socket, set `SSH_AUTH_SOCK`. Unix-only.                                                                          |
-| F3  | SSH client subcommands           | Medium-High | Emulate `ssh` CLI for one-off connections without YAML. Needs argument parsing, ephemeral config construction.                                                                |
-| F4  | sshd: user switching             | High        | `setuid`/`setgid` on Unix, `CreateProcessAsUser` on Windows. Requires root/capabilities. Security-critical.                                                                   |
-| F1  | Config hot-reload                | High        | File watcher, config diff, per-component context tree with independent cancellation. Currently all components share one root context with no restart capability.              |
-| F11 | sshd: X11 forwarding             | High        | Xauth cookie handling, Unix socket, channel multiplexing. Low demand.                                                                                                         |
+| ID  | Component | Item                      | Complexity  | Notes                                                                                                                                                                         |
+|-----|-----------|---------------------------|-------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| F14 | clipsync  | Group isolation           | Low-Medium  | All LAN mesh instances currently discover and sync with each other. Add a `group` field and embed it in UDP beacons and HTTP `/discover` bodies. Peers with mismatched groups ignore each other. Details below. |
+| F15 | clipsync  | Protobuf protocol         | Medium      | Replace JSON serialization with protobuf for efficiency. 5 message types across 9 serialization sites. Details below. |
+| F16 | filesync  | Delta index exchange      | Medium      | Full index (up to 200K entries) is sent every 30s. Implement sequence-based filtering to send only changed entries. Details below. |
+| F17 | filesync  | Block-level delta sync    | High        | Currently transfers entire files on any change. rsync-style rolling hash + block transfer would reduce bandwidth for edits to large files. Details below. |
+| F18 | filesync  | Bandwidth throttling      | Low-Medium  | No rate limiting on file transfers. Can saturate the link during large initial syncs. Details below. |
+| F13 | clipsync  | Payload size limit        | Low         | Network side partially capped (`maxRequestBodySize`). Gap: local clipboard read has no cap. A large image can OOM the sender. Add a per-format size check in `pollClipboard`. |
+| F7  | sshd      | Env var forwarding        | Low         | Handle `"env"` request type. Collect before `"shell"/"exec"`, apply configurable allowlist (`AcceptEnv`), append to `cmd.Env`.                                                |
+| F9  | sshd      | Exit-signal reporting     | Low         | Check `WaitStatus.Signaled()`, map to SSH signal name, send `exit-signal` instead of `exit-status`.                                                                           |
+| F10 | sshd      | Banner and MOTD           | Low         | `ssh.ServerConfig.BannerCallback` for pre-auth. Channel data write before shell for post-auth MOTD. Config: `banner` and `motd` fields.                                       |
+| F8  | sshd      | Signal forwarding         | Medium      | Handle `"signal"` request type for non-PTY sessions. Map SSH signal names to `syscall.Signal`. Send to process group via `syscall.Kill(-pgid, sig)`.                          |
+| F12 | sshd      | Windows shell default     | Decision    | Current: `cmd.exe` via `COMSPEC`. PowerShell (`pwsh.exe`) is modern but not universally available. Decide and document. No ConPTY support yet.                                |
+| F2  | cli       | `mesh init` command       | Medium      | Interactive config generator. Scaffolds a starter YAML with common patterns.                                                                                                  |
+| F5  | sshd      | SFTP subsystem            | Medium      | Handle `"subsystem"` request with `sftp` name. Requires `github.com/pkg/sftp` dependency (new). Enables `scp`, `sftp`, `rsync`.                                               |
+| F6  | sshd      | SSH agent forwarding      | Medium      | Handle `auth-agent-req@openssh.com`. Create per-session Unix socket, set `SSH_AUTH_SOCK`. Unix-only.                                                                          |
+| F3  | cli       | SSH client subcommands    | Medium-High | Emulate `ssh` CLI for one-off connections without YAML. Needs argument parsing, ephemeral config construction.                                                                |
+| F4  | sshd      | User switching            | High        | `setuid`/`setgid` on Unix, `CreateProcessAsUser` on Windows. Requires root/capabilities. Security-critical.                                                                   |
+| F1  | core      | Config hot-reload         | High        | File watcher, config diff, per-component context tree with independent cancellation. Currently all components share one root context with no restart capability.              |
+| F11 | sshd      | X11 forwarding            | High        | Xauth cookie handling, Unix socket, channel multiplexing. Low demand.                                                                                                         |
 
 ---
 
-### F14 — Clipsync group isolation (expanded)
+### F14 — Clipsync group isolation
 
 **Problem:** All mesh instances with `lan_discovery: true` on the same network auto-discover and sync clipboards. Two teams on the same LAN get each other's clipboard data.
 
@@ -76,7 +76,7 @@ Ordered by estimated value and complexity. Each needs design before implementati
 
 ---
 
-### F15 — Clipsync protobuf protocol (expanded)
+### F15 — Clipsync protobuf protocol
 
 **Problem:** Clipsync uses JSON with base64-encoded binary blobs. For clipboard data with images or large files, this adds ~33% overhead from base64 + JSON structural overhead.
 
@@ -88,17 +88,14 @@ Ordered by estimated value and complexity. Each needs design before implementati
    - `DiscoverRequest` (replaces inline discovery struct: id, port, hash, group)
 2. Migrate HTTP endpoints first (`POST /sync`, `GET /clip`): `Content-Type: application/x-protobuf`. These carry the bulk of the data.
 3. Migrate UDP beacons second. Beacons are small (~100 bytes) so benefit is minimal, but consistency matters.
-4. Keep backward-compatible accept logic during rollout: try protobuf first, fall back to JSON if content-type header is missing.
 
 **Affected sites:** 9 serialization points (3 `json.Marshal`, 1 `json.Unmarshal`, 5 `json.NewDecoder`). The `Payload`, `ClipFormat`, and `FileRef` structs become generated types.
-
-**Risk:** Breaking change for mixed-version deployments. Mitigate with content-type negotiation in step 4.
 
 **Scope:** New `.proto` file, ~200 lines of migration across `clipsync.go`, update tests.
 
 ---
 
-### F16 — Filesync delta index exchange (expanded)
+### F16 — Filesync delta index exchange
 
 **Problem:** Every 30s, `syncFolder` calls `buildIndexExchange` which serializes the entire `FileIndex` (up to 200K entries) into a protobuf `IndexExchange` and sends it to each peer. The peer sends its full index back. For a folder with 100K files, this is ~10-20 MB per peer per cycle even when nothing changed.
 
@@ -117,7 +114,7 @@ Ordered by estimated value and complexity. Each needs design before implementati
 
 ---
 
-### F17 — Filesync block-level delta sync (expanded)
+### F17 — Filesync block-level delta sync
 
 **Problem:** A 1-byte edit to a 1 GB file retransmits the entire file. For large files that change frequently (databases, logs, disk images), this wastes significant bandwidth and time.
 
@@ -136,7 +133,7 @@ Ordered by estimated value and complexity. Each needs design before implementati
 
 ---
 
-### F18 — Filesync bandwidth throttling (expanded)
+### F18 — Filesync bandwidth throttling
 
 **Problem:** A large initial sync (e.g., 50 GB of files) saturates the network link, starving other mesh traffic (SSH, clipsync) and potentially other applications.
 
@@ -156,16 +153,16 @@ Ordered by estimated value and complexity. Each needs design before implementati
 
 ## Tier 5 — Release / packaging
 
-| ID | Item                         | Notes                                                                     |
-|----|------------------------------|---------------------------------------------------------------------------|
-| R1 | Semantic versioning          | Tag `v0.1.0` or `v1.0.0`. Define stability commitment.                    |
-| R2 | CHANGELOG.md                 | Start from current state.                                                 |
-| R3 | Verify `go install` path     | End-to-end test: `go install github.com/mmdemirbas/mesh/cmd/mesh@latest`. |
-| R4 | README: admin server docs    | Port file location, API endpoints, one curl example.                      |
-| R5 | README: demo GIF             | Capture live dashboard in action.                                         |
-| R6 | Homebrew formula             |                                                                           |
-| R7 | Dockerfile                   |                                                                           |
-| R8 | systemd unit + launchd plist |                                                                           |
+| ID | Component | Item                         | Notes                                                                     |
+|----|-----------|------------------------------|---------------------------------------------------------------------------|
+| R1 | release   | Semantic versioning          | Tag `v0.1.0` or `v1.0.0`. Define stability commitment.                    |
+| R2 | release   | CHANGELOG.md                 | Start from current state.                                                 |
+| R3 | release   | Verify `go install` path     | End-to-end test: `go install github.com/mmdemirbas/mesh/cmd/mesh@latest`. |
+| R4 | docs      | README: admin server docs    | Port file location, API endpoints, one curl example.                      |
+| R5 | docs      | README: demo GIF             | Capture live dashboard in action.                                         |
+| R6 | release   | Homebrew formula             |                                                                           |
+| R7 | release   | Dockerfile                   |                                                                           |
+| R8 | release   | systemd unit + launchd plist |                                                                           |
 
 ---
 
