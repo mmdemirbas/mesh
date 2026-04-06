@@ -9,6 +9,7 @@ message IndexExchange {
   string folder_id = 2;
   int64  sequence  = 3;            // Highest sequence number in this index
   repeated FileInfo files = 4;
+  int64  since     = 5;            // Only include entries with sequence > since (delta mode)
 }
 
 // FileInfo describes a single file (or a deletion tombstone) in the index.

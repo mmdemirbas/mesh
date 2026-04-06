@@ -68,8 +68,8 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	slog.Debug("received index from peer", "peer", peerAddr, "folder", folderID, "files", len(req.GetFiles()))
 
-	// Respond with our index.
-	resp := s.node.buildIndexExchange(folderID)
+	// Respond with our index, filtered by the peer's since sequence.
+	resp := s.node.buildIndexExchange(folderID, req.GetSince())
 	data, err := proto.Marshal(resp)
 	if err != nil {
 		http.Error(w, "marshal response: "+err.Error(), http.StatusInternalServerError)

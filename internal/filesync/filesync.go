@@ -399,8 +399,16 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 	state.Global.Update("filesync-folder", folderID, state.Connecting, "syncing with "+peerAddr)
 
-	// Build and send our index.
-	exchange := n.buildIndexExchange(folderID)
+	// Build and send our index, requesting only entries newer than what we've seen.
+	fs.indexMu.RLock()
+	peerLastSeq := int64(0)
+	if ps, ok := fs.peers[peerAddr]; ok {
+		peerLastSeq = ps.LastSeenSequence
+	}
+	fs.indexMu.RUnlock()
+
+	exchange := n.buildIndexExchange(folderID, 0) // send full index to peer
+	exchange.Since = peerLastSeq                   // ask peer to send only entries newer than this
 	remoteIdx, err := sendIndex(n.httpClient, peerAddr, exchange)
 	if err != nil {
 		slog.Debug("sync failed", "folder", folderID, "peer", peerAddr, "error", err)
@@ -410,14 +418,23 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 	state.Global.Update("filesync-peer", stateKey, state.Connected, "")
 
+	// Detect peer restart: if remote sequence dropped below what we last saw,
+	// reset tracking and request a full exchange on the next cycle.
+	if remoteIdx.GetSequence() < peerLastSeq {
+		slog.Info("peer sequence reset detected, will do full exchange next cycle",
+			"folder", folderID, "peer", peerAddr,
+			"remote_seq", remoteIdx.GetSequence(), "last_seen", peerLastSeq)
+		fs.indexMu.Lock()
+		fs.peers[peerAddr] = PeerState{LastSeenSequence: 0, LastSync: time.Now()}
+		fs.indexMu.Unlock()
+		return
+	}
+
 	// Convert remote protobuf index to our internal format for diffing.
 	remoteFileIndex := protoToFileIndex(remoteIdx)
 
 	fs.indexMu.Lock()
-	lastSeenSeq := int64(0)
-	if ps, ok := fs.peers[peerAddr]; ok {
-		lastSeenSeq = ps.LastSeenSequence
-	}
+	lastSeenSeq := peerLastSeq
 
 	actions := fs.index.diff(remoteFileIndex, lastSeenSeq, fs.cfg.Direction)
 	fs.indexMu.Unlock()
@@ -554,7 +571,8 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 }
 
 // buildIndexExchange creates a protobuf IndexExchange from the local index.
-func (n *Node) buildIndexExchange(folderID string) *pb.IndexExchange {
+// If sinceSequence > 0, only entries with Sequence > sinceSequence are included (delta mode).
+func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.IndexExchange {
 	fs, ok := n.folders[folderID]
 	if !ok {
 		return &pb.IndexExchange{}
@@ -565,6 +583,9 @@ func (n *Node) buildIndexExchange(folderID string) *pb.IndexExchange {
 
 	files := make([]*pb.FileInfo, 0, len(fs.index.Files))
 	for path, entry := range fs.index.Files {
+		if sinceSequence > 0 && entry.Sequence <= sinceSequence {
+			continue
+		}
 		fi := &pb.FileInfo{
 			Path:     path,
 			Size:     entry.Size,

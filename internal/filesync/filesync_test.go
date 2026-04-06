@@ -691,6 +691,111 @@ func TestHandleIndex_ExchangeRoundtrip(t *testing.T) {
 	}
 }
 
+func TestHandleIndex_DeltaMode(t *testing.T) {
+	dir := t.TempDir()
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	idx := newFileIndex()
+	idx.Sequence = 10
+	idx.Files["old.txt"] = FileEntry{Size: 100, SHA256: "aaa", Sequence: 3}
+	idx.Files["new.txt"] = FileEntry{Size: 200, SHA256: "bbb", Sequence: 8}
+	n.folders["test"] = &folderState{
+		cfg:   testFolderCfg(dir, "127.0.0.1"),
+		index: idx,
+		peers: make(map[string]PeerState),
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// Request with since=5: should only get new.txt (sequence 8 > 5).
+	req := &pb.IndexExchange{
+		DeviceId: "peer",
+		FolderId: "test",
+		Sequence: 5,
+		Since:    5,
+	}
+	data, _ := proto.Marshal(req)
+
+	resp, err := http.Post(ts.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body := readBody(t, resp)
+	var respIdx pb.IndexExchange
+	if err := proto.Unmarshal(body, &respIdx); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(respIdx.GetFiles()) != 1 {
+		t.Fatalf("expected 1 file in delta response, got %d", len(respIdx.GetFiles()))
+	}
+	if respIdx.GetFiles()[0].GetPath() != "new.txt" {
+		t.Errorf("expected 'new.txt', got %q", respIdx.GetFiles()[0].GetPath())
+	}
+
+	// Request with since=0: should get both files (full exchange).
+	req.Since = 0
+	data, _ = proto.Marshal(req)
+	resp2, err := http.Post(ts.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+
+	body2 := readBody(t, resp2)
+	var respIdx2 pb.IndexExchange
+	if err := proto.Unmarshal(body2, &respIdx2); err != nil {
+		t.Fatal(err)
+	}
+	if len(respIdx2.GetFiles()) != 2 {
+		t.Fatalf("expected 2 files in full response, got %d", len(respIdx2.GetFiles()))
+	}
+}
+
+func TestBuildIndexExchange_DeltaFiltering(t *testing.T) {
+	n := &Node{
+		deviceID: "test",
+		folders: map[string]*folderState{
+			"docs": {
+				index: &FileIndex{
+					Sequence: 10,
+					Files: map[string]FileEntry{
+						"old.txt": {SHA256: "aaa", Sequence: 2},
+						"mid.txt": {SHA256: "bbb", Sequence: 5},
+						"new.txt": {SHA256: "ccc", Sequence: 9},
+					},
+				},
+			},
+		},
+	}
+
+	// Full exchange.
+	full := n.buildIndexExchange("docs", 0)
+	if len(full.GetFiles()) != 3 {
+		t.Errorf("full: expected 3 files, got %d", len(full.GetFiles()))
+	}
+
+	// Delta since=4: should get mid.txt (5) and new.txt (9).
+	delta := n.buildIndexExchange("docs", 4)
+	if len(delta.GetFiles()) != 2 {
+		t.Errorf("delta since=4: expected 2 files, got %d", len(delta.GetFiles()))
+	}
+
+	// Delta since=9: should get nothing (no entries > 9, only = 9).
+	delta2 := n.buildIndexExchange("docs", 9)
+	if len(delta2.GetFiles()) != 0 {
+		t.Errorf("delta since=9: expected 0 files, got %d", len(delta2.GetFiles()))
+	}
+}
+
 func TestHandleStatus(t *testing.T) {
 	dir := t.TempDir()
 
@@ -850,7 +955,7 @@ func TestTwoNodeSync(t *testing.T) {
 	defer srvA.Close()
 
 	// Node B exchanges index with node A via A's server.
-	exchangeB := nodeB.buildIndexExchange("test")
+	exchangeB := nodeB.buildIndexExchange("test", 0)
 	remoteIdx, err := sendIndex(&http.Client{}, srvA.Listener.Addr().String(), exchangeB)
 	if err != nil {
 		t.Fatal(err)
