@@ -176,145 +176,6 @@ func (x *FileInfo) GetSequence() int64 {
 	return 0
 }
 
-// IndexRequest asks a peer for its index, optionally requesting only entries
-// with sequence > since (delta mode).
-type IndexRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	FolderId      string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
-	Since         int64                  `protobuf:"varint,2,opt,name=since,proto3" json:"since,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *IndexRequest) Reset() {
-	*x = IndexRequest{}
-	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[2]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *IndexRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*IndexRequest) ProtoMessage() {}
-
-func (x *IndexRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[2]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use IndexRequest.ProtoReflect.Descriptor instead.
-func (*IndexRequest) Descriptor() ([]byte, []int) {
-	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{2}
-}
-
-func (x *IndexRequest) GetFolderId() string {
-	if x != nil {
-		return x.FolderId
-	}
-	return ""
-}
-
-func (x *IndexRequest) GetSince() int64 {
-	if x != nil {
-		return x.Since
-	}
-	return 0
-}
-
-// FileChunk carries a segment of file data for chunked transfer.
-type FileChunk struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	FolderId      string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
-	Path          string                 `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
-	Offset        int64                  `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
-	Data          []byte                 `protobuf:"bytes,4,opt,name=data,proto3" json:"data,omitempty"`
-	Sha256        []byte                 `protobuf:"bytes,5,opt,name=sha256,proto3" json:"sha256,omitempty"` // Full-file hash, set on the final chunk
-	TotalSize     int64                  `protobuf:"varint,6,opt,name=total_size,json=totalSize,proto3" json:"total_size,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *FileChunk) Reset() {
-	*x = FileChunk{}
-	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[3]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *FileChunk) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*FileChunk) ProtoMessage() {}
-
-func (x *FileChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[3]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use FileChunk.ProtoReflect.Descriptor instead.
-func (*FileChunk) Descriptor() ([]byte, []int) {
-	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{3}
-}
-
-func (x *FileChunk) GetFolderId() string {
-	if x != nil {
-		return x.FolderId
-	}
-	return ""
-}
-
-func (x *FileChunk) GetPath() string {
-	if x != nil {
-		return x.Path
-	}
-	return ""
-}
-
-func (x *FileChunk) GetOffset() int64 {
-	if x != nil {
-		return x.Offset
-	}
-	return 0
-}
-
-func (x *FileChunk) GetData() []byte {
-	if x != nil {
-		return x.Data
-	}
-	return nil
-}
-
-func (x *FileChunk) GetSha256() []byte {
-	if x != nil {
-		return x.Sha256
-	}
-	return nil
-}
-
-func (x *FileChunk) GetTotalSize() int64 {
-	if x != nil {
-		return x.TotalSize
-	}
-	return 0
-}
-
 var File_internal_filesync_proto_filesync_proto protoreflect.FileDescriptor
 
 const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
@@ -331,18 +192,7 @@ const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
 	"\bmtime_ns\x18\x03 \x01(\x03R\amtimeNs\x12\x16\n" +
 	"\x06sha256\x18\x04 \x01(\fR\x06sha256\x12\x18\n" +
 	"\adeleted\x18\x05 \x01(\bR\adeleted\x12\x1a\n" +
-	"\bsequence\x18\x06 \x01(\x03R\bsequence\"A\n" +
-	"\fIndexRequest\x12\x1b\n" +
-	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12\x14\n" +
-	"\x05since\x18\x02 \x01(\x03R\x05since\"\x9f\x01\n" +
-	"\tFileChunk\x12\x1b\n" +
-	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12\x12\n" +
-	"\x04path\x18\x02 \x01(\tR\x04path\x12\x16\n" +
-	"\x06offset\x18\x03 \x01(\x03R\x06offset\x12\x12\n" +
-	"\x04data\x18\x04 \x01(\fR\x04data\x12\x16\n" +
-	"\x06sha256\x18\x05 \x01(\fR\x06sha256\x12\x1d\n" +
-	"\n" +
-	"total_size\x18\x06 \x01(\x03R\ttotalSizeB4Z2github.com/mmdemirbas/mesh/internal/filesync/protob\x06proto3"
+	"\bsequence\x18\x06 \x01(\x03R\bsequenceB4Z2github.com/mmdemirbas/mesh/internal/filesync/protob\x06proto3"
 
 var (
 	file_internal_filesync_proto_filesync_proto_rawDescOnce sync.Once
@@ -356,12 +206,10 @@ func file_internal_filesync_proto_filesync_proto_rawDescGZIP() []byte {
 	return file_internal_filesync_proto_filesync_proto_rawDescData
 }
 
-var file_internal_filesync_proto_filesync_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_internal_filesync_proto_filesync_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
 var file_internal_filesync_proto_filesync_proto_goTypes = []any{
 	(*IndexExchange)(nil), // 0: filesync.IndexExchange
 	(*FileInfo)(nil),      // 1: filesync.FileInfo
-	(*IndexRequest)(nil),  // 2: filesync.IndexRequest
-	(*FileChunk)(nil),     // 3: filesync.FileChunk
 }
 var file_internal_filesync_proto_filesync_proto_depIdxs = []int32{
 	1, // 0: filesync.IndexExchange.files:type_name -> filesync.FileInfo
@@ -383,7 +231,7 @@ func file_internal_filesync_proto_filesync_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_filesync_proto_filesync_proto_rawDesc), len(file_internal_filesync_proto_filesync_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   2,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
