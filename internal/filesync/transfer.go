@@ -1,7 +1,6 @@
 package filesync
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"io"
 	"net/http"
@@ -142,24 +141,6 @@ func deleteFile(folderRoot, relPath string) error {
 	err = os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("delete %s: %w", relPath, err)
-	}
-	return nil
-}
-
-// verifyFile checks if a file at path matches the expected SHA-256 hash.
-func verifyFile(path, expectedHash string) error {
-	h := sha256.New()
-	f, err := os.Open(path) //nolint:gosec // G304: path from user folder
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	if _, err := io.Copy(h, f); err != nil {
-		return err
-	}
-	actual := fmt.Sprintf("%x", h.Sum(nil))
-	if actual != expectedHash {
-		return fmt.Errorf("hash mismatch: expected %s, got %s", expectedHash, actual)
 	}
 	return nil
 }

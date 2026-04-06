@@ -1,15 +1,14 @@
 package filesync
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
-	"strings"
 
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
 	"google.golang.org/protobuf/proto"
@@ -167,14 +166,14 @@ func addrFromRequest(r *http.Request) string {
 }
 
 // sendIndex pushes our index to a peer and receives their response.
-func sendIndex(client *http.Client, peerAddr, folderID string, exchange *pb.IndexExchange) (*pb.IndexExchange, error) {
+func sendIndex(client *http.Client, peerAddr string, exchange *pb.IndexExchange) (*pb.IndexExchange, error) {
 	data, err := proto.Marshal(exchange)
 	if err != nil {
 		return nil, fmt.Errorf("marshal index: %w", err)
 	}
 
 	u := fmt.Sprintf("http://%s/index", peerAddr)
-	resp, err := client.Post(u, "application/x-protobuf", strings.NewReader(string(data)))
+	resp, err := client.Post(u, "application/x-protobuf", bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("post index to %s: %w", peerAddr, err)
 	}
@@ -226,17 +225,4 @@ func peerMatchesAddr(peerAddr, requestIP string) bool {
 		reqHost = "127.0.0.1"
 	}
 	return host == reqHost
-}
-
-// formatPeerURL builds a URL for a peer, handling potential URL encoding.
-func formatPeerURL(peerAddr, path string, params map[string]string) string {
-	u := fmt.Sprintf("http://%s%s", peerAddr, path)
-	if len(params) > 0 {
-		v := url.Values{}
-		for k, val := range params {
-			v.Set(k, val)
-		}
-		u += "?" + v.Encode()
-	}
-	return u
 }

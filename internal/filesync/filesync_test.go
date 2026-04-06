@@ -1,6 +1,7 @@
 package filesync
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -661,7 +662,7 @@ func TestHandleIndex_ExchangeRoundtrip(t *testing.T) {
 	}
 	data, _ := proto.Marshal(req)
 
-	resp, err := http.Post(ts.URL+"/index", "application/x-protobuf", byteReader(data))
+	resp, err := http.Post(ts.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -739,7 +740,7 @@ func TestHandleIndex_RejectsUnknownPeer(t *testing.T) {
 	req := &pb.IndexExchange{FolderId: "test"}
 	data, _ := proto.Marshal(req)
 
-	resp, err := http.Post(ts.URL+"/index", "application/x-protobuf", byteReader(data))
+	resp, err := http.Post(ts.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -814,39 +815,13 @@ func writeFile(t *testing.T, dir, relPath, content string) {
 	}
 }
 
-func byteReader(data []byte) *bytesReader {
-	return &bytesReader{data: data}
-}
-
-type bytesReader struct {
-	data []byte
-	pos  int
-}
-
-func (r *bytesReader) Read(p []byte) (int, error) {
-	if r.pos >= len(r.data) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.data[r.pos:])
-	r.pos += n
-	if r.pos >= len(r.data) {
-		return n, io.EOF
-	}
-	return n, nil
-}
-
 func readBody(t *testing.T, resp *http.Response) []byte {
 	t.Helper()
-	buf := make([]byte, 1024*1024)
-	var total int
-	for {
-		n, err := resp.Body.Read(buf[total:])
-		total += n
-		if err != nil {
-			break
-		}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return buf[:total]
+	return data
 }
 
 func testCfg(dir, peerIP string) config.FilesyncCfg {

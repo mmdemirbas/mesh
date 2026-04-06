@@ -401,7 +401,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 	// Build and send our index.
 	exchange := n.buildIndexExchange(folderID)
-	remoteIdx, err := sendIndex(n.httpClient, peerAddr, folderID, exchange)
+	remoteIdx, err := sendIndex(n.httpClient, peerAddr, exchange)
 	if err != nil {
 		slog.Debug("sync failed", "folder", folderID, "peer", peerAddr, "error", err)
 		state.Global.Update("filesync-peer", stateKey, state.Retrying, err.Error())
