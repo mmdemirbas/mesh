@@ -345,6 +345,66 @@ func mockSocks5ServerReject(conn net.Conn) {
 	_, _ = conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 }
 
+func TestHandleSocks5_MalformedGreeting(t *testing.T) {
+	// A non-SOCKS5 greeting should be rejected without hanging.
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = proxyLn.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ServeSocks(ctx, proxyLn, nil, slog.Default(), nil)
+
+	conn, err := net.DialTimeout("tcp", proxyLn.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Send garbage (not SOCKS5 version byte 0x05)
+	_, _ = conn.Write([]byte{0x04, 0x01, 0x00})
+
+	// The handler should close the connection promptly
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 16)
+	_, err = conn.Read(buf)
+	if err == nil {
+		t.Error("expected connection to be closed by server, but got data")
+	}
+}
+
+func TestHandleHTTPProxy_MalformedRequest(t *testing.T) {
+	// Garbage input should be rejected without hanging.
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = proxyLn.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ServeHTTPProxy(ctx, proxyLn, "", slog.Default(), nil)
+
+	conn, err := net.DialTimeout("tcp", proxyLn.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Send garbage that isn't a valid HTTP request
+	_, _ = conn.Write([]byte("NOT_HTTP\r\n\r\n"))
+
+	// The handler should close the connection promptly
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 16)
+	_, err = conn.Read(buf)
+	if err == nil {
+		t.Error("expected connection to be closed by server, but got data")
+	}
+}
+
 // mockSocks5ServerIPv6Bind responds to CONNECT with an IPv6 bind address
 // (atyp=0x04, 16-byte addr + 2-byte port) then relays traffic to targetAddr.
 func mockSocks5ServerIPv6Bind(t *testing.T, conn net.Conn, targetAddr string) {

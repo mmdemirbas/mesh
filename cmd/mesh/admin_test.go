@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -223,6 +226,69 @@ func TestAdminLogsEmpty(t *testing.T) {
 	}
 	if len(lines) != 0 {
 		t.Errorf("expected empty array, got %v", lines)
+	}
+}
+
+func TestAdminServerRandomPortBind(t *testing.T) {
+	ring := newLogRing(4)
+	mux := buildAdminMux(ring)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	port := ln.Addr().(*net.TCPAddr).Port
+	if port == 0 {
+		t.Fatal("expected a non-zero port from random binding")
+	}
+
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	defer func() { _ = srv.Close() }()
+
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/state", port))
+	if err != nil {
+		t.Fatalf("admin server not reachable: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestPortFilePath(t *testing.T) {
+	path := portFilePath("testnode")
+	if path == "" {
+		t.Fatal("portFilePath returned empty")
+	}
+	if !strings.HasSuffix(path, "mesh-testnode.port") {
+		t.Errorf("unexpected path suffix: %s", path)
+	}
+	if !strings.Contains(path, "mesh") {
+		t.Errorf("path does not contain 'mesh' directory: %s", path)
+	}
+}
+
+func TestPortFileWriteAndCleanup(t *testing.T) {
+	path := portFilePath("test-cleanup")
+	if err := os.WriteFile(path, []byte("12345"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "12345" {
+		t.Errorf("port file content = %q, want %q", data, "12345")
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("port file should be removed, but stat returned: %v", err)
 	}
 }
 
