@@ -369,6 +369,41 @@ func TestPurgeTombstones(t *testing.T) {
 	}
 }
 
+func TestCleanTempFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create stale temp files: one at root, one nested.
+	writeFile(t, dir, ".mesh-tmp-aaa", "stale root")
+	writeFile(t, dir, "sub/.mesh-tmp-bbb", "stale nested")
+	// Create a fresh temp file that should survive.
+	writeFile(t, dir, ".mesh-tmp-fresh", "fresh")
+	// Create a normal file that should never be touched.
+	writeFile(t, dir, "sub/real.txt", "keep")
+
+	// Backdate the stale files.
+	staleTime := time.Now().Add(-48 * time.Hour)
+	_ = os.Chtimes(filepath.Join(dir, ".mesh-tmp-aaa"), staleTime, staleTime)
+	_ = os.Chtimes(filepath.Join(dir, "sub/.mesh-tmp-bbb"), staleTime, staleTime)
+
+	cleanTempFiles(dir, 24*time.Hour)
+
+	// Stale files should be removed.
+	if _, err := os.Stat(filepath.Join(dir, ".mesh-tmp-aaa")); !os.IsNotExist(err) {
+		t.Error("stale root temp file should be removed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sub/.mesh-tmp-bbb")); !os.IsNotExist(err) {
+		t.Error("stale nested temp file should be removed")
+	}
+	// Fresh temp file should survive.
+	if _, err := os.Stat(filepath.Join(dir, ".mesh-tmp-fresh")); err != nil {
+		t.Error("fresh temp file should survive")
+	}
+	// Normal file should be untouched.
+	if _, err := os.Stat(filepath.Join(dir, "sub/real.txt")); err != nil {
+		t.Error("normal file should be untouched")
+	}
+}
+
 // --- Conflict tests ---
 
 func TestConflictFileName(t *testing.T) {

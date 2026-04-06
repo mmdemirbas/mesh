@@ -339,23 +339,23 @@ func (idx *FileIndex) purgeTombstones(maxAge time.Duration) {
 	}
 }
 
-// cleanTempFiles removes stale .mesh-tmp-* files from the folder root.
+// cleanTempFiles removes stale .mesh-tmp-* files from the entire folder tree.
 func cleanTempFiles(folderRoot string, maxAge time.Duration) {
-	entries, err := os.ReadDir(folderRoot)
-	if err != nil {
-		return
-	}
 	cutoff := time.Now().Add(-maxAge)
-	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), ".mesh-tmp-") {
-			continue
+	_ = filepath.WalkDir(folderRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
 		}
-		info, err := e.Info()
-		if err != nil {
-			continue
+		if !strings.HasPrefix(d.Name(), ".mesh-tmp-") {
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return nil
 		}
 		if info.ModTime().Before(cutoff) {
-			_ = os.Remove(filepath.Join(folderRoot, e.Name()))
+			_ = os.Remove(path)
 		}
-	}
+		return nil
+	})
 }
