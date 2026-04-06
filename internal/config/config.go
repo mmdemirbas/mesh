@@ -21,6 +21,8 @@ type Config struct {
 	Connections []Connection `yaml:"connections,omitempty"`
 	// Clipsync configuration.
 	Clipsync []ClipsyncCfg `yaml:"clipsync,omitempty"`
+	// Filesync configuration (Syncthing-style folder synchronization).
+	Filesync []FilesyncCfg `yaml:"filesync,omitempty"`
 	// Log level: "debug", "info", "warn", or "error". Defaults to "info".
 	LogLevel string `yaml:"log_level,omitempty" jsonschema:"enum=debug,enum=info,enum=warn,enum=error"`
 	// Admin server listen address for the local HTTP API (/api/state, /metrics, /ui).
@@ -99,6 +101,56 @@ func (c *ClipsyncCfg) UnmarshalYAML(value *yaml.Node) error {
 	c.AllowReceive = []string{"all"}
 
 	if err := value.Decode((*plain)(c)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// FilesyncCfg configures a Syncthing-style folder synchronization instance.
+type FilesyncCfg struct {
+	// Network address for the filesync HTTP server (e.g., "0.0.0.0:7756").
+	Bind string `yaml:"bind"`
+	// Folders to synchronize.
+	Folders []FolderCfg `yaml:"folders"`
+	// Periodic full rescan interval (e.g., "60s", "5m"). Default: "60s".
+	// Acts as a safety net alongside real-time filesystem notifications.
+	ScanInterval string `yaml:"scan_interval,omitempty"`
+	// Maximum concurrent file transfers per sync cycle. Default: 4.
+	MaxConcurrent int `yaml:"max_concurrent,omitempty"`
+}
+
+// UnmarshalYAML provides default values for FilesyncCfg.
+func (c *FilesyncCfg) UnmarshalYAML(value *yaml.Node) error {
+	type plain FilesyncCfg
+	c.ScanInterval = "60s"
+	c.MaxConcurrent = 4
+	if err := value.Decode((*plain)(c)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// FolderCfg configures a single folder for synchronization.
+type FolderCfg struct {
+	// Unique identifier shared between peers (must match on all sides).
+	ID string `yaml:"id"`
+	// Local filesystem path to sync.
+	Path string `yaml:"path"`
+	// Explicit peer addresses (host:port) to sync this folder with.
+	Peers []string `yaml:"peers"`
+	// Sync direction: "send-receive" (bidirectional), "send-only", or "receive-only".
+	// Default: "send-receive".
+	Direction string `yaml:"direction,omitempty" jsonschema:"enum=send-receive,enum=send-only,enum=receive-only"`
+	// Ignore patterns (gitignore-style), local to this node.
+	// Applied in addition to .stignore file in the folder root.
+	IgnorePatterns []string `yaml:"ignore_patterns,omitempty"`
+}
+
+// UnmarshalYAML provides default values for FolderCfg.
+func (f *FolderCfg) UnmarshalYAML(value *yaml.Node) error {
+	type plain FolderCfg
+	f.Direction = "send-receive"
+	if err := value.Decode((*plain)(f)); err != nil {
 		return err
 	}
 	return nil
@@ -212,6 +264,11 @@ func LoadUnvalidated(path string) (map[string]*Config, error) {
 		for i := range cfg.Connections {
 			cfg.Connections[i].Auth.Key = expandHome(cfg.Connections[i].Auth.Key)
 			cfg.Connections[i].Auth.KnownHosts = expandHome(cfg.Connections[i].Auth.KnownHosts)
+		}
+		for i := range cfg.Filesync {
+			for j := range cfg.Filesync[i].Folders {
+				cfg.Filesync[i].Folders[j].Path = expandHome(cfg.Filesync[i].Folders[j].Path)
+			}
 		}
 	}
 
@@ -327,6 +384,45 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	for i, fs := range c.Filesync {
+		if fs.Bind == "" {
+			return fmt.Errorf("filesync[%d]: bind is required", i)
+		}
+		if len(fs.Folders) == 0 {
+			return fmt.Errorf("filesync[%d]: at least one folder is required", i)
+		}
+		if fs.ScanInterval != "" {
+			if _, err := time.ParseDuration(fs.ScanInterval); err != nil {
+				return fmt.Errorf("filesync[%d]: invalid scan_interval %q: %w", i, fs.ScanInterval, err)
+			}
+		}
+		if fs.MaxConcurrent < 0 {
+			return fmt.Errorf("filesync[%d]: max_concurrent must be positive", i)
+		}
+		folderIDs := make(map[string]int)
+		for j, f := range fs.Folders {
+			if f.ID == "" {
+				return fmt.Errorf("filesync[%d] folders[%d]: id is required", i, j)
+			}
+			if prev, ok := folderIDs[f.ID]; ok {
+				return fmt.Errorf("filesync[%d]: duplicate folder id %q: folders[%d] and folders[%d]", i, f.ID, prev, j)
+			}
+			folderIDs[f.ID] = j
+			if f.Path == "" {
+				return fmt.Errorf("filesync[%d] folders[%d] %q: path is required", i, j, f.ID)
+			}
+			if len(f.Peers) == 0 {
+				return fmt.Errorf("filesync[%d] folders[%d] %q: at least one peer is required", i, j, f.ID)
+			}
+			switch f.Direction {
+			case "send-receive", "send-only", "receive-only":
+				// ok
+			default:
+				return fmt.Errorf("filesync[%d] folders[%d] %q: direction must be send-receive, send-only, or receive-only, got %q", i, j, f.ID, f.Direction)
+			}
+		}
+	}
+
 	// Check for duplicate names
 	if err := c.checkDuplicateNames(); err != nil {
 		return err
@@ -431,6 +527,11 @@ func (c *Config) checkDuplicateBinds() error {
 					return err
 				}
 			}
+		}
+	}
+	for i, fs := range c.Filesync {
+		if err := check(fs.Bind, fmt.Sprintf("filesync[%d]", i)); err != nil {
+			return err
 		}
 	}
 	return nil

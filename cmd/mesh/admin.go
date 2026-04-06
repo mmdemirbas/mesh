@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mmdemirbas/mesh/internal/filesync"
 	"github.com/mmdemirbas/mesh/internal/state"
 	"github.com/mmdemirbas/mesh/internal/tunnel"
 )
@@ -114,10 +115,36 @@ func buildAdminMux(ring *logRing) *http.ServeMux {
 		_, _ = fmt.Fprint(w, b.String()) // write error: headers already sent, nothing to do
 	})
 
+	// GET /api/filesync/folders — filesync folder statuses.
+	mux.HandleFunc("/api/filesync/folders", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		folders := filesync.GetFolderStatuses()
+		if folders == nil {
+			folders = []filesync.FolderStatus{}
+		}
+		_ = json.NewEncoder(w).Encode(folders)
+	})
+
+	// GET /api/filesync/conflicts — list conflict files.
+	mux.HandleFunc("/api/filesync/conflicts", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		conflicts := filesync.GetConflicts()
+		if conflicts == nil {
+			conflicts = []filesync.ConflictInfo{}
+		}
+		_ = json.NewEncoder(w).Encode(conflicts)
+	})
+
 	// GET /ui — browser dashboard; polls /api/state and /api/logs every second.
 	mux.HandleFunc("/ui", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = fmt.Fprint(w, adminUI) // write error: headers already sent, nothing to do
+	})
+
+	// GET /ui/filesync — filesync web dashboard.
+	mux.HandleFunc("/ui/filesync", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = fmt.Fprint(w, filesyncUI)
 	})
 
 	return mux
@@ -184,6 +211,60 @@ function renderLogs(lines){
 }
 function x(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 tick();setInterval(tick,1000);
+</script>
+</body>
+</html>`
+
+// filesyncUI is the web dashboard for filesync status, served at GET /ui/filesync.
+const filesyncUI = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>mesh filesync</title>
+<style>
+body{font-family:monospace;background:#1a1a2e;color:#e0e0e0;margin:2em}
+h1{color:#00d4aa;font-size:1.4em}
+h2{color:#7ec8e3;font-size:1.1em;margin-top:1.5em}
+table{border-collapse:collapse;width:100%;margin:.5em 0}
+th,td{text-align:left;padding:.3em .8em;border-bottom:1px solid #333}
+th{color:#888;font-weight:normal}
+.ok{color:#4ade80}
+.warn{color:#facc15}
+.err{color:#f87171}
+.conflict{background:#2a1a1a;color:#f87171}
+#status{margin-bottom:1em;color:#888}
+</style>
+</head>
+<body>
+<h1>mesh filesync</h1>
+<div id="status">loading...</div>
+<h2>Folders</h2>
+<table id="folders"><tr><th>ID</th><th>Path</th><th>Direction</th><th>Files</th><th>Peers</th></tr></table>
+<h2>Conflicts</h2>
+<div id="conflicts">none</div>
+<script>
+async function tick(){
+  try{
+    const[fr,cr]=await Promise.all([fetch('/api/filesync/folders'),fetch('/api/filesync/conflicts')]);
+    const folders=await fr.json(),conflicts=await cr.json();
+    document.getElementById('status').textContent='Updated: '+new Date().toLocaleTimeString();
+    let ft='<tr><th>ID</th><th>Path</th><th>Direction</th><th>Files</th><th>Peers</th></tr>';
+    for(const f of folders){
+      ft+='<tr><td>'+x(f.id)+'</td><td>'+x(f.path)+'</td><td>'+x(f.direction)+'</td><td>'+f.file_count+'</td><td>'+x((f.peers||[]).join(', '))+'</td></tr>';
+    }
+    document.getElementById('folders').innerHTML=ft;
+    if(conflicts.length===0){
+      document.getElementById('conflicts').innerHTML='<span class="ok">none</span>';
+    }else{
+      let ct='<table><tr><th>Folder</th><th>Path</th></tr>';
+      for(const c of conflicts){ct+='<tr class="conflict"><td>'+x(c.folder_id)+'</td><td>'+x(c.path)+'</td></tr>';}
+      ct+='</table>';
+      document.getElementById('conflicts').innerHTML=ct;
+    }
+  }catch(e){document.getElementById('status').textContent='Error: '+e.message}
+}
+function x(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+tick();setInterval(tick,2000);
 </script>
 </body>
 </html>`

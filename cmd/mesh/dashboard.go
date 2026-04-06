@@ -366,6 +366,28 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		addHeader("")
 	}
 
+	if len(cfg.Filesync) > 0 {
+		addHeader(sectionTitle("filesync"))
+		for _, fs := range cfg.Filesync {
+			indicator, st, _ := getComponentInfo("filesync", fs.Bind)
+			addRow("", indicator, colorAddr(fs.Bind), "", "", st, "", readMetrics(metricsMap["filesync:"+fs.Bind]))
+
+			for _, folder := range fs.Folders {
+				fIndicator, fSt, _ := getComponentInfo("filesync-folder", folder.ID)
+				pathLabel := cGray + folder.Path + cReset
+				addRow("  ", fIndicator, folder.ID+" "+pathLabel, "", "", fSt, "", metricsSnapshot{})
+
+				for _, peer := range folder.Peers {
+					peerKey := folder.ID + "|" + peer
+					_, pSt, _ := getComponentInfo("filesync-peer", peerKey)
+					addRow("    ", "~", colorAddr(peer), "", "", pSt, "", metricsSnapshot{})
+				}
+				_ = fIndicator
+			}
+		}
+		addHeader("")
+	}
+
 	if len(cfg.Listeners) > 0 {
 		addHeader(sectionTitle("listeners"))
 		for _, l := range cfg.Listeners {

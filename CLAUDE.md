@@ -4,7 +4,7 @@
 
 ## What is mesh?
 
-A single-binary, cross-platform networking tool that replaces `ssh`, `sshd`, `autossh`, `socat`, and SOCKS/HTTP proxy servers. One config file defines listeners, outbound connections, port forwards, and clipboard sync.
+A single-binary, cross-platform networking tool that replaces `ssh`, `sshd`, `autossh`, `socat`, SOCKS/HTTP proxy servers, and file sync tools. One config file defines listeners, outbound connections, port forwards, clipboard sync, and folder synchronization.
 
 ## Project Structure
 
@@ -16,6 +16,7 @@ internal/
   proxy/            SOCKS5 + HTTP CONNECT proxy servers
   netutil/          TCP helpers (BiCopy, keepalive, reusable listeners)
   clipsync/         Clipboard sync (UDP discovery, HTTP push/pull, OS clipboard I/O)
+  filesync/         Syncthing-style folder sync (protobuf index exchange, fsnotify, HTTP file transfer)
   state/            Thread-safe component state (Global singleton with Snapshot())
 configs/            Example YAML + JSON schema
 ```
@@ -35,6 +36,8 @@ configs/            Example YAML + JSON schema
 **Dashboard** — Uses terminal alternate screen buffer (`\033[?1049h`). Overwrites in-place line by line (`\033[K` per line, `\033[J` to clear remainder). Header (uptime/clock) always written; body (status + logs) skipped when unchanged. No scrollback pollution, no flicker.
 
 **Config precedence** — Hardcoded defaults → config file (YAML) → environment variables (`os.ExpandEnv` in config loading) → CLI flags. Validation at load time with actionable errors.
+
+**Filesync** — Syncthing-style folder sync with explicit peer configuration (no broadcast discovery). Protobuf index exchange for efficiency. Dual change detection: fsnotify for real-time + periodic scan as safety net. Conflict resolution uses Syncthing naming (`.sync-conflict-*`). Transfer resume via `.mesh-tmp-*` temp files with offset-based HTTP GET. Index persisted as YAML in `~/.mesh/filesync/<folder-id>/`. Uses `.stignore` (Syncthing-compatible) for ignore patterns. Folder marker `.stfolder` for managed folder identification. Web UI at `/ui/filesync` on the admin port.
 
 **Admin server** — Every `mesh up` starts a local HTTP server on `127.0.0.1:0` (random port). Port written to `<UserCacheDir>/mesh/mesh-<node>.port` (e.g., `~/Library/Caches/mesh/mesh-mynode.port` on macOS). Endpoints: `GET /` and `/api/state` (JSON state), `GET /api/logs` (recent log lines), `GET /metrics` (Prometheus text), `GET /ui` (browser dashboard). Configure with `admin_addr` in node config; set to `"off"` to disable. Auth failures are tracked in `tunnel.authFailuresByIP` and exposed via `tunnel.SnapshotAuthFailures()` for the metrics endpoint.
 

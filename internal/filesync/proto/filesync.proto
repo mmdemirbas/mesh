@@ -1,0 +1,39 @@
+syntax = "proto3";
+package filesync;
+option go_package = "github.com/mmdemirbas/mesh/internal/filesync/proto";
+
+// IndexExchange is sent during sync: each side pushes its index and receives
+// the peer's index in the response.
+message IndexExchange {
+  string device_id = 1;
+  string folder_id = 2;
+  int64  sequence  = 3;            // Highest sequence number in this index
+  repeated FileInfo files = 4;
+}
+
+// FileInfo describes a single file (or a deletion tombstone) in the index.
+message FileInfo {
+  string path      = 1;           // Relative to folder root, forward-slash separated
+  int64  size      = 2;
+  int64  mtime_ns  = 3;           // Unix nanoseconds
+  bytes  sha256    = 4;           // 32 bytes
+  bool   deleted   = 5;           // Tombstone flag
+  int64  sequence  = 6;           // Per-file monotonic counter
+}
+
+// IndexRequest asks a peer for its index, optionally requesting only entries
+// with sequence > since (delta mode).
+message IndexRequest {
+  string folder_id = 1;
+  int64  since     = 2;
+}
+
+// FileChunk carries a segment of file data for chunked transfer.
+message FileChunk {
+  string folder_id  = 1;
+  string path       = 2;
+  int64  offset     = 3;
+  bytes  data       = 4;
+  bytes  sha256     = 5;          // Full-file hash, set on the final chunk
+  int64  total_size = 6;
+}

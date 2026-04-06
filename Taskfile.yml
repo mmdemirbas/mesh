@@ -34,6 +34,11 @@ tasks:
       - mkdir -p build
       - cp dist/mesh-{{OS}}-{{ARCH}}{{exeExt}} build/mesh{{exeExt}}
 
+  proto:
+    desc: Regenerate protobuf Go code
+    cmds:
+      - protoc --go_out=. --go_opt=paths=source_relative internal/filesync/proto/filesync.proto
+
   test:
     desc: "Run all tests"
     cmds:

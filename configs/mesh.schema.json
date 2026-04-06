@@ -91,6 +91,13 @@
           "type": "array",
           "description": "Clipsync configuration."
         },
+        "filesync": {
+          "items": {
+            "$ref": "#/$defs/FilesyncCfg"
+          },
+          "type": "array",
+          "description": "Filesync configuration (Syncthing-style folder synchronization)."
+        },
         "log_level": {
           "type": "string",
           "enum": [
@@ -161,6 +168,79 @@
         "targets"
       ],
       "description": "Connection is an outbound SSH connection to a peer or standard SSH server."
+    },
+    "FilesyncCfg": {
+      "properties": {
+        "bind": {
+          "type": "string",
+          "description": "Network address for the filesync HTTP server (e.g., \"0.0.0.0:7756\")."
+        },
+        "folders": {
+          "items": {
+            "$ref": "#/$defs/FolderCfg"
+          },
+          "type": "array",
+          "description": "Folders to synchronize."
+        },
+        "scan_interval": {
+          "type": "string",
+          "description": "Periodic full rescan interval (e.g., \"60s\", \"5m\"). Default: \"60s\".\nActs as a safety net alongside real-time filesystem notifications."
+        },
+        "max_concurrent": {
+          "type": "integer",
+          "description": "Maximum concurrent file transfers per sync cycle. Default: 4."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "bind",
+        "folders"
+      ],
+      "description": "FilesyncCfg configures a Syncthing-style folder synchronization instance."
+    },
+    "FolderCfg": {
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier shared between peers (must match on all sides)."
+        },
+        "path": {
+          "type": "string",
+          "description": "Local filesystem path to sync."
+        },
+        "peers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Explicit peer addresses (host:port) to sync this folder with."
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "send-receive",
+            "send-only",
+            "receive-only"
+          ],
+          "description": "Sync direction: \"send-receive\" (bidirectional), \"send-only\", or \"receive-only\".\nDefault: \"send-receive\"."
+        },
+        "ignore_patterns": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Ignore patterns (gitignore-style), local to this node.\nApplied in addition to .stignore file in the folder root."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "path",
+        "peers"
+      ],
+      "description": "FolderCfg configures a single folder for synchronization."
     },
     "Forward": {
       "properties": {

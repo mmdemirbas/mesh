@@ -62,7 +62,36 @@ my-vps-tunnel-service:
       # poll_interval: "3s"
 
   # ==============================================================================
-  # 2. Listeners (Accept incoming connections and requests)
+  # 2. File Synchronization (Syncthing-style)
+  # ==============================================================================
+  # Sync folders between mesh nodes. Explicitly configured peers per folder.
+  # Uses protobuf for efficient index exchange and supports resume for large files.
+  # Real-time change detection via fsnotify, with periodic full scan as safety net.
+  filesync:
+    - bind: "0.0.0.0:7756"
+      scan_interval: "60s"   # Full rescan interval (fsnotify handles real-time)
+      max_concurrent: 4      # Concurrent file transfers
+      folders:
+        - id: projects
+          path: ~/Projects
+          peers:
+            - "192.168.1.10:7756"       # LAN peer
+            - "127.0.0.1:17756"         # Peer behind NAT via SSH tunnel
+          direction: send-receive        # send-receive | send-only | receive-only
+          ignore_patterns:
+            - ".git"
+            - "node_modules"
+            - "*.tmp"
+          # conflict_policy: newer-wins  # default: newer-wins
+
+        - id: photos-backup
+          path: ~/Photos
+          peers:
+            - "192.168.1.10:7756"
+          direction: send-only           # One-way backup
+
+  # ==============================================================================
+  # 3. Listeners (Accept incoming connections and requests)
   # ==============================================================================
   listeners:
     # 'proxies': Run standard exit nodes on THIS machine.
@@ -88,7 +117,7 @@ my-vps-tunnel-service:
       options: *sshd_options
 
   # ==============================================================================
-  # 3. Outbound SSH Connections (Dial remote servers)
+  # 4. Outbound SSH Connections (Dial remote servers)
   # ==============================================================================
   # Act as an SSH client. You can define multiple outbound connections.
   #

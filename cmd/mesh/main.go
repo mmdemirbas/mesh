@@ -24,6 +24,7 @@ import (
 	"github.com/lmittmann/tint"
 	"github.com/mmdemirbas/mesh/internal/clipsync"
 	"github.com/mmdemirbas/mesh/internal/config"
+	"github.com/mmdemirbas/mesh/internal/filesync"
 	"github.com/mmdemirbas/mesh/internal/proxy"
 	"github.com/mmdemirbas/mesh/internal/state"
 	"github.com/mmdemirbas/mesh/internal/tunnel"
@@ -442,9 +443,21 @@ func upCmd(nodeNames []string, configPath string) {
 				}
 			}()
 		}
+
+		// 4. Filesync
+		for _, fs := range cfg.Filesync {
+			fs := fs
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := filesync.Start(ctx, fs); err != nil {
+					log.Error("Filesync failed to start", "error", err)
+				}
+			}()
+		}
 	}
 
-	// 4. Live dashboard or block until signal
+	// 5. Live dashboard or block until signal
 	if useDashboard {
 		go runDashboard(ctx, cfgs, nodeNames, configPath, logFilePath, ring)
 	}
