@@ -18,6 +18,7 @@ A single-binary, cross-platform networking tool that replaces `ssh`, `sshd`, `au
 | SOCKS/HTTP proxy server | `type: socks` or `type: http` listener |
 | docker-compose with 20+ sshpass containers | `mode: multiplex` — one connection per target, all managed |
 | clipboard sync tools | Built-in `clipsync` with UDP LAN discovery |
+| Syncthing / rsync | Built-in `filesync` with block-level delta sync |
 
 ## Features
 
@@ -26,7 +27,8 @@ A single-binary, cross-platform networking tool that replaces `ssh`, `sshd`, `au
 - **Multiplex connections** — `mode: multiplex` connects to ALL targets simultaneously for fleet management
 - **Flexible auth** — SSH agent, key files, or `password_command` (fetch from Keychain, `pass`, 1Password CLI)
 - **Parallel SSH sessions** — each `ForwardSet` gets its own SSH connection for throughput isolation
-- **Clipboard sync** — text, images, and files across your network with UDP LAN discovery
+- **Clipboard sync** — text, images, and files across your network with UDP LAN discovery and group isolation
+- **Folder sync** — Syncthing-style file sync with delta index exchange, block-level delta transfer, and bandwidth throttling
 - **Cross-platform** — macOS, Linux, Windows (including Windows SSH server support)
 - **16 SSH options** — Ciphers, MACs, KexAlgorithms, HostKeyAlgorithms, IPQoS, RekeyLimit, and more
 
@@ -186,6 +188,22 @@ mynode:
       allow_send_to: ["all"]
       allow_receive: ["all"]
       poll_interval: "3s"  # optional, default 3s
+      group: "team-alpha"  # optional, isolates discovery groups on the same LAN
+```
+
+**Folder sync:**
+
+```yaml
+mynode:
+  filesync:
+    - bind: "0.0.0.0:7756"
+      max_concurrent: 4
+      max_bandwidth: "50MB"   # optional, throttle to 50 MB/s
+      folders:
+        - id: projects
+          path: ~/Projects
+          peers: ["192.168.1.10:7756"]
+          direction: send-receive  # or send-only, receive-only
 ```
 
 See [`configs/example.yaml`](configs/example.yaml) for a comprehensive reference with all options documented.
@@ -226,7 +244,7 @@ task clean          # remove build artifacts
 
 ### Testing
 
-290+ tests across 7 packages, all race-free:
+620+ tests across 8 packages, all race-free:
 
 ```bash
 go test -race -count=1 ./...
@@ -241,7 +259,8 @@ internal/
   tunnel/           SSH client + server, forwarding
   proxy/            SOCKS5 + HTTP proxy
   netutil/          TCP helpers (BiCopy, keepalive)
-  clipsync/         Clipboard sync (UDP discovery, HTTP push/pull)
+  clipsync/         Clipboard sync (UDP discovery, protobuf push/pull)
+  filesync/         Syncthing-style folder sync (delta index, block delta, bandwidth throttling)
   state/            Thread-safe component state
 ```
 

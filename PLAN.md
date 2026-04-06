@@ -68,10 +68,6 @@ Ordered by estimated value and complexity. Each needs design before implementati
 
 ---
 
-## CI note
-
-`.github/workflows/ci.yml` specifies Go 1.25, but README says Go 1.26+. Reconcile.
-
 ## Pre-existing flaky test
 
 `TestAcceptAndForward_DialerErrorDropsConnection` occasionally fails with "connection reset by peer"
