@@ -734,3 +734,32 @@ func TestValidate_FilesyncMaxConcurrentZero(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+func TestParseBandwidth(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    int64
+		wantErr bool
+	}{
+		{"10MB", 10_000_000, false},
+		{"500KB", 500_000, false},
+		{"1GB", 1_000_000_000, false},
+		{"100", 100, false},
+		{"  50 MB  ", 50_000_000, false},
+		{"0MB", 0, true},
+		{"-5MB", 0, true},
+		{"abc", 0, true},
+		{"", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := ParseBandwidth(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseBandwidth(%q) error=%v, wantErr=%v", tt.input, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("ParseBandwidth(%q) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}

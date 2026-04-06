@@ -75,6 +75,7 @@ my-vps-tunnel-service:
     - bind: "0.0.0.0:7756"
       scan_interval: "60s"   # Full rescan interval (fsnotify handles real-time)
       max_concurrent: 4      # Concurrent file transfers
+      # max_bandwidth: "50MB"  # Throttle to 50 MB/s (default: unlimited)
       folders:
         - id: projects
           path: ~/Projects

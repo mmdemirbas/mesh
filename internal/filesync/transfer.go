@@ -2,6 +2,7 @@ package filesync
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.org/x/time/rate"
 
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
 	"google.golang.org/protobuf/proto"
@@ -23,7 +26,7 @@ const (
 // downloadFile fetches a file from a peer and writes it to the folder,
 // resuming from an existing temp file if present.
 // Returns the local path of the completed file.
-func downloadFile(client *http.Client, peerAddr, folderID, relPath, expectedHash string, folderRoot string) (string, error) {
+func downloadFile(client *http.Client, peerAddr, folderID, relPath, expectedHash string, folderRoot string, limiter *rate.Limiter) (string, error) {
 	destPath, err := safePath(folderRoot, relPath)
 	if err != nil {
 		return "", err
@@ -88,7 +91,8 @@ func downloadFile(client *http.Client, peerAddr, folderID, relPath, expectedHash
 		return "", fmt.Errorf("open temp file: %w", err)
 	}
 
-	if _, err := io.Copy(f, io.LimitReader(resp.Body, maxSyncFileSize)); err != nil {
+	reader := newRateLimitedReader(context.Background(), io.LimitReader(resp.Body, maxSyncFileSize), limiter)
+	if _, err := io.Copy(f, reader); err != nil {
 		_ = f.Close()
 		return "", fmt.Errorf("write file data: %w", err)
 	}
@@ -140,7 +144,7 @@ func safePath(folderRoot, relPath string) (string, error) {
 // It computes block signatures of the local file, sends them to the peer,
 // and reconstructs the file from unchanged local blocks + received delta blocks.
 // Falls back to full download if the local file doesn't exist.
-func downloadFileDelta(client *http.Client, peerAddr, folderID, relPath, expectedHash, folderRoot string) (string, error) {
+func downloadFileDelta(client *http.Client, peerAddr, folderID, relPath, expectedHash, folderRoot string, limiter *rate.Limiter) (string, error) {
 	destPath, err := safePath(folderRoot, relPath)
 	if err != nil {
 		return "", err
@@ -148,19 +152,19 @@ func downloadFileDelta(client *http.Client, peerAddr, folderID, relPath, expecte
 
 	// If local file doesn't exist, fall back to full download.
 	if _, err := os.Stat(destPath); os.IsNotExist(err) {
-		return downloadFile(client, peerAddr, folderID, relPath, expectedHash, folderRoot)
+		return downloadFile(client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
 	}
 
 	// Compute block signatures of local file.
 	blockSize := int64(defaultBlockSize)
 	localHashes, err := computeBlockSignatures(destPath, blockSize)
 	if err != nil {
-		return downloadFile(client, peerAddr, folderID, relPath, expectedHash, folderRoot)
+		return downloadFile(client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
 	}
 
 	localInfo, err := os.Stat(destPath)
 	if err != nil {
-		return downloadFile(client, peerAddr, folderID, relPath, expectedHash, folderRoot)
+		return downloadFile(client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
 	}
 
 	// Send block signatures to peer.
@@ -185,7 +189,7 @@ func downloadFileDelta(client *http.Client, peerAddr, folderID, relPath, expecte
 
 	// Fall back to full download on error.
 	if resp.StatusCode != http.StatusOK {
-		return downloadFile(client, peerAddr, folderID, relPath, expectedHash, folderRoot)
+		return downloadFile(client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
 	}
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxSyncFileSize))

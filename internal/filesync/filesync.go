@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/mmdemirbas/mesh/internal/config"
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
 	"github.com/mmdemirbas/mesh/internal/state"
@@ -126,6 +128,9 @@ type Node struct {
 
 	httpClient *http.Client
 
+	// rateLimiter throttles file transfer bandwidth. nil means unlimited.
+	rateLimiter *rate.Limiter
+
 	// scanTrigger signals the sync loop that a scan completed with changes.
 	scanTrigger chan struct{}
 }
@@ -153,6 +158,15 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			},
 		},
 		scanTrigger: make(chan struct{}, 1),
+	}
+
+	// Set up bandwidth limiter.
+	if cfg.MaxBandwidth != "" {
+		bps, err := config.ParseBandwidth(cfg.MaxBandwidth)
+		if err == nil && bps > 0 {
+			n.rateLimiter = rate.NewLimiter(rate.Limit(bps), int(min(bps, 1<<20))) // burst up to 1MB or bps
+			slog.Info("filesync bandwidth throttle", "bytes_per_sec", bps)
+		}
 	}
 
 	// Initialize folders.
@@ -479,7 +493,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
-				err := downloadFromPeer(n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path)
+				err := downloadFromPeer(n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
 				if err != nil {
 					slog.Warn("download failed", "folder", folderID, "path", action.Path, "peer", peerAddr, "error", err)
 					return
@@ -512,7 +526,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			}
 			if winner == "remote" {
 				// Download the remote version to replace local.
-				err := downloadFromPeer(n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path)
+				err := downloadFromPeer(n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
 				if err != nil {
 					slog.Warn("conflict download failed", "folder", folderID, "path", action.Path, "error", err)
 					continue

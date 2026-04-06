@@ -477,7 +477,7 @@ func TestResolveConflict_LocalWins(t *testing.T) {
 
 func TestDownloadFile_PathTraversal(t *testing.T) {
 	client := &http.Client{}
-	_, err := downloadFile(client, "127.0.0.1:9999", "test", "../../../etc/passwd", "abcdef0123456789abcdef0123456789", t.TempDir())
+	_, err := downloadFile(client, "127.0.0.1:9999", "test", "../../../etc/passwd", "abcdef0123456789abcdef0123456789", t.TempDir(), nil)
 	if err == nil {
 		t.Error("expected error for path traversal")
 	}
@@ -485,7 +485,7 @@ func TestDownloadFile_PathTraversal(t *testing.T) {
 
 func TestDownloadFile_ShortHash(t *testing.T) {
 	client := &http.Client{}
-	_, err := downloadFile(client, "127.0.0.1:9999", "test", "file.txt", "abc", t.TempDir())
+	_, err := downloadFile(client, "127.0.0.1:9999", "test", "file.txt", "abc", t.TempDir(), nil)
 	if err == nil {
 		t.Fatal("expected error for short hash")
 	}
@@ -1114,6 +1114,7 @@ func TestTwoNodeSync(t *testing.T) {
 		"from-a.txt",
 		actions[0].RemoteHash,
 		dirB,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1174,6 +1175,7 @@ func TestDownloadFile_Resume(t *testing.T) {
 		"data.txt",
 		expectedHash,
 		destDir,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)

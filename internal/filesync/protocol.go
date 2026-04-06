@@ -11,6 +11,8 @@ import (
 	"os"
 	"strconv"
 
+	"golang.org/x/time/rate"
+
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
 	"google.golang.org/protobuf/proto"
 )
@@ -143,7 +145,8 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	_, _ = io.Copy(w, f)
+	writer := newRateLimitedWriter(r.Context(), w, s.node.rateLimiter)
+	_, _ = io.Copy(writer, f)
 }
 
 // handleDelta receives block signatures from a peer and responds with only
@@ -295,8 +298,8 @@ func sendIndex(client *http.Client, peerAddr string, exchange *pb.IndexExchange)
 }
 
 // downloadFromPeer downloads a single file from a peer with resume support.
-func downloadFromPeer(client *http.Client, peerAddr, folderID, relPath, expectedHash, folderRoot string) error {
-	_, err := downloadFileDelta(client, peerAddr, folderID, relPath, expectedHash, folderRoot)
+func downloadFromPeer(client *http.Client, peerAddr, folderID, relPath, expectedHash, folderRoot string, limiter *rate.Limiter) error {
+	_, err := downloadFileDelta(client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
 	return err
 }
 

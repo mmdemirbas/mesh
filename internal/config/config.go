@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -118,6 +119,9 @@ type FilesyncCfg struct {
 	ScanInterval string `yaml:"scan_interval,omitempty"`
 	// Maximum concurrent file transfers per sync cycle. Default: 4.
 	MaxConcurrent int `yaml:"max_concurrent,omitempty"`
+	// Maximum bandwidth for file transfers (e.g., "10MB", "100MB", "1GB").
+	// The value is bytes per second. Suffixes: KB, MB, GB (base-10). Default: unlimited.
+	MaxBandwidth string `yaml:"max_bandwidth,omitempty"`
 }
 
 // UnmarshalYAML provides default values for FilesyncCfg.
@@ -400,6 +404,11 @@ func (c *Config) Validate() error {
 		if fs.MaxConcurrent <= 0 {
 			return fmt.Errorf("filesync[%d]: max_concurrent must be positive", i)
 		}
+		if fs.MaxBandwidth != "" {
+			if _, err := ParseBandwidth(fs.MaxBandwidth); err != nil {
+				return fmt.Errorf("filesync[%d]: invalid max_bandwidth %q: %w", i, fs.MaxBandwidth, err)
+			}
+		}
 		folderIDs := make(map[string]int)
 		for j, f := range fs.Folders {
 			if f.ID == "" {
@@ -606,6 +615,34 @@ func requireFile(path, field string) error {
 		return fmt.Errorf("%s file inaccessible: %w", field, err)
 	}
 	return nil
+}
+
+// ParseBandwidth parses a human-readable bandwidth string into bytes per second.
+// Supported suffixes: KB, MB, GB (base-10: 1 KB = 1000 bytes).
+// Examples: "10MB" = 10_000_000, "500KB" = 500_000, "1GB" = 1_000_000_000.
+func ParseBandwidth(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	s = strings.ToUpper(s)
+	multiplier := int64(1)
+	switch {
+	case strings.HasSuffix(s, "GB"):
+		multiplier = 1_000_000_000
+		s = strings.TrimSuffix(s, "GB")
+	case strings.HasSuffix(s, "MB"):
+		multiplier = 1_000_000
+		s = strings.TrimSuffix(s, "MB")
+	case strings.HasSuffix(s, "KB"):
+		multiplier = 1_000
+		s = strings.TrimSuffix(s, "KB")
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid number: %w", err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("bandwidth must be positive")
+	}
+	return n * multiplier, nil
 }
 
 func expandHome(path string) string {

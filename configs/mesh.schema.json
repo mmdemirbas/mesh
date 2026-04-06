@@ -194,6 +194,10 @@
           "type": "integer",
           "minimum": 1,
           "description": "Maximum concurrent file transfers per sync cycle. Default: 4."
+        },
+        "max_bandwidth": {
+          "type": "string",
+          "description": "Maximum bandwidth for file transfers (e.g., \"10MB\", \"100MB\", \"1GB\"). Value is bytes per second. Default: unlimited."
         }
       },
       "additionalProperties": false,
