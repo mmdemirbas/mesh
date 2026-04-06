@@ -4,7 +4,7 @@
 [![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-A single-binary, cross-platform networking tool that replaces `ssh`, `sshd`, `autossh`, `socat`, and SOCKS/HTTP proxy servers.
+A single-binary, cross-platform networking tool that replaces `ssh`, `sshd`, `autossh`, `socat`, SOCKS/HTTP proxy servers, and Syncthing/rsync.
 
 ## Why mesh?
 
@@ -28,7 +28,7 @@ A single-binary, cross-platform networking tool that replaces `ssh`, `sshd`, `au
 - **Flexible auth** — SSH agent, key files, or `password_command` (fetch from Keychain, `pass`, 1Password CLI)
 - **Parallel SSH sessions** — each `ForwardSet` gets its own SSH connection for throughput isolation
 - **Clipboard sync** — text, images, and files across your network with UDP LAN discovery and group isolation
-- **Folder sync** — Syncthing-style file sync with delta index exchange, block-level delta transfer, and bandwidth throttling
+- **Folder sync** — File sync with named peers, config-level defaults, delta index exchange, block-level delta transfer, and bandwidth throttling
 - **Cross-platform** — macOS, Linux, Windows (including Windows SSH server support)
 - **16 SSH options** — Ciphers, MACs, KexAlgorithms, HostKeyAlgorithms, IPQoS, RekeyLimit, and more
 
@@ -199,11 +199,20 @@ mynode:
     - bind: "0.0.0.0:7756"
       max_concurrent: 4
       max_bandwidth: "50MB"   # optional, throttle to 50 MB/s
+      peers:
+        desktop: ["192.168.1.10:7756"]
+        laptop:  ["10.0.0.5:7756"]
+      defaults:
+        peers: ["desktop"]
+        direction: send-receive
+        ignore_patterns: [".git", "*.tmp"]
       folders:
-        - id: projects
+        projects:
           path: ~/Projects
-          peers: ["192.168.1.10:7756"]
-          direction: send-receive  # or send-only, receive-only
+          peers: ["desktop", "laptop"]  # overrides defaults
+        photos:
+          path: ~/Photos
+          direction: send-only          # overrides defaults
 ```
 
 See [`configs/example.yaml`](configs/example.yaml) for a comprehensive reference with all options documented.
@@ -260,7 +269,7 @@ internal/
   proxy/            SOCKS5 + HTTP proxy
   netutil/          TCP helpers (BiCopy, keepalive)
   clipsync/         Clipboard sync (UDP discovery, protobuf push/pull)
-  filesync/         Syncthing-style folder sync (delta index, block delta, bandwidth throttling)
+  filesync/         Folder sync (named peers, config defaults, delta index, block delta, bandwidth throttling)
   state/            Thread-safe component state
 ```
 

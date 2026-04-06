@@ -100,7 +100,7 @@
             "$ref": "#/$defs/FilesyncCfg"
           },
           "type": "array",
-          "description": "Filesync configuration (Syncthing-style folder synchronization)."
+          "description": "Filesync configuration (folder synchronization)."
         },
         "log_level": {
           "type": "string",
@@ -179,12 +179,24 @@
           "type": "string",
           "description": "Network address for the filesync HTTP server (e.g., \"0.0.0.0:7756\")."
         },
-        "folders": {
-          "items": {
-            "$ref": "#/$defs/FolderCfg"
+        "peers": {
+          "type": "object",
+          "additionalProperties": {
+            "items": { "type": "string" },
+            "type": "array"
           },
-          "type": "array",
-          "description": "Folders to synchronize."
+          "description": "Named peer definitions. Key is a short nickname, value is a list of addresses."
+        },
+        "defaults": {
+          "$ref": "#/$defs/FilesyncDefaults",
+          "description": "Default values applied to all folders unless overridden per-folder."
+        },
+        "folders": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/FolderCfgRaw"
+          },
+          "description": "Folders to synchronize. Key is a human-readable folder ID (must match on all peers)."
         },
         "scan_interval": {
           "type": "string",
@@ -206,50 +218,55 @@
         "bind",
         "folders"
       ],
-      "description": "FilesyncCfg configures a Syncthing-style folder synchronization instance."
+      "description": "FilesyncCfg configures a folder synchronization instance."
     },
-    "FolderCfg": {
+    "FilesyncDefaults": {
       "properties": {
-        "id": {
-          "type": "string",
-          "description": "Unique identifier shared between peers (must match on all sides)."
+        "peers": {
+          "items": { "type": "string" },
+          "type": "array",
+          "description": "Default peer names for folders that don't specify their own."
         },
+        "direction": {
+          "type": "string",
+          "enum": ["send-receive", "send-only", "receive-only"],
+          "description": "Default sync direction. Default: \"send-receive\"."
+        },
+        "ignore_patterns": {
+          "items": { "type": "string" },
+          "type": "array",
+          "description": "Ignore patterns (gitignore-style) applied to all folders. Per-folder patterns are appended."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "FolderCfgRaw": {
+      "properties": {
         "path": {
           "type": "string",
           "description": "Local filesystem path to sync."
         },
         "peers": {
-          "items": {
-            "type": "string"
-          },
+          "items": { "type": "string" },
           "type": "array",
-          "description": "Explicit peer addresses (host:port) to sync this folder with."
+          "description": "Peer names (overrides defaults.peers). Resolved to addresses via the peers map."
         },
         "direction": {
           "type": "string",
-          "enum": [
-            "send-receive",
-            "send-only",
-            "receive-only"
-          ],
-          "description": "Sync direction: \"send-receive\" (bidirectional), \"send-only\", or \"receive-only\".\nDefault: \"send-receive\"."
+          "enum": ["send-receive", "send-only", "receive-only"],
+          "description": "Sync direction (overrides defaults.direction)."
         },
         "ignore_patterns": {
-          "items": {
-            "type": "string"
-          },
+          "items": { "type": "string" },
           "type": "array",
-          "description": "Ignore patterns (gitignore-style), local to this node.\nApplied in addition to .stignore file in the folder root."
+          "description": "Ignore patterns (gitignore-style), appended to defaults.ignore_patterns."
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "id",
-        "path",
-        "peers"
-      ],
-      "description": "FolderCfg configures a single folder for synchronization."
+      "required": ["path"],
+      "description": "FolderCfgRaw configures a single folder for synchronization (before defaults merge)."
     },
     "Forward": {
       "properties": {

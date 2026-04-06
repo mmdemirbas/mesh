@@ -66,9 +66,9 @@ my-vps-tunnel-service:
       # group: "team-alpha"
 
   # ==============================================================================
-  # 2. File Synchronization (Syncthing-style)
+  # 2. File Synchronization
   # ==============================================================================
-  # Sync folders between mesh nodes. Explicitly configured peers per folder.
+  # Sync folders between mesh nodes. Named peers for readability.
   # Uses protobuf for efficient index exchange and supports resume for large files.
   # Real-time change detection via fsnotify, with periodic full scan as safety net.
   filesync:
@@ -76,23 +76,29 @@ my-vps-tunnel-service:
       scan_interval: "60s"   # Full rescan interval (fsnotify handles real-time)
       max_concurrent: 4      # Concurrent file transfers
       # max_bandwidth: "50MB"  # Throttle to 50 MB/s (default: unlimited)
-      folders:
-        - id: projects
-          path: ~/Projects
-          peers:
-            - "192.168.1.10:7756"       # LAN peer
-            - "127.0.0.1:17756"         # Peer behind NAT via SSH tunnel
-          direction: send-receive        # send-receive | send-only | receive-only
-          ignore_patterns:
-            - ".git"
-            - "node_modules"
-            - "*.tmp"
-          # conflict_policy: newer-wins  # default: newer-wins
 
-        - id: photos-backup
+      # Named peer definitions. Key is a short nickname.
+      peers:
+        desktop: ["192.168.1.10:7756"]
+        laptop:  ["127.0.0.1:17756"]    # Behind NAT via SSH tunnel
+
+      # Default values applied to all folders unless overridden per-folder.
+      defaults:
+        peers: ["desktop"]
+        direction: send-receive          # send-receive | send-only | receive-only
+        ignore_patterns:                 # Gitignore-style, applied to all folders
+          - ".git"
+          - "node_modules"
+          - "*.tmp"
+
+      # Folders to sync. Key is a human-readable ID (must match on all peers).
+      folders:
+        projects:
+          path: ~/Projects
+          peers: ["desktop", "laptop"]   # Overrides defaults.peers
+
+        photos-backup:
           path: ~/Photos
-          peers:
-            - "192.168.1.10:7756"
           direction: send-only           # One-way backup
 
   # ==============================================================================
