@@ -37,6 +37,8 @@ func TestParseLine(t *testing.T) {
 		{"node_modules/", true, "node_modules", false, true},
 		{"!build/", true, "build", true, true},
 		{".git", true, ".git", false, false},
+		{"!", false, "", false, false},   // negation prefix only, no pattern
+		{"!/", false, "", false, false},  // negation + dir-only, no pattern
 	}
 	for _, tt := range tests {
 		t.Run(tt.line, func(t *testing.T) {
@@ -800,6 +802,365 @@ func TestPeerMatchesAddr(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- End-to-end sync test (FT1) ---
+
+func TestTwoNodeSync(t *testing.T) {
+	// Set up two folders with a file on each side.
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	writeFile(t, dirA, "from-a.txt", "content from A")
+
+	// Node A: scan to build index.
+	idxA := newFileIndex()
+	ignore := &ignoreMatcher{}
+	_, _ = idxA.scan(dirA, ignore)
+
+	// Node B: empty index.
+	idxB := newFileIndex()
+
+	// Start node B's HTTP server so A can download from it and vice versa.
+	nodeB := &Node{
+		cfg:      testCfg(dirB, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "node-b",
+	}
+	nodeB.folders["test"] = &folderState{
+		cfg:   testFolderCfg(dirB, "127.0.0.1"),
+		index: idxB,
+		peers: make(map[string]PeerState),
+	}
+	srvB := httptest.NewServer((&server{node: nodeB}).handler())
+	defer srvB.Close()
+
+	// Node A's HTTP server.
+	nodeA := &Node{
+		cfg:      testCfg(dirA, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "node-a",
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
+	nodeA.folders["test"] = &folderState{
+		cfg:   testFolderCfg(dirA, "127.0.0.1"),
+		index: idxA,
+		peers: make(map[string]PeerState),
+	}
+	srvA := httptest.NewServer((&server{node: nodeA}).handler())
+	defer srvA.Close()
+
+	// Node B exchanges index with node A via A's server.
+	exchangeB := nodeB.buildIndexExchange("test")
+	remoteIdx, err := sendIndex(&http.Client{}, srvA.Listener.Addr().String(), exchangeB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// remoteIdx should contain from-a.txt.
+	remoteFileIndex := protoToFileIndex(remoteIdx)
+	if _, ok := remoteFileIndex.Files["from-a.txt"]; !ok {
+		t.Fatal("expected from-a.txt in remote index")
+	}
+
+	// Compute diff: B should want to download from-a.txt.
+	fsB := nodeB.folders["test"]
+	fsB.indexMu.Lock()
+	actions := fsB.index.diff(remoteFileIndex, 0, "send-receive")
+	fsB.indexMu.Unlock()
+
+	if len(actions) != 1 {
+		t.Fatalf("expected 1 action, got %d", len(actions))
+	}
+	if actions[0].Action != ActionDownload || actions[0].Path != "from-a.txt" {
+		t.Fatalf("expected download from-a.txt, got %v", actions[0])
+	}
+
+	// Download the file from node A's server.
+	err = downloadFromPeer(
+		&http.Client{},
+		srvA.Listener.Addr().String(),
+		"test",
+		"from-a.txt",
+		actions[0].RemoteHash,
+		dirB,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the file arrived on disk with correct content.
+	got, err := os.ReadFile(filepath.Join(dirB, "from-a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "content from A" {
+		t.Errorf("expected 'content from A', got %q", string(got))
+	}
+}
+
+// --- Resume test (FT2) ---
+
+func TestDownloadFile_Resume(t *testing.T) {
+	dir := t.TempDir()
+	content := "0123456789abcdef" // 16 bytes
+
+	// Compute expected hash.
+	writeFile(t, dir, "source.txt", content)
+	expectedHash, err := hashFile(filepath.Join(dir, "source.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Start a server that serves the file with offset support.
+	nodeDir := t.TempDir()
+	writeFile(t, nodeDir, "data.txt", content)
+
+	n := &Node{
+		cfg:      testCfg(nodeDir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test",
+	}
+	n.folders["test"] = &folderState{
+		cfg: testFolderCfg(nodeDir, "127.0.0.1"),
+	}
+	srv := httptest.NewServer((&server{node: n}).handler())
+	defer srv.Close()
+
+	destDir := t.TempDir()
+
+	// Pre-create a partial temp file (first 5 bytes).
+	tmpName := ".mesh-tmp-" + expectedHash[:16]
+	tmpPath := filepath.Join(destDir, tmpName)
+	if err := os.WriteFile(tmpPath, []byte(content[:5]), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Download should resume from offset 5.
+	path, err := downloadFile(
+		&http.Client{},
+		srv.Listener.Addr().String(),
+		"test",
+		"data.txt",
+		expectedHash,
+		destDir,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != content {
+		t.Errorf("expected %q, got %q", content, string(got))
+	}
+
+	// Temp file should be cleaned up (renamed to final).
+	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+		t.Error("temp file should have been renamed away")
+	}
+}
+
+// --- Direction enforcement test (FT3) ---
+
+func TestHandleFile_RejectsReceiveOnly(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "secret.txt", "data")
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg: config.FolderCfg{
+			ID:        "test",
+			Path:      dir,
+			Direction: "receive-only",
+			Peers:     []string{"127.0.0.1:7756"},
+		},
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/file?folder=test&path=secret.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 for receive-only folder, got %d", resp.StatusCode)
+	}
+}
+
+// --- Unknown folder test (FT4) ---
+
+func TestHandleIndex_UnknownFolder(t *testing.T) {
+	dir := t.TempDir()
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	// "test" folder exists but we'll request "nonexistent".
+	n.folders["test"] = &folderState{
+		cfg:   testFolderCfg(dir, "127.0.0.1"),
+		index: newFileIndex(),
+		peers: make(map[string]PeerState),
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req := &pb.IndexExchange{FolderId: "nonexistent"}
+	data, _ := proto.Marshal(req)
+
+	resp, err := http.Post(ts.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown folder, got %d", resp.StatusCode)
+	}
+}
+
+// --- listConflicts test (FT6) ---
+
+func TestListConflicts(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "normal.txt", "ok")
+	writeFile(t, dir, "report.sync-conflict-20260406-143022-abc123.docx", "conflict1")
+	writeFile(t, dir, "sub/data.sync-conflict-20260101-000000-def456.csv", "conflict2")
+
+	conflicts, err := listConflicts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conflicts) != 2 {
+		t.Fatalf("expected 2 conflicts, got %d: %v", len(conflicts), conflicts)
+	}
+
+	conflictSet := make(map[string]bool)
+	for _, c := range conflicts {
+		conflictSet[c] = true
+	}
+	if !conflictSet["report.sync-conflict-20260406-143022-abc123.docx"] {
+		t.Error("missing root-level conflict")
+	}
+	if !conflictSet["sub/data.sync-conflict-20260101-000000-def456.csv"] {
+		t.Error("missing nested conflict")
+	}
+}
+
+// --- persistFolder roundtrip test (FT8) ---
+
+func TestPersistFolder_Roundtrip(t *testing.T) {
+	dataDir := t.TempDir()
+	folderDir := t.TempDir()
+	writeFile(t, folderDir, "a.txt", "hello")
+
+	idx := newFileIndex()
+	ignore := &ignoreMatcher{}
+	_, _ = idx.scan(folderDir, ignore)
+
+	peers := map[string]PeerState{
+		"192.168.1.10:7756": {LastSeenSequence: 42, LastSync: time.Now().Truncate(time.Second)},
+	}
+
+	n := &Node{
+		dataDir: dataDir,
+		folders: map[string]*folderState{
+			"docs": {
+				cfg:   config.FolderCfg{ID: "docs", Path: folderDir},
+				index: idx,
+				peers: peers,
+			},
+		},
+	}
+
+	n.persistFolder("docs")
+
+	// Reload index.
+	loadedIdx, err := loadIndex(filepath.Join(dataDir, "docs", "index.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedIdx.Sequence != idx.Sequence {
+		t.Errorf("sequence: got %d, want %d", loadedIdx.Sequence, idx.Sequence)
+	}
+	if len(loadedIdx.Files) != len(idx.Files) {
+		t.Errorf("file count: got %d, want %d", len(loadedIdx.Files), len(idx.Files))
+	}
+	for path, entry := range idx.Files {
+		loaded, ok := loadedIdx.Files[path]
+		if !ok {
+			t.Errorf("missing file %q", path)
+			continue
+		}
+		if loaded.SHA256 != entry.SHA256 {
+			t.Errorf("%s: hash got %q, want %q", path, loaded.SHA256, entry.SHA256)
+		}
+	}
+
+	// Reload peers.
+	loadedPeers, err := loadPeerStates(filepath.Join(dataDir, "docs", "peers.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loadedPeers) != 1 {
+		t.Fatalf("expected 1 peer, got %d", len(loadedPeers))
+	}
+	ps := loadedPeers["192.168.1.10:7756"]
+	if ps.LastSeenSequence != 42 {
+		t.Errorf("last seen sequence: got %d, want 42", ps.LastSeenSequence)
+	}
+}
+
+// --- Fuzz test for ignore parser (FT9) ---
+
+func FuzzParseLine(f *testing.F) {
+	f.Add("")
+	f.Add("*.go")
+	f.Add("!important.txt")
+	f.Add("build/")
+	f.Add("# comment")
+	f.Add("// another comment")
+	f.Add("src/**/*.go")
+	f.Add("!node_modules/")
+	f.Add("/absolute")
+	f.Add("!!")
+
+	f.Fuzz(func(t *testing.T, line string) {
+		p, ok := parseLine(line)
+		if !ok {
+			return
+		}
+		// Pattern should never be empty if parseLine returned ok.
+		if p.pattern == "" {
+			t.Errorf("parseLine(%q) returned ok=true with empty pattern", line)
+		}
+	})
+}
+
+func FuzzMatchPattern(f *testing.F) {
+	f.Add("*.go", "main.go")
+	f.Add("src/**/*.go", "src/pkg/main.go")
+	f.Add(".git", "sub/.git")
+	f.Add("build/", "build")
+	f.Add("*", "anything")
+
+	f.Fuzz(func(t *testing.T, pattern, path string) {
+		// Must not panic.
+		matchPattern(pattern, path)
+	})
 }
 
 // --- Helpers ---

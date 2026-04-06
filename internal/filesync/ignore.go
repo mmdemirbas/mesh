@@ -76,6 +76,9 @@ func parseLine(line string) (ignorePattern, bool) {
 	}
 
 	p.pattern = line
+	if p.pattern == "" {
+		return ignorePattern{}, false
+	}
 	return p, true
 }
 
