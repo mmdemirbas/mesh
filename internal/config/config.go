@@ -90,6 +90,7 @@ type ClipsyncCfg struct {
 	AllowSendTo  []string `yaml:"allow_send_to,omitempty"` // "all", "none", "udp", or specific IPs. Default: ["all"]
 	AllowReceive []string `yaml:"allow_receive,omitempty"` // "all", "none", "udp", or specific IPs. Default: ["all"]
 	PollInterval string   `yaml:"poll_interval,omitempty"` // Clipboard polling interval (e.g., "3s", "5s"). Default: "3s"
+	Group        string   `yaml:"group,omitempty"`         // Group name for LAN discovery isolation. Peers with different groups ignore each other.
 }
 
 // UnmarshalYAML provides default values for ClipsyncCfg.

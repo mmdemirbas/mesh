@@ -436,15 +436,19 @@ func newTestNode(t *testing.T, allowReceive []string) (*Node, string, func()) {
 			return
 		}
 		var msg struct {
-			ID   string `json:"id"`
-			Port int    `json:"port"`
-			Hash string `json:"h"`
+			ID    string `json:"id"`
+			Port  int    `json:"port"`
+			Hash  string `json:"h"`
+			Group string `json:"gk,omitempty"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&msg); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		if msg.ID == n.id {
+			return
+		}
+		if msg.Group != n.config.Group {
 			return
 		}
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -1286,6 +1290,56 @@ func TestDiscoverEndpoint_RejectsGET(t *testing.T) {
 	}
 }
 
+func TestDiscoverEndpoint_RejectsDifferentGroup(t *testing.T) {
+	n, url, cleanup := newTestNode(t, []string{"all"})
+	defer cleanup()
+
+	// Node has empty group (default). Send discover with a different group.
+	body, _ := json.Marshal(struct {
+		ID    string `json:"id"`
+		Port  int    `json:"port"`
+		Hash  string `json:"h"`
+		Group string `json:"gk,omitempty"`
+	}{"remote-node", 7755, "hash-abc", "team-beta"})
+
+	resp, err := http.Post(url+"/discover", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /discover failed: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	n.peersMu.RLock()
+	defer n.peersMu.RUnlock()
+	if len(n.peers) != 0 {
+		t.Fatalf("peer count = %d, want 0 (different group should be rejected)", len(n.peers))
+	}
+}
+
+func TestDiscoverEndpoint_AcceptsSameGroup(t *testing.T) {
+	n, url, cleanup := newTestNode(t, []string{"all"})
+	defer cleanup()
+	n.config.Group = "team-alpha"
+
+	body, _ := json.Marshal(struct {
+		ID    string `json:"id"`
+		Port  int    `json:"port"`
+		Hash  string `json:"h"`
+		Group string `json:"gk,omitempty"`
+	}{"remote-node", 7755, "hash-abc", "team-alpha"})
+
+	resp, err := http.Post(url+"/discover", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /discover failed: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	n.peersMu.RLock()
+	defer n.peersMu.RUnlock()
+	if len(n.peers) != 1 {
+		t.Fatalf("peer count = %d, want 1 (same group should be accepted)", len(n.peers))
+	}
+}
+
 func TestRegisterPeerHTTP_SendsDiscoverRequest(t *testing.T) {
 	var received atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1304,6 +1358,7 @@ func TestRegisterPeerHTTP_SendsDiscoverRequest(t *testing.T) {
 	n := &Node{
 		id:         "sender-node",
 		port:       7755,
+		config:     config.ClipsyncCfg{Group: "my-group"},
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	n.lastHash = "myhash"
@@ -1315,9 +1370,10 @@ func TestRegisterPeerHTTP_SendsDiscoverRequest(t *testing.T) {
 		t.Fatal("peer never received the /discover request")
 	}
 	var msg struct {
-		ID   string `json:"id"`
-		Port int    `json:"port"`
-		Hash string `json:"h"`
+		ID    string `json:"id"`
+		Port  int    `json:"port"`
+		Hash  string `json:"h"`
+		Group string `json:"gk,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -1330,5 +1386,8 @@ func TestRegisterPeerHTTP_SendsDiscoverRequest(t *testing.T) {
 	}
 	if msg.Hash != "myhash" {
 		t.Errorf("Hash = %q, want %q", msg.Hash, "myhash")
+	}
+	if msg.Group != "my-group" {
+		t.Errorf("Group = %q, want %q", msg.Group, "my-group")
 	}
 }

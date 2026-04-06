@@ -59,6 +59,10 @@
         "poll_interval": {
           "type": "string",
           "description": "Clipboard polling interval (e.g., \"3s\", \"5s\"). Default: \"3s\""
+        },
+        "group": {
+          "type": "string",
+          "description": "Group name for LAN discovery isolation. Peers with different groups ignore each other. Default: empty (global group)."
         }
       },
       "additionalProperties": false,

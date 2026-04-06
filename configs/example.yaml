@@ -61,6 +61,10 @@ my-vps-tunnel-service:
       # Lower values detect changes faster but spawn more subprocess calls.
       # poll_interval: "3s"
 
+      # Group name for LAN discovery isolation. Only peers with the same group
+      # name will discover and sync with each other. Default: empty (global group).
+      # group: "team-alpha"
+
   # ==============================================================================
   # 2. File Synchronization (Syncthing-style)
   # ==============================================================================

@@ -411,9 +411,10 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 			return
 		}
 		var msg struct {
-			ID   string `json:"id"`
-			Port int    `json:"port"`
-			Hash string `json:"h"`
+			ID    string `json:"id"`
+			Port  int    `json:"port"`
+			Hash  string `json:"h"`
+			Group string `json:"gk,omitempty"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&msg); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -421,6 +422,9 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 		}
 		if msg.ID == n.id {
 			return // self-discovery
+		}
+		if msg.Group != n.config.Group {
+			return // different group
 		}
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
 		peerAddr := net.JoinHostPort(host, fmt.Sprintf("%d", msg.Port))
@@ -1335,9 +1339,13 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 			ID    string `json:"id"`
 			Port  int    `json:"port"`
 			Hash  string `json:"h"`
+			Group string `json:"gk,omitempty"`
 		}
 
 		if err := json.Unmarshal(buf[:nBytes], &msg); err != nil || msg.Magic != magicHeader || msg.ID == n.id {
+			continue
+		}
+		if msg.Group != n.config.Group {
 			continue
 		}
 
@@ -1360,7 +1368,8 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 				ID    string `json:"id"`
 				Port  int    `json:"port"`
 				Hash  string `json:"h"`
-			}{magicHeader, n.id, n.port, h})
+				Group string `json:"gk,omitempty"`
+			}{magicHeader, n.id, n.port, h, n.config.Group})
 			if err == nil {
 				// Reply to the peer's UDP server port (same as ours), not the
 				// ephemeral source port of the beacon sender.
@@ -1469,8 +1478,9 @@ func (n *Node) runUDPBeacon(ctx context.Context, magicHeader string, port int) {
 		ID    string `json:"id"`
 		Port  int    `json:"port"`
 		Hash  string `json:"h"`
+		Group string `json:"gk,omitempty"`
 	}
-	beacon := beaconMsg{Magic: magicHeader, ID: n.id, Port: n.port}
+	beacon := beaconMsg{Magic: magicHeader, ID: n.id, Port: n.port, Group: n.config.Group}
 
 	for {
 		select {
@@ -1561,10 +1571,11 @@ func (n *Node) registerPeerHTTP(peerAddr string) {
 	n.stateMu.Unlock()
 
 	body, err := json.Marshal(struct {
-		ID   string `json:"id"`
-		Port int    `json:"port"`
-		Hash string `json:"h"`
-	}{n.id, n.port, h})
+		ID    string `json:"id"`
+		Port  int    `json:"port"`
+		Hash  string `json:"h"`
+		Group string `json:"gk,omitempty"`
+	}{n.id, n.port, h, n.config.Group})
 	if err != nil {
 		return
 	}
