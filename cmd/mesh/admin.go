@@ -152,12 +152,12 @@ func buildAdminMux(ring *logRing) *http.ServeMux {
 
 // adminUI is the single-page web dashboard served at GET /ui.
 // Polls /api/state and /api/logs every second via vanilla JS. No external deps.
-const adminUI = `<!DOCTYPE html>
+var adminUI = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>mesh</title>
+<title>mesh ` + version + `</title>
 <style>
 *{box-sizing:border-box}
 body{font-family:monospace;background:#1a1a1a;color:#e0e0e0;margin:16px;font-size:13px}
@@ -176,7 +176,7 @@ td{padding:3px 16px 3px 0;white-space:nowrap}
 </style>
 </head>
 <body>
-<h1>mesh</h1>
+<h1>mesh <span style="color:#666;font-size:.8em">` + version + `</span></h1>
 <div id="state"><em style="color:#555">loading…</em></div>
 <h2>logs</h2>
 <div id="logs"></div>

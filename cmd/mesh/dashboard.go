@@ -80,8 +80,8 @@ func runDashboard(ctx context.Context, cfgs map[string]*config.Config, nodeNames
 		// Header (changes every second due to uptime — always written)
 		uptime := time.Since(startTime).Truncate(time.Second)
 		nodesLabel := strings.Join(nodeNames, ", ")
-		header := fmt.Sprintf("%s%smesh %s%s | pid %d | %s | up %s",
-			cBold, cCyan, nodesLabel, cReset, os.Getpid(), time.Now().Format("15:04:05"), uptime)
+		header := fmt.Sprintf("%s%smesh %s%s %s%s%s | pid %d | %s | up %s",
+			cBold, cCyan, nodesLabel, cReset, cGray, version, cReset, os.Getpid(), time.Now().Format("15:04:05"), uptime)
 		headerLines = append(headerLines, header)
 		if configPath != "" {
 			headerLines = append(headerLines, fmt.Sprintf("  %sconfig: %s%s", cGray, configPath, cReset))
