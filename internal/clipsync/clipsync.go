@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,7 +21,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	config "github.com/mmdemirbas/mesh/internal/config"
+	pb "github.com/mmdemirbas/mesh/internal/clipsync/proto"
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
@@ -45,22 +47,6 @@ const (
 	maxPeers = 32
 )
 
-type FileRef struct {
-	FileID   string `json:"file_id"`
-	FileName string `json:"file_name"`
-	Data     []byte `json:"data,omitempty"` // file content embedded in payload; avoids a pull-back when sender blocks incoming connections
-}
-
-// ClipFormat holds a single clipboard representation keyed by MIME type.
-type ClipFormat struct {
-	MimeType string `json:"mime_type"` // "text/plain", "text/html", "text/rtf", "image/png", "image/tiff"
-	Data     []byte `json:"data"`
-}
-
-type Payload struct {
-	Formats []ClipFormat `json:"formats,omitempty"` // multi-format clipboard content
-	Files   []FileRef    `json:"files,omitempty"`
-}
 
 type Node struct {
 	config config.ClipsyncCfg
@@ -225,8 +211,8 @@ func containsIP(slice []string, host string) bool {
 	return false
 }
 
-func (n *Node) Broadcast(payload Payload) {
-	data, _ := json.Marshal(payload)
+func (n *Node) Broadcast(payload *pb.SyncPayload) {
+	data, _ := proto.Marshal(payload)
 
 	n.stateMu.Lock()
 	n.lastPayload = data
@@ -288,26 +274,26 @@ func cleanLogStr(s string) string {
 
 // ─── HTTP Server & File Handling ─────────────────────────────────────────────
 
-func (n *Node) processPayload(p Payload, peerHostPort string) {
-	if len(p.Files) > 0 {
+func (n *Node) processPayload(p *pb.SyncPayload, peerHostPort string) {
+	if len(p.GetFiles()) > 0 {
 		var writtenPaths []string
-		for _, f := range p.Files {
+		for _, f := range p.GetFiles() {
 			// Sanitize filename: filepath.Base strips directory components,
 			// then reject any remaining unsafe names or path separator characters.
-			safeName := filepath.Base(f.FileName)
+			safeName := filepath.Base(f.GetFileName())
 			if safeName == "." || safeName == ".." || safeName == "" ||
 				strings.ContainsAny(safeName, "/\\") {
-				slog.Warn("Rejected clipboard file with unsafe name", "file", cleanLogStr(f.FileName))
+				slog.Warn("Rejected clipboard file with unsafe name", "file", cleanLogStr(f.GetFileName()))
 				continue
 			}
 			destPath := filepath.Join(n.filesDir, safeName)
-			if len(f.Data) > 0 {
-				if err := os.WriteFile(destPath, f.Data, 0600); err != nil {
-					slog.Warn("Failed to save clipboard file", "file", cleanLogStr(f.FileName), "error", err)
+			if len(f.GetData()) > 0 {
+				if err := os.WriteFile(destPath, f.GetData(), 0600); err != nil {
+					slog.Warn("Failed to save clipboard file", "file", cleanLogStr(f.GetFileName()), "error", err)
 					continue
 				}
-			} else if err := n.downloadFile(f.FileID, f.FileName, peerHostPort); err != nil {
-				slog.Warn("Failed to download clipboard file", "file", cleanLogStr(f.FileName), "peer", cleanLogStr(peerHostPort), "error", err) //nolint:gosec // G706: values sanitized via cleanLogStr above
+			} else if err := n.downloadFile(f.GetFileId(), f.GetFileName(), peerHostPort); err != nil {
+				slog.Warn("Failed to download clipboard file", "file", cleanLogStr(f.GetFileName()), "peer", cleanLogStr(peerHostPort), "error", err) //nolint:gosec // G706: values sanitized via cleanLogStr above
 				continue
 			}
 			writtenPaths = append(writtenPaths, destPath)
@@ -319,11 +305,11 @@ func (n *Node) processPayload(p Payload, peerHostPort string) {
 			writeFiles(writtenPaths)
 			n.clipMu.Unlock()
 		}
-	} else if len(p.Formats) > 0 {
+	} else if len(p.GetFormats()) > 0 {
 		n.clipMu.Lock()
 		n.clearCurrentFiles()
-		n.setWrittenHash(hashFormats(p.Formats), peerHostPort)
-		writeClipboardFormats(p.Formats)
+		n.setWrittenHash(hashFormats(p.GetFormats()), peerHostPort)
+		writeClipboardFormats(p.GetFormats())
 		n.clipMu.Unlock()
 	}
 }
@@ -341,14 +327,19 @@ func (n *Node) pullHTTP(peerAddr string) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	var p Payload
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxRequestBodySize)).Decode(&p); err != nil {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRequestBodySize))
+	if err != nil {
+		slog.Debug("Failed to read pulled payload", "peer", cleanLogStr(peerAddr), "error", err) //nolint:gosec // G706: sanitized via cleanLogStr
+		return
+	}
+	var p pb.SyncPayload
+	if err := proto.Unmarshal(body, &p); err != nil {
 		slog.Debug("Failed to decode pulled payload", "peer", cleanLogStr(peerAddr), "error", err) //nolint:gosec // G706: sanitized via cleanLogStr
 		return
 	}
 
-	slog.Info("Successfully pulled and ingested payload", "formats", len(p.Formats), "files", len(p.Files), "peer", cleanLogStr(peerAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
-	n.processPayload(p, peerAddr)
+	slog.Info("Successfully pulled and ingested payload", "formats", len(p.GetFormats()), "files", len(p.GetFiles()), "peer", cleanLogStr(peerAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
+	n.processPayload(&p, peerAddr)
 }
 
 func (n *Node) runHTTPServer(ctx context.Context) {
@@ -361,8 +352,8 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 		}
 
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
-		var p Payload
-		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
 			if err.Error() == "http: request body too large" {
 				slog.Warn("Rejected oversized sync payload", "from", cleanLogStr(r.RemoteAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
 				http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
@@ -371,12 +362,17 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 			}
 			return
 		}
+		var p pb.SyncPayload
+		if err := proto.Unmarshal(body, &p); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
 
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
 		peerHostPort := net.JoinHostPort(host, fmt.Sprintf("%d", n.port))
 
-		slog.Info("Received pushed payload via HTTP POST", "formats", len(p.Formats), "from", cleanLogStr(r.RemoteAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
-		n.processPayload(p, peerHostPort)
+		slog.Info("Received pushed payload via HTTP POST", "formats", len(p.GetFormats()), "from", cleanLogStr(r.RemoteAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
+		n.processPayload(&p, peerHostPort)
 	})
 
 	mux.HandleFunc("/clip", func(w http.ResponseWriter, r *http.Request) {
@@ -394,7 +390,7 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/x-protobuf")
 		_, _ = w.Write(data)
 	})
 
@@ -410,26 +406,26 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		var msg struct {
-			ID    string `json:"id"`
-			Port  int    `json:"port"`
-			Hash  string `json:"h"`
-			Group string `json:"gk,omitempty"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&msg); err != nil {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1024))
+		if err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		if msg.ID == n.id {
+		var msg pb.DiscoverRequest
+		if err := proto.Unmarshal(body, &msg); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if msg.GetId() == n.id {
 			return // self-discovery
 		}
-		if msg.Group != n.config.Group {
+		if msg.GetGroup() != n.config.Group {
 			return // different group
 		}
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		peerAddr := net.JoinHostPort(host, fmt.Sprintf("%d", msg.Port))
+		peerAddr := net.JoinHostPort(host, fmt.Sprintf("%d", msg.GetPort()))
 
-		_, needsPull := n.registerPeer(peerAddr, msg.Hash, "http")
+		_, needsPull := n.registerPeer(peerAddr, msg.GetHash(), "http")
 		if needsPull {
 			go n.pullHTTP(peerAddr)
 		}
@@ -546,7 +542,7 @@ func (n *Node) pollClipboard(ctx context.Context, pollInterval time.Duration) {
 			h := hashFormats(formats)
 			if n.checkHash(h) {
 				slog.Debug("Local clipboard changed", "hash", h, "formats", len(formats))
-				n.Broadcast(Payload{Formats: formats})
+				n.Broadcast(&pb.SyncPayload{Formats: formats})
 			}
 		}
 
@@ -559,7 +555,7 @@ func (n *Node) handleFileBroadcast(paths []string) {
 		return
 	}
 	n.clearCurrentFiles() // delete files cached from the previous clipboard content
-	var files []FileRef
+	var files []*pb.FileRef
 	var storedPaths []string
 	for _, src := range paths {
 		fileName := filepath.Base(src)
@@ -586,12 +582,12 @@ func (n *Node) handleFileBroadcast(paths []string) {
 			slog.Warn("Failed to store clipboard file", "path", dest, "error", err)
 			continue
 		}
-		files = append(files, FileRef{FileID: fileID, FileName: fileName, Data: input})
+		files = append(files, &pb.FileRef{FileId: fileID, FileName: fileName, Data: input})
 		storedPaths = append(storedPaths, dest)
 	}
 	if len(files) > 0 {
 		n.setCurrentFiles(storedPaths) // track so they're deleted when clipboard changes
-		n.Broadcast(Payload{Files: files})
+		n.Broadcast(&pb.SyncPayload{Files: files})
 	}
 }
 
@@ -696,34 +692,34 @@ func hashFilePaths(paths []string) string {
 }
 
 // hashFormats returns a stable hash of a set of clipboard formats.
-func hashFormats(formats []ClipFormat) string {
+func hashFormats(formats []*pb.ClipFormat) string {
 	// Fast path: single format (most common case) avoids copy+sort.
 	if len(formats) == 1 {
 		h := sha256.New()
-		h.Write([]byte(formats[0].MimeType))
+		h.Write([]byte(formats[0].GetMimeType()))
 		h.Write([]byte{0})
-		h.Write(formats[0].Data)
+		h.Write(formats[0].GetData())
 		return hex.EncodeToString(h.Sum(nil))
 	}
 	// Check if already sorted (common when formats come from a consistent source).
 	sorted := formats
 	needsSort := false
 	for i := 1; i < len(formats); i++ {
-		if formats[i].MimeType < formats[i-1].MimeType {
+		if formats[i].GetMimeType() < formats[i-1].GetMimeType() {
 			needsSort = true
 			break
 		}
 	}
 	if needsSort {
-		sorted = make([]ClipFormat, len(formats))
+		sorted = make([]*pb.ClipFormat, len(formats))
 		copy(sorted, formats)
-		sort.Slice(sorted, func(i, j int) bool { return sorted[i].MimeType < sorted[j].MimeType })
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].GetMimeType() < sorted[j].GetMimeType() })
 	}
 	h := sha256.New()
 	for _, f := range sorted {
-		h.Write([]byte(f.MimeType))
+		h.Write([]byte(f.GetMimeType()))
 		h.Write([]byte{0}) // separator
-		h.Write(f.Data)
+		h.Write(f.GetData())
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -824,7 +820,7 @@ var clipFormatTable = []clipFormatEntry{
 // readClipboardFormats reads all known non-file formats from the OS clipboard.
 // The function recovers from panics (e.g. Go runtime crashes during subprocess
 // creation on Windows) so that a transient OS failure cannot kill the process.
-func readClipboardFormats() (formats []ClipFormat) {
+func readClipboardFormats() (formats []*pb.ClipFormat) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("Recovered panic in readClipboardFormats", "panic", r)
@@ -850,8 +846,8 @@ func readClipboardFormats() (formats []ClipFormat) {
 	return loadFormatsFromDir(dir)
 }
 
-func loadFormatsFromDir(dir string) []ClipFormat {
-	var formats []ClipFormat
+func loadFormatsFromDir(dir string) []*pb.ClipFormat {
+	var formats []*pb.ClipFormat
 	for _, entry := range clipFormatTable {
 		data, err := os.ReadFile(filepath.Join(dir, entry.fileName)) //nolint:gosec // G304: dir is the node's private filesDir; entry.fileName is a fixed constant
 		if err != nil || len(data) == 0 {
@@ -860,7 +856,7 @@ func loadFormatsFromDir(dir string) []ClipFormat {
 		if len(data) > maxSyncFileSize {
 			continue
 		}
-		formats = append(formats, ClipFormat{MimeType: entry.mimeType, Data: data})
+		formats = append(formats, &pb.ClipFormat{MimeType: entry.mimeType, Data: data})
 	}
 
 	// Windows stores CF_HTML in a wrapper; extract the fragment.
@@ -868,7 +864,7 @@ func loadFormatsFromDir(dir string) []ClipFormat {
 		cfdata, err := os.ReadFile(filepath.Join(dir, "text_html_cf")) //nolint:gosec // G304: dir is the node's private filesDir; filename is a fixed constant
 		if err == nil && len(cfdata) > 0 {
 			if frag := extractCFHTMLFragment(string(cfdata)); frag != "" {
-				formats = append(formats, ClipFormat{MimeType: "text/html", Data: []byte(frag)})
+				formats = append(formats, &pb.ClipFormat{MimeType: "text/html", Data: []byte(frag)})
 			}
 		}
 	}
@@ -998,7 +994,7 @@ func readClipboardLinux(ctx context.Context, dir string) {
 
 // writeClipboardFormats writes all formats to the OS clipboard at once.
 // Recovers from panics to prevent subprocess crashes from killing the process.
-func writeClipboardFormats(formats []ClipFormat) {
+func writeClipboardFormats(formats []*pb.ClipFormat) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("Recovered panic in writeClipboardFormats", "panic", r)
@@ -1015,7 +1011,7 @@ func writeClipboardFormats(formats []ClipFormat) {
 	// Build a lookup and write temp files.
 	fmtMap := make(map[string][]byte) // mimeType → data
 	for _, f := range formats {
-		fmtMap[f.MimeType] = f.Data
+		fmtMap[f.GetMimeType()] = f.GetData()
 	}
 	for _, entry := range clipFormatTable {
 		if data, ok := fmtMap[entry.mimeType]; ok {
@@ -1106,13 +1102,13 @@ func writeClipboardWindows(ctx context.Context, fmtMap map[string][]byte) {
 	<-done
 }
 
-func writeClipboardLinux(ctx context.Context, formats []ClipFormat) {
+func writeClipboardLinux(ctx context.Context, formats []*pb.ClipFormat) {
 	// Linux clipboard tools can only set one MIME type per invocation.
 	// Write the most universally useful format.
 	priority := []string{"text/plain", "text/html", "text/rtf", "image/png", "image/tiff"}
 	for _, mime := range priority {
 		for _, f := range formats {
-			if f.MimeType != mime {
+			if f.GetMimeType() != mime {
 				continue
 			}
 			tool := detectLinuxClipTool()
@@ -1129,7 +1125,7 @@ func writeClipboardLinux(ctx context.Context, formats []ClipFormat) {
 			default:
 				return
 			}
-			cmd.Stdin = bytes.NewReader(f.Data)
+			cmd.Stdin = bytes.NewReader(f.GetData())
 			_ = cmd.Run()
 			return
 		}
@@ -1334,18 +1330,11 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 			continue
 		}
 
-		var msg struct {
-			Magic string `json:"m"`
-			ID    string `json:"id"`
-			Port  int    `json:"port"`
-			Hash  string `json:"h"`
-			Group string `json:"gk,omitempty"`
-		}
-
-		if err := json.Unmarshal(buf[:nBytes], &msg); err != nil || msg.Magic != magicHeader || msg.ID == n.id {
+		var msg pb.Beacon
+		if err := proto.Unmarshal(buf[:nBytes], &msg); err != nil || msg.GetMagic() != magicHeader || msg.GetId() == n.id {
 			continue
 		}
-		if msg.Group != n.config.Group {
+		if msg.GetGroup() != n.config.Group {
 			continue
 		}
 
@@ -1353,9 +1342,9 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 		if remoteAddr == nil || remoteAddr.IP == nil {
 			continue
 		}
-		peerAddr := fmt.Sprintf("%s:%d", remoteAddr.IP.String(), msg.Port)
+		peerAddr := fmt.Sprintf("%s:%d", remoteAddr.IP.String(), msg.GetPort())
 
-		isNew, needsPull := n.registerPeer(peerAddr, msg.Hash, "udp")
+		isNew, needsPull := n.registerPeer(peerAddr, msg.GetHash(), "udp")
 		if isNew {
 			// Send a unicast reply so the sender also discovers us.
 			// This handles asymmetric networks where broadcast only works
@@ -1363,13 +1352,13 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 			n.stateMu.Lock()
 			h := n.lastHash
 			n.stateMu.Unlock()
-			reply, err := json.Marshal(struct {
-				Magic string `json:"m"`
-				ID    string `json:"id"`
-				Port  int    `json:"port"`
-				Hash  string `json:"h"`
-				Group string `json:"gk,omitempty"`
-			}{magicHeader, n.id, n.port, h, n.config.Group})
+			reply, err := proto.Marshal(&pb.Beacon{
+				Magic: magicHeader,
+				Id:    n.id,
+				Port:  int32(n.port),
+				Hash:  h,
+				Group: n.config.Group,
+			})
 			if err == nil {
 				// Reply to the peer's UDP server port (same as ours), not the
 				// ephemeral source port of the beacon sender.
@@ -1472,15 +1461,8 @@ func (n *Node) runUDPBeacon(ctx context.Context, magicHeader string, port int) {
 		return addrs
 	}
 
-	// Pre-allocate beacon message struct to avoid map allocation each tick.
-	type beaconMsg struct {
-		Magic string `json:"m"`
-		ID    string `json:"id"`
-		Port  int    `json:"port"`
-		Hash  string `json:"h"`
-		Group string `json:"gk,omitempty"`
-	}
-	beacon := beaconMsg{Magic: magicHeader, ID: n.id, Port: n.port, Group: n.config.Group}
+	// Pre-allocate beacon message to avoid allocation each tick.
+	beacon := &pb.Beacon{Magic: magicHeader, Id: n.id, Port: int32(n.port), Group: n.config.Group}
 
 	for {
 		select {
@@ -1495,7 +1477,7 @@ func (n *Node) runUDPBeacon(ctx context.Context, magicHeader string, port int) {
 		beacon.Hash = n.lastHash
 		n.stateMu.Unlock()
 
-		msg, err := json.Marshal(&beacon)
+		msg, err := proto.Marshal(beacon)
 		if err != nil {
 			continue // Prevent nil payloads from reaching WriteTo
 		}
@@ -1570,12 +1552,12 @@ func (n *Node) registerPeerHTTP(peerAddr string) {
 	h := n.lastHash
 	n.stateMu.Unlock()
 
-	body, err := json.Marshal(struct {
-		ID    string `json:"id"`
-		Port  int    `json:"port"`
-		Hash  string `json:"h"`
-		Group string `json:"gk,omitempty"`
-	}{n.id, n.port, h, n.config.Group})
+	body, err := proto.Marshal(&pb.DiscoverRequest{
+		Id:    n.id,
+		Port:  int32(n.port),
+		Hash:  h,
+		Group: n.config.Group,
+	})
 	if err != nil {
 		return
 	}
@@ -1586,7 +1568,7 @@ func (n *Node) registerPeerHTTP(peerAddr string) {
 	if err != nil {
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/x-protobuf")
 	resp, err := n.httpClient.Do(req)
 	if err != nil {
 		slog.Debug("HTTP peer registration failed", "peer", peerAddr, "error", err)

@@ -1,0 +1,41 @@
+syntax = "proto3";
+package clipsync;
+option go_package = "github.com/mmdemirbas/mesh/internal/clipsync/proto";
+
+// SyncPayload carries clipboard content between peers via HTTP POST /sync
+// and GET /clip response.
+message SyncPayload {
+  repeated ClipFormat formats = 1;
+  repeated FileRef    files   = 2;
+}
+
+// ClipFormat holds a single clipboard representation keyed by MIME type.
+message ClipFormat {
+  string mime_type = 1;  // "text/plain", "text/html", "image/png", etc.
+  bytes  data      = 2;
+}
+
+// FileRef describes a file attached to the clipboard payload.
+message FileRef {
+  string file_id   = 1;
+  string file_name = 2;
+  bytes  data      = 3;  // file content embedded in payload
+}
+
+// Beacon is the UDP discovery message sent on broadcast and unicast reply.
+message Beacon {
+  string magic = 1;  // "CLPSYNC2"
+  string id    = 2;  // node ID
+  int32  port  = 3;  // HTTP listen port
+  string hash  = 4;  // clipboard content hash
+  string group = 5;  // group isolation key
+}
+
+// DiscoverRequest is the HTTP POST /discover body for firewall-safe
+// peer registration.
+message DiscoverRequest {
+  string id    = 1;
+  int32  port  = 2;
+  string hash  = 3;
+  string group = 4;
+}

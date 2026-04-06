@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -17,6 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
+	pb "github.com/mmdemirbas/mesh/internal/clipsync/proto"
 	"github.com/mmdemirbas/mesh/internal/config"
 )
 
@@ -123,13 +125,13 @@ func TestHashFilePathsEmpty(t *testing.T) {
 }
 
 func TestHashFormats(t *testing.T) {
-	formats := []ClipFormat{
+	formats := []*pb.ClipFormat{
 		{MimeType: "text/plain", Data: []byte("hello")},
 		{MimeType: "text/html", Data: []byte("<b>hello</b>")},
 	}
 
 	// Order-independent
-	reversed := []ClipFormat{formats[1], formats[0]}
+	reversed := []*pb.ClipFormat{formats[1], formats[0]}
 	h1 := hashFormats(formats)
 	h2 := hashFormats(reversed)
 	if h1 != h2 {
@@ -138,8 +140,8 @@ func TestHashFormats(t *testing.T) {
 }
 
 func TestHashFormatsDifferentData(t *testing.T) {
-	f1 := []ClipFormat{{MimeType: "text/plain", Data: []byte("hello")}}
-	f2 := []ClipFormat{{MimeType: "text/plain", Data: []byte("world")}}
+	f1 := []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("hello")}}
+	f2 := []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("world")}}
 	if hashFormats(f1) == hashFormats(f2) {
 		t.Error("different data should produce different hashes")
 	}
@@ -402,14 +404,19 @@ func newTestNode(t *testing.T, allowReceive []string) (*Node, string, func()) {
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
-		var p Payload
-		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		var p pb.SyncPayload
+		if err := proto.Unmarshal(body, &p); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
 		peerHostPort := net.JoinHostPort(host, "7755")
-		n.processPayload(p, peerHostPort)
+		n.processPayload(&p, peerHostPort)
 	})
 	mux.HandleFunc("/clip", func(w http.ResponseWriter, r *http.Request) {
 		if !n.canReceiveFrom(r.RemoteAddr) {
@@ -423,7 +430,7 @@ func newTestNode(t *testing.T, allowReceive []string) (*Node, string, func()) {
 			http.Error(w, "No content", http.StatusNotFound)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/x-protobuf")
 		_, _ = w.Write(data)
 	})
 	mux.HandleFunc("/discover", func(w http.ResponseWriter, r *http.Request) {
@@ -435,25 +442,25 @@ func newTestNode(t *testing.T, allowReceive []string) (*Node, string, func()) {
 			http.Error(w, "Forbidden by ACL", http.StatusForbidden)
 			return
 		}
-		var msg struct {
-			ID    string `json:"id"`
-			Port  int    `json:"port"`
-			Hash  string `json:"h"`
-			Group string `json:"gk,omitempty"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&msg); err != nil {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1024))
+		if err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		if msg.ID == n.id {
+		var msg pb.DiscoverRequest
+		if err := proto.Unmarshal(body, &msg); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		if msg.Group != n.config.Group {
+		if msg.GetId() == n.id {
+			return
+		}
+		if msg.GetGroup() != n.config.Group {
 			return
 		}
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		peerAddr := net.JoinHostPort(host, fmt.Sprintf("%d", msg.Port))
-		n.registerPeer(peerAddr, msg.Hash, "http")
+		peerAddr := net.JoinHostPort(host, fmt.Sprintf("%d", msg.GetPort()))
+		n.registerPeer(peerAddr, msg.GetHash(), "http")
 	})
 	fileServer := http.StripPrefix("/files/", http.FileServer(http.Dir(n.filesDir)))
 	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
@@ -472,14 +479,14 @@ func TestSyncEndpoint_PushFormats(t *testing.T) {
 	n, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
-	payload := Payload{
-		Formats: []ClipFormat{
+	payload := &pb.SyncPayload{
+		Formats: []*pb.ClipFormat{
 			{MimeType: "text/plain", Data: []byte("hello from peer")},
 		},
 	}
-	data, _ := json.Marshal(payload)
+	data, _ := proto.Marshal(payload)
 
-	resp, err := http.Post(url+"/sync", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("POST /sync failed: %v", err)
 	}
@@ -505,14 +512,14 @@ func TestSyncEndpoint_PushFilesEmbedded(t *testing.T) {
 	defer cleanup()
 
 	fileContent := []byte("file content from one-way peer")
-	payload := Payload{
-		Files: []FileRef{
-			{FileID: "test123.txt", FileName: "document.txt", Data: fileContent},
+	payload := &pb.SyncPayload{
+		Files: []*pb.FileRef{
+			{FileId: "test123.txt", FileName: "document.txt", Data: fileContent},
 		},
 	}
-	data, _ := json.Marshal(payload)
+	data, _ := proto.Marshal(payload)
 
-	resp, err := http.Post(url+"/sync", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("POST /sync failed: %v", err)
 	}
@@ -535,28 +542,28 @@ func TestSyncEndpoint_PushFilesEmbedded_MultipleFiles(t *testing.T) {
 	n, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
-	payload := Payload{
-		Files: []FileRef{
-			{FileID: "a.txt", FileName: "first.txt", Data: []byte("content-a")},
-			{FileID: "b.png", FileName: "image.png", Data: []byte("fake-png-data")},
+	payload := &pb.SyncPayload{
+		Files: []*pb.FileRef{
+			{FileId: "a.txt", FileName: "first.txt", Data: []byte("content-a")},
+			{FileId: "b.png", FileName: "image.png", Data: []byte("fake-png-data")},
 		},
 	}
-	data, _ := json.Marshal(payload)
+	data, _ := proto.Marshal(payload)
 
-	resp, err := http.Post(url+"/sync", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("POST /sync failed: %v", err)
 	}
 	_ = resp.Body.Close()
 
-	for _, f := range payload.Files {
-		got, err := os.ReadFile(filepath.Join(n.filesDir, f.FileName))
+	for _, f := range payload.GetFiles() {
+		got, err := os.ReadFile(filepath.Join(n.filesDir, f.GetFileName()))
 		if err != nil {
-			t.Errorf("file %q not written: %v", f.FileName, err)
+			t.Errorf("file %q not written: %v", f.GetFileName(), err)
 			continue
 		}
-		if !bytes.Equal(got, f.Data) {
-			t.Errorf("file %q content = %q, want %q", f.FileName, got, f.Data)
+		if !bytes.Equal(got, f.GetData()) {
+			t.Errorf("file %q content = %q, want %q", f.GetFileName(), got, f.GetData())
 		}
 	}
 }
@@ -572,9 +579,9 @@ func TestSyncEndpoint_PushFilesWithoutData_PullBack(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(n.filesDir, "pullme.txt"), fileContent, 0600)
 
 	// Now simulate a payload where Data is empty (receiver must pull)
-	payload := Payload{
-		Files: []FileRef{
-			{FileID: "pullme.txt", FileName: "pulled.txt"},
+	payload := &pb.SyncPayload{
+		Files: []*pb.FileRef{
+			{FileId: "pullme.txt", FileName: "pulled.txt"},
 		},
 	}
 
@@ -601,12 +608,12 @@ func TestClipEndpoint_ReturnsLastPayload(t *testing.T) {
 	defer cleanup()
 
 	// Set a payload via Broadcast (simulates local clipboard change)
-	payload := Payload{
-		Formats: []ClipFormat{
+	payload := &pb.SyncPayload{
+		Formats: []*pb.ClipFormat{
 			{MimeType: "text/plain", Data: []byte("clipboard content")},
 		},
 	}
-	data, _ := json.Marshal(payload)
+	data, _ := proto.Marshal(payload)
 	n.stateMu.Lock()
 	n.lastPayload = data
 	n.stateMu.Unlock()
@@ -620,15 +627,19 @@ func TestClipEndpoint_ReturnsLastPayload(t *testing.T) {
 		t.Fatalf("GET /clip status = %d, want 200", resp.StatusCode)
 	}
 
-	var got Payload
-	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	var got pb.SyncPayload
+	if err := proto.Unmarshal(body, &got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(got.Formats) != 1 || got.Formats[0].MimeType != "text/plain" {
-		t.Errorf("GET /clip returned unexpected payload: %+v", got)
+	if len(got.GetFormats()) != 1 || got.GetFormats()[0].GetMimeType() != "text/plain" {
+		t.Errorf("GET /clip returned unexpected payload: formats=%d", len(got.GetFormats()))
 	}
-	if string(got.Formats[0].Data) != "clipboard content" {
-		t.Errorf("data = %q, want %q", got.Formats[0].Data, "clipboard content")
+	if string(got.GetFormats()[0].GetData()) != "clipboard content" {
+		t.Errorf("data = %q, want %q", got.GetFormats()[0].GetData(), "clipboard content")
 	}
 }
 
@@ -650,12 +661,12 @@ func TestSyncEndpoint_ACLBlocks(t *testing.T) {
 	_, url, cleanup := newTestNode(t, []string{"none"})
 	defer cleanup()
 
-	payload := Payload{
-		Formats: []ClipFormat{{MimeType: "text/plain", Data: []byte("blocked")}},
+	payload := &pb.SyncPayload{
+		Formats: []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("blocked")}},
 	}
-	data, _ := json.Marshal(payload)
+	data, _ := proto.Marshal(payload)
 
-	resp, err := http.Post(url+"/sync", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("POST /sync failed: %v", err)
 	}
@@ -706,14 +717,14 @@ func TestSyncEndpoint_RejectsPathTraversal(t *testing.T) {
 	n, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
-	payload := Payload{
-		Files: []FileRef{
-			{FileID: "evil.txt", FileName: "../../etc/passwd", Data: []byte("malicious")},
+	payload := &pb.SyncPayload{
+		Files: []*pb.FileRef{
+			{FileId: "evil.txt", FileName: "../../etc/passwd", Data: []byte("malicious")},
 		},
 	}
-	data, _ := json.Marshal(payload)
+	data, _ := proto.Marshal(payload)
 
-	resp, err := http.Post(url+"/sync", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("POST /sync failed: %v", err)
 	}
@@ -744,7 +755,9 @@ func TestPostHTTP_UsesZeroCopyReader(t *testing.T) {
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
-	data := []byte(`{"formats":[{"mime_type":"text/plain","data":"aGVsbG8="}]}`)
+	data, _ := proto.Marshal(&pb.SyncPayload{
+		Formats: []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("hello")}},
+	})
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
 	n.postHTTP(net.JoinHostPort("127.0.0.1", port), data)
 
@@ -763,8 +776,8 @@ func TestBroadcast_SetsLastPayload(t *testing.T) {
 		notifyCh:   make(chan struct{}, 1),
 	}
 
-	payload := Payload{
-		Formats: []ClipFormat{{MimeType: "text/plain", Data: []byte("test")}},
+	payload := &pb.SyncPayload{
+		Formats: []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("test")}},
 	}
 	n.Broadcast(payload)
 
@@ -776,12 +789,12 @@ func TestBroadcast_SetsLastPayload(t *testing.T) {
 		t.Fatal("lastPayload not set after Broadcast")
 	}
 
-	var got Payload
-	if err := json.Unmarshal(data, &got); err != nil {
+	var got pb.SyncPayload
+	if err := proto.Unmarshal(data, &got); err != nil {
 		t.Fatalf("unmarshal lastPayload: %v", err)
 	}
-	if len(got.Formats) != 1 || string(got.Formats[0].Data) != "test" {
-		t.Errorf("lastPayload content unexpected: %+v", got)
+	if len(got.GetFormats()) != 1 || string(got.GetFormats()[0].GetData()) != "test" {
+		t.Errorf("lastPayload content unexpected: formats=%d", len(got.GetFormats()))
 	}
 }
 
@@ -809,19 +822,19 @@ func TestBroadcast_PushesToPeers(t *testing.T) {
 		notifyCh:   make(chan struct{}, 1),
 	}
 
-	payload := Payload{
-		Formats: []ClipFormat{{MimeType: "text/plain", Data: []byte("pushed")}},
+	payload := &pb.SyncPayload{
+		Formats: []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("pushed")}},
 	}
 	n.Broadcast(payload)
 
 	select {
 	case received := <-receivedCh:
-		var got Payload
-		if err := json.Unmarshal(received, &got); err != nil {
+		var got pb.SyncPayload
+		if err := proto.Unmarshal(received, &got); err != nil {
 			t.Fatalf("unmarshal received: %v", err)
 		}
-		if len(got.Formats) != 1 || string(got.Formats[0].Data) != "pushed" {
-			t.Errorf("received unexpected payload: %+v", got)
+		if len(got.GetFormats()) != 1 || string(got.GetFormats()[0].GetData()) != "pushed" {
+			t.Errorf("received unexpected payload: formats=%d", len(got.GetFormats()))
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("peer never received the broadcast")
@@ -860,8 +873,8 @@ func TestBroadcast_DoesNotEchoBackToOrigin(t *testing.T) {
 	n.originAddr = peerAddr
 	n.stateMu.Unlock()
 
-	payload := Payload{
-		Formats: []ClipFormat{{MimeType: "text/plain", Data: []byte("no echo")}},
+	payload := &pb.SyncPayload{
+		Formats: []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("no echo")}},
 	}
 	n.Broadcast(payload)
 
@@ -904,7 +917,7 @@ func TestLoadFormatsFromDir(t *testing.T) {
 
 	mimeMap := make(map[string]string)
 	for _, f := range formats {
-		mimeMap[f.MimeType] = string(f.Data)
+		mimeMap[f.GetMimeType()] = string(f.GetData())
 	}
 
 	if mimeMap["text/plain"] != "hello" {
@@ -951,10 +964,10 @@ func TestPullHTTP(t *testing.T) {
 	defer cleanup()
 
 	// Set last payload (simulating a clipboard state on the "sender")
-	payload := Payload{
-		Formats: []ClipFormat{{MimeType: "text/plain", Data: []byte("pulled content")}},
+	payload := &pb.SyncPayload{
+		Formats: []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("pulled content")}},
 	}
-	data, _ := json.Marshal(payload)
+	data, _ := proto.Marshal(payload)
 	n.stateMu.Lock()
 	n.lastPayload = data
 	n.stateMu.Unlock()
@@ -1204,13 +1217,11 @@ func TestDiscoverEndpoint_RegistersPeer(t *testing.T) {
 	n, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
-	body, _ := json.Marshal(struct {
-		ID   string `json:"id"`
-		Port int    `json:"port"`
-		Hash string `json:"h"`
-	}{"remote-node", 7755, "hash-abc"})
+	body, _ := proto.Marshal(&pb.DiscoverRequest{
+		Id: "remote-node", Port: 7755, Hash: "hash-abc",
+	})
 
-	resp, err := http.Post(url+"/discover", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /discover failed: %v", err)
 	}
@@ -1237,13 +1248,11 @@ func TestDiscoverEndpoint_RejectsSelf(t *testing.T) {
 	defer cleanup()
 
 	// Send discover with the node's own ID — should be ignored.
-	body, _ := json.Marshal(struct {
-		ID   string `json:"id"`
-		Port int    `json:"port"`
-		Hash string `json:"h"`
-	}{n.id, 7755, ""})
+	body, _ := proto.Marshal(&pb.DiscoverRequest{
+		Id: n.id, Port: 7755,
+	})
 
-	resp, err := http.Post(url+"/discover", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /discover failed: %v", err)
 	}
@@ -1260,13 +1269,11 @@ func TestDiscoverEndpoint_ACLBlocks(t *testing.T) {
 	_, url, cleanup := newTestNode(t, []string{"none"})
 	defer cleanup()
 
-	body, _ := json.Marshal(struct {
-		ID   string `json:"id"`
-		Port int    `json:"port"`
-		Hash string `json:"h"`
-	}{"remote-node", 7755, ""})
+	body, _ := proto.Marshal(&pb.DiscoverRequest{
+		Id: "remote-node", Port: 7755,
+	})
 
-	resp, err := http.Post(url+"/discover", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /discover failed: %v", err)
 	}
@@ -1295,14 +1302,11 @@ func TestDiscoverEndpoint_RejectsDifferentGroup(t *testing.T) {
 	defer cleanup()
 
 	// Node has empty group (default). Send discover with a different group.
-	body, _ := json.Marshal(struct {
-		ID    string `json:"id"`
-		Port  int    `json:"port"`
-		Hash  string `json:"h"`
-		Group string `json:"gk,omitempty"`
-	}{"remote-node", 7755, "hash-abc", "team-beta"})
+	body, _ := proto.Marshal(&pb.DiscoverRequest{
+		Id: "remote-node", Port: 7755, Hash: "hash-abc", Group: "team-beta",
+	})
 
-	resp, err := http.Post(url+"/discover", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /discover failed: %v", err)
 	}
@@ -1320,14 +1324,11 @@ func TestDiscoverEndpoint_AcceptsSameGroup(t *testing.T) {
 	defer cleanup()
 	n.config.Group = "team-alpha"
 
-	body, _ := json.Marshal(struct {
-		ID    string `json:"id"`
-		Port  int    `json:"port"`
-		Hash  string `json:"h"`
-		Group string `json:"gk,omitempty"`
-	}{"remote-node", 7755, "hash-abc", "team-alpha"})
+	body, _ := proto.Marshal(&pb.DiscoverRequest{
+		Id: "remote-node", Port: 7755, Hash: "hash-abc", Group: "team-alpha",
+	})
 
-	resp, err := http.Post(url+"/discover", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /discover failed: %v", err)
 	}
@@ -1369,25 +1370,20 @@ func TestRegisterPeerHTTP_SendsDiscoverRequest(t *testing.T) {
 	if !ok || raw == nil {
 		t.Fatal("peer never received the /discover request")
 	}
-	var msg struct {
-		ID    string `json:"id"`
-		Port  int    `json:"port"`
-		Hash  string `json:"h"`
-		Group string `json:"gk,omitempty"`
-	}
-	if err := json.Unmarshal(raw, &msg); err != nil {
+	var msg pb.DiscoverRequest
+	if err := proto.Unmarshal(raw, &msg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if msg.ID != "sender-node" {
-		t.Errorf("ID = %q, want %q", msg.ID, "sender-node")
+	if msg.GetId() != "sender-node" {
+		t.Errorf("ID = %q, want %q", msg.GetId(), "sender-node")
 	}
-	if msg.Port != 7755 {
-		t.Errorf("Port = %d, want 7755", msg.Port)
+	if msg.GetPort() != 7755 {
+		t.Errorf("Port = %d, want 7755", msg.GetPort())
 	}
-	if msg.Hash != "myhash" {
-		t.Errorf("Hash = %q, want %q", msg.Hash, "myhash")
+	if msg.GetHash() != "myhash" {
+		t.Errorf("Hash = %q, want %q", msg.GetHash(), "myhash")
 	}
-	if msg.Group != "my-group" {
-		t.Errorf("Group = %q, want %q", msg.Group, "my-group")
+	if msg.GetGroup() != "my-group" {
+		t.Errorf("Group = %q, want %q", msg.GetGroup(), "my-group")
 	}
 }

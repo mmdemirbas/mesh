@@ -11,6 +11,7 @@ require (
 )
 
 require (
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/invopop/jsonschema v0.13.0
 	golang.org/x/sys v0.42.0
 	golang.org/x/term v0.41.0
@@ -20,7 +21,6 @@ require (
 require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
-	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/mailru/easyjson v0.9.2 // indirect
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 )
