@@ -55,6 +55,10 @@
           },
           "type": "array",
           "description": "\"all\", \"none\", \"udp\", or specific IPs. Default: [\"all\"]"
+        },
+        "poll_interval": {
+          "type": "string",
+          "description": "Clipboard polling interval (e.g., \"3s\", \"5s\"). Default: \"3s\""
         }
       },
       "additionalProperties": false,

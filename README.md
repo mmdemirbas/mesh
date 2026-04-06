@@ -185,6 +185,7 @@ mynode:
       static_peers: ["192.168.1.10:7755"]
       allow_send_to: ["all"]
       allow_receive: ["all"]
+      poll_interval: "3s"  # optional, default 3s
 ```
 
 See [`configs/example.yaml`](configs/example.yaml) for a comprehensive reference with all options documented.
@@ -209,7 +210,7 @@ All options can be set at connection or forward-set level:
 | `ClientAliveCountMax` | Max unanswered server keepalives |
 | `ExitOnForwardFailure` | Stop on forward failure (`yes`/`no`) |
 | `GatewayPorts` | Remote forward bind policy (`yes`/`no`/`clientspecified`) |
-| `PermitOpen` | Restrict tunneled destinations (e.g., `*:22`, `none`) |
+| `PermitOpen` | Restrict tunneled destinations (comma or space separated, e.g., `*:22,host:80`) |
 | `StrictHostKeyChecking` | Host key verification (`no` to disable — insecure) |
 
 ## Development

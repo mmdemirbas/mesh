@@ -29,7 +29,7 @@ The following are in scope for security reports:
 
 ## Known Limitations
 
-- **Clipsync uses unencrypted HTTP** for clipboard sync between peers. This is documented and planned for TLS migration (see ROADMAP.md). Use only on trusted networks until TLS is implemented.
+- **Clipsync uses unencrypted HTTP** for clipboard sync between peers. This is documented and planned for TLS migration (see PLAN.md, item S1). Use only on trusted networks until TLS is implemented.
 - **StrictHostKeyChecking=no** disables SSH server identity verification. This is an explicit opt-in that is logged as a warning.
 
 ## Security Design Principles

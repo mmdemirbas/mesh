@@ -30,13 +30,13 @@ configs/            Example YAML + JSON schema
 
 **Auth method order** — `buildAuthMethods()` tries: SSH agent → private key → password_command. Multiple methods can be configured; they're all offered to the server.
 
-**Clipsync protocol** — Push-based via HTTP POST. The sender embeds file data directly in the payload for one-way connectivity (receiver can't pull back). Pull-back via `/files/` endpoint is a fallback for when the receiver CAN reach the sender. UDP discovery uses broadcast beacons with unicast reply for asymmetric networks.
+**Clipsync protocol** — Push-based via HTTP POST. The sender embeds file data directly in the payload for one-way connectivity (receiver can't pull back). Pull-back via `/files/` endpoint is a fallback for when the receiver CAN reach the sender. UDP discovery uses broadcast beacons (10s interval) with unicast reply for asymmetric networks. Clipboard polling interval is configurable via `poll_interval` (default 3s).
 
-**Dashboard** — Uses terminal alternate screen buffer (`\033[?1049h`). Overwrites in-place line by line (`\033[K` per line, `\033[J` to clear remainder). No scrollback pollution, no flicker.
+**Dashboard** — Uses terminal alternate screen buffer (`\033[?1049h`). Overwrites in-place line by line (`\033[K` per line, `\033[J` to clear remainder). Header (uptime/clock) always written; body (status + logs) skipped when unchanged. No scrollback pollution, no flicker.
 
 **Config precedence** — Hardcoded defaults → config file (YAML) → environment variables (`os.ExpandEnv` in config loading) → CLI flags. Validation at load time with actionable errors.
 
-**Admin server** — Every `mesh up` starts a local HTTP server on `127.0.0.1:0` (random port). Port written to `~/.mesh/run/<node>.port`. Endpoints: `GET /` and `/api/state` (JSON state), `GET /api/logs` (recent log lines), `GET /metrics` (Prometheus text), `GET /ui` (browser dashboard). Configure with `admin_addr` in node config; set to `"off"` to disable. Auth failures are tracked in `tunnel.authFailuresByIP` and exposed via `tunnel.SnapshotAuthFailures()` for the metrics endpoint.
+**Admin server** — Every `mesh up` starts a local HTTP server on `127.0.0.1:0` (random port). Port written to `<UserCacheDir>/mesh/mesh-<node>.port` (e.g., `~/Library/Caches/mesh/mesh-mynode.port` on macOS). Endpoints: `GET /` and `/api/state` (JSON state), `GET /api/logs` (recent log lines), `GET /metrics` (Prometheus text), `GET /ui` (browser dashboard). Configure with `admin_addr` in node config; set to `"off"` to disable. Auth failures are tracked in `tunnel.authFailuresByIP` and exposed via `tunnel.SnapshotAuthFailures()` for the metrics endpoint.
 
 ## CLI
 
@@ -65,7 +65,7 @@ Shell completions dynamically resolve node names from the config file.
 - **Log handler chain** — `humanLogHandler` wraps tint. Dashboard mode: `humanLogHandler → multiHandler → {tint(file), tint(ring)}`. Non-TTY mode: `humanLogHandler → multiHandler → {tint(stderr), tint(ring)}`. The ring is always populated regardless of mode so `/api/logs` has data.
 - **Platform code** — Build-tagged files (`_unix.go`, `_windows.go`), never `runtime.GOOS` in core logic.
 - **Config validation** — `validate()` checks at load time. Auth requires at least one method. `known_hosts` or `StrictHostKeyChecking: no` required for SSH.
-- **Tests** — Table-driven. Real TCP/HTTP for integration tests (`httptest.NewServer`). No `time.Sleep` — use channels/atomic. Race detector always on.
+- **Tests** — Table-driven. Real TCP/HTTP for integration tests (`httptest.NewServer`). Fuzz tests for parsers (`go test -fuzz`). No `time.Sleep` — use channels/atomic. Race detector always on.
 - **Error handling** — Wrap errors with context: `fmt.Errorf("connections[%d] %q: %w", i, name, err)`. Return errors from libraries; never `log.Fatal` outside `main()`.
 - **Resource cleanup** — `defer` for connections, file handles, goroutines. Every goroutine has a clear exit path tied to context cancellation or channel close.
 - **Channel close safety** — Use `sync.Once`-guarded close functions when multiple goroutines may close the same channel/connection (see `shell_windows.go`, `shell_unix.go`).
@@ -79,6 +79,9 @@ state.Global.Update("connection", id, state.Connecting, "")
 state.Global.Update("connection", id, state.Connected, target)
 // ... on failure ...
 state.Global.Update("connection", id, state.Retrying, err.Error())
+// ... on cleanup — always pair Delete with DeleteMetrics ...
+state.Global.Delete("forward", compID)
+state.Global.DeleteMetrics("forward", compID)
 
 // Graceful shutdown
 ctx, cancel := context.WithCancel(context.Background())

@@ -57,6 +57,10 @@ my-vps-tunnel-service:
       allow_send_to: ["all"]
       allow_receive: ["all"]
 
+      # How often to poll the OS clipboard for changes. Default: "3s".
+      # Lower values detect changes faster but spawn more subprocess calls.
+      # poll_interval: "3s"
+
   # ==============================================================================
   # 2. Listeners (Accept incoming connections and requests)
   # ==============================================================================
