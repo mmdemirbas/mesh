@@ -1,6 +1,7 @@
 package filesync
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -130,6 +134,100 @@ func safePath(folderRoot, relPath string) (string, error) {
 		return "", fmt.Errorf("path traversal: %q resolves outside root", relPath)
 	}
 	return full, nil
+}
+
+// downloadFileDelta downloads a file using block-level delta transfer.
+// It computes block signatures of the local file, sends them to the peer,
+// and reconstructs the file from unchanged local blocks + received delta blocks.
+// Falls back to full download if the local file doesn't exist.
+func downloadFileDelta(client *http.Client, peerAddr, folderID, relPath, expectedHash, folderRoot string) (string, error) {
+	destPath, err := safePath(folderRoot, relPath)
+	if err != nil {
+		return "", err
+	}
+
+	// If local file doesn't exist, fall back to full download.
+	if _, err := os.Stat(destPath); os.IsNotExist(err) {
+		return downloadFile(client, peerAddr, folderID, relPath, expectedHash, folderRoot)
+	}
+
+	// Compute block signatures of local file.
+	blockSize := int64(defaultBlockSize)
+	localHashes, err := computeBlockSignatures(destPath, blockSize)
+	if err != nil {
+		return downloadFile(client, peerAddr, folderID, relPath, expectedHash, folderRoot)
+	}
+
+	localInfo, err := os.Stat(destPath)
+	if err != nil {
+		return downloadFile(client, peerAddr, folderID, relPath, expectedHash, folderRoot)
+	}
+
+	// Send block signatures to peer.
+	req := &pb.BlockSignatures{
+		FolderId:    folderID,
+		Path:        relPath,
+		BlockSize:   blockSize,
+		FileSize:    localInfo.Size(),
+		BlockHashes: localHashes,
+	}
+	reqData, err := proto.Marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("marshal block sigs: %w", err)
+	}
+
+	u := fmt.Sprintf("http://%s/delta", peerAddr)
+	resp, err := client.Post(u, "application/x-protobuf", bytes.NewReader(reqData))
+	if err != nil {
+		return "", fmt.Errorf("delta request to %s: %w", peerAddr, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Fall back to full download on error.
+	if resp.StatusCode != http.StatusOK {
+		return downloadFile(client, peerAddr, folderID, relPath, expectedHash, folderRoot)
+	}
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxSyncFileSize))
+	if err != nil {
+		return "", fmt.Errorf("read delta response: %w", err)
+	}
+
+	var deltaResp pb.DeltaResponse
+	if err := proto.Unmarshal(respBody, &deltaResp); err != nil {
+		return "", fmt.Errorf("unmarshal delta: %w", err)
+	}
+
+	// Convert proto blocks to internal format.
+	blocks := make([]deltaBlock, len(deltaResp.GetBlocks()))
+	for i, b := range deltaResp.GetBlocks() {
+		blocks[i] = deltaBlock{index: b.GetIndex(), data: b.GetData()}
+	}
+
+	// Apply delta to reconstruct the file.
+	tmpPath, err := applyDelta(destPath, destPath, blockSize, deltaResp.GetFileSize(), blocks)
+	if err != nil {
+		return "", fmt.Errorf("apply delta: %w", err)
+	}
+
+	// Verify hash.
+	actualHash, err := hashFile(tmpPath)
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("hash delta result: %w", err)
+	}
+	if actualHash != expectedHash {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("delta hash mismatch for %s: expected %s, got %s", relPath, expectedHash, actualHash)
+	}
+
+	// Atomic rename.
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("rename delta result: %w", err)
+	}
+
+	return destPath, nil
 }
 
 // deleteFile removes a local file, creating a tombstone in the index.

@@ -494,6 +494,132 @@ func TestDownloadFile_ShortHash(t *testing.T) {
 	}
 }
 
+// --- Block-level delta tests ---
+
+func TestComputeBlockSignatures(t *testing.T) {
+	dir := t.TempDir()
+	// Create a file with 2.5 blocks worth of data (block size = 4 bytes for testing).
+	writeFile(t, dir, "data.bin", "AAAABBBBcc")
+
+	hashes, err := computeBlockSignatures(filepath.Join(dir, "data.bin"), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hashes) != 3 {
+		t.Fatalf("expected 3 blocks, got %d", len(hashes))
+	}
+	// First two blocks are different (AAAA vs BBBB).
+	if hashEqual(hashes[0], hashes[1]) {
+		t.Error("first two blocks should differ")
+	}
+}
+
+func TestComputeDeltaBlocks(t *testing.T) {
+	dir := t.TempDir()
+	// Old file: "AAAABBBBcc"
+	writeFile(t, dir, "old.bin", "AAAABBBBcc")
+	// New file: "AAAAXXXXcc" — middle block changed.
+	writeFile(t, dir, "new.bin", "AAAAXXXXcc")
+
+	oldHashes, _ := computeBlockSignatures(filepath.Join(dir, "old.bin"), 4)
+	delta, err := computeDeltaBlocks(filepath.Join(dir, "new.bin"), 4, oldHashes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only block 1 (XXXX) should be in the delta.
+	if len(delta) != 1 {
+		t.Fatalf("expected 1 delta block, got %d", len(delta))
+	}
+	if delta[0].index != 1 {
+		t.Errorf("delta block index = %d, want 1", delta[0].index)
+	}
+	if string(delta[0].data) != "XXXX" {
+		t.Errorf("delta block data = %q, want 'XXXX'", delta[0].data)
+	}
+}
+
+func TestApplyDelta(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "old.bin", "AAAABBBBcc")
+
+	// Delta: replace block 1 with "XXXX".
+	blocks := []deltaBlock{{index: 1, data: []byte("XXXX")}}
+	tmpPath, err := applyDelta(
+		filepath.Join(dir, "old.bin"),
+		filepath.Join(dir, "result.bin"),
+		4, 10, blocks,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(tmpPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "AAAAXXXXcc" {
+		t.Errorf("delta result = %q, want 'AAAAXXXXcc'", got)
+	}
+	_ = os.Remove(tmpPath)
+}
+
+func TestDeltaEndpoint_ReducesTransfer(t *testing.T) {
+	dir := t.TempDir()
+	// Server has a file with a changed middle block.
+	writeFile(t, dir, "data.bin", "AAAAXXXXcc")
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg: testFolderCfg(dir, "127.0.0.1"),
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// Client has old version with different middle block.
+	clientDir := t.TempDir()
+	writeFile(t, clientDir, "data.bin", "AAAABBBBcc")
+	localHashes, _ := computeBlockSignatures(filepath.Join(clientDir, "data.bin"), 4)
+
+	req := &pb.BlockSignatures{
+		FolderId:    "test",
+		Path:        "data.bin",
+		BlockSize:   4,
+		FileSize:    10,
+		BlockHashes: localHashes,
+	}
+	reqData, _ := proto.Marshal(req)
+
+	resp, err := http.Post(ts.URL+"/delta", "application/x-protobuf", bytes.NewReader(reqData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body := readBody(t, resp)
+	var deltaResp pb.DeltaResponse
+	if err := proto.Unmarshal(body, &deltaResp); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should only get 1 changed block (the middle one).
+	if len(deltaResp.GetBlocks()) != 1 {
+		t.Fatalf("expected 1 delta block, got %d", len(deltaResp.GetBlocks()))
+	}
+	if string(deltaResp.GetBlocks()[0].GetData()) != "XXXX" {
+		t.Errorf("delta data = %q, want 'XXXX'", deltaResp.GetBlocks()[0].GetData())
+	}
+}
+
 func TestSafePath(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "valid.txt", "ok")

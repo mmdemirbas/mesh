@@ -21,3 +21,27 @@ message FileInfo {
   bool   deleted   = 5;           // Tombstone flag
   int64  sequence  = 6;           // Per-file monotonic counter
 }
+
+// BlockSignatures is sent by the receiver to request a block-level delta.
+// Each entry is the SHA-256 hash of a fixed-size block of the local file.
+message BlockSignatures {
+  string folder_id  = 1;
+  string path       = 2;
+  int64  block_size = 3;           // Block size in bytes (e.g., 131072 = 128 KB)
+  int64  file_size  = 4;           // Total local file size
+  repeated bytes block_hashes = 5; // SHA-256 of each sequential block
+}
+
+// DeltaResponse contains only the blocks that differ between the local
+// and remote versions of a file.
+message DeltaResponse {
+  int64  file_size    = 1;         // Total remote file size
+  bytes  file_sha256  = 2;         // SHA-256 of the complete remote file
+  repeated DeltaBlock blocks = 3;
+}
+
+// DeltaBlock carries a single changed block.
+message DeltaBlock {
+  int64 index = 1;                 // Block index (0-based)
+  bytes data  = 2;                 // Block content
+}

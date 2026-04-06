@@ -28,6 +28,7 @@ func (s *server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/index", s.handleIndex)
 	mux.HandleFunc("/file", s.handleFile)
+	mux.HandleFunc("/delta", s.handleDelta)
 	mux.HandleFunc("/status", s.handleStatus)
 	return mux
 }
@@ -145,6 +146,98 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, f)
 }
 
+// handleDelta receives block signatures from a peer and responds with only
+// the blocks that differ between the peer's local version and our version.
+// POST /delta — body: BlockSignatures (protobuf), response: DeltaResponse (protobuf)
+func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	peerAddr := addrFromRequest(r)
+	if !s.node.isPeerConfigured(peerAddr) {
+		http.Error(w, "unknown peer", http.StatusForbidden)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxIndexPayload))
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var req pb.BlockSignatures
+	if err := proto.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid protobuf: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	folder := s.node.findFolder(req.GetFolderId())
+	if folder == nil {
+		http.Error(w, "unknown folder", http.StatusNotFound)
+		return
+	}
+	if folder.cfg.Direction == "receive-only" {
+		http.Error(w, "folder is receive-only", http.StatusForbidden)
+		return
+	}
+
+	fullPath, err := safePath(folder.cfg.Path, req.GetPath())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	blockSize := req.GetBlockSize()
+	if blockSize <= 0 {
+		blockSize = defaultBlockSize
+	}
+
+	// Compute delta between our file and the peer's block hashes.
+	delta, err := computeDeltaBlocks(fullPath, blockSize, req.GetBlockHashes())
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "compute delta: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Get full-file hash and size for verification.
+	fileHash, err := hashFile(fullPath)
+	if err != nil {
+		http.Error(w, "hash file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	fi, err := os.Stat(fullPath)
+	if err != nil {
+		http.Error(w, "stat: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Build response.
+	pbBlocks := make([]*pb.DeltaBlock, len(delta))
+	for i, b := range delta {
+		pbBlocks[i] = &pb.DeltaBlock{Index: b.index, Data: b.data}
+	}
+	resp := &pb.DeltaResponse{
+		FileSize:   fi.Size(),
+		FileSha256: hexToBytes(fileHash),
+		Blocks:     pbBlocks,
+	}
+
+	data, err := proto.Marshal(resp)
+	if err != nil {
+		http.Error(w, "marshal delta: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	_, _ = w.Write(data)
+}
+
 // handleStatus returns a JSON summary of the filesync state.
 func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -203,7 +296,7 @@ func sendIndex(client *http.Client, peerAddr string, exchange *pb.IndexExchange)
 
 // downloadFromPeer downloads a single file from a peer with resume support.
 func downloadFromPeer(client *http.Client, peerAddr, folderID, relPath, expectedHash, folderRoot string) error {
-	_, err := downloadFile(client, peerAddr, folderID, relPath, expectedHash, folderRoot)
+	_, err := downloadFileDelta(client, peerAddr, folderID, relPath, expectedHash, folderRoot)
 	return err
 }
 

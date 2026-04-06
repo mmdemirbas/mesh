@@ -184,6 +184,199 @@ func (x *FileInfo) GetSequence() int64 {
 	return 0
 }
 
+// BlockSignatures is sent by the receiver to request a block-level delta.
+// Each entry is the SHA-256 hash of a fixed-size block of the local file.
+type BlockSignatures struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	FolderId      string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
+	Path          string                 `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	BlockSize     int64                  `protobuf:"varint,3,opt,name=block_size,json=blockSize,proto3" json:"block_size,omitempty"`      // Block size in bytes (e.g., 131072 = 128 KB)
+	FileSize      int64                  `protobuf:"varint,4,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"`         // Total local file size
+	BlockHashes   [][]byte               `protobuf:"bytes,5,rep,name=block_hashes,json=blockHashes,proto3" json:"block_hashes,omitempty"` // SHA-256 of each sequential block
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlockSignatures) Reset() {
+	*x = BlockSignatures{}
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlockSignatures) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlockSignatures) ProtoMessage() {}
+
+func (x *BlockSignatures) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlockSignatures.ProtoReflect.Descriptor instead.
+func (*BlockSignatures) Descriptor() ([]byte, []int) {
+	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *BlockSignatures) GetFolderId() string {
+	if x != nil {
+		return x.FolderId
+	}
+	return ""
+}
+
+func (x *BlockSignatures) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *BlockSignatures) GetBlockSize() int64 {
+	if x != nil {
+		return x.BlockSize
+	}
+	return 0
+}
+
+func (x *BlockSignatures) GetFileSize() int64 {
+	if x != nil {
+		return x.FileSize
+	}
+	return 0
+}
+
+func (x *BlockSignatures) GetBlockHashes() [][]byte {
+	if x != nil {
+		return x.BlockHashes
+	}
+	return nil
+}
+
+// DeltaResponse contains only the blocks that differ between the local
+// and remote versions of a file.
+type DeltaResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	FileSize      int64                  `protobuf:"varint,1,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"`      // Total remote file size
+	FileSha256    []byte                 `protobuf:"bytes,2,opt,name=file_sha256,json=fileSha256,proto3" json:"file_sha256,omitempty"` // SHA-256 of the complete remote file
+	Blocks        []*DeltaBlock          `protobuf:"bytes,3,rep,name=blocks,proto3" json:"blocks,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeltaResponse) Reset() {
+	*x = DeltaResponse{}
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeltaResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeltaResponse) ProtoMessage() {}
+
+func (x *DeltaResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeltaResponse.ProtoReflect.Descriptor instead.
+func (*DeltaResponse) Descriptor() ([]byte, []int) {
+	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *DeltaResponse) GetFileSize() int64 {
+	if x != nil {
+		return x.FileSize
+	}
+	return 0
+}
+
+func (x *DeltaResponse) GetFileSha256() []byte {
+	if x != nil {
+		return x.FileSha256
+	}
+	return nil
+}
+
+func (x *DeltaResponse) GetBlocks() []*DeltaBlock {
+	if x != nil {
+		return x.Blocks
+	}
+	return nil
+}
+
+// DeltaBlock carries a single changed block.
+type DeltaBlock struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Index         int64                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"` // Block index (0-based)
+	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`    // Block content
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeltaBlock) Reset() {
+	*x = DeltaBlock{}
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeltaBlock) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeltaBlock) ProtoMessage() {}
+
+func (x *DeltaBlock) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeltaBlock.ProtoReflect.Descriptor instead.
+func (*DeltaBlock) Descriptor() ([]byte, []int) {
+	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *DeltaBlock) GetIndex() int64 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *DeltaBlock) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
 var File_internal_filesync_proto_filesync_proto protoreflect.FileDescriptor
 
 const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
@@ -201,7 +394,23 @@ const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
 	"\bmtime_ns\x18\x03 \x01(\x03R\amtimeNs\x12\x16\n" +
 	"\x06sha256\x18\x04 \x01(\fR\x06sha256\x12\x18\n" +
 	"\adeleted\x18\x05 \x01(\bR\adeleted\x12\x1a\n" +
-	"\bsequence\x18\x06 \x01(\x03R\bsequenceB4Z2github.com/mmdemirbas/mesh/internal/filesync/protob\x06proto3"
+	"\bsequence\x18\x06 \x01(\x03R\bsequence\"\xa1\x01\n" +
+	"\x0fBlockSignatures\x12\x1b\n" +
+	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12\x12\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12\x1d\n" +
+	"\n" +
+	"block_size\x18\x03 \x01(\x03R\tblockSize\x12\x1b\n" +
+	"\tfile_size\x18\x04 \x01(\x03R\bfileSize\x12!\n" +
+	"\fblock_hashes\x18\x05 \x03(\fR\vblockHashes\"{\n" +
+	"\rDeltaResponse\x12\x1b\n" +
+	"\tfile_size\x18\x01 \x01(\x03R\bfileSize\x12\x1f\n" +
+	"\vfile_sha256\x18\x02 \x01(\fR\n" +
+	"fileSha256\x12,\n" +
+	"\x06blocks\x18\x03 \x03(\v2\x14.filesync.DeltaBlockR\x06blocks\"6\n" +
+	"\n" +
+	"DeltaBlock\x12\x14\n" +
+	"\x05index\x18\x01 \x01(\x03R\x05index\x12\x12\n" +
+	"\x04data\x18\x02 \x01(\fR\x04dataB4Z2github.com/mmdemirbas/mesh/internal/filesync/protob\x06proto3"
 
 var (
 	file_internal_filesync_proto_filesync_proto_rawDescOnce sync.Once
@@ -215,18 +424,22 @@ func file_internal_filesync_proto_filesync_proto_rawDescGZIP() []byte {
 	return file_internal_filesync_proto_filesync_proto_rawDescData
 }
 
-var file_internal_filesync_proto_filesync_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_internal_filesync_proto_filesync_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_internal_filesync_proto_filesync_proto_goTypes = []any{
-	(*IndexExchange)(nil), // 0: filesync.IndexExchange
-	(*FileInfo)(nil),      // 1: filesync.FileInfo
+	(*IndexExchange)(nil),   // 0: filesync.IndexExchange
+	(*FileInfo)(nil),        // 1: filesync.FileInfo
+	(*BlockSignatures)(nil), // 2: filesync.BlockSignatures
+	(*DeltaResponse)(nil),   // 3: filesync.DeltaResponse
+	(*DeltaBlock)(nil),      // 4: filesync.DeltaBlock
 }
 var file_internal_filesync_proto_filesync_proto_depIdxs = []int32{
 	1, // 0: filesync.IndexExchange.files:type_name -> filesync.FileInfo
-	1, // [1:1] is the sub-list for method output_type
-	1, // [1:1] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	4, // 1: filesync.DeltaResponse.blocks:type_name -> filesync.DeltaBlock
+	2, // [2:2] is the sub-list for method output_type
+	2, // [2:2] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_internal_filesync_proto_filesync_proto_init() }
@@ -240,7 +453,7 @@ func file_internal_filesync_proto_filesync_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_filesync_proto_filesync_proto_rawDesc), len(file_internal_filesync_proto_filesync_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
