@@ -633,10 +633,9 @@ func TestHandleIndex_ExchangeRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 
 	n := &Node{
-		cfg:           testCfg(dir, "127.0.0.1"),
-		folders:       make(map[string]*folderState),
-		remoteIndices: make(map[string]map[string]*pb.IndexExchange),
-		deviceID:      "test-device",
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
 	}
 	idx := newFileIndex()
 	idx.Sequence = 5
@@ -646,7 +645,6 @@ func TestHandleIndex_ExchangeRoundtrip(t *testing.T) {
 		index: idx,
 		peers: make(map[string]PeerState),
 	}
-	n.remoteIndices["test"] = make(map[string]*pb.IndexExchange)
 
 	srv := &server{node: n}
 	ts := httptest.NewServer(srv.handler())

@@ -124,10 +124,6 @@ type Node struct {
 	folders map[string]*folderState // folderID -> state
 	mu      sync.RWMutex
 
-	// remoteIndices stores the latest index received from each peer per folder.
-	remoteIndices   map[string]map[string]*pb.IndexExchange // folderID -> peerAddr -> index
-	remoteIndicesMu sync.Mutex
-
 	httpClient *http.Client
 
 	// scanTrigger signals the sync loop that a scan completed with changes.
@@ -149,7 +145,6 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		deviceID:      deviceID,
 		dataDir:       dataDir,
 		folders:       make(map[string]*folderState),
-		remoteIndices: make(map[string]map[string]*pb.IndexExchange),
 		httpClient: &http.Client{
 			Timeout: 10 * time.Minute,
 			Transport: &http.Transport{
@@ -196,7 +191,6 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			peers:  peers,
 		}
 		n.folders[fcfg.ID] = fs
-		n.remoteIndices[fcfg.ID] = make(map[string]*pb.IndexExchange)
 
 		state.Global.Update("filesync-folder", fcfg.ID, state.Starting, fcfg.Path)
 		for _, peer := range fcfg.Peers {
@@ -588,17 +582,6 @@ func (n *Node) buildIndexExchange(folderID string) *pb.IndexExchange {
 		Sequence: fs.index.Sequence,
 		Files:    files,
 	}
-}
-
-// storeRemoteIndex saves a received index for later processing by syncLoop.
-func (n *Node) storeRemoteIndex(peerAddr string, idx *pb.IndexExchange) {
-	n.remoteIndicesMu.Lock()
-	defer n.remoteIndicesMu.Unlock()
-	folderID := idx.GetFolderId()
-	if _, ok := n.remoteIndices[folderID]; !ok {
-		n.remoteIndices[folderID] = make(map[string]*pb.IndexExchange)
-	}
-	n.remoteIndices[folderID][peerAddr] = idx
 }
 
 // findFolder returns the folder state for the given ID, or nil.

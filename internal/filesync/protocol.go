@@ -68,9 +68,6 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	slog.Debug("received index from peer", "peer", peerAddr, "folder", folderID, "files", len(req.GetFiles()))
 
-	// Store the remote index for the sync loop to process.
-	s.node.storeRemoteIndex(peerAddr, &req)
-
 	// Respond with our index.
 	resp := s.node.buildIndexExchange(folderID)
 	data, err := proto.Marshal(resp)
