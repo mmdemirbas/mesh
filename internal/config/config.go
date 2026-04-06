@@ -31,6 +31,7 @@ type Config struct {
 }
 
 // Listener represents a local server port (proxy, relay, or sshd).
+// "relay" = standalone TCP forwarder (socat replacement); "forward" = SSH tunnel port-forward.
 type Listener struct {
 	// Optional friendly name for this listener.
 	Name string `yaml:"name,omitempty"`
@@ -86,6 +87,7 @@ type ClipsyncCfg struct {
 	StaticPeers  []string `yaml:"static_peers,omitempty"`
 	AllowSendTo  []string `yaml:"allow_send_to,omitempty"` // "all", "none", "udp", or specific IPs. Default: ["all"]
 	AllowReceive []string `yaml:"allow_receive,omitempty"` // "all", "none", "udp", or specific IPs. Default: ["all"]
+	PollInterval string   `yaml:"poll_interval,omitempty"` // Clipboard polling interval (e.g., "3s", "5s"). Default: "3s"
 }
 
 // UnmarshalYAML provides default values for ClipsyncCfg.
@@ -195,6 +197,9 @@ func LoadUnvalidated(path string) (map[string]*Config, error) {
 	}
 
 	for _, cfg := range cfgs {
+		if cfg == nil {
+			continue
+		}
 		WarnUnsupportedOptions(cfg)
 
 		// Expand ~ in all path fields

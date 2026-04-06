@@ -29,7 +29,7 @@ import (
 const (
 	Port         = 7755
 	MagicHeader  = "CLPSYNC2"
-	PollInterval = 2 * time.Second // Optimized default for lower OS footprint
+	PollInterval = 3 * time.Second // Default clipboard polling interval
 
 	// maxSyncFileSize is the per-file size limit for clipboard sync.
 	// Files larger than this are skipped to avoid OOM and transfer timeouts.
@@ -97,6 +97,13 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 	port := Port
 	magicHeader := MagicHeader
 	pollInterval := PollInterval
+	if cfg.PollInterval != "" {
+		if d, err := time.ParseDuration(cfg.PollInterval); err == nil && d > 0 {
+			pollInterval = d
+		} else {
+			return nil, fmt.Errorf("clipsync: invalid poll_interval %q: %w", cfg.PollInterval, err)
+		}
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -1302,17 +1309,12 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	go func() {
-		<-ctx.Done()
-		_ = conn.Close()
-	}()
+	// Unblock the blocking ReadFromUDP when the context is cancelled.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 
 	// 2. Increase buffer slightly to prevent edge-case payload truncation
 	buf := make([]byte, 2048)
-	go func() {
-		<-ctx.Done()
-		_ = conn.Close()
-	}()
 
 	for {
 		// 3. Removed the 30s deadline. A blocking read uses 0% CPU and is
@@ -1386,7 +1388,7 @@ func (n *Node) runUDPBeacon(ctx context.Context, magicHeader string, port int) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	// Cache broadcast addresses; network interfaces rarely change at runtime.

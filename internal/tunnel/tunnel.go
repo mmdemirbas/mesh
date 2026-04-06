@@ -848,6 +848,7 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fs
 		<-ctx.Done()
 		_ = listener.Close()
 		state.Global.Delete("forward", compID)
+		state.Global.DeleteMetrics("forward", compID)
 	}()
 
 	acceptAndForward(ctx, listener, func() (net.Conn, error) {
@@ -883,6 +884,7 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fse
 		<-ctx.Done()
 		_ = listener.Close()
 		state.Global.Delete("forward", compID)
+		state.Global.DeleteMetrics("forward", compID)
 	}()
 
 	acceptAndForward(ctx, listener, func() (net.Conn, error) {
@@ -931,6 +933,7 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fset
 		<-ctx.Done()
 		_ = listener.Close()
 		state.Global.Delete("forward", compID)
+		state.Global.DeleteMetrics("forward", compID)
 	}()
 
 	switch pxy.Type {
@@ -972,6 +975,7 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, fsetN
 		<-ctx.Done()
 		_ = listener.Close()
 		state.Global.Delete("forward", compID)
+		state.Global.DeleteMetrics("forward", compID)
 	}()
 
 	// For SOCKS, direct traffic through the SSH tunnel
@@ -1121,6 +1125,7 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 	dm.StartTime.Store(time.Now().UnixNano())
 	defer func() {
 		state.Global.Delete("dynamic", compID)
+		state.Global.DeleteMetrics("dynamic", compID)
 		log.Info("tcpip-forward closed", "addr", addr)
 	}()
 
@@ -1208,8 +1213,7 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[str
 	permitOpen := config.GetOption(options, "PermitOpen")
 	if permitOpen != "" && permitOpen != "any" {
 		allowed := false
-		for _, p := range strings.Split(permitOpen, ",") {
-			p = strings.TrimSpace(p)
+		for _, p := range strings.FieldsFunc(permitOpen, func(r rune) bool { return r == ',' || r == ' ' }) {
 			if p == "none" {
 				break
 			}

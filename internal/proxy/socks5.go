@@ -34,70 +34,14 @@ func ServeSocks(ctx context.Context, listener net.Listener, dialer func(string, 
 func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), log *slog.Logger, metrics *state.Metrics) {
 	defer func() { _ = conn.Close() }()
 
-	// Set a deadline for the SOCKS5 handshake to prevent slowloris attacks
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
-
 	if dialer == nil {
 		dialer = net.Dial
 	}
 
-	buf := make([]byte, 258)
-
-	// Greeting
-	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
+	target, err := socks5Handshake(conn)
+	if err != nil {
 		return
 	}
-	if buf[0] != 0x05 {
-		return
-	}
-	nMethods := int(buf[1])
-	if _, err := io.ReadFull(conn, buf[:nMethods]); err != nil {
-		return
-	}
-	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil { // No auth
-		return
-	}
-
-	// Request
-	if _, err := io.ReadFull(conn, buf[:4]); err != nil {
-		return
-	}
-	if buf[0] != 0x05 || buf[1] != 0x01 || buf[2] != 0x00 { // Only CONNECT, RSV must be 0x00
-		_ = socksReply(conn, 0x07)
-		return
-	}
-
-	var destAddr string
-	switch buf[3] {
-	case 0x01: // IPv4
-		if _, err := io.ReadFull(conn, buf[:4]); err != nil {
-			return
-		}
-		destAddr = net.IP(buf[:4]).String()
-	case 0x03: // Domain
-		if _, err := io.ReadFull(conn, buf[:1]); err != nil {
-			return
-		}
-		n := int(buf[0])
-		if _, err := io.ReadFull(conn, buf[:n]); err != nil {
-			return
-		}
-		destAddr = string(buf[:n])
-	case 0x04: // IPv6
-		if _, err := io.ReadFull(conn, buf[:16]); err != nil {
-			return
-		}
-		destAddr = net.IP(buf[:16]).String()
-	default:
-		_ = socksReply(conn, 0x08)
-		return
-	}
-
-	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
-		return
-	}
-	port := binary.BigEndian.Uint16(buf[:2])
-	target := fmt.Sprintf("%s:%d", destAddr, port)
 
 	remote, err := dialer("tcp", target)
 	if err != nil {
@@ -119,6 +63,76 @@ func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), 
 	} else {
 		netutil.BiCopy(conn, remote)
 	}
+}
+
+// socks5Handshake performs the SOCKS5 greeting and request exchange, returning
+// the requested target address. It enforces a 30-second timeout using both
+// SetDeadline (works on real TCP) and a context-based close (works on SSH channels
+// where SetDeadline is a no-op).
+func socks5Handshake(conn net.Conn) (string, error) {
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer cancel()
+	defer stop()
+
+	buf := make([]byte, 258)
+
+	// Greeting
+	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
+		return "", err
+	}
+	if buf[0] != 0x05 {
+		return "", fmt.Errorf("unsupported SOCKS version: %d", buf[0])
+	}
+	nMethods := int(buf[1])
+	if _, err := io.ReadFull(conn, buf[:nMethods]); err != nil {
+		return "", err
+	}
+	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil { // No auth
+		return "", err
+	}
+
+	// Request
+	if _, err := io.ReadFull(conn, buf[:4]); err != nil {
+		return "", err
+	}
+	if buf[0] != 0x05 || buf[1] != 0x01 || buf[2] != 0x00 { // Only CONNECT, RSV must be 0x00
+		_ = socksReply(conn, 0x07)
+		return "", fmt.Errorf("unsupported SOCKS command")
+	}
+
+	var destAddr string
+	switch buf[3] {
+	case 0x01: // IPv4
+		if _, err := io.ReadFull(conn, buf[:4]); err != nil {
+			return "", err
+		}
+		destAddr = net.IP(buf[:4]).String()
+	case 0x03: // Domain
+		if _, err := io.ReadFull(conn, buf[:1]); err != nil {
+			return "", err
+		}
+		n := int(buf[0])
+		if _, err := io.ReadFull(conn, buf[:n]); err != nil {
+			return "", err
+		}
+		destAddr = string(buf[:n])
+	case 0x04: // IPv6
+		if _, err := io.ReadFull(conn, buf[:16]); err != nil {
+			return "", err
+		}
+		destAddr = net.IP(buf[:16]).String()
+	default:
+		_ = socksReply(conn, 0x08)
+		return "", fmt.Errorf("unsupported address type: %d", buf[3])
+	}
+
+	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
+		return "", err
+	}
+	port := binary.BigEndian.Uint16(buf[:2])
+	return fmt.Sprintf("%s:%d", destAddr, port), nil
 }
 
 func socksReply(conn net.Conn, status byte) error {

@@ -66,12 +66,20 @@ func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer
 func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *slog.Logger, metrics *state.Metrics) {
 	defer func() { _ = conn.Close() }()
 
-	// Set a deadline for the HTTP CONNECT handshake to prevent slowloris attacks
+	// Handshake timeout: SetDeadline works on real TCP but is a no-op on SSH
+	// channels, so we also use a context-based close as a universal fallback.
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	hsCtx, hsCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	stop := context.AfterFunc(hsCtx, func() {
+		_ = conn.Close()
+	})
 
 	br := bufio.NewReader(conn)
 	req, err := http.ReadRequest(br)
+	stop()     // disarm the close callback before cancelling the context
+	hsCancel() // release context resources
 	if err != nil {
+		log.Debug("http proxy: malformed request", "error", err)
 		return
 	}
 
