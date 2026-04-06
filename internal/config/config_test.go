@@ -714,24 +714,306 @@ func TestValidate_DuplicateNames(t *testing.T) {
 }
 
 func TestValidate_FilesyncMaxConcurrentZero(t *testing.T) {
-	cfg := &Config{
-		Filesync: []FilesyncCfg{{
-			Bind:          "0.0.0.0:7756",
-			MaxConcurrent: 0,
-			Folders: []FolderCfg{{
-				ID:        "docs",
-				Path:      t.TempDir(),
-				Peers:     []string{"192.168.1.10:7756"},
-				Direction: "send-receive",
-			}},
-		}},
+	fsCfg := FilesyncCfg{
+		Bind:          "0.0.0.0:7756",
+		MaxConcurrent: 0,
+		Peers:         map[string][]string{"peer1": {"192.168.1.10:7756"}},
+		Folders: map[string]FolderCfgRaw{
+			"docs": {Path: t.TempDir()},
+		},
+		Defaults: FilesyncDefaults{Peers: []string{"peer1"}},
 	}
+	_ = fsCfg.Resolve()
+	cfg := &Config{Filesync: []FilesyncCfg{fsCfg}}
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected error for max_concurrent=0")
 	}
 	if !strings.Contains(err.Error(), "max_concurrent must be positive") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestFilesyncResolve(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     FilesyncCfg
+		wantErr string
+		check   func(t *testing.T, cfg *FilesyncCfg)
+	}{
+		{
+			name: "basic resolution with defaults",
+			cfg: FilesyncCfg{
+				Bind:  "0.0.0.0:7756",
+				Peers: map[string][]string{"hw": {"10.0.0.1:7756"}},
+				Defaults: FilesyncDefaults{
+					Peers:     []string{"hw"},
+					Direction: "send-only",
+					IgnorePatterns: []string{"*.tmp"},
+				},
+				Folders: map[string]FolderCfgRaw{
+					"code": {Path: "/tmp/code"},
+				},
+			},
+			check: func(t *testing.T, cfg *FilesyncCfg) {
+				if len(cfg.ResolvedFolders) != 1 {
+					t.Fatalf("resolved %d folders, want 1", len(cfg.ResolvedFolders))
+				}
+				f := cfg.ResolvedFolders[0]
+				if f.ID != "code" {
+					t.Errorf("ID = %q, want code", f.ID)
+				}
+				if f.Direction != "send-only" {
+					t.Errorf("Direction = %q, want send-only", f.Direction)
+				}
+				if len(f.Peers) != 1 || f.Peers[0] != "10.0.0.1:7756" {
+					t.Errorf("Peers = %v, want [10.0.0.1:7756]", f.Peers)
+				}
+				if len(f.IgnorePatterns) != 1 || f.IgnorePatterns[0] != "*.tmp" {
+					t.Errorf("IgnorePatterns = %v, want [*.tmp]", f.IgnorePatterns)
+				}
+			},
+		},
+		{
+			name: "folder overrides peers and direction",
+			cfg: FilesyncCfg{
+				Bind: "0.0.0.0:7756",
+				Peers: map[string][]string{
+					"hw":  {"10.0.0.1:7756"},
+					"mbp": {"10.0.0.2:7756"},
+				},
+				Defaults: FilesyncDefaults{
+					Peers:     []string{"hw"},
+					Direction: "send-only",
+				},
+				Folders: map[string]FolderCfgRaw{
+					"docs": {
+						Path:      "/tmp/docs",
+						Peers:     []string{"hw", "mbp"},
+						Direction: "receive-only",
+					},
+				},
+			},
+			check: func(t *testing.T, cfg *FilesyncCfg) {
+				f := cfg.ResolvedFolders[0]
+				if f.Direction != "receive-only" {
+					t.Errorf("Direction = %q, want receive-only", f.Direction)
+				}
+				if len(f.Peers) != 2 {
+					t.Errorf("Peers count = %d, want 2", len(f.Peers))
+				}
+			},
+		},
+		{
+			name: "ignore patterns extend defaults",
+			cfg: FilesyncCfg{
+				Bind:  "0.0.0.0:7756",
+				Peers: map[string][]string{"hw": {"10.0.0.1:7756"}},
+				Defaults: FilesyncDefaults{
+					Peers:          []string{"hw"},
+					IgnorePatterns: []string{".DS_Store", "*.tmp"},
+				},
+				Folders: map[string]FolderCfgRaw{
+					"code": {
+						Path:           "/tmp/code",
+						IgnorePatterns: []string{"**/target"},
+					},
+				},
+			},
+			check: func(t *testing.T, cfg *FilesyncCfg) {
+				f := cfg.ResolvedFolders[0]
+				want := []string{".DS_Store", "*.tmp", "**/target"}
+				if len(f.IgnorePatterns) != len(want) {
+					t.Fatalf("IgnorePatterns = %v, want %v", f.IgnorePatterns, want)
+				}
+				for i, p := range want {
+					if f.IgnorePatterns[i] != p {
+						t.Errorf("IgnorePatterns[%d] = %q, want %q", i, f.IgnorePatterns[i], p)
+					}
+				}
+			},
+		},
+		{
+			name: "direction defaults to send-receive",
+			cfg: FilesyncCfg{
+				Bind:  "0.0.0.0:7756",
+				Peers: map[string][]string{"hw": {"10.0.0.1:7756"}},
+				Defaults: FilesyncDefaults{
+					Peers: []string{"hw"},
+				},
+				Folders: map[string]FolderCfgRaw{
+					"code": {Path: "/tmp/code"},
+				},
+			},
+			check: func(t *testing.T, cfg *FilesyncCfg) {
+				if cfg.ResolvedFolders[0].Direction != "send-receive" {
+					t.Errorf("Direction = %q, want send-receive", cfg.ResolvedFolders[0].Direction)
+				}
+			},
+		},
+		{
+			name: "multi-address peer expands",
+			cfg: FilesyncCfg{
+				Bind:  "0.0.0.0:7756",
+				Peers: map[string][]string{"hw": {"10.0.0.1:7756", "10.0.0.2:7756"}},
+				Defaults: FilesyncDefaults{
+					Peers: []string{"hw"},
+				},
+				Folders: map[string]FolderCfgRaw{
+					"code": {Path: "/tmp/code"},
+				},
+			},
+			check: func(t *testing.T, cfg *FilesyncCfg) {
+				if len(cfg.ResolvedFolders[0].Peers) != 2 {
+					t.Errorf("Peers = %v, want 2 addresses", cfg.ResolvedFolders[0].Peers)
+				}
+			},
+		},
+		{
+			name: "unknown peer name",
+			cfg: FilesyncCfg{
+				Bind:  "0.0.0.0:7756",
+				Peers: map[string][]string{"hw": {"10.0.0.1:7756"}},
+				Defaults: FilesyncDefaults{
+					Peers: []string{"unknown"},
+				},
+				Folders: map[string]FolderCfgRaw{
+					"code": {Path: "/tmp/code"},
+				},
+			},
+			wantErr: `unknown peer "unknown"`,
+		},
+		{
+			name: "folder-level unknown peer name",
+			cfg: FilesyncCfg{
+				Bind:  "0.0.0.0:7756",
+				Peers: map[string][]string{"hw": {"10.0.0.1:7756"}},
+				Folders: map[string]FolderCfgRaw{
+					"code": {Path: "/tmp/code", Peers: []string{"missing"}},
+				},
+			},
+			wantErr: `unknown peer "missing"`,
+		},
+		{
+			name: "sorted by ID",
+			cfg: FilesyncCfg{
+				Bind:  "0.0.0.0:7756",
+				Peers: map[string][]string{"hw": {"10.0.0.1:7756"}},
+				Defaults: FilesyncDefaults{Peers: []string{"hw"}},
+				Folders: map[string]FolderCfgRaw{
+					"zebra": {Path: "/tmp/z"},
+					"alpha": {Path: "/tmp/a"},
+					"middle": {Path: "/tmp/m"},
+				},
+			},
+			check: func(t *testing.T, cfg *FilesyncCfg) {
+				ids := make([]string, len(cfg.ResolvedFolders))
+				for i, f := range cfg.ResolvedFolders {
+					ids[i] = f.ID
+				}
+				if ids[0] != "alpha" || ids[1] != "middle" || ids[2] != "zebra" {
+					t.Errorf("IDs = %v, want [alpha middle zebra]", ids)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Resolve()
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %q", tt.wantErr, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.check != nil {
+				tt.check(t, &tt.cfg)
+			}
+		})
+	}
+}
+
+func TestFilesyncYAMLParsing(t *testing.T) {
+	input := `
+bind: "0.0.0.0:7756"
+scan_interval: "3600s"
+peers:
+  hw: ["10.0.0.1:7756"]
+  mbp: ["10.0.0.2:7756", "10.0.0.3:7756"]
+defaults:
+  peers: ["hw"]
+  direction: "send-receive"
+  ignore_patterns: [".DS_Store"]
+folders:
+  code:
+    path: "/tmp/code"
+  docs:
+    path: "/tmp/docs"
+    peers: ["hw", "mbp"]
+    direction: "send-only"
+    ignore_patterns: ["*.pdf"]
+`
+	var cfg FilesyncCfg
+	if err := yamlUnmarshal([]byte(input), &cfg); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if cfg.Bind != "0.0.0.0:7756" {
+		t.Errorf("Bind = %q", cfg.Bind)
+	}
+	if cfg.ScanInterval != "3600s" {
+		t.Errorf("ScanInterval = %q", cfg.ScanInterval)
+	}
+	if len(cfg.Peers) != 2 {
+		t.Errorf("Peers count = %d, want 2", len(cfg.Peers))
+	}
+	if len(cfg.Folders) != 2 {
+		t.Errorf("Folders count = %d, want 2", len(cfg.Folders))
+	}
+
+	if err := cfg.Resolve(); err != nil {
+		t.Fatalf("Resolve error: %v", err)
+	}
+
+	if len(cfg.ResolvedFolders) != 2 {
+		t.Fatalf("ResolvedFolders count = %d, want 2", len(cfg.ResolvedFolders))
+	}
+
+	// Sorted: code < docs
+	code := cfg.ResolvedFolders[0]
+	docs := cfg.ResolvedFolders[1]
+
+	if code.ID != "code" || docs.ID != "docs" {
+		t.Fatalf("IDs = [%q, %q], want [code, docs]", code.ID, docs.ID)
+	}
+
+	// code inherits defaults
+	if len(code.Peers) != 1 || code.Peers[0] != "10.0.0.1:7756" {
+		t.Errorf("code.Peers = %v", code.Peers)
+	}
+	if code.Direction != "send-receive" {
+		t.Errorf("code.Direction = %q", code.Direction)
+	}
+	if len(code.IgnorePatterns) != 1 || code.IgnorePatterns[0] != ".DS_Store" {
+		t.Errorf("code.IgnorePatterns = %v", code.IgnorePatterns)
+	}
+
+	// docs overrides peers and direction, extends ignore patterns
+	if len(docs.Peers) != 3 {
+		t.Errorf("docs.Peers = %v, want 3 addresses (hw=1 + mbp=2)", docs.Peers)
+	}
+	if docs.Direction != "send-only" {
+		t.Errorf("docs.Direction = %q", docs.Direction)
+	}
+	if len(docs.IgnorePatterns) != 2 {
+		t.Errorf("docs.IgnorePatterns = %v, want [.DS_Store, *.pdf]", docs.IgnorePatterns)
 	}
 }
 

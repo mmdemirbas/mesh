@@ -1419,14 +1419,18 @@ func readBody(t *testing.T, resp *http.Response) []byte {
 }
 
 func testCfg(dir, peerIP string) config.FilesyncCfg {
-	return config.FilesyncCfg{
+	cfg := config.FilesyncCfg{
 		Bind:          "0.0.0.0:0",
 		MaxConcurrent: 4,
 		ScanInterval:  "60s",
-		Folders: []config.FolderCfg{
-			testFolderCfg(dir, peerIP),
+		Peers:         map[string][]string{"peer": {peerIP + ":7756"}},
+		Defaults:      config.FilesyncDefaults{Peers: []string{"peer"}},
+		Folders: map[string]config.FolderCfgRaw{
+			"test": {Path: dir},
 		},
 	}
+	_ = cfg.Resolve()
+	return cfg
 }
 
 func testFolderCfg(dir, peerIP string) config.FolderCfg {
