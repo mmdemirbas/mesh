@@ -12,6 +12,8 @@ import (
 // It explicitly asserts TCP_NODELAY to ensure interactive sessions don't buffer,
 // and forces SetLinger(0) to ensure sockets close immediately with a RST packet
 // instead of lingering politely in TIME_WAIT, keeping proxy listener ports clean.
+// Trade-off: RST on close may discard unsent data on real networks. Acceptable here
+// because this is applied to proxy connections, not user-facing streams.
 func ApplyTCPKeepAlive(conn net.Conn, period time.Duration) {
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		_ = tcpConn.SetKeepAlive(true)

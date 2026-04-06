@@ -980,7 +980,7 @@ func TestHandleCancelTCPIPForward_UnknownAddrNoOp(t *testing.T) {
 		t.Fatal(err)
 	}
 	otherAddr := other.Addr().String()
-	other.Close()
+	_ = other.Close()
 
 	var mu sync.Mutex
 	listeners := map[string]net.Listener{ln.Addr().String(): ln}

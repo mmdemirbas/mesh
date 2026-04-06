@@ -73,30 +73,32 @@ func runDashboard(ctx context.Context, cfgs map[string]*config.Config, nodeNames
 	fmt.Print("\033[?1049h\033[?25l")
 	defer fmt.Print("\033[?25h\033[?1049l") // show cursor, leave alternate screen
 
+	var prevBody string
 	render := func() {
-		var lines []string
+		var headerLines []string
 
-		// Header
+		// Header (changes every second due to uptime — always written)
 		uptime := time.Since(startTime).Truncate(time.Second)
 		nodesLabel := strings.Join(nodeNames, ", ")
 		header := fmt.Sprintf("%s%smesh %s%s | pid %d | %s | up %s",
 			cBold, cCyan, nodesLabel, cReset, os.Getpid(), time.Now().Format("15:04:05"), uptime)
-		lines = append(lines, header)
+		headerLines = append(headerLines, header)
 		if configPath != "" {
-			lines = append(lines, fmt.Sprintf("  %sconfig: %s%s", cGray, configPath, cReset))
+			headerLines = append(headerLines, fmt.Sprintf("  %sconfig: %s%s", cGray, configPath, cReset))
 		}
 		if logFilePath != "" {
-			lines = append(lines, fmt.Sprintf("  %slog:    %s%s", cGray, logFilePath, cReset))
+			headerLines = append(headerLines, fmt.Sprintf("  %slog:    %s%s", cGray, logFilePath, cReset))
 		}
-		lines = append(lines, "")
+		headerLines = append(headerLines, "")
 
 		// Status body — render each node
 		snap := state.Global.Snapshot()
 		metrics := state.Global.SnapshotMetrics()
+		var bodyLines []string
 		var maxWidth int
 		for _, name := range nodeNames {
 			statusOutput, statusWidth := renderStatus(cfgs[name], snap, metrics, name)
-			lines = append(lines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
+			bodyLines = append(bodyLines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
 			if statusWidth > maxWidth {
 				maxWidth = statusWidth
 			}
@@ -104,30 +106,41 @@ func runDashboard(ctx context.Context, cfgs map[string]*config.Config, nodeNames
 
 		// Log tail — fill remaining terminal height
 		logLines := ring.Lines()
+		totalLines := len(headerLines) + len(bodyLines)
 		if len(logLines) > 0 {
 			termHeight := 24
 			if _, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && h > 0 {
 				termHeight = h
 			}
-			available := termHeight - len(lines) - 1 // -1 for separator
+			available := termHeight - totalLines - 1 // -1 for separator
 			if available > len(logLines) {
 				available = len(logLines)
 			}
 			if available > 0 {
-				lines = append(lines, cGray+strings.Repeat("─", maxWidth)+cReset)
-				lines = append(lines, logLines[len(logLines)-available:]...)
+				bodyLines = append(bodyLines, cGray+strings.Repeat("─", maxWidth)+cReset)
+				bodyLines = append(bodyLines, logLines[len(logLines)-available:]...)
 			}
 		}
 
-		// Overwrite in-place: cursor home, then each line + clear-to-EOL.
-		// After all lines, clear from cursor to end of screen (removes stale content).
+		// Skip the expensive body section if state and logs are unchanged.
+		// The header (uptime/clock) is always rewritten — it's just one line.
+		body := strings.Join(bodyLines, "\n")
+		bodyChanged := body != prevBody
+		prevBody = body
+
 		var buf strings.Builder
-		buf.WriteString("\033[H") // cursor home — no clear
-		for _, line := range lines {
+		buf.WriteString("\033[H") // cursor home
+		for _, line := range headerLines {
 			buf.WriteString(line)
-			buf.WriteString("\033[K\n") // clear to end of line, then newline
+			buf.WriteString("\033[K\n")
 		}
-		buf.WriteString("\033[J") // clear from cursor to end of screen
+		if bodyChanged {
+			for _, line := range bodyLines {
+				buf.WriteString(line)
+				buf.WriteString("\033[K\n")
+			}
+			buf.WriteString("\033[J") // clear from cursor to end of screen
+		}
 		fmt.Print(buf.String())
 	}
 
