@@ -2,6 +2,7 @@ package filesync
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -152,7 +153,10 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"device_id":%q,"folders":%d}`, s.node.deviceID, len(s.node.cfg.Folders))
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"device_id": s.node.deviceID,
+		"folders":   len(s.node.cfg.Folders),
+	})
 }
 
 // addrFromRequest extracts the peer's IP:port for matching against configured peers.
