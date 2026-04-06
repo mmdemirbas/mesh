@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -108,12 +109,16 @@ func (c *ClipsyncCfg) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// FilesyncCfg configures a Syncthing-style folder synchronization instance.
+// FilesyncCfg configures a folder synchronization instance.
 type FilesyncCfg struct {
 	// Network address for the filesync HTTP server (e.g., "0.0.0.0:7756").
 	Bind string `yaml:"bind"`
-	// Folders to synchronize.
-	Folders []FolderCfg `yaml:"folders"`
+	// Named peer definitions. Key is a short nickname, value is a list of addresses.
+	Peers map[string][]string `yaml:"peers,omitempty"`
+	// Default values applied to all folders unless overridden per-folder.
+	Defaults FilesyncDefaults `yaml:"defaults,omitempty"`
+	// Folders to synchronize. Key is a human-readable folder ID (must match on all peers).
+	Folders map[string]FolderCfgRaw `yaml:"folders"`
 	// Periodic full rescan interval (e.g., "60s", "5m"). Default: "60s".
 	// Acts as a safety net alongside real-time filesystem notifications.
 	ScanInterval string `yaml:"scan_interval,omitempty"`
@@ -122,6 +127,9 @@ type FilesyncCfg struct {
 	// Maximum bandwidth for file transfers (e.g., "10MB", "100MB", "1GB").
 	// The value is bytes per second. Suffixes: KB, MB, GB (base-10). Default: unlimited.
 	MaxBandwidth string `yaml:"max_bandwidth,omitempty"`
+
+	// ResolvedFolders is populated by Resolve(). Runtime code reads this.
+	ResolvedFolders []FolderCfg `yaml:"-"`
 }
 
 // UnmarshalYAML provides default values for FilesyncCfg.
@@ -135,29 +143,92 @@ func (c *FilesyncCfg) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// FolderCfg configures a single folder for synchronization.
-type FolderCfg struct {
-	// Unique identifier shared between peers (must match on all sides).
-	ID string `yaml:"id"`
-	// Local filesystem path to sync.
-	Path string `yaml:"path"`
-	// Explicit peer addresses (host:port) to sync this folder with.
-	Peers []string `yaml:"peers"`
-	// Sync direction: "send-receive" (bidirectional), "send-only", or "receive-only".
-	// Default: "send-receive".
-	Direction string `yaml:"direction,omitempty" jsonschema:"enum=send-receive,enum=send-only,enum=receive-only"`
-	// Ignore patterns (gitignore-style), local to this node.
-	// Applied in addition to .stignore file in the folder root.
+// FilesyncDefaults holds default values applied to all folders unless overridden.
+type FilesyncDefaults struct {
+	// Default peer names for folders that don't specify their own.
+	Peers []string `yaml:"peers,omitempty"`
+	// Default sync direction. Default: "send-receive".
+	Direction string `yaml:"direction,omitempty"`
+	// Ignore patterns (gitignore-style) applied to all folders.
+	// Per-folder patterns are appended to these.
 	IgnorePatterns []string `yaml:"ignore_patterns,omitempty"`
 }
 
-// UnmarshalYAML provides default values for FolderCfg.
-func (f *FolderCfg) UnmarshalYAML(value *yaml.Node) error {
-	type plain FolderCfg
-	f.Direction = "send-receive"
-	if err := value.Decode((*plain)(f)); err != nil {
-		return err
+// FolderCfgRaw is the YAML-facing folder config before defaults are merged.
+type FolderCfgRaw struct {
+	// Local filesystem path to sync.
+	Path string `yaml:"path"`
+	// Peer names (overrides defaults.peers). Resolved to addresses via the peers map.
+	Peers []string `yaml:"peers,omitempty"`
+	// Sync direction (overrides defaults.direction).
+	Direction string `yaml:"direction,omitempty"`
+	// Ignore patterns (gitignore-style), appended to defaults.ignore_patterns.
+	IgnorePatterns []string `yaml:"ignore_patterns,omitempty"`
+}
+
+// FolderCfg is the resolved runtime type for a synced folder.
+type FolderCfg struct {
+	// Unique identifier (from the map key in YAML). Must match on all peers.
+	ID string
+	// Local filesystem path to sync.
+	Path string
+	// Resolved peer addresses (host:port).
+	Peers []string
+	// Sync direction: "send-receive", "send-only", or "receive-only".
+	Direction string
+	// Merged ignore patterns (defaults + folder-specific).
+	IgnorePatterns []string
+}
+
+// Resolve merges defaults, resolves peer names to addresses, expands paths,
+// and populates ResolvedFolders. Returns an error if a peer name is unknown.
+func (c *FilesyncCfg) Resolve() error {
+	c.ResolvedFolders = nil
+	for id, raw := range c.Folders {
+		// Peers: folder overrides defaults entirely.
+		peerNames := raw.Peers
+		if len(peerNames) == 0 {
+			peerNames = c.Defaults.Peers
+		}
+
+		// Resolve peer names to addresses.
+		var resolvedPeers []string
+		for _, name := range peerNames {
+			addrs, ok := c.Peers[name]
+			if !ok {
+				return fmt.Errorf("folder %q: unknown peer %q", id, name)
+			}
+			resolvedPeers = append(resolvedPeers, addrs...)
+		}
+
+		// Direction: folder overrides defaults, fallback to "send-receive".
+		direction := raw.Direction
+		if direction == "" {
+			direction = c.Defaults.Direction
+		}
+		if direction == "" {
+			direction = "send-receive"
+		}
+
+		// Ignore patterns: defaults + folder (appended).
+		var patterns []string
+		patterns = append(patterns, c.Defaults.IgnorePatterns...)
+		patterns = append(patterns, raw.IgnorePatterns...)
+
+		c.ResolvedFolders = append(c.ResolvedFolders, FolderCfg{
+			ID:             id,
+			Path:           expandHome(raw.Path),
+			Peers:          resolvedPeers,
+			Direction:      direction,
+			IgnorePatterns: patterns,
+		})
 	}
+
+	// Sort by ID for deterministic iteration order.
+	sort.Slice(c.ResolvedFolders, func(i, j int) bool {
+		return c.ResolvedFolders[i].ID < c.ResolvedFolders[j].ID
+	})
+
 	return nil
 }
 
@@ -271,8 +342,8 @@ func LoadUnvalidated(path string) (map[string]*Config, error) {
 			cfg.Connections[i].Auth.KnownHosts = expandHome(cfg.Connections[i].Auth.KnownHosts)
 		}
 		for i := range cfg.Filesync {
-			for j := range cfg.Filesync[i].Folders {
-				cfg.Filesync[i].Folders[j].Path = expandHome(cfg.Filesync[i].Folders[j].Path)
+			if err := cfg.Filesync[i].Resolve(); err != nil {
+				return nil, fmt.Errorf("filesync[%d]: %w", i, err)
 			}
 		}
 	}
@@ -409,26 +480,19 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("filesync[%d]: invalid max_bandwidth %q: %w", i, fs.MaxBandwidth, err)
 			}
 		}
-		folderIDs := make(map[string]int)
-		for j, f := range fs.Folders {
-			if f.ID == "" {
-				return fmt.Errorf("filesync[%d] folders[%d]: id is required", i, j)
-			}
-			if prev, ok := folderIDs[f.ID]; ok {
-				return fmt.Errorf("filesync[%d]: duplicate folder id %q: folders[%d] and folders[%d]", i, f.ID, prev, j)
-			}
-			folderIDs[f.ID] = j
+		// Validate resolved folders (populated by Resolve()).
+		for _, f := range fs.ResolvedFolders {
 			if f.Path == "" {
-				return fmt.Errorf("filesync[%d] folders[%d] %q: path is required", i, j, f.ID)
+				return fmt.Errorf("filesync[%d] folder %q: path is required", i, f.ID)
 			}
 			if len(f.Peers) == 0 {
-				return fmt.Errorf("filesync[%d] folders[%d] %q: at least one peer is required", i, j, f.ID)
+				return fmt.Errorf("filesync[%d] folder %q: at least one peer is required", i, f.ID)
 			}
 			switch f.Direction {
 			case "send-receive", "send-only", "receive-only":
 				// ok
 			default:
-				return fmt.Errorf("filesync[%d] folders[%d] %q: direction must be send-receive, send-only, or receive-only, got %q", i, j, f.ID, f.Direction)
+				return fmt.Errorf("filesync[%d] folder %q: direction must be send-receive, send-only, or receive-only, got %q", i, f.ID, f.Direction)
 			}
 		}
 	}
