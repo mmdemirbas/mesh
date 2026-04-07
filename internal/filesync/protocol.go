@@ -108,8 +108,12 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate direction: only serve files if we're allowed to send.
-	if folder.cfg.Direction == "receive-only" {
+	switch folder.cfg.Direction {
+	case "receive-only":
 		http.Error(w, "folder is receive-only", http.StatusForbidden)
+		return
+	case "disabled":
+		http.Error(w, "folder is disabled", http.StatusForbidden)
 		return
 	}
 
@@ -181,8 +185,12 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown folder", http.StatusNotFound)
 		return
 	}
-	if folder.cfg.Direction == "receive-only" {
+	switch folder.cfg.Direction {
+	case "receive-only":
 		http.Error(w, "folder is receive-only", http.StatusForbidden)
+		return
+	case "disabled":
+		http.Error(w, "folder is disabled", http.StatusForbidden)
 		return
 	}
 

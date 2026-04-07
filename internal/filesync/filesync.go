@@ -211,9 +211,13 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		}
 		n.folders[fcfg.ID] = fs
 
-		state.Global.Update("filesync-folder", fcfg.ID, state.Starting, fcfg.Path)
-		for _, peer := range fcfg.Peers {
-			state.Global.Update("filesync-peer", fcfg.ID+"|"+peer, state.Connecting, "")
+		if fcfg.Direction == "disabled" {
+			state.Global.Update("filesync-folder", fcfg.ID, state.Connected, "disabled")
+		} else {
+			state.Global.Update("filesync-folder", fcfg.ID, state.Starting, fcfg.Path)
+			for _, peer := range fcfg.Peers {
+				state.Global.Update("filesync-peer", fcfg.ID+"|"+peer, state.Connecting, "")
+			}
 		}
 	}
 
@@ -251,6 +255,9 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	roots := make([]string, 0, len(cfg.ResolvedFolders))
 	ignoreMap := make(map[string]*ignoreMatcher)
 	for _, fs := range n.folders {
+		if fs.cfg.Direction == "disabled" {
+			continue
+		}
 		roots = append(roots, fs.cfg.Path)
 		ignoreMap[fs.cfg.Path] = fs.ignore
 	}
@@ -336,6 +343,9 @@ func (n *Node) scanLoop(ctx context.Context, interval time.Duration, watcher *fo
 func (n *Node) runScan() {
 	anyChanged := false
 	for id, fs := range n.folders {
+		if fs.cfg.Direction == "disabled" {
+			continue
+		}
 		fs.indexMu.Lock()
 		state.Global.Update("filesync-folder", id, state.Connecting, "scanning")
 
@@ -402,6 +412,9 @@ func (n *Node) syncAllPeers(ctx context.Context) {
 	sem := make(chan struct{}, n.cfg.MaxConcurrent)
 
 	for _, fs := range n.folders {
+		if fs.cfg.Direction == "disabled" {
+			continue
+		}
 		for _, peer := range fs.cfg.Peers {
 			if ctx.Err() != nil {
 				return
@@ -479,7 +492,17 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		return
 	}
 
-	slog.Info("sync actions", "folder", folderID, "peer", peerAddr, "downloads", countActions(actions, ActionDownload), "conflicts", countActions(actions, ActionConflict), "deletes", countActions(actions, ActionDelete))
+	downloads := countActions(actions, ActionDownload)
+	conflicts := countActions(actions, ActionConflict)
+	deletes := countActions(actions, ActionDelete)
+	slog.Info("sync actions", "folder", folderID, "peer", peerAddr, "downloads", downloads, "conflicts", conflicts, "deletes", deletes)
+
+	// Dry-run: log what would happen but don't modify files or update peer state.
+	if fs.cfg.Direction == "dry-run" {
+		state.Global.Update("filesync-folder", folderID, state.Connected,
+			fmt.Sprintf("dry-run: %d downloads, %d deletes, %d conflicts", downloads, deletes, conflicts))
+		return
+	}
 
 	state.Global.Update("filesync-folder", folderID, state.Connecting, fmt.Sprintf("syncing %d files", len(actions)))
 

@@ -485,14 +485,15 @@ func (c *Config) Validate() error {
 			if f.Path == "" {
 				return fmt.Errorf("filesync[%d] folder %q: path is required", i, f.ID)
 			}
-			if len(f.Peers) == 0 {
-				return fmt.Errorf("filesync[%d] folder %q: at least one peer is required", i, f.ID)
-			}
 			switch f.Direction {
-			case "send-receive", "send-only", "receive-only":
-				// ok
+			case "disabled":
+				// ok — no peers required
+			case "send-receive", "send-only", "receive-only", "dry-run":
+				if len(f.Peers) == 0 {
+					return fmt.Errorf("filesync[%d] folder %q: at least one peer is required", i, f.ID)
+				}
 			default:
-				return fmt.Errorf("filesync[%d] folder %q: direction must be send-receive, send-only, or receive-only, got %q", i, f.ID, f.Direction)
+				return fmt.Errorf("filesync[%d] folder %q: direction must be send-receive, send-only, receive-only, dry-run, or disabled, got %q", i, f.ID, f.Direction)
 			}
 		}
 	}

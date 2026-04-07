@@ -258,7 +258,7 @@ type DiffEntry struct {
 // actions needed to bring the local side up to date.
 // lastSeenSeq is the highest sequence we've previously processed from this peer.
 func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, direction string) []DiffEntry {
-	canReceive := direction == "send-receive" || direction == "receive-only"
+	canReceive := direction == "send-receive" || direction == "receive-only" || direction == "dry-run"
 	if !canReceive {
 		return nil
 	}
