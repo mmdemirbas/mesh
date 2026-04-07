@@ -1,7 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/mmdemirbas/mesh/internal/config/config",
-  "$ref": "#/$defs/Config",
+  "description": "Top-level config is a map of node names to Config objects. Keys prefixed with x- are YAML anchors (ignored by the parser).",
+  "type": "object",
+  "patternProperties": {
+    "^x-": {
+      "description": "YAML anchor definitions for reuse via merge keys."
+    }
+  },
+  "additionalProperties": {
+    "$ref": "#/$defs/Config"
+  },
   "$defs": {
     "AuthCfg": {
       "properties": {
