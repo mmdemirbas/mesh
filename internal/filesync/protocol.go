@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
+	"time"
 
 	"golang.org/x/time/rate"
 
@@ -18,12 +20,32 @@ import (
 )
 
 const (
-	maxIndexPayload = 10 * 1024 * 1024 // 10 MB
+	maxIndexPayload = 10 * 1024 * 1024 // 10 MB — per-page limit
+	indexPageSize   = 10_000           // max files per index page
+	pendingTTL      = 5 * time.Minute  // stale pending exchange cleanup threshold
 )
 
 // server handles filesync HTTP endpoints.
 type server struct {
-	node *Node
+	node    *Node
+	pending sync.Map // key: "deviceID|folderID" -> *pendingExchange
+}
+
+// pendingExchange accumulates multi-page index uploads from a peer.
+type pendingExchange struct {
+	mu         sync.Mutex
+	files      []*pb.FileInfo
+	received   map[int32]bool
+	totalPages int32
+	deviceID   string
+	folderID   string
+	sequence   int64
+	since      int64
+
+	// Built after all client pages are received.
+	responsePages []*pb.IndexExchange
+
+	createdAt time.Time
 }
 
 func (s *server) handler() http.Handler {
@@ -35,18 +57,35 @@ func (s *server) handler() http.Handler {
 	return mux
 }
 
+// validatePeer checks if a request is from a trusted peer.
+// Loopback connections (127.0.0.1, ::1) are always trusted — they arrive via
+// SSH tunnels where the tunnel itself provides authentication.
+// Non-loopback connections must match a configured peer address.
+func (s *server) validatePeer(w http.ResponseWriter, r *http.Request) (string, bool) {
+	peerAddr := addrFromRequest(r)
+	if isLoopback(peerAddr) {
+		return peerAddr, true
+	}
+	if s.node.isPeerConfigured(peerAddr) {
+		return peerAddr, true
+	}
+	slog.Warn("filesync peer rejected", "peer", peerAddr, "remote", r.RemoteAddr, "path", r.URL.Path)
+	http.Error(w, "unknown peer", http.StatusForbidden)
+	return peerAddr, false
+}
+
 // handleIndex receives a peer's index for a folder and responds with our own.
-// POST /index — body: IndexExchange (protobuf), response: IndexExchange (protobuf)
+// Supports paginated exchange for large indices:
+//   - Single page (total_pages <= 1): legacy behavior, request-response in one round trip.
+//   - Multi-page upload: intermediate pages get empty ack, final page triggers processing.
+//   - Fetch (fetch=true): client retrieves remaining server response pages.
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Validate peer is configured.
-	peerAddr := addrFromRequest(r)
-	if !s.node.isPeerConfigured(peerAddr) {
-		http.Error(w, "unknown peer", http.StatusForbidden)
+	if _, ok := s.validatePeer(w, r); !ok {
 		return
 	}
 
@@ -62,6 +101,22 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.GetFetch() {
+		s.handleIndexFetch(w, &req)
+		return
+	}
+
+	totalPages := req.GetTotalPages()
+	if totalPages <= 1 {
+		s.handleSinglePageIndex(w, &req)
+		return
+	}
+
+	s.handleMultiPageIndex(w, &req)
+}
+
+// handleSinglePageIndex handles the legacy single-page index exchange.
+func (s *server) handleSinglePageIndex(w http.ResponseWriter, req *pb.IndexExchange) {
 	folderID := req.GetFolderId()
 	folder := s.node.findFolder(folderID)
 	if folder == nil {
@@ -69,9 +124,8 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Debug("received index from peer", "peer", peerAddr, "folder", folderID, "files", len(req.GetFiles()))
+	slog.Debug("received index from peer", "folder", folderID, "files", len(req.GetFiles()))
 
-	// Respond with our index, filtered by the peer's since sequence.
 	resp := s.node.buildIndexExchange(folderID, req.GetSince())
 	data, err := proto.Marshal(resp)
 	if err != nil {
@@ -83,6 +137,151 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+// handleMultiPageIndex accumulates pages of a multi-page index upload.
+// On receiving the final page, it processes the complete index and returns
+// the first page of the server's response (possibly paginated).
+func (s *server) handleMultiPageIndex(w http.ResponseWriter, req *pb.IndexExchange) {
+	folderID := req.GetFolderId()
+	folder := s.node.findFolder(folderID)
+	if folder == nil {
+		http.Error(w, "unknown folder: "+folderID, http.StatusNotFound)
+		return
+	}
+
+	key := req.GetDeviceId() + "|" + folderID
+
+	// Evict stale pending exchange if present.
+	if v, ok := s.pending.Load(key); ok {
+		pe := v.(*pendingExchange)
+		pe.mu.Lock()
+		stale := time.Since(pe.createdAt) > pendingTTL
+		pe.mu.Unlock()
+		if stale {
+			s.pending.Delete(key)
+		}
+	}
+
+	v, _ := s.pending.LoadOrStore(key, &pendingExchange{
+		totalPages: req.GetTotalPages(),
+		deviceID:   req.GetDeviceId(),
+		folderID:   folderID,
+		sequence:   req.GetSequence(),
+		since:      req.GetSince(),
+		received:   make(map[int32]bool),
+		createdAt:  time.Now(),
+	})
+	pe := v.(*pendingExchange)
+
+	pe.mu.Lock()
+	defer pe.mu.Unlock()
+
+	pe.files = append(pe.files, req.GetFiles()...)
+	pe.received[req.GetPage()] = true
+
+	slog.Debug("received index page", "folder", folderID, "page", req.GetPage(),
+		"total_pages", pe.totalPages, "received", len(pe.received), "files_so_far", len(pe.files))
+
+	if int32(len(pe.received)) < pe.totalPages {
+		// Intermediate page — ack.
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// All pages received — process the complete index.
+	s.pending.Delete(key)
+
+	resp := s.node.buildIndexExchange(folderID, pe.since)
+	respPages := paginateResponse(resp)
+	pe.responsePages = respPages
+
+	// If the response itself needs pagination, cache it for subsequent fetch requests.
+	if len(respPages) > 1 {
+		s.pending.Store(key+"|resp", &pendingExchange{
+			responsePages: respPages,
+			createdAt:     time.Now(),
+		})
+	}
+
+	slog.Debug("index exchange complete", "folder", folderID,
+		"received_files", len(pe.files), "response_files", len(resp.GetFiles()),
+		"response_pages", len(respPages))
+
+	data, err := proto.Marshal(respPages[0])
+	if err != nil {
+		http.Error(w, "marshal response: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	_, _ = w.Write(data)
+}
+
+// handleIndexFetch serves a cached response page to a peer that previously
+// completed a multi-page upload.
+func (s *server) handleIndexFetch(w http.ResponseWriter, req *pb.IndexExchange) {
+	key := req.GetDeviceId() + "|" + req.GetFolderId() + "|resp"
+
+	v, ok := s.pending.Load(key)
+	if !ok {
+		http.Error(w, "no pending response", http.StatusNotFound)
+		return
+	}
+	pe := v.(*pendingExchange)
+
+	pe.mu.Lock()
+	defer pe.mu.Unlock()
+
+	page := req.GetPage()
+	if int(page) >= len(pe.responsePages) {
+		http.Error(w, "page out of range", http.StatusBadRequest)
+		return
+	}
+
+	data, err := proto.Marshal(pe.responsePages[page])
+	if err != nil {
+		http.Error(w, "marshal response page: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Clean up after the last page is served.
+	if int(page) == len(pe.responsePages)-1 {
+		s.pending.Delete(key)
+	}
+
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	_, _ = w.Write(data)
+}
+
+// paginateResponse splits a server response IndexExchange into pages.
+func paginateResponse(resp *pb.IndexExchange) []*pb.IndexExchange {
+	files := resp.GetFiles()
+	if len(files) <= indexPageSize {
+		resp.Page = 0
+		resp.TotalPages = 1
+		return []*pb.IndexExchange{resp}
+	}
+
+	totalPages := int32((len(files) + indexPageSize - 1) / indexPageSize)
+	pages := make([]*pb.IndexExchange, 0, totalPages)
+
+	for i := int32(0); i < totalPages; i++ {
+		start := int(i) * indexPageSize
+		end := start + indexPageSize
+		if end > len(files) {
+			end = len(files)
+		}
+		pages = append(pages, &pb.IndexExchange{
+			DeviceId:   resp.GetDeviceId(),
+			FolderId:   resp.GetFolderId(),
+			Sequence:   resp.GetSequence(),
+			Files:      files[start:end],
+			Page:       i,
+			TotalPages: totalPages,
+		})
+	}
+	return pages
+}
+
 // handleFile serves a file from a synced folder.
 // GET /file?folder=ID&path=PATH&offset=N
 func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
@@ -91,9 +290,7 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	peerAddr := addrFromRequest(r)
-	if !s.node.isPeerConfigured(peerAddr) {
-		http.Error(w, "unknown peer", http.StatusForbidden)
+	if _, ok := s.validatePeer(w, r); !ok {
 		return
 	}
 
@@ -162,9 +359,7 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	peerAddr := addrFromRequest(r)
-	if !s.node.isPeerConfigured(peerAddr) {
-		http.Error(w, "unknown peer", http.StatusForbidden)
+	if _, ok := s.validatePeer(w, r); !ok {
 		return
 	}
 
@@ -263,8 +458,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// addrFromRequest extracts the peer's IP:port for matching against configured peers.
-// We only use the IP for matching since the ephemeral source port won't match config.
+// addrFromRequest extracts the peer's IP for matching against configured peers.
 func addrFromRequest(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -273,13 +467,135 @@ func addrFromRequest(r *http.Request) string {
 	return host
 }
 
+// isLoopback returns true if the IP is a loopback address (127.0.0.1 or ::1).
+func isLoopback(ip string) bool {
+	return ip == "127.0.0.1" || ip == "::1"
+}
+
 // sendIndex pushes our index to a peer and receives their response.
+// For large indices (> indexPageSize files), the exchange is paginated:
+// files are split into pages sent as separate HTTP requests.
 func sendIndex(client *http.Client, peerAddr string, exchange *pb.IndexExchange) (*pb.IndexExchange, error) {
+	files := exchange.GetFiles()
+	if len(files) <= indexPageSize {
+		return sendSingleIndex(client, peerAddr, exchange)
+	}
+	return sendPaginatedIndex(client, peerAddr, exchange)
+}
+
+// sendSingleIndex sends a complete index in a single HTTP request (legacy path).
+func sendSingleIndex(client *http.Client, peerAddr string, exchange *pb.IndexExchange) (*pb.IndexExchange, error) {
+	exchange.Page = 0
+	exchange.TotalPages = 1
+
 	data, err := proto.Marshal(exchange)
 	if err != nil {
 		return nil, fmt.Errorf("marshal index: %w", err)
 	}
 
+	return postIndex(client, peerAddr, data)
+}
+
+// sendPaginatedIndex splits the index into pages and sends them sequentially.
+// Intermediate pages get an empty ack. The final page returns the first page of
+// the server's response. If the server's response is also paginated, remaining
+// pages are fetched via follow-up requests.
+func sendPaginatedIndex(client *http.Client, peerAddr string, exchange *pb.IndexExchange) (*pb.IndexExchange, error) {
+	files := exchange.GetFiles()
+	totalPages := int32((len(files) + indexPageSize - 1) / indexPageSize)
+	clientDeviceID := exchange.GetDeviceId()
+
+	slog.Debug("sending paginated index", "peer", peerAddr,
+		"folder", exchange.GetFolderId(), "files", len(files), "pages", totalPages)
+
+	var firstResp *pb.IndexExchange
+
+	for page := int32(0); page < totalPages; page++ {
+		start := int(page) * indexPageSize
+		end := start + indexPageSize
+		if end > len(files) {
+			end = len(files)
+		}
+
+		pageExchange := &pb.IndexExchange{
+			DeviceId:   clientDeviceID,
+			FolderId:   exchange.GetFolderId(),
+			Sequence:   exchange.GetSequence(),
+			Since:      exchange.GetSince(),
+			Files:      files[start:end],
+			Page:       page,
+			TotalPages: totalPages,
+		}
+
+		data, err := proto.Marshal(pageExchange)
+		if err != nil {
+			return nil, fmt.Errorf("marshal index page %d: %w", page, err)
+		}
+
+		if page < totalPages-1 {
+			// Intermediate page — expect empty ack.
+			if err := postIndexAck(client, peerAddr, data); err != nil {
+				return nil, fmt.Errorf("send index page %d/%d to %s: %w", page, totalPages, peerAddr, err)
+			}
+		} else {
+			// Final page — expect server's response (first page).
+			resp, err := postIndex(client, peerAddr, data)
+			if err != nil {
+				return nil, fmt.Errorf("send final index page to %s: %w", peerAddr, err)
+			}
+			firstResp = resp
+		}
+	}
+
+	if firstResp == nil {
+		return nil, fmt.Errorf("no response from %s", peerAddr)
+	}
+
+	// If the server's response is paginated, fetch remaining pages.
+	// Use the client's device ID for fetch requests (matches the server's cache key).
+	return fetchResponsePages(client, peerAddr, clientDeviceID, firstResp)
+}
+
+// fetchResponsePages fetches remaining server response pages after a paginated
+// index exchange. clientDeviceID must match the device ID used during the upload
+// phase so the server can locate the cached response.
+func fetchResponsePages(client *http.Client, peerAddr, clientDeviceID string, firstPage *pb.IndexExchange) (*pb.IndexExchange, error) {
+	if firstPage.GetTotalPages() <= 1 {
+		return firstPage, nil
+	}
+
+	allFiles := append([]*pb.FileInfo{}, firstPage.GetFiles()...)
+
+	for page := int32(1); page < firstPage.GetTotalPages(); page++ {
+		fetchReq := &pb.IndexExchange{
+			DeviceId: clientDeviceID,
+			FolderId: firstPage.GetFolderId(),
+			Page:     page,
+			Fetch:    true,
+		}
+
+		data, err := proto.Marshal(fetchReq)
+		if err != nil {
+			return nil, fmt.Errorf("marshal fetch request page %d: %w", page, err)
+		}
+
+		resp, err := postIndex(client, peerAddr, data)
+		if err != nil {
+			return nil, fmt.Errorf("fetch response page %d from %s: %w", page, peerAddr, err)
+		}
+		allFiles = append(allFiles, resp.GetFiles()...)
+	}
+
+	return &pb.IndexExchange{
+		DeviceId: firstPage.GetDeviceId(),
+		FolderId: firstPage.GetFolderId(),
+		Sequence: firstPage.GetSequence(),
+		Files:    allFiles,
+	}, nil
+}
+
+// postIndex sends an index request and returns the parsed response.
+func postIndex(client *http.Client, peerAddr string, data []byte) (*pb.IndexExchange, error) {
 	u := fmt.Sprintf("http://%s/index", peerAddr)
 	resp, err := client.Post(u, "application/x-protobuf", bytes.NewReader(data))
 	if err != nil {
@@ -297,12 +613,33 @@ func sendIndex(client *http.Client, peerAddr string, exchange *pb.IndexExchange)
 		return nil, fmt.Errorf("read response from %s: %w", peerAddr, err)
 	}
 
+	// Empty body is a valid ack for intermediate pages.
+	if len(respBody) == 0 {
+		return &pb.IndexExchange{}, nil
+	}
+
 	var respIdx pb.IndexExchange
 	if err := proto.Unmarshal(respBody, &respIdx); err != nil {
 		return nil, fmt.Errorf("unmarshal response from %s: %w", peerAddr, err)
 	}
 
 	return &respIdx, nil
+}
+
+// postIndexAck sends an index page and expects an empty ack (200 OK with no body).
+func postIndexAck(client *http.Client, peerAddr string, data []byte) error {
+	u := fmt.Sprintf("http://%s/index", peerAddr)
+	resp, err := client.Post(u, "application/x-protobuf", bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("post index to %s: %w", peerAddr, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body) // drain
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("peer %s returned %d", peerAddr, resp.StatusCode)
+	}
+	return nil
 }
 
 // downloadFromPeer downloads a single file from a peer with resume support.

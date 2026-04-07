@@ -10,6 +10,9 @@ message IndexExchange {
   int64  sequence  = 3;            // Highest sequence number in this index
   repeated FileInfo files = 4;
   int64  since     = 5;            // Only include entries with sequence > since (delta mode)
+  int32  page        = 6;          // 0-based page number
+  int32  total_pages = 7;          // Total pages (0 or 1 = single page, legacy compat)
+  bool   fetch       = 8;          // True = client is fetching a server response page
 }
 
 // FileInfo describes a single file (or a deletion tombstone) in the index.

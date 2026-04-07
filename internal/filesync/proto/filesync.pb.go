@@ -29,7 +29,10 @@ type IndexExchange struct {
 	FolderId      string                 `protobuf:"bytes,2,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
 	Sequence      int64                  `protobuf:"varint,3,opt,name=sequence,proto3" json:"sequence,omitempty"` // Highest sequence number in this index
 	Files         []*FileInfo            `protobuf:"bytes,4,rep,name=files,proto3" json:"files,omitempty"`
-	Since         int64                  `protobuf:"varint,5,opt,name=since,proto3" json:"since,omitempty"` // Only include entries with sequence > since (delta mode)
+	Since         int64                  `protobuf:"varint,5,opt,name=since,proto3" json:"since,omitempty"`                             // Only include entries with sequence > since (delta mode)
+	Page          int32                  `protobuf:"varint,6,opt,name=page,proto3" json:"page,omitempty"`                               // 0-based page number
+	TotalPages    int32                  `protobuf:"varint,7,opt,name=total_pages,json=totalPages,proto3" json:"total_pages,omitempty"` // Total pages (0 or 1 = single page, legacy compat)
+	Fetch         bool                   `protobuf:"varint,8,opt,name=fetch,proto3" json:"fetch,omitempty"`                             // True = client is fetching a server response page
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -97,6 +100,27 @@ func (x *IndexExchange) GetSince() int64 {
 		return x.Since
 	}
 	return 0
+}
+
+func (x *IndexExchange) GetPage() int32 {
+	if x != nil {
+		return x.Page
+	}
+	return 0
+}
+
+func (x *IndexExchange) GetTotalPages() int32 {
+	if x != nil {
+		return x.TotalPages
+	}
+	return 0
+}
+
+func (x *IndexExchange) GetFetch() bool {
+	if x != nil {
+		return x.Fetch
+	}
+	return false
 }
 
 // FileInfo describes a single file (or a deletion tombstone) in the index.
@@ -381,13 +405,17 @@ var File_internal_filesync_proto_filesync_proto protoreflect.FileDescriptor
 
 const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
 	"\n" +
-	"&internal/filesync/proto/filesync.proto\x12\bfilesync\"\xa5\x01\n" +
+	"&internal/filesync/proto/filesync.proto\x12\bfilesync\"\xf0\x01\n" +
 	"\rIndexExchange\x12\x1b\n" +
 	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12\x1b\n" +
 	"\tfolder_id\x18\x02 \x01(\tR\bfolderId\x12\x1a\n" +
 	"\bsequence\x18\x03 \x01(\x03R\bsequence\x12(\n" +
 	"\x05files\x18\x04 \x03(\v2\x12.filesync.FileInfoR\x05files\x12\x14\n" +
-	"\x05since\x18\x05 \x01(\x03R\x05since\"\x9b\x01\n" +
+	"\x05since\x18\x05 \x01(\x03R\x05since\x12\x12\n" +
+	"\x04page\x18\x06 \x01(\x05R\x04page\x12\x1f\n" +
+	"\vtotal_pages\x18\a \x01(\x05R\n" +
+	"totalPages\x12\x14\n" +
+	"\x05fetch\x18\b \x01(\bR\x05fetch\"\x9b\x01\n" +
 	"\bFileInfo\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x03R\x04size\x12\x19\n" +

@@ -369,3 +369,21 @@ func formatPeerIdentity(identity string) string {
 func compareAddr(a, b string) bool {
 	return makeAddrKey(a).less(makeAddrKey(b))
 }
+
+// directionSymbol returns a compact symbol for a filesync direction mode.
+func directionSymbol(dir string) string {
+	switch dir {
+	case "send-receive":
+		return "↕"
+	case "send-only":
+		return "↑"
+	case "receive-only":
+		return "↓"
+	case "dry-run":
+		return "◎"
+	case "disabled":
+		return "⏸"
+	default:
+		return "?"
+	}
+}

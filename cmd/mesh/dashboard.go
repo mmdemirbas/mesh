@@ -10,9 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mmdemirbas/mesh/internal/config"
 	"github.com/mmdemirbas/mesh/internal/state"
-	"golang.org/x/term"
 )
 
 // logRing is a fixed-size ring buffer that captures recent log lines for the dashboard.
@@ -58,105 +59,149 @@ func (r *logRing) Lines() []string {
 	return out
 }
 
-// runDashboard renders a live status screen that refreshes periodically.
-// It uses the terminal's alternate screen buffer (like vim, top, htop) so the
-// dashboard doesn't pollute scrollback and the user's previous terminal content
-// is restored when the dashboard exits. Rendering overwrites in-place line by
-// line to avoid flicker — no full screen clear is needed.
-func runDashboard(ctx context.Context, cfgs map[string]*config.Config, nodeNames []string, configPath string, logFilePath string, ring *logRing) {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
+// dashboardModel implements tea.Model for the live TUI dashboard.
+// The header (node name, config/log paths) is rendered above the viewport.
+// The viewport contains the scrollable status body and log tail.
+type dashboardModel struct {
+	cfgs         map[string]*config.Config
+	nodeNames    []string
+	configPath   string
+	logFilePath  string
+	ring         *logRing
+	startTime    time.Time
+	viewport     viewport.Model
+	headerHeight int
+	ready        bool
+}
 
-	startTime := time.Now()
+type tickMsg time.Time
 
-	// Enter alternate screen buffer and hide cursor
-	fmt.Print("\033[?1049h\033[?25l")
-	defer fmt.Print("\033[?25h\033[?1049l") // show cursor, leave alternate screen
+func tickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
 
-	var prevBody string
-	render := func() {
-		var headerLines []string
+func (m dashboardModel) Init() tea.Cmd {
+	return tickCmd()
+}
 
-		// Header (changes every second due to uptime — always written)
-		uptime := time.Since(startTime).Truncate(time.Second)
-		nodesLabel := strings.Join(nodeNames, ", ")
-		header := fmt.Sprintf("%s%smesh %s%s %s%s%s | pid %d | %s | up %s",
-			cBold, cCyan, nodesLabel, cReset, cGray, version, cReset, os.Getpid(), time.Now().Format("15:04:05"), uptime)
-		headerLines = append(headerLines, header)
-		if configPath != "" {
-			headerLines = append(headerLines, fmt.Sprintf("  %sconfig: %s%s", cGray, configPath, cReset))
+func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "q", "ctrl+c":
+			return m, tea.Quit
 		}
-		if logFilePath != "" {
-			headerLines = append(headerLines, fmt.Sprintf("  %slog:    %s%s", cGray, logFilePath, cReset))
+	case tea.WindowSizeMsg:
+		vpHeight := msg.Height - m.headerHeight
+		if vpHeight < 1 {
+			vpHeight = 1
 		}
-		headerLines = append(headerLines, "")
-
-		// Status body — render each node
-		snap := state.Global.Snapshot()
-		metrics := state.Global.SnapshotMetrics()
-		var bodyLines []string
-		var maxWidth int
-		for _, name := range nodeNames {
-			statusOutput, statusWidth := renderStatus(cfgs[name], snap, metrics, name)
-			bodyLines = append(bodyLines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
-			if statusWidth > maxWidth {
-				maxWidth = statusWidth
+		if !m.ready {
+			m.viewport = viewport.New(msg.Width, vpHeight)
+			m.viewport.SetHorizontalStep(1)
+			m.ready = true
+		} else {
+			m.viewport.Width = msg.Width
+			m.viewport.Height = vpHeight
+		}
+		m.viewport.SetContent(m.buildContent())
+	case tickMsg:
+		if m.ready {
+			atBottom := m.viewport.AtBottom()
+			m.viewport.SetContent(m.buildContent())
+			if atBottom {
+				m.viewport.GotoBottom()
 			}
 		}
-
-		// Log tail — fill remaining terminal height
-		logLines := ring.Lines()
-		totalLines := len(headerLines) + len(bodyLines)
-		if len(logLines) > 0 {
-			termHeight := 24
-			if _, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && h > 0 {
-				termHeight = h
-			}
-			available := termHeight - totalLines - 1 // -1 for separator
-			if available > len(logLines) {
-				available = len(logLines)
-			}
-			if available > 0 {
-				bodyLines = append(bodyLines, cGray+strings.Repeat("─", maxWidth)+cReset)
-				bodyLines = append(bodyLines, logLines[len(logLines)-available:]...)
-			}
-		}
-
-		// Skip the expensive body section if state and logs are unchanged.
-		// The header (uptime/clock) is always rewritten — it's just one line.
-		body := strings.Join(bodyLines, "\n")
-		bodyChanged := body != prevBody
-		prevBody = body
-
-		var buf strings.Builder
-		buf.WriteString("\033[H") // cursor home
-		for _, line := range headerLines {
-			buf.WriteString(line)
-			buf.WriteString("\033[K\n")
-		}
-		if bodyChanged {
-			for _, line := range bodyLines {
-				buf.WriteString(line)
-				buf.WriteString("\033[K\n")
-			}
-			buf.WriteString("\033[J") // clear from cursor to end of screen
-		}
-		fmt.Print(buf.String())
+		cmd = tickCmd()
 	}
 
-	winch := winchSignal()
+	var vpCmd tea.Cmd
+	m.viewport, vpCmd = m.viewport.Update(msg)
+	return m, tea.Batch(cmd, vpCmd)
+}
 
-	render()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			render()
-		case <-winch:
-			render()
+func (m dashboardModel) View() string {
+	if !m.ready {
+		return ""
+	}
+	var buf strings.Builder
+	uptime := time.Since(m.startTime).Truncate(time.Second)
+	nodesLabel := strings.Join(m.nodeNames, ", ")
+	fmt.Fprintf(&buf, "%s%smesh %s%s %s%s%s | pid %d | %s | up %s\n",
+		cBold, cCyan, nodesLabel, cReset, cGray, version, cReset, os.Getpid(), time.Now().Format("15:04:05"), uptime)
+	if m.configPath != "" {
+		fmt.Fprintf(&buf, "  %sconfig: %s%s\n", cGray, m.configPath, cReset)
+	}
+	if m.logFilePath != "" {
+		fmt.Fprintf(&buf, "  %slog:    %s%s\n", cGray, m.logFilePath, cReset)
+	}
+	buf.WriteByte('\n')
+	buf.WriteString(m.viewport.View())
+	return buf.String()
+}
+
+func (m dashboardModel) buildContent() string {
+	snap := state.Global.Snapshot()
+	metrics := state.Global.SnapshotMetrics()
+	var bodyLines []string
+	var maxWidth int
+	for _, name := range m.nodeNames {
+		statusOutput, statusWidth := renderStatus(m.cfgs[name], snap, metrics, name)
+		bodyLines = append(bodyLines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
+		if statusWidth > maxWidth {
+			maxWidth = statusWidth
 		}
 	}
+
+	logLines := m.ring.Lines()
+	if len(logLines) > 0 {
+		if maxWidth < 80 {
+			maxWidth = 80
+		}
+		bodyLines = append(bodyLines, cGray+strings.Repeat("─", maxWidth)+cReset)
+		bodyLines = append(bodyLines, logLines...)
+	}
+
+	return strings.Join(bodyLines, "\n")
+}
+
+// runDashboard renders a live status screen using a bubbletea TUI with a
+// scrollable viewport. It uses the terminal's alternate screen buffer so the
+// dashboard doesn't pollute scrollback. When the dashboard exits (via ctx
+// cancellation or user quit), cancel is called to unblock the main goroutine.
+func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[string]*config.Config, nodeNames []string, configPath string, logFilePath string, ring *logRing) {
+	headerHeight := 2 // header line + blank line
+	if configPath != "" {
+		headerHeight++
+	}
+	if logFilePath != "" {
+		headerHeight++
+	}
+
+	m := dashboardModel{
+		cfgs:         cfgs,
+		nodeNames:    nodeNames,
+		configPath:   configPath,
+		logFilePath:  logFilePath,
+		ring:         ring,
+		startTime:    time.Now(),
+		headerHeight: headerHeight,
+	}
+
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+
+	go func() {
+		<-ctx.Done()
+		p.Quit()
+	}()
+
+	_, _ = p.Run()
+	cancel()
 }
 
 // renderStatus builds the status dashboard output as a string.
@@ -372,17 +417,109 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			indicator, st, _ := getComponentInfo("filesync", fs.Bind)
 			addRow("", indicator, colorAddr(fs.Bind), "", "", st, "", readMetrics(metricsMap["filesync:"+fs.Bind]))
 
-			for _, folder := range fs.ResolvedFolders {
-				fIndicator, fSt, _ := getComponentInfo("filesync-folder", folder.ID)
-				pathLabel := cGray + folder.Path + cReset
-				addRow("  ", fIndicator, folder.ID+" "+pathLabel, "", "", fSt, "", metricsSnapshot{})
-
-				for _, peer := range folder.Peers {
-					peerKey := folder.ID + "|" + peer
-					_, pSt, _ := getComponentInfo("filesync-peer", peerKey)
-					addRow("    ", "~", colorAddr(peer), "", "", pSt, "", metricsSnapshot{})
+			// Peers — show each named peer once with aggregated state across all folders.
+			if len(fs.Peers) > 0 {
+				addHeader("  " + cGray + "peers" + cReset)
+				var peerNames []string
+				for name := range fs.Peers {
+					peerNames = append(peerNames, name)
 				}
-				_ = fIndicator
+				sort.Strings(peerNames)
+
+				maxNameLen := 0
+				for _, name := range peerNames {
+					if len(name) > maxNameLen {
+						maxNameLen = len(name)
+					}
+				}
+
+				for _, name := range peerNames {
+					addrs := fs.Peers[name]
+					bestInd, bestSt := "⚪️", cGray+"[starting]"+cReset
+					bestPrio := 0
+					if activeState != nil {
+						for _, addr := range addrs {
+							for _, folder := range fs.ResolvedFolders {
+								if folder.Direction == "disabled" {
+									continue
+								}
+								ind, pst, comp := getComponentInfo("filesync-peer", folder.ID+"|"+addr)
+								prio := 0
+								switch comp.Status {
+								case state.Connected, state.Listening:
+									prio = 3
+								case state.Connecting:
+									prio = 2
+								case state.Retrying, state.Failed:
+									prio = 1
+								}
+								if prio > bestPrio {
+									bestPrio = prio
+									bestInd = ind
+									bestSt = pst
+								}
+							}
+						}
+					}
+					paddedName := cBold + name + cReset + strings.Repeat(" ", maxNameLen-len(name))
+					addRow("    ", bestInd, paddedName+"  "+colorAddr(addrs[0]), "", "", bestSt, "", metricsSnapshot{})
+				}
+			}
+
+			// Folders — direction symbol, aligned paths, file count, last sync time.
+			if len(fs.ResolvedFolders) > 0 {
+				addHeader("  " + cGray + "folders" + cReset)
+
+				maxIDLen := 0
+				for _, folder := range fs.ResolvedFolders {
+					if len(folder.ID) > maxIDLen {
+						maxIDLen = len(folder.ID)
+					}
+				}
+
+				for _, folder := range fs.ResolvedFolders {
+					dirSym := directionSymbol(folder.Direction)
+					_, _, comp := getComponentInfo("filesync-folder", folder.ID)
+
+					var fSt string
+					switch {
+					case folder.Direction == "disabled":
+						fSt = cGray + "[disabled]" + cReset
+					case activeState == nil:
+						fSt = cGray + "[starting]" + cReset
+					case comp.Status == state.Connected:
+						fSt = cGreen + "[idle]" + cReset
+					case comp.Status == state.Connecting:
+						if comp.Message == "scanning" {
+							fSt = cYellow + "[scanning]" + cReset
+						} else {
+							fSt = cYellow + "[syncing]" + cReset
+						}
+					case comp.Status == state.Retrying:
+						fSt = cYellow + "[retrying]" + cReset
+					case comp.Status == state.Failed:
+						fSt = cRed + "[failed]" + cReset
+					default:
+						fSt = cGray + "[starting]" + cReset
+					}
+
+					var annParts []string
+					if comp.FileCount > 0 {
+						annParts = append(annParts, fmt.Sprintf("%d files", comp.FileCount))
+					}
+					if !comp.LastSync.IsZero() {
+						ago := time.Since(comp.LastSync).Truncate(time.Second)
+						annParts = append(annParts, "synced "+formatDuration(ago)+" ago")
+					}
+					annotation := ""
+					if len(annParts) > 0 {
+						annotation = cGray + strings.Join(annParts, "  ") + cReset
+					}
+
+					paddedID := folder.ID + strings.Repeat(" ", maxIDLen-len(folder.ID))
+					left := paddedID + "  " + cGray + folder.Path + cReset
+					addRow("    ", dirSym, left, "", "", fSt, annotation, metricsSnapshot{})
+				}
 			}
 		}
 		addHeader("")

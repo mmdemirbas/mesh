@@ -37,8 +37,8 @@ func TestParseLine(t *testing.T) {
 		{"node_modules/", true, "node_modules", false, true},
 		{"!build/", true, "build", true, true},
 		{".git", true, ".git", false, false},
-		{"!", false, "", false, false},   // negation prefix only, no pattern
-		{"!/", false, "", false, false},  // negation + dir-only, no pattern
+		{"!", false, "", false, false},  // negation prefix only, no pattern
+		{"!/", false, "", false, false}, // negation + dir-only, no pattern
 	}
 	for _, tt := range tests {
 		t.Run(tt.line, func(t *testing.T) {
@@ -954,23 +954,28 @@ func TestHandleStatus(t *testing.T) {
 	}
 }
 
-func TestHandleIndex_RejectsUnknownPeer(t *testing.T) {
+func TestHandleIndex_LoopbackTrusted(t *testing.T) {
+	// Loopback connections (via SSH tunnels) bypass peer IP validation.
 	dir := t.TempDir()
 
 	n := &Node{
-		cfg:      testCfg(dir, "10.99.99.99"), // peer that won't match localhost
+		cfg:      testCfg(dir, "10.99.99.99"), // peer IP doesn't match localhost
 		folders:  make(map[string]*folderState),
 		deviceID: "test-device",
 	}
+	idx := newFileIndex()
+	idx.Files["local.txt"] = FileEntry{Size: 100, SHA256: "abc", Sequence: 1}
 	n.folders["test"] = &folderState{
-		cfg: testFolderCfg(dir, "10.99.99.99"),
+		cfg:   testFolderCfg(dir, "10.99.99.99"),
+		index: idx,
+		peers: make(map[string]PeerState),
 	}
 
 	srv := &server{node: n}
-	ts := httptest.NewServer(srv.handler())
+	ts := httptest.NewServer(srv.handler()) // connects from 127.0.0.1
 	defer ts.Close()
 
-	req := &pb.IndexExchange{FolderId: "test"}
+	req := &pb.IndexExchange{DeviceId: "peer", FolderId: "test"}
 	data, _ := proto.Marshal(req)
 
 	resp, err := http.Post(ts.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
@@ -979,8 +984,176 @@ func TestHandleIndex_RejectsUnknownPeer(t *testing.T) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("expected 403, got %d", resp.StatusCode)
+	// Loopback should be trusted — expect 200, not 403.
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 (loopback trusted), got %d", resp.StatusCode)
+	}
+}
+
+func TestPeerValidation_NonLoopbackRejected(t *testing.T) {
+	// Non-loopback peers that don't match any configured peer are rejected.
+	n := &Node{
+		folders: map[string]*folderState{
+			"docs": {cfg: config.FolderCfg{Peers: []string{"10.1.1.1:7756"}}},
+		},
+	}
+
+	tests := []struct {
+		ip   string
+		want bool
+	}{
+		{"127.0.0.1", false}, // isPeerConfigured doesn't match, but isLoopback would
+		{"::1", false},       // same — loopback bypass is in validatePeer, not isPeerConfigured
+		{"10.1.1.1", true},   // matches configured peer
+		{"10.2.2.2", false},  // doesn't match
+		{"192.168.1.1", false},
+	}
+
+	for _, tt := range tests {
+		got := n.isPeerConfigured(tt.ip)
+		if got != tt.want {
+			t.Errorf("isPeerConfigured(%q) = %v, want %v", tt.ip, got, tt.want)
+		}
+	}
+
+	// Verify isLoopback
+	if !isLoopback("127.0.0.1") {
+		t.Error("isLoopback(127.0.0.1) should be true")
+	}
+	if !isLoopback("::1") {
+		t.Error("isLoopback(::1) should be true")
+	}
+	if isLoopback("10.1.1.1") {
+		t.Error("isLoopback(10.1.1.1) should be false")
+	}
+}
+
+func TestPaginatedIndexExchange(t *testing.T) {
+	dir := t.TempDir()
+
+	// Build a node with a large index that exceeds indexPageSize.
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "server-device",
+	}
+	idx := newFileIndex()
+	for i := range indexPageSize + 500 { // slightly more than one page
+		idx.Files[fmt.Sprintf("file-%05d.txt", i)] = FileEntry{
+			Size: int64(i), SHA256: fmt.Sprintf("hash%05d", i), Sequence: int64(i + 1),
+		}
+	}
+	idx.Sequence = int64(indexPageSize + 500)
+	n.folders["bigfolder"] = &folderState{
+		cfg:   config.FolderCfg{ID: "bigfolder", Path: dir, Direction: "send-receive", Peers: []string{"127.0.0.1:7756"}},
+		index: idx,
+		peers: make(map[string]PeerState),
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// Client builds its own index (also large).
+	clientFiles := make([]*pb.FileInfo, 0, indexPageSize+200)
+	for i := range indexPageSize + 200 {
+		clientFiles = append(clientFiles, &pb.FileInfo{
+			Path: fmt.Sprintf("client-%05d.txt", i), Size: int64(i),
+			Sha256: []byte(fmt.Sprintf("chash%05d", i)), Sequence: int64(i + 1),
+		})
+	}
+	exchange := &pb.IndexExchange{
+		DeviceId: "client-device",
+		FolderId: "bigfolder",
+		Sequence: int64(indexPageSize + 200),
+		Since:    0,
+		Files:    clientFiles,
+	}
+
+	// Use sendIndex which should automatically paginate.
+	client := &http.Client{Timeout: 10 * time.Second}
+	addr := ts.Listener.Addr().String()
+	resp, err := sendIndex(client, addr, exchange)
+	if err != nil {
+		t.Fatalf("sendIndex: %v", err)
+	}
+
+	// Server should return its full index (possibly paginated, reassembled by sendIndex).
+	if resp.GetDeviceId() != "server-device" {
+		t.Errorf("expected device_id 'server-device', got %q", resp.GetDeviceId())
+	}
+	if len(resp.GetFiles()) != indexPageSize+500 {
+		t.Errorf("expected %d files in response, got %d", indexPageSize+500, len(resp.GetFiles()))
+	}
+}
+
+func TestPaginatedIndexExchange_SmallIndex(t *testing.T) {
+	// Small indices should still work (single-page path).
+	dir := t.TempDir()
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "srv",
+	}
+	idx := newFileIndex()
+	idx.Files["a.txt"] = FileEntry{Size: 10, SHA256: "aaa", Sequence: 1}
+	idx.Sequence = 1
+	n.folders["test"] = &folderState{
+		cfg:   testFolderCfg(dir, "127.0.0.1"),
+		index: idx,
+		peers: make(map[string]PeerState),
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	exchange := &pb.IndexExchange{
+		DeviceId: "cli",
+		FolderId: "test",
+		Sequence: 1,
+		Files:    []*pb.FileInfo{{Path: "b.txt", Size: 20, Sha256: []byte("bbb"), Sequence: 1}},
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := sendIndex(client, ts.Listener.Addr().String(), exchange)
+	if err != nil {
+		t.Fatalf("sendIndex: %v", err)
+	}
+
+	if len(resp.GetFiles()) != 1 || resp.GetFiles()[0].GetPath() != "a.txt" {
+		t.Errorf("unexpected response: %v", resp.GetFiles())
+	}
+}
+
+func TestPaginateResponse(t *testing.T) {
+	files := make([]*pb.FileInfo, indexPageSize*3+50)
+	for i := range files {
+		files[i] = &pb.FileInfo{Path: fmt.Sprintf("f%d", i)}
+	}
+
+	resp := &pb.IndexExchange{
+		DeviceId: "d", FolderId: "f", Sequence: 99, Files: files,
+	}
+	pages := paginateResponse(resp)
+
+	if len(pages) != 4 {
+		t.Fatalf("expected 4 pages, got %d", len(pages))
+	}
+
+	total := 0
+	for i, p := range pages {
+		if p.GetPage() != int32(i) {
+			t.Errorf("page %d: got page=%d", i, p.GetPage())
+		}
+		if p.GetTotalPages() != 4 {
+			t.Errorf("page %d: got total_pages=%d", i, p.GetTotalPages())
+		}
+		total += len(p.GetFiles())
+	}
+	if total != len(files) {
+		t.Errorf("total files across pages: got %d, want %d", total, len(files))
 	}
 }
 
@@ -1067,9 +1240,9 @@ func TestTwoNodeSync(t *testing.T) {
 
 	// Node A's HTTP server.
 	nodeA := &Node{
-		cfg:      testCfg(dirA, "127.0.0.1"),
-		folders:  make(map[string]*folderState),
-		deviceID: "node-a",
+		cfg:        testCfg(dirA, "127.0.0.1"),
+		folders:    make(map[string]*folderState),
+		deviceID:   "node-a",
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 	nodeA.folders["test"] = &folderState{

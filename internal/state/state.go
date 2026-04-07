@@ -3,6 +3,7 @@ package state
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type Status string
@@ -27,12 +28,14 @@ type Metrics struct {
 }
 
 type Component struct {
-	Type      string `json:"type"`       // "proxy", "relay", "server", "connection"
-	ID        string `json:"id"`         // unique identifier
-	Status    Status `json:"status"`     // current status
-	Message   string `json:"message"`    // error or target info
-	BoundAddr string `json:"bound_addr"` // active resolved listener address
-	PeerAddr  string `json:"peer_addr"`  // resolved remote peer address (connections)
+	Type      string    `json:"type"`                 // "proxy", "relay", "server", "connection"
+	ID        string    `json:"id"`                   // unique identifier
+	Status    Status    `json:"status"`               // current status
+	Message   string    `json:"message"`              // error or target info
+	BoundAddr string    `json:"bound_addr"`           // active resolved listener address
+	PeerAddr  string    `json:"peer_addr"`            // resolved remote peer address (connections)
+	FileCount int       `json:"file_count,omitempty"` // tracked file count (filesync folders)
+	LastSync  time.Time `json:"last_sync,omitempty"`  // last successful sync time (filesync)
 }
 
 type State struct {
@@ -72,6 +75,24 @@ func (s *State) UpdatePeer(compType, id, peerAddr string) {
 	key := compType + ":" + id
 	comp := s.components[key]
 	comp.PeerAddr = peerAddr
+	s.components[key] = comp
+}
+
+func (s *State) UpdateFileCount(compType, id string, count int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := compType + ":" + id
+	comp := s.components[key]
+	comp.FileCount = count
+	s.components[key] = comp
+}
+
+func (s *State) UpdateLastSync(compType, id string, t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := compType + ":" + id
+	comp := s.components[key]
+	comp.LastSync = t
 	s.components[key] = comp
 }
 

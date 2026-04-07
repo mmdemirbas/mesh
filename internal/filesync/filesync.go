@@ -146,10 +146,10 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	dataDir := filepath.Join(home, ".mesh", "filesync")
 
 	n := &Node{
-		cfg:           cfg,
-		deviceID:      deviceID,
-		dataDir:       dataDir,
-		folders:       make(map[string]*folderState),
+		cfg:      cfg,
+		deviceID: deviceID,
+		dataDir:  dataDir,
+		folders:  make(map[string]*folderState),
 		httpClient: &http.Client{
 			Timeout: 10 * time.Minute,
 			Transport: &http.Transport{
@@ -366,7 +366,8 @@ func (n *Node) runScan() {
 				count++
 			}
 		}
-		state.Global.Update("filesync-folder", id, state.Connected, fmt.Sprintf("idle, %d files", count))
+		state.Global.Update("filesync-folder", id, state.Connected, "idle")
+		state.Global.UpdateFileCount("filesync-folder", id, count)
 		fs.indexMu.Unlock()
 
 		if changed {
@@ -440,7 +441,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	fs.indexMu.RUnlock()
 
 	exchange := n.buildIndexExchange(folderID, 0) // send full index to peer
-	exchange.Since = peerLastSeq                   // ask peer to send only entries newer than this
+	exchange.Since = peerLastSeq                  // ask peer to send only entries newer than this
 	remoteIdx, err := sendIndex(n.httpClient, peerAddr, exchange)
 	if err != nil {
 		slog.Debug("sync failed", "folder", folderID, "peer", peerAddr, "error", err)
@@ -488,7 +489,10 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			}
 		}
 		fs.indexMu.RUnlock()
-		state.Global.Update("filesync-folder", folderID, state.Connected, fmt.Sprintf("idle, %d files", count))
+		now := time.Now()
+		state.Global.Update("filesync-folder", folderID, state.Connected, "idle")
+		state.Global.UpdateFileCount("filesync-folder", folderID, count)
+		state.Global.UpdateLastSync("filesync-folder", folderID, now)
 		return
 	}
 
@@ -501,6 +505,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	if fs.cfg.Direction == "dry-run" {
 		state.Global.Update("filesync-folder", folderID, state.Connected,
 			fmt.Sprintf("dry-run: %d downloads, %d deletes, %d conflicts", downloads, deletes, conflicts))
+		state.Global.UpdateLastSync("filesync-folder", folderID, time.Now())
 		return
 	}
 
@@ -609,7 +614,9 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		}
 	}
 	fs.indexMu.RUnlock()
-	state.Global.Update("filesync-folder", folderID, state.Connected, fmt.Sprintf("idle, %d files", count))
+	state.Global.Update("filesync-folder", folderID, state.Connected, "idle")
+	state.Global.UpdateFileCount("filesync-folder", folderID, count)
+	state.Global.UpdateLastSync("filesync-folder", folderID, time.Now())
 }
 
 // buildIndexExchange creates a protobuf IndexExchange from the local index.
