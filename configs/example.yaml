@@ -85,7 +85,7 @@ my-vps-tunnel-service:
       # Default values applied to all folders unless overridden per-folder.
       defaults:
         peers: ["desktop"]
-        direction: send-receive          # send-receive | send-only | receive-only
+        direction: send-receive          # send-receive | send-only | receive-only | dry-run | disabled
         ignore_patterns:                 # Gitignore-style, applied to all folders
           - ".git"
           - "node_modules"

@@ -229,7 +229,7 @@
         },
         "direction": {
           "type": "string",
-          "enum": ["send-receive", "send-only", "receive-only"],
+          "enum": ["send-receive", "send-only", "receive-only", "dry-run", "disabled"],
           "description": "Default sync direction. Default: \"send-receive\"."
         },
         "ignore_patterns": {
@@ -254,7 +254,7 @@
         },
         "direction": {
           "type": "string",
-          "enum": ["send-receive", "send-only", "receive-only"],
+          "enum": ["send-receive", "send-only", "receive-only", "dry-run", "disabled"],
           "description": "Sync direction (overrides defaults.direction)."
         },
         "ignore_patterns": {
