@@ -87,6 +87,11 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Listener, log *slo
 					if ctx.Err() != nil {
 						return
 					}
+					select {
+					case <-time.After(50 * time.Millisecond):
+					case <-ctx.Done():
+						return
+					}
 					continue
 				}
 				netutil.ApplyTCPKeepAlive(conn, 0)
