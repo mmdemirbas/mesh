@@ -55,7 +55,7 @@ func CountedBiCopy(a, b io.ReadWriteCloser, tx, rx *atomic.Int64) {
 		defer wg.Done()
 		bufPtr := copyBufPool.Get().(*[]byte)
 		defer copyBufPool.Put(bufPtr)
-		_, _ = io.CopyBuffer(&countingWriter{w: a, counter: tx}, b, *bufPtr)
+		_, _ = io.CopyBuffer(&countingWriter{w: a, counter: rx}, b, *bufPtr)
 		if c, ok := a.(interface{ CloseWrite() error }); ok {
 			_ = c.CloseWrite()
 		}
@@ -64,7 +64,7 @@ func CountedBiCopy(a, b io.ReadWriteCloser, tx, rx *atomic.Int64) {
 		defer wg.Done()
 		bufPtr := copyBufPool.Get().(*[]byte)
 		defer copyBufPool.Put(bufPtr)
-		_, _ = io.CopyBuffer(&countingWriter{w: b, counter: rx}, a, *bufPtr)
+		_, _ = io.CopyBuffer(&countingWriter{w: b, counter: tx}, a, *bufPtr)
 		if c, ok := b.(interface{ CloseWrite() error }); ok {
 			_ = c.CloseWrite()
 		}
