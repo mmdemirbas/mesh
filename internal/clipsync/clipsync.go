@@ -325,15 +325,15 @@ func (n *Node) pullHTTP(peerAddr string) {
 		return
 	}
 	resp, err := n.httpClient.Do(req)
-	if err != nil || resp.StatusCode != 200 {
-		status := 0
-		if resp != nil {
-			status = resp.StatusCode
-		}
-		slog.Debug("Failed to pull from peer", "peer", cleanLogStr(peerAddr), "error", err, "status", status) //nolint:gosec // G706: sanitized via cleanLogStr
+	if err != nil {
+		slog.Debug("Failed to pull from peer", "peer", cleanLogStr(peerAddr), "error", err) //nolint:gosec // G706: sanitized via cleanLogStr
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != 200 {
+		slog.Debug("Failed to pull from peer", "peer", cleanLogStr(peerAddr), "status", resp.StatusCode) //nolint:gosec // G706: sanitized via cleanLogStr
+		return
+	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRequestBodySize))
 	if err != nil {
@@ -478,10 +478,13 @@ func (n *Node) downloadFile(fileID, fileName, peerAddr string) error {
 	}
 
 	resp, err := n.httpClient.Get(fmt.Sprintf("http://%s/files/%s", peerAddr, safeID)) //nolint:gosec // G704: peer addresses are user-configured, not untrusted input
-	if err != nil || resp.StatusCode != 200 {
+	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("download %s: HTTP %d", safeID, resp.StatusCode)
+	}
 
 	dst, err := os.Create(filepath.Join(n.filesDir, safeName)) //nolint:gosec // G304: safeName is filepath.Base-sanitized above
 	if err != nil {
