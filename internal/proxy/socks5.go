@@ -22,7 +22,11 @@ func ServeSocks(ctx context.Context, listener net.Listener, dialer func(string, 
 				return
 			}
 			log.Debug("SOCKS accept error (transient)", "error", err)
-			time.Sleep(50 * time.Millisecond) // backoff on transient errors
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(50 * time.Millisecond): // backoff on transient errors
+			}
 			continue
 		}
 		netutil.ApplyTCPKeepAlive(conn, 0)

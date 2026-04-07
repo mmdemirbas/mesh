@@ -54,7 +54,11 @@ func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer
 				return
 			}
 			log.Debug("HTTP proxy accept error (transient)", "error", err)
-			time.Sleep(50 * time.Millisecond) // backoff on transient errors
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(50 * time.Millisecond): // backoff on transient errors
+			}
 			continue
 		}
 		netutil.ApplyTCPKeepAlive(conn, 0)

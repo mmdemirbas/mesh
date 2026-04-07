@@ -830,7 +830,11 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fs
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		time.Sleep(backoff) // wait out TIME_WAIT locking
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff): // wait out TIME_WAIT locking
+		}
 		backoff *= 2
 	}
 	if err != nil {
@@ -915,7 +919,11 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fset
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		time.Sleep(backoff) // wait out TIME_WAIT locking
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff): // wait out TIME_WAIT locking
+		}
 		backoff *= 2
 	}
 	if err != nil {
