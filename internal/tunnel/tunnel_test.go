@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -338,10 +337,11 @@ func TestBuildAuthMethods_KeyOnly(t *testing.T) {
 		},
 		log: slog.Default(),
 	}
-	methods, err := client.buildAuthMethods("test")
+	methods, cleanup, err := client.buildAuthMethods("test")
 	if err != nil {
 		t.Fatalf("buildAuthMethods failed: %v", err)
 	}
+	defer cleanup()
 	if len(methods) != 1 {
 		t.Errorf("expected 1 auth method, got %d", len(methods))
 	}
@@ -354,10 +354,11 @@ func TestBuildAuthMethods_PasswordCommand(t *testing.T) {
 		},
 		log: slog.Default(),
 	}
-	methods, err := client.buildAuthMethods("test")
+	methods, cleanup, err := client.buildAuthMethods("test")
 	if err != nil {
 		t.Fatalf("buildAuthMethods failed: %v", err)
 	}
+	defer cleanup()
 	// Should have password + keyboard-interactive
 	if len(methods) != 2 {
 		t.Errorf("expected 2 auth methods (password + keyboard-interactive), got %d", len(methods))
@@ -369,7 +370,7 @@ func TestBuildAuthMethods_NoAuth(t *testing.T) {
 		cfg: config.Connection{Auth: config.AuthCfg{}},
 		log: slog.Default(),
 	}
-	_, err := client.buildAuthMethods("test")
+	_, _, err := client.buildAuthMethods("test")
 	if err == nil {
 		t.Error("expected error when no auth methods configured")
 	}
@@ -383,10 +384,11 @@ func TestBuildAuthMethods_AgentWithoutSocket(t *testing.T) {
 		},
 		log: slog.Default(),
 	}
-	methods, err := client.buildAuthMethods("test")
+	methods, cleanup, err := client.buildAuthMethods("test")
 	if err != nil {
 		t.Fatalf("buildAuthMethods failed: %v", err)
 	}
+	defer cleanup()
 	// Agent fails but password_command should still provide methods
 	if len(methods) < 1 {
 		t.Error("expected at least 1 auth method from password fallback")
@@ -607,7 +609,7 @@ func TestRecordAuthFailure_Concurrent(t *testing.T) {
 	if !ok {
 		t.Fatal("key not found after concurrent writes")
 	}
-	if got := v.(*atomic.Int64).Load(); got != n {
+	if got := v.(*authFailureEntry).count.Load(); got != n {
 		t.Errorf("concurrent count = %d, want %d", got, n)
 	}
 }

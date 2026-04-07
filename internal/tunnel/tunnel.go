@@ -47,18 +47,35 @@ const (
 	limiterMaxEntries = 10000
 )
 
+// authFailureEntry tracks cumulative SSH auth rejections and last activity for an IP.
+type authFailureEntry struct {
+	count    atomic.Int64
+	lastSeen atomic.Int64 // unix nanoseconds
+}
+
 // authFailuresByIP tracks cumulative SSH auth rejection counts per remote IP.
-// Values are *atomic.Int64 to allow lock-free increments.
+// Values are *authFailureEntry. Evicted periodically alongside rate limiters.
 var authFailuresByIP sync.Map
 
 // SnapshotAuthFailures returns a point-in-time copy of auth failure counts keyed by remote IP.
 func SnapshotAuthFailures() map[string]int64 {
 	out := make(map[string]int64)
 	authFailuresByIP.Range(func(k, v any) bool {
-		out[k.(string)] = v.(*atomic.Int64).Load()
+		out[k.(string)] = v.(*authFailureEntry).count.Load()
 		return true
 	})
 	return out
+}
+
+// evictOldAuthFailures removes authFailuresByIP entries not seen since cutoff.
+func evictOldAuthFailures(cutoff time.Time) {
+	cutoffNano := cutoff.UnixNano()
+	authFailuresByIP.Range(func(k, v any) bool {
+		if v.(*authFailureEntry).lastSeen.Load() < cutoffNano {
+			authFailuresByIP.Delete(k)
+		}
+		return true
+	})
 }
 
 // limiterEntry holds a per-IP rate limiter and the time it was last used.
@@ -90,8 +107,10 @@ func matchesAnyAuthorizedKey(incoming ssh.PublicKey, authorized []ssh.PublicKey)
 
 // recordAuthFailure increments the failure counter for ip in m and returns the new total.
 func recordAuthFailure(m *sync.Map, ip string) int64 {
-	counter, _ := m.LoadOrStore(ip, &atomic.Int64{})
-	return counter.(*atomic.Int64).Add(1)
+	entry, _ := m.LoadOrStore(ip, &authFailureEntry{})
+	e := entry.(*authFailureEntry)
+	e.lastSeen.Store(time.Now().UnixNano())
+	return e.count.Add(1)
 }
 
 // --- SSH Server (accepts incoming connections) ---
@@ -134,9 +153,11 @@ func (s *SSHServer) Run(ctx context.Context) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				now := time.Now()
 				limitersMu.Lock()
-				evictOldLimiters(limiters, limiterStaleAfter, time.Now())
+				evictOldLimiters(limiters, limiterStaleAfter, now)
 				limitersMu.Unlock()
+				evictOldAuthFailures(now.Add(-limiterStaleAfter))
 			}
 		}
 	}()
@@ -167,8 +188,9 @@ func (s *SSHServer) Run(ctx context.Context) error {
 			limiter := entry.limiter
 			limitersMu.Unlock()
 
-			// Rate-limit all auth attempts (not just failures) to bound CPU from key comparison
-			if err := limiter.Wait(context.Background()); err != nil {
+			// Rate-limit all auth attempts (not just failures) to bound CPU from key comparison.
+			// Use server ctx so goroutines unblock on shutdown instead of leaking.
+			if err := limiter.Wait(ctx); err != nil {
 				return nil, err
 			}
 
@@ -370,8 +392,11 @@ func (c *SSHClient) runMultiplexTarget(ctx context.Context, target string) {
 
 // buildAuthMethods constructs SSH auth methods from the config.
 // Methods are tried in order: agent → key → password_command.
-func (c *SSHClient) buildAuthMethods(id string) ([]ssh.AuthMethod, error) {
+// The returned cleanup function closes resources (e.g. agent socket) and must
+// be called when the auth methods are no longer needed.
+func (c *SSHClient) buildAuthMethods(id string) ([]ssh.AuthMethod, func(), error) {
 	var methods []ssh.AuthMethod
+	var agentConn net.Conn
 
 	// 1. SSH Agent (most secure — keys never leave the agent process)
 	if c.cfg.Auth.Agent {
@@ -383,6 +408,7 @@ func (c *SSHClient) buildAuthMethods(id string) ([]ssh.AuthMethod, error) {
 			if err != nil {
 				c.log.Warn("Could not connect to SSH agent", "error", err)
 			} else {
+				agentConn = conn
 				agentClient := agent.NewClient(conn)
 				methods = append(methods, ssh.PublicKeysCallback(agentClient.Signers))
 			}
@@ -393,7 +419,10 @@ func (c *SSHClient) buildAuthMethods(id string) ([]ssh.AuthMethod, error) {
 	if c.cfg.Auth.Key != "" {
 		signer, err := loadSigner(c.cfg.Auth.Key)
 		if err != nil {
-			return nil, fmt.Errorf("load key %s: %w", c.cfg.Auth.Key, err)
+			if agentConn != nil {
+				_ = agentConn.Close()
+			}
+			return nil, nil, fmt.Errorf("load key %s: %w", c.cfg.Auth.Key, err)
 		}
 		methods = append(methods, ssh.PublicKeys(signer))
 	}
@@ -402,7 +431,10 @@ func (c *SSHClient) buildAuthMethods(id string) ([]ssh.AuthMethod, error) {
 	if c.cfg.Auth.PasswordCommand != "" {
 		password, err := runPasswordCommand(c.cfg.Auth.PasswordCommand)
 		if err != nil {
-			return nil, fmt.Errorf("password_command failed: %w", err)
+			if agentConn != nil {
+				_ = agentConn.Close()
+			}
+			return nil, nil, fmt.Errorf("password_command failed: %w", err)
 		}
 		methods = append(methods, ssh.Password(password))
 		methods = append(methods, ssh.KeyboardInteractive(
@@ -416,9 +448,17 @@ func (c *SSHClient) buildAuthMethods(id string) ([]ssh.AuthMethod, error) {
 	}
 
 	if len(methods) == 0 {
-		return nil, errors.New("no auth methods configured (set agent, key, or password_command)")
+		if agentConn != nil {
+			_ = agentConn.Close()
+		}
+		return nil, nil, errors.New("no auth methods configured (set agent, key, or password_command)")
 	}
-	return methods, nil
+	cleanup := func() {
+		if agentConn != nil {
+			_ = agentConn.Close()
+		}
+	}
+	return methods, cleanup, nil
 }
 
 // runPasswordCommand executes a shell command and returns its trimmed stdout as a password.
@@ -433,10 +473,10 @@ func runPasswordCommand(command string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func (c *SSHClient) buildSSHConfig(fset *config.ForwardSet, id string) (*ssh.ClientConfig, map[string]string, int, error) {
-	authMethods, err := c.buildAuthMethods(id)
+func (c *SSHClient) buildSSHConfig(fset *config.ForwardSet, id string) (*ssh.ClientConfig, func(), map[string]string, int, error) {
+	authMethods, authCleanup, err := c.buildAuthMethods(id)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, nil, 0, err
 	}
 
 	opts := mergeOptions(c.cfg.Options, fset.Options)
@@ -446,14 +486,16 @@ func (c *SSHClient) buildSSHConfig(fset *config.ForwardSet, id string) (*ssh.Cli
 	case c.cfg.Auth.KnownHosts != "":
 		hkc, err := knownhosts.New(c.cfg.Auth.KnownHosts)
 		if err != nil {
-			return nil, nil, 0, fmt.Errorf("load known_hosts %s: %w", c.cfg.Auth.KnownHosts, err)
+			authCleanup()
+			return nil, nil, nil, 0, fmt.Errorf("load known_hosts %s: %w", c.cfg.Auth.KnownHosts, err)
 		}
 		hostKeyCallback = hkc
 	case strings.ToLower(config.GetOption(opts, "StrictHostKeyChecking")) == "no":
 		hostKeyCallback = ssh.InsecureIgnoreHostKey() //nolint:gosec // G106: explicit user opt-out via StrictHostKeyChecking=no
 		c.log.Warn("StrictHostKeyChecking=no is configured. Vulnerable to MITM attacks.")
 	default:
-		return nil, nil, 0, errors.New("SSH server identity cannot be verified: auth.known_hosts is not configured and StrictHostKeyChecking is not set to 'no'. " +
+		authCleanup()
+		return nil, nil, nil, 0, errors.New("SSH server identity cannot be verified: auth.known_hosts is not configured and StrictHostKeyChecking is not set to 'no'. " +
 			"Set auth.known_hosts to a known_hosts file, or add StrictHostKeyChecking: 'no' to options (insecure, allows MITM attacks)")
 	}
 
@@ -478,10 +520,11 @@ func (c *SSHClient) buildSSHConfig(fset *config.ForwardSet, id string) (*ssh.Cli
 
 	interactiveTos, _, err := ParseIPQoS(config.GetOption(opts, "IPQoS"))
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("invalid ipqos: %w", err)
+		authCleanup()
+		return nil, nil, nil, 0, fmt.Errorf("invalid ipqos: %w", err)
 	}
 
-	return sshCfg, opts, interactiveTos, nil
+	return sshCfg, authCleanup, opts, interactiveTos, nil
 }
 
 // runForwardSetForTarget runs a forward set against a specific target (used by multiplex mode).
@@ -500,12 +543,13 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 		}
 	}
 
-	sshCfg, opts, interactiveTos, err := c.buildSSHConfig(fset, id)
+	sshCfg, authCleanup, opts, interactiveTos, err := c.buildSSHConfig(fset, id)
 	if err != nil {
 		state.Global.Update("connection", id, state.Failed, err.Error())
 		c.log.Error("SSH config failed", "target", target, "error", err)
 		return
 	}
+	defer authCleanup()
 
 	log := c.log.With("target", target)
 
@@ -597,12 +641,13 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		}
 	}
 
-	sshCfg, opts, interactiveTos, err := c.buildSSHConfig(fset, id)
+	sshCfg, authCleanup, opts, interactiveTos, err := c.buildSSHConfig(fset, id)
 	if err != nil {
 		state.Global.Update("connection", id, state.Failed, err.Error())
 		c.log.Error("SSH config failed", "error", err)
 		return
 	}
+	defer authCleanup()
 
 	log := c.log.With("set", fset.Name)
 
@@ -847,13 +892,12 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fs
 	state.Global.Update("forward", compID, state.Listening, "")
 	state.Global.UpdateBind("forward", compID, listener.Addr().String())
 
-	// Guarantee immediate closure when session aborts, breaking accept loops
-	go func() {
-		<-ctx.Done()
-		_ = listener.Close()
-		state.Global.Delete("forward", compID)
-		state.Global.DeleteMetrics("forward", compID)
-	}()
+	// Break accept loop immediately on context cancel
+	stop := context.AfterFunc(ctx, func() { _ = listener.Close() })
+	defer stop()
+	// Clean up state on exit regardless of reason (context cancel or accept error)
+	defer state.Global.Delete("forward", compID)
+	defer state.Global.DeleteMetrics("forward", compID)
 
 	acceptAndForward(ctx, listener, func() (net.Conn, error) {
 		return net.DialTimeout("tcp", fwd.Target, 10*time.Second)
@@ -883,13 +927,12 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fse
 	state.Global.Update("forward", compID, state.Listening, "")
 	state.Global.UpdateBind("forward", compID, listener.Addr().String())
 
-	// Guarantee immediate closure when session aborts, breaking accept loops
-	go func() {
-		<-ctx.Done()
-		_ = listener.Close()
-		state.Global.Delete("forward", compID)
-		state.Global.DeleteMetrics("forward", compID)
-	}()
+	// Break accept loop immediately on context cancel
+	stop := context.AfterFunc(ctx, func() { _ = listener.Close() })
+	defer stop()
+	// Clean up state on exit regardless of reason (context cancel or accept error)
+	defer state.Global.Delete("forward", compID)
+	defer state.Global.DeleteMetrics("forward", compID)
 
 	acceptAndForward(ctx, listener, func() (net.Conn, error) {
 		return client.Dial("tcp", fwd.Target)
@@ -1086,21 +1129,24 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 	}
 
 	addr := net.JoinHostPort(bindAddr, strconv.FormatUint(uint64(fwdReq.BindPort), 10))
+
+	// Hold mu across listen+insert so cancel-tcpip-forward cannot miss
+	// a listener that has been created but not yet registered.
+	mu.Lock()
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
+		mu.Unlock()
 		log.Error("tcpip-forward listen failed", "addr", addr, "error", err)
 		if req.WantReply {
 			_ = req.Reply(false, nil)
 		}
 		return
 	}
+	listeners[addr] = ln
+	mu.Unlock()
 
 	actualPort := uint32(ln.Addr().(*net.TCPAddr).Port)
 	actualAddr := ln.Addr().String()
-
-	mu.Lock()
-	listeners[addr] = ln
-	mu.Unlock()
 
 	var peerIP string
 	if tcpAddr, ok := sshConn.RemoteAddr().(*net.TCPAddr); ok {
