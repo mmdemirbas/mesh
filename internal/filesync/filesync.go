@@ -251,6 +251,22 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	}()
 	context.AfterFunc(ctx, func() { _ = httpSrv.Close() })
 
+	// Periodic eviction of stale pending index exchanges.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				srv.evictStalePending()
+			}
+		}
+	}()
+
 	// Filesystem watcher.
 	roots := make([]string, 0, len(cfg.ResolvedFolders))
 	ignoreMap := make(map[string]*ignoreMatcher)
@@ -304,6 +320,9 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	n.persistAll()
 
 	wg.Wait()
+
+	// Close idle HTTP connections after all goroutines have stopped.
+	n.httpClient.CloseIdleConnections()
 
 	// Clean up state.
 	for _, fcfg := range cfg.ResolvedFolders {
@@ -442,7 +461,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 	exchange := n.buildIndexExchange(folderID, 0) // send full index to peer
 	exchange.Since = peerLastSeq                  // ask peer to send only entries newer than this
-	remoteIdx, err := sendIndex(n.httpClient, peerAddr, exchange)
+	remoteIdx, err := sendIndex(ctx, n.httpClient, peerAddr, exchange)
 	if err != nil {
 		slog.Debug("sync failed", "folder", folderID, "peer", peerAddr, "error", err)
 		state.Global.Update("filesync-peer", stateKey, state.Retrying, err.Error())
@@ -526,7 +545,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
-				err := downloadFromPeer(n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
+				err := downloadFromPeer(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
 				if err != nil {
 					slog.Warn("download failed", "folder", folderID, "path", action.Path, "peer", peerAddr, "error", err)
 					return
@@ -559,7 +578,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			}
 			if winner == "remote" {
 				// Download the remote version to replace local.
-				err := downloadFromPeer(n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
+				err := downloadFromPeer(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
 				if err != nil {
 					slog.Warn("conflict download failed", "folder", folderID, "path", action.Path, "error", err)
 					continue

@@ -91,7 +91,12 @@ func applyDelta(oldPath, destPath string, blockSize, remoteFileSize int64, block
 	if err != nil {
 		return "", fmt.Errorf("create delta temp: %w", err)
 	}
-	defer func() { _ = out.Close() }()
+	closeOut := true
+	defer func() {
+		if closeOut {
+			_ = out.Close()
+		}
+	}()
 
 	// Build a map of changed blocks for O(1) lookup.
 	changed := make(map[int64][]byte, len(blocks))
@@ -140,6 +145,13 @@ func applyDelta(oldPath, destPath string, blockSize, remoteFileSize int64, block
 	if err := out.Truncate(remoteFileSize); err != nil {
 		_ = os.Remove(tmpPath)
 		return "", fmt.Errorf("truncate: %w", err)
+	}
+
+	// Close before returning so caller can rename on Windows.
+	closeOut = false
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("close delta temp: %w", err)
 	}
 
 	return tmpPath, nil

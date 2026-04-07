@@ -2,6 +2,7 @@ package filesync
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ const (
 	maxIndexPayload = 10 * 1024 * 1024 // 10 MB — per-page limit
 	indexPageSize   = 10_000           // max files per index page
 	pendingTTL      = 5 * time.Minute  // stale pending exchange cleanup threshold
+	maxTotalPages   = 200              // caps incoming TotalPages to prevent OOM (200 × 10k = 2M files)
 )
 
 // server handles filesync HTTP endpoints.
@@ -46,6 +48,23 @@ type pendingExchange struct {
 	responsePages []*pb.IndexExchange
 
 	createdAt time.Time
+}
+
+// evictStalePending removes pending exchange entries older than pendingTTL.
+// This catches both incomplete uploads and response caches abandoned by
+// disconnected clients.
+func (s *server) evictStalePending() {
+	now := time.Now()
+	s.pending.Range(func(k, v any) bool {
+		pe := v.(*pendingExchange)
+		pe.mu.Lock()
+		stale := now.Sub(pe.createdAt) > pendingTTL
+		pe.mu.Unlock()
+		if stale {
+			s.pending.Delete(k)
+		}
+		return true
+	})
 }
 
 func (s *server) handler() http.Handler {
@@ -161,8 +180,16 @@ func (s *server) handleMultiPageIndex(w http.ResponseWriter, req *pb.IndexExchan
 		}
 	}
 
+	totalPages := req.GetTotalPages()
+	if totalPages > maxTotalPages {
+		slog.Warn("rejecting index exchange: totalPages exceeds cap",
+			"peer", req.GetDeviceId(), "folder", folderID, "totalPages", totalPages, "max", maxTotalPages)
+		http.Error(w, "totalPages exceeds limit", http.StatusBadRequest)
+		return
+	}
+
 	v, _ := s.pending.LoadOrStore(key, &pendingExchange{
-		totalPages: req.GetTotalPages(),
+		totalPages: totalPages,
 		deviceID:   req.GetDeviceId(),
 		folderID:   folderID,
 		sequence:   req.GetSequence(),
@@ -475,16 +502,16 @@ func isLoopback(ip string) bool {
 // sendIndex pushes our index to a peer and receives their response.
 // For large indices (> indexPageSize files), the exchange is paginated:
 // files are split into pages sent as separate HTTP requests.
-func sendIndex(client *http.Client, peerAddr string, exchange *pb.IndexExchange) (*pb.IndexExchange, error) {
+func sendIndex(ctx context.Context, client *http.Client, peerAddr string, exchange *pb.IndexExchange) (*pb.IndexExchange, error) {
 	files := exchange.GetFiles()
 	if len(files) <= indexPageSize {
-		return sendSingleIndex(client, peerAddr, exchange)
+		return sendSingleIndex(ctx, client, peerAddr, exchange)
 	}
-	return sendPaginatedIndex(client, peerAddr, exchange)
+	return sendPaginatedIndex(ctx, client, peerAddr, exchange)
 }
 
 // sendSingleIndex sends a complete index in a single HTTP request (legacy path).
-func sendSingleIndex(client *http.Client, peerAddr string, exchange *pb.IndexExchange) (*pb.IndexExchange, error) {
+func sendSingleIndex(ctx context.Context, client *http.Client, peerAddr string, exchange *pb.IndexExchange) (*pb.IndexExchange, error) {
 	exchange.Page = 0
 	exchange.TotalPages = 1
 
@@ -493,14 +520,14 @@ func sendSingleIndex(client *http.Client, peerAddr string, exchange *pb.IndexExc
 		return nil, fmt.Errorf("marshal index: %w", err)
 	}
 
-	return postIndex(client, peerAddr, data)
+	return postIndex(ctx, client, peerAddr, data)
 }
 
 // sendPaginatedIndex splits the index into pages and sends them sequentially.
 // Intermediate pages get an empty ack. The final page returns the first page of
 // the server's response. If the server's response is also paginated, remaining
 // pages are fetched via follow-up requests.
-func sendPaginatedIndex(client *http.Client, peerAddr string, exchange *pb.IndexExchange) (*pb.IndexExchange, error) {
+func sendPaginatedIndex(ctx context.Context, client *http.Client, peerAddr string, exchange *pb.IndexExchange) (*pb.IndexExchange, error) {
 	files := exchange.GetFiles()
 	totalPages := int32((len(files) + indexPageSize - 1) / indexPageSize)
 	clientDeviceID := exchange.GetDeviceId()
@@ -534,12 +561,12 @@ func sendPaginatedIndex(client *http.Client, peerAddr string, exchange *pb.Index
 
 		if page < totalPages-1 {
 			// Intermediate page — expect empty ack.
-			if err := postIndexAck(client, peerAddr, data); err != nil {
+			if err := postIndexAck(ctx, client, peerAddr, data); err != nil {
 				return nil, fmt.Errorf("send index page %d/%d to %s: %w", page, totalPages, peerAddr, err)
 			}
 		} else {
 			// Final page — expect server's response (first page).
-			resp, err := postIndex(client, peerAddr, data)
+			resp, err := postIndex(ctx, client, peerAddr, data)
 			if err != nil {
 				return nil, fmt.Errorf("send final index page to %s: %w", peerAddr, err)
 			}
@@ -553,13 +580,13 @@ func sendPaginatedIndex(client *http.Client, peerAddr string, exchange *pb.Index
 
 	// If the server's response is paginated, fetch remaining pages.
 	// Use the client's device ID for fetch requests (matches the server's cache key).
-	return fetchResponsePages(client, peerAddr, clientDeviceID, firstResp)
+	return fetchResponsePages(ctx, client, peerAddr, clientDeviceID, firstResp)
 }
 
 // fetchResponsePages fetches remaining server response pages after a paginated
 // index exchange. clientDeviceID must match the device ID used during the upload
 // phase so the server can locate the cached response.
-func fetchResponsePages(client *http.Client, peerAddr, clientDeviceID string, firstPage *pb.IndexExchange) (*pb.IndexExchange, error) {
+func fetchResponsePages(ctx context.Context, client *http.Client, peerAddr, clientDeviceID string, firstPage *pb.IndexExchange) (*pb.IndexExchange, error) {
 	if firstPage.GetTotalPages() <= 1 {
 		return firstPage, nil
 	}
@@ -579,7 +606,7 @@ func fetchResponsePages(client *http.Client, peerAddr, clientDeviceID string, fi
 			return nil, fmt.Errorf("marshal fetch request page %d: %w", page, err)
 		}
 
-		resp, err := postIndex(client, peerAddr, data)
+		resp, err := postIndex(ctx, client, peerAddr, data)
 		if err != nil {
 			return nil, fmt.Errorf("fetch response page %d from %s: %w", page, peerAddr, err)
 		}
@@ -595,9 +622,14 @@ func fetchResponsePages(client *http.Client, peerAddr, clientDeviceID string, fi
 }
 
 // postIndex sends an index request and returns the parsed response.
-func postIndex(client *http.Client, peerAddr string, data []byte) (*pb.IndexExchange, error) {
+func postIndex(ctx context.Context, client *http.Client, peerAddr string, data []byte) (*pb.IndexExchange, error) {
 	u := fmt.Sprintf("http://%s/index", peerAddr)
-	resp, err := client.Post(u, "application/x-protobuf", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("create index request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("post index to %s: %w", peerAddr, err)
 	}
@@ -627,9 +659,14 @@ func postIndex(client *http.Client, peerAddr string, data []byte) (*pb.IndexExch
 }
 
 // postIndexAck sends an index page and expects an empty ack (200 OK with no body).
-func postIndexAck(client *http.Client, peerAddr string, data []byte) error {
+func postIndexAck(ctx context.Context, client *http.Client, peerAddr string, data []byte) error {
 	u := fmt.Sprintf("http://%s/index", peerAddr)
-	resp, err := client.Post(u, "application/x-protobuf", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("create index request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("post index to %s: %w", peerAddr, err)
 	}
@@ -643,8 +680,8 @@ func postIndexAck(client *http.Client, peerAddr string, data []byte) error {
 }
 
 // downloadFromPeer downloads a single file from a peer with resume support.
-func downloadFromPeer(client *http.Client, peerAddr, folderID, relPath, expectedHash, folderRoot string, limiter *rate.Limiter) error {
-	_, err := downloadFileDelta(client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
+func downloadFromPeer(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash, folderRoot string, limiter *rate.Limiter) error {
+	_, err := downloadFileDelta(ctx, client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
 	return err
 }
 

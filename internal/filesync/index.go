@@ -347,7 +347,8 @@ func cleanTempFiles(folderRoot string, maxAge time.Duration) {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if !strings.HasPrefix(d.Name(), ".mesh-tmp-") {
+		name := d.Name()
+		if !strings.HasPrefix(name, ".mesh-tmp-") && !strings.HasSuffix(name, ".mesh-delta-tmp") {
 			return nil
 		}
 		info, infoErr := d.Info()

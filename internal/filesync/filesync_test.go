@@ -477,7 +477,7 @@ func TestResolveConflict_LocalWins(t *testing.T) {
 
 func TestDownloadFile_PathTraversal(t *testing.T) {
 	client := &http.Client{}
-	_, err := downloadFile(client, "127.0.0.1:9999", "test", "../../../etc/passwd", "abcdef0123456789abcdef0123456789", t.TempDir(), nil)
+	_, err := downloadFile(t.Context(), client, "127.0.0.1:9999", "test", "../../../etc/passwd", "abcdef0123456789abcdef0123456789", t.TempDir(), nil)
 	if err == nil {
 		t.Error("expected error for path traversal")
 	}
@@ -485,7 +485,7 @@ func TestDownloadFile_PathTraversal(t *testing.T) {
 
 func TestDownloadFile_ShortHash(t *testing.T) {
 	client := &http.Client{}
-	_, err := downloadFile(client, "127.0.0.1:9999", "test", "file.txt", "abc", t.TempDir(), nil)
+	_, err := downloadFile(t.Context(), client, "127.0.0.1:9999", "test", "file.txt", "abc", t.TempDir(), nil)
 	if err == nil {
 		t.Fatal("expected error for short hash")
 	}
@@ -1073,7 +1073,7 @@ func TestPaginatedIndexExchange(t *testing.T) {
 	// Use sendIndex which should automatically paginate.
 	client := &http.Client{Timeout: 10 * time.Second}
 	addr := ts.Listener.Addr().String()
-	resp, err := sendIndex(client, addr, exchange)
+	resp, err := sendIndex(t.Context(), client, addr, exchange)
 	if err != nil {
 		t.Fatalf("sendIndex: %v", err)
 	}
@@ -1117,7 +1117,7 @@ func TestPaginatedIndexExchange_SmallIndex(t *testing.T) {
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := sendIndex(client, ts.Listener.Addr().String(), exchange)
+	resp, err := sendIndex(t.Context(), client, ts.Listener.Addr().String(), exchange)
 	if err != nil {
 		t.Fatalf("sendIndex: %v", err)
 	}
@@ -1255,7 +1255,7 @@ func TestTwoNodeSync(t *testing.T) {
 
 	// Node B exchanges index with node A via A's server.
 	exchangeB := nodeB.buildIndexExchange("test", 0)
-	remoteIdx, err := sendIndex(&http.Client{}, srvA.Listener.Addr().String(), exchangeB)
+	remoteIdx, err := sendIndex(t.Context(), &http.Client{}, srvA.Listener.Addr().String(), exchangeB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1280,7 +1280,7 @@ func TestTwoNodeSync(t *testing.T) {
 	}
 
 	// Download the file from node A's server.
-	err = downloadFromPeer(
+	err = downloadFromPeer(t.Context(),
 		&http.Client{},
 		srvA.Listener.Addr().String(),
 		"test",
@@ -1341,7 +1341,7 @@ func TestDownloadFile_Resume(t *testing.T) {
 	}
 
 	// Download should resume from offset 5.
-	path, err := downloadFile(
+	path, err := downloadFile(t.Context(),
 		&http.Client{},
 		srv.Listener.Addr().String(),
 		"test",
