@@ -67,14 +67,17 @@ type dashboardModel struct {
 	nodeNames    []string
 	configPath   string
 	logFilePath  string
+	adminURL     string
 	ring         *logRing
 	startTime    time.Time
 	viewport     viewport.Model
 	headerHeight int
 	ready        bool
+	quitting     bool
 }
 
 type tickMsg time.Time
+type shutdownMsg struct{}
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
@@ -90,9 +93,13 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+	case shutdownMsg:
+		m.quitting = true
+		return m, tea.Quit
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
+			m.quitting = true
 			return m, tea.Quit
 		}
 	case tea.WindowSizeMsg:
@@ -126,7 +133,7 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m dashboardModel) View() string {
-	if !m.ready {
+	if !m.ready || m.quitting {
 		return ""
 	}
 	var buf strings.Builder
@@ -139,6 +146,9 @@ func (m dashboardModel) View() string {
 	}
 	if m.logFilePath != "" {
 		fmt.Fprintf(&buf, "  %slog:    %s%s\n", cGray, m.logFilePath, cReset)
+	}
+	if m.adminURL != "" {
+		fmt.Fprintf(&buf, "  %sui:     %s%s\n", cGray, m.adminURL, cReset)
 	}
 	buf.WriteByte('\n')
 	buf.WriteString(m.viewport.View())
@@ -174,12 +184,15 @@ func (m dashboardModel) buildContent() string {
 // scrollable viewport. It uses the terminal's alternate screen buffer so the
 // dashboard doesn't pollute scrollback. When the dashboard exits (via ctx
 // cancellation or user quit), cancel is called to unblock the main goroutine.
-func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[string]*config.Config, nodeNames []string, configPath string, logFilePath string, ring *logRing) {
+func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[string]*config.Config, nodeNames []string, configPath string, logFilePath string, adminURL string, ring *logRing) {
 	headerHeight := 2 // header line + blank line
 	if configPath != "" {
 		headerHeight++
 	}
 	if logFilePath != "" {
+		headerHeight++
+	}
+	if adminURL != "" {
 		headerHeight++
 	}
 
@@ -188,6 +201,7 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 		nodeNames:    nodeNames,
 		configPath:   configPath,
 		logFilePath:  logFilePath,
+		adminURL:     adminURL,
 		ring:         ring,
 		startTime:    time.Now(),
 		headerHeight: headerHeight,
@@ -197,7 +211,10 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 
 	go func() {
 		<-ctx.Done()
-		p.Quit()
+		// Send a shutdown message so the model clears its view before quitting.
+		// This prevents bubbletea from dumping the last frame (including log lines)
+		// to the normal terminal when leaving the alternate screen.
+		p.Send(shutdownMsg{})
 	}()
 
 	_, _ = p.Run()
@@ -503,22 +520,18 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 						fSt = cGray + "[starting]" + cReset
 					}
 
-					var annParts []string
+					// Build a combined status string: "[idle] 1234 files  synced 5m ago"
 					if comp.FileCount > 0 {
-						annParts = append(annParts, fmt.Sprintf("%d files", comp.FileCount))
+						fSt += " " + cGray + fmt.Sprintf("%d files", comp.FileCount) + cReset
 					}
 					if !comp.LastSync.IsZero() {
 						ago := time.Since(comp.LastSync).Truncate(time.Second)
-						annParts = append(annParts, "synced "+formatDuration(ago)+" ago")
-					}
-					annotation := ""
-					if len(annParts) > 0 {
-						annotation = cGray + strings.Join(annParts, "  ") + cReset
+						fSt += "  " + cGray + "synced " + formatDuration(ago) + " ago" + cReset
 					}
 
 					paddedID := folder.ID + strings.Repeat(" ", maxIDLen-len(folder.ID))
 					left := paddedID + "  " + cGray + folder.Path + cReset
-					addRow("    ", dirSym, left, "", "", fSt, annotation, metricsSnapshot{})
+					addRow("    ", dirSym, left, "", "", fSt, "", metricsSnapshot{})
 				}
 			}
 		}
