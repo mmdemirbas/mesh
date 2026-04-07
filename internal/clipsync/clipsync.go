@@ -49,6 +49,7 @@ const (
 
 
 type Node struct {
+	ctx    context.Context // parent context; cancelled on shutdown
 	config config.ClipsyncCfg
 	id     string
 	port   int
@@ -105,6 +106,7 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 	_, _ = fmt.Sscanf(portStr, "%d", &port)
 
 	n := &Node{
+		ctx:        ctx,
 		config:     cfg,
 		id:         generateID(),
 		port:       port,
@@ -251,7 +253,7 @@ func (n *Node) Broadcast(payload *pb.SyncPayload) {
 }
 
 func (n *Node) postHTTP(addr string, data []byte) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(n.ctx, 5*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/sync", addr), bytes.NewReader(data))
 	req.ContentLength = int64(len(data))
@@ -302,21 +304,27 @@ func (n *Node) processPayload(p *pb.SyncPayload, peerHostPort string) {
 			n.clipMu.Lock()
 			n.setCurrentFiles(writtenPaths)
 			n.setWrittenHash(hashFilePaths(writtenPaths), peerHostPort)
-			writeFiles(writtenPaths)
+			clipWriteFiles(writtenPaths)
 			n.clipMu.Unlock()
 		}
 	} else if len(p.GetFormats()) > 0 {
 		n.clipMu.Lock()
 		n.clearCurrentFiles()
 		n.setWrittenHash(hashFormats(p.GetFormats()), peerHostPort)
-		writeClipboardFormats(p.GetFormats())
+		clipWriteFormats(p.GetFormats())
 		n.clipMu.Unlock()
 	}
 }
 
 func (n *Node) pullHTTP(peerAddr string) {
 	slog.Debug("Making outbound HTTP GET pull request", "peer", cleanLogStr(peerAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
-	resp, err := n.httpClient.Get(fmt.Sprintf("http://%s/clip", peerAddr)) //nolint:gosec // G704: peer addresses are user-configured, not untrusted input
+	ctx, cancel := context.WithTimeout(n.ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://%s/clip", peerAddr), nil) //nolint:gosec // G704: peer addresses are user-configured, not untrusted input
+	if err != nil {
+		return
+	}
+	resp, err := n.httpClient.Do(req)
 	if err != nil || resp.StatusCode != 200 {
 		status := 0
 		if resp != nil {
@@ -992,6 +1000,14 @@ func readClipboardLinux(ctx context.Context, dir string) {
 	}
 }
 
+// clipWriteFormats writes clipboard formats to the OS. Tests replace this to
+// avoid touching the real clipboard.
+var clipWriteFormats = writeClipboardFormats
+
+// clipWriteFiles writes file paths to the OS clipboard. Tests replace this to
+// avoid touching the real clipboard.
+var clipWriteFiles = writeFiles
+
 // writeClipboardFormats writes all formats to the OS clipboard at once.
 // Recovers from panics to prevent subprocess crashes from killing the process.
 func writeClipboardFormats(formats []*pb.ClipFormat) {
@@ -1326,7 +1342,11 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 			}
 			// 4. Prevent CPU spinning if the Windows network stack temporarily
 			// invalidates the socket (e.g., during WiFi roaming or VPN toggles).
-			time.Sleep(100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
 			continue
 		}
 
@@ -1562,9 +1582,9 @@ func (n *Node) registerPeerHTTP(peerAddr string) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	reqCtx, cancel := context.WithTimeout(n.ctx, 5*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/discover", peerAddr), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(reqCtx, "POST", fmt.Sprintf("http://%s/discover", peerAddr), bytes.NewReader(body))
 	if err != nil {
 		return
 	}

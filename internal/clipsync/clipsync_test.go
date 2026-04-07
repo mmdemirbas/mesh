@@ -2,6 +2,7 @@ package clipsync
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -21,6 +22,13 @@ import (
 	pb "github.com/mmdemirbas/mesh/internal/clipsync/proto"
 	"github.com/mmdemirbas/mesh/internal/config"
 )
+
+func TestMain(m *testing.M) {
+	// Stub clipboard writes so tests never touch the real OS clipboard.
+	clipWriteFormats = func([]*pb.ClipFormat) {}
+	clipWriteFiles = func([]string) {}
+	os.Exit(m.Run())
+}
 
 func TestContains(t *testing.T) {
 	tests := []struct {
@@ -384,7 +392,11 @@ func newTestNode(t *testing.T, allowReceive []string) (*Node, string, func()) {
 		AllowSendTo:  []string{"all"},
 		AllowReceive: allowReceive,
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
 	n := &Node{
+		ctx:        ctx,
 		config:     cfg,
 		id:         "test-node",
 		port:       7755,
@@ -750,6 +762,7 @@ func TestPostHTTP_UsesZeroCopyReader(t *testing.T) {
 
 	cfg := config.ClipsyncCfg{AllowSendTo: []string{"all"}}
 	n := &Node{
+		ctx:        context.Background(),
 		config:     cfg,
 		sendToIPs:  parseIPList(cfg.AllowSendTo),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
@@ -768,6 +781,7 @@ func TestPostHTTP_UsesZeroCopyReader(t *testing.T) {
 
 func TestBroadcast_SetsLastPayload(t *testing.T) {
 	n := &Node{
+		ctx:        context.Background(),
 		config:     config.ClipsyncCfg{AllowSendTo: []string{"none"}},
 		sendToIPs:  nil,
 		peers:      make(map[string]time.Time),
@@ -814,6 +828,7 @@ func TestBroadcast_PushesToPeers(t *testing.T) {
 		StaticPeers: []string{peerAddr},
 	}
 	n := &Node{
+		ctx:        context.Background(),
 		config:     cfg,
 		sendToIPs:  parseIPList(cfg.AllowSendTo),
 		peers:      make(map[string]time.Time),
@@ -860,6 +875,7 @@ func TestBroadcast_DoesNotEchoBackToOrigin(t *testing.T) {
 		StaticPeers: []string{peerAddr},
 	}
 	n := &Node{
+		ctx:        context.Background(),
 		config:     cfg,
 		sendToIPs:  parseIPList(cfg.AllowSendTo),
 		peers:      make(map[string]time.Time),
@@ -975,6 +991,7 @@ func TestPullHTTP(t *testing.T) {
 	// Create a receiver node that pulls from the sender
 	receiverDir := t.TempDir()
 	receiver := &Node{
+		ctx:        context.Background(),
 		config:     config.ClipsyncCfg{AllowReceive: []string{"all"}},
 		receiveIPs: nil,
 		httpClient: &http.Client{Timeout: 5 * time.Second},
@@ -1002,6 +1019,7 @@ func TestPullHTTP_NoContent(t *testing.T) {
 	// lastPayload is nil → /clip returns 404
 
 	receiver := &Node{
+		ctx:        context.Background(),
 		config:     config.ClipsyncCfg{AllowReceive: []string{"all"}},
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 		filesDir:   t.TempDir(),
@@ -1357,6 +1375,7 @@ func TestRegisterPeerHTTP_SendsDiscoverRequest(t *testing.T) {
 	peerAddr := net.JoinHostPort("127.0.0.1", port)
 
 	n := &Node{
+		ctx:        context.Background(),
 		id:         "sender-node",
 		port:       7755,
 		config:     config.ClipsyncCfg{Group: "my-group"},
