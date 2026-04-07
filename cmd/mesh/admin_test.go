@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -37,7 +38,7 @@ func TestAdminStateEndpoints(t *testing.T) {
 	srv := httptest.NewServer(buildAdminMux(ring))
 	defer srv.Close()
 
-	for _, path := range []string{"/", "/api/state"} {
+	for _, path := range []string{"/api/state"} {
 		t.Run(path, func(t *testing.T) {
 			resp, err := http.Get(srv.URL + path)
 			if err != nil {
@@ -117,9 +118,9 @@ func TestAdminMetricsEndpoint(t *testing.T) {
 	srv := httptest.NewServer(buildAdminMux(ring))
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/metrics")
+	resp, err := http.Get(srv.URL + "/api/metrics")
 	if err != nil {
-		t.Fatalf("GET /metrics: %v", err)
+		t.Fatalf("GET /api/metrics: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -172,9 +173,9 @@ func TestAdminMetricsDownComponent(t *testing.T) {
 	srv := httptest.NewServer(buildAdminMux(ring))
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/metrics")
+	resp, err := http.Get(srv.URL + "/api/metrics")
 	if err != nil {
-		t.Fatalf("GET /metrics: %v", err)
+		t.Fatalf("GET /api/metrics: %v", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -190,22 +191,49 @@ func TestAdminUIEndpoint(t *testing.T) {
 	srv := httptest.NewServer(buildAdminMux(ring))
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/ui")
+	for _, path := range []string{"/ui", "/ui/filesync", "/ui/logs", "/ui/api"} {
+		t.Run(path, func(t *testing.T) {
+			resp, err := http.Get(srv.URL + path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", path, err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("status = %d, want 200", resp.StatusCode)
+			}
+			ct := resp.Header.Get("Content-Type")
+			if !strings.HasPrefix(ct, "text/html") {
+				t.Errorf("Content-Type = %q, want text/html", ct)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			if !strings.Contains(string(body), "<!DOCTYPE html>") {
+				t.Error("response body does not contain <!DOCTYPE html>")
+			}
+		})
+	}
+}
+
+func TestAdminRootRedirect(t *testing.T) {
+	ring := newLogRing(4)
+	srv := httptest.NewServer(buildAdminMux(ring))
+	defer srv.Close()
+
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Get(srv.URL + "/")
 	if err != nil {
-		t.Fatalf("GET /ui: %v", err)
+		t.Fatalf("GET /: %v", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusFound {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
-	ct := resp.Header.Get("Content-Type")
-	if !strings.HasPrefix(ct, "text/html") {
-		t.Errorf("Content-Type = %q, want text/html", ct)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "<!DOCTYPE html>") {
-		t.Error("response body does not contain <!DOCTYPE html>")
+	loc := resp.Header.Get("Location")
+	if loc != "/ui" {
+		t.Errorf("Location = %q, want /ui", loc)
 	}
 }
 
@@ -265,8 +293,8 @@ func TestPortFilePath(t *testing.T) {
 	if !strings.HasSuffix(path, "mesh-testnode.port") {
 		t.Errorf("unexpected path suffix: %s", path)
 	}
-	if !strings.Contains(path, "mesh") {
-		t.Errorf("path does not contain 'mesh' directory: %s", path)
+	if !strings.Contains(path, filepath.Join(".mesh", "run")) {
+		t.Errorf("path does not contain .mesh/run directory: %s", path)
 	}
 }
 

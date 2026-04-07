@@ -27,9 +27,8 @@ type Config struct {
 	Filesync []FilesyncCfg `yaml:"filesync,omitempty"`
 	// Log level: "debug", "info", "warn", or "error". Defaults to "info".
 	LogLevel string `yaml:"log_level,omitempty" jsonschema:"enum=debug,enum=info,enum=warn,enum=error"`
-	// Admin server listen address for the local HTTP API (/api/state, /metrics, /ui).
-	// Defaults to "127.0.0.1:0" (random port, localhost only).
-	// Set to a fixed address (e.g., "127.0.0.1:2225") for stable Prometheus scraping.
+	// Admin server listen address for the local HTTP API and web UI.
+	// Defaults to "127.0.0.1:7777" (localhost only).
 	// Set to "" to use the default. Set to "off" to disable entirely.
 	AdminAddr string `yaml:"admin_addr,omitempty"`
 }

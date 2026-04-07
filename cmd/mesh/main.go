@@ -354,8 +354,8 @@ func upCmd(nodeNames []string, configPath string) {
 	}()
 
 	// Determine admin server address: first non-empty admin_addr across nodes wins.
-	// "off" disables the admin server. Default: random localhost port.
-	adminAddr := "127.0.0.1:0"
+	// "off" disables the admin server. Default: localhost:7777.
+	adminAddr := "127.0.0.1:7777"
 	for _, cfg := range cfgs {
 		if cfg.AdminAddr != "" {
 			adminAddr = cfg.AdminAddr
@@ -365,6 +365,7 @@ func upCmd(nodeNames []string, configPath string) {
 
 	// Single admin HTTP endpoint — write port file for each node (same port).
 	// Disabled when admin_addr is "off" in the node config.
+	var adminURL string
 	if adminAddr != "off" {
 		adminLn, err := net.Listen("tcp", adminAddr)
 		if err != nil {
@@ -372,6 +373,7 @@ func upCmd(nodeNames []string, configPath string) {
 		} else {
 			port := adminLn.Addr().(*net.TCPAddr).Port
 			portStr := []byte(strconv.Itoa(port))
+			adminURL = fmt.Sprintf("http://127.0.0.1:%d/ui", port)
 			for _, name := range nodeNames {
 				_ = os.WriteFile(portFilePath(name), portStr, 0600)
 				name := name
@@ -459,7 +461,7 @@ func upCmd(nodeNames []string, configPath string) {
 
 	// 5. Live dashboard or block until signal
 	if useDashboard {
-		go runDashboard(ctx, cancel, cfgs, nodeNames, configPath, logFilePath, ring)
+		go runDashboard(ctx, cancel, cfgs, nodeNames, configPath, logFilePath, adminURL, ring)
 	}
 
 	<-ctx.Done()
@@ -588,7 +590,7 @@ func fetchState(nodeName string) map[string]state.Component {
 	if err != nil {
 		return nil
 	}
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/", string(portData)))
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/api/state", string(portData)))
 	if err != nil {
 		return nil
 	}
@@ -775,28 +777,23 @@ func downCmd(nodeNames []string) {
 	}
 }
 
-func portFilePath(nodeName string) string {
-	dir, err := os.UserCacheDir()
+// runDir returns ~/.mesh/run, creating it if necessary.
+func runDir() string {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		dir, err = os.UserHomeDir()
-		if err != nil {
-			dir = os.TempDir()
-		}
+		home = os.TempDir()
 	}
-	_ = os.MkdirAll(filepath.Join(dir, "mesh"), 0700)
-	return filepath.Join(dir, "mesh", fmt.Sprintf("mesh-%s.port", nodeName))
+	dir := filepath.Join(home, ".mesh", "run")
+	_ = os.MkdirAll(dir, 0700)
+	return dir
+}
+
+func portFilePath(nodeName string) string {
+	return filepath.Join(runDir(), fmt.Sprintf("mesh-%s.port", nodeName))
 }
 
 func pidFilePath(nodeName string) string {
-	dir, err := os.UserCacheDir()
-	if err != nil {
-		dir, err = os.UserHomeDir()
-		if err != nil {
-			dir = os.TempDir()
-		}
-	}
-	_ = os.MkdirAll(filepath.Join(dir, "mesh"), 0700)
-	return filepath.Join(dir, "mesh", fmt.Sprintf("mesh-%s.pid", nodeName))
+	return filepath.Join(runDir(), fmt.Sprintf("mesh-%s.pid", nodeName))
 }
 
 func writePidFile(nodeName string) error {
