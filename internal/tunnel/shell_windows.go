@@ -127,6 +127,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 						if req.WantReply {
 							_ = req.Reply(false, nil)
 						}
+						closeCh()
 						return
 					}
 
