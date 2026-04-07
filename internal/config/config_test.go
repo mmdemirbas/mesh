@@ -734,6 +734,40 @@ func TestValidate_FilesyncMaxConcurrentZero(t *testing.T) {
 	}
 }
 
+func TestValidate_FilesyncDisabledNoPeers(t *testing.T) {
+	fsCfg := FilesyncCfg{
+		Bind:          "0.0.0.0:7756",
+		MaxConcurrent: 4,
+		Folders: map[string]FolderCfgRaw{
+			"archive": {Path: t.TempDir(), Direction: "disabled"},
+		},
+	}
+	_ = fsCfg.Resolve()
+	cfg := &Config{Filesync: []FilesyncCfg{fsCfg}}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("disabled folder without peers should be valid: %v", err)
+	}
+}
+
+func TestValidate_FilesyncDryRunRequiresPeers(t *testing.T) {
+	fsCfg := FilesyncCfg{
+		Bind:          "0.0.0.0:7756",
+		MaxConcurrent: 4,
+		Folders: map[string]FolderCfgRaw{
+			"code": {Path: t.TempDir(), Direction: "dry-run"},
+		},
+	}
+	_ = fsCfg.Resolve()
+	cfg := &Config{Filesync: []FilesyncCfg{fsCfg}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("dry-run folder without peers should fail validation")
+	}
+	if !strings.Contains(err.Error(), "at least one peer") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 func TestFilesyncResolve(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -893,6 +927,43 @@ func TestFilesyncResolve(t *testing.T) {
 				},
 			},
 			wantErr: `unknown peer "missing"`,
+		},
+		{
+			name: "dry-run direction resolves",
+			cfg: FilesyncCfg{
+				Bind:  "0.0.0.0:7756",
+				Peers: map[string][]string{"hw": {"10.0.0.1:7756"}},
+				Defaults: FilesyncDefaults{
+					Peers:     []string{"hw"},
+					Direction: "dry-run",
+				},
+				Folders: map[string]FolderCfgRaw{
+					"code": {Path: "/tmp/code"},
+				},
+			},
+			check: func(t *testing.T, cfg *FilesyncCfg) {
+				if cfg.ResolvedFolders[0].Direction != "dry-run" {
+					t.Errorf("Direction = %q, want dry-run", cfg.ResolvedFolders[0].Direction)
+				}
+			},
+		},
+		{
+			name: "disabled direction without peers",
+			cfg: FilesyncCfg{
+				Bind: "0.0.0.0:7756",
+				Folders: map[string]FolderCfgRaw{
+					"archive": {Path: "/tmp/archive", Direction: "disabled"},
+				},
+			},
+			check: func(t *testing.T, cfg *FilesyncCfg) {
+				f := cfg.ResolvedFolders[0]
+				if f.Direction != "disabled" {
+					t.Errorf("Direction = %q, want disabled", f.Direction)
+				}
+				if len(f.Peers) != 0 {
+					t.Errorf("Peers = %v, want empty for disabled", f.Peers)
+				}
+			},
 		},
 		{
 			name: "sorted by ID",

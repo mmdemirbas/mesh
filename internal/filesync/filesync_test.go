@@ -1230,6 +1230,100 @@ func TestHandleFile_RejectsReceiveOnly(t *testing.T) {
 	}
 }
 
+func TestHandleFile_RejectsDisabled(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "data.txt", "content")
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg: config.FolderCfg{
+			ID:        "test",
+			Path:      dir,
+			Direction: "disabled",
+		},
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/file?folder=test&path=data.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 for disabled folder, got %d", resp.StatusCode)
+	}
+}
+
+func TestDryRunComputesDiffWithoutExecution(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "local.txt", "local content")
+
+	idx := newFileIndex()
+	ignore := &ignoreMatcher{}
+	_, _ = idx.scan(dir, ignore)
+
+	// Simulate a remote index with a file we don't have.
+	remote := &FileIndex{
+		Sequence: 10,
+		Files: map[string]FileEntry{
+			"remote.txt": {Size: 100, MtimeNS: 1000, SHA256: "abc123", Sequence: 10},
+		},
+	}
+
+	// Dry-run should compute diff (canReceive = true).
+	actions := idx.diff(remote, 0, "dry-run")
+	if len(actions) == 0 {
+		t.Fatal("dry-run diff should produce actions")
+	}
+	found := false
+	for _, a := range actions {
+		if a.Path == "remote.txt" && a.Action == ActionDownload {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected download action for remote.txt in dry-run diff")
+	}
+}
+
+func TestDisabledFolderSkippedInScan(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "file.txt", "content")
+
+	n := &Node{
+		folders: make(map[string]*folderState),
+	}
+	n.folders["active"] = &folderState{
+		cfg:    config.FolderCfg{ID: "active", Path: dir, Direction: "send-receive"},
+		index:  newFileIndex(),
+		ignore: &ignoreMatcher{},
+	}
+	n.folders["off"] = &folderState{
+		cfg:    config.FolderCfg{ID: "off", Path: dir, Direction: "disabled"},
+		index:  newFileIndex(),
+		ignore: &ignoreMatcher{},
+	}
+
+	n.runScan()
+
+	// Active folder should have scanned files.
+	if len(n.folders["active"].index.Files) == 0 {
+		t.Error("active folder should have scanned files")
+	}
+	// Disabled folder should remain empty.
+	if len(n.folders["off"].index.Files) != 0 {
+		t.Error("disabled folder should not have scanned files")
+	}
+}
+
 // --- Unknown folder test (FT4) ---
 
 func TestHandleIndex_UnknownFolder(t *testing.T) {
