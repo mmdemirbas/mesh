@@ -238,6 +238,49 @@ func TestMetrics_ConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
+func TestSizes_Empty(t *testing.T) {
+	s := newState()
+	comps, mets := s.Sizes()
+	if comps != 0 {
+		t.Errorf("components = %d, want 0", comps)
+	}
+	if mets != 0 {
+		t.Errorf("metrics = %d, want 0", mets)
+	}
+}
+
+func TestSizes_WithData(t *testing.T) {
+	s := newState()
+	s.Update("proxy", "p1", Listening, "")
+	s.Update("connection", "c1", Connected, "")
+	s.GetMetrics("connection", "c1")
+
+	comps, mets := s.Sizes()
+	if comps != 2 {
+		t.Errorf("components = %d, want 2", comps)
+	}
+	if mets != 1 {
+		t.Errorf("metrics = %d, want 1", mets)
+	}
+}
+
+func TestSizes_AfterDelete(t *testing.T) {
+	s := newState()
+	s.Update("proxy", "p1", Listening, "")
+	s.GetMetrics("proxy", "p1")
+
+	s.Delete("proxy", "p1")
+	s.DeleteMetrics("proxy", "p1")
+
+	comps, mets := s.Sizes()
+	if comps != 0 {
+		t.Errorf("components = %d, want 0", comps)
+	}
+	if mets != 0 {
+		t.Errorf("metrics = %d, want 0", mets)
+	}
+}
+
 func TestConcurrentAccess(t *testing.T) {
 	s := newState()
 	var wg sync.WaitGroup

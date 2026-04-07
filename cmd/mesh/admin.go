@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -113,6 +114,28 @@ func buildAdminMux(ring *logRing) *http.ServeMux {
 		for ip, count := range authFails {
 			fmt.Fprintf(&b, "mesh_auth_failures_total{remote_ip=%q} %d\n", ip, count)
 		}
+
+		// mesh_process_goroutines
+		b.WriteString("# HELP mesh_process_goroutines Current number of goroutines.\n")
+		b.WriteString("# TYPE mesh_process_goroutines gauge\n")
+		fmt.Fprintf(&b, "mesh_process_goroutines %d\n", runtime.NumGoroutine())
+
+		// mesh_process_open_fds (omitted on platforms where counting is unavailable)
+		if fds := openFDCount(); fds >= 0 {
+			b.WriteString("# HELP mesh_process_open_fds Current number of open file descriptors.\n")
+			b.WriteString("# TYPE mesh_process_open_fds gauge\n")
+			fmt.Fprintf(&b, "mesh_process_open_fds %d\n", fds)
+		}
+
+		// mesh_state_components
+		b.WriteString("# HELP mesh_state_components Number of tracked components in the state map.\n")
+		b.WriteString("# TYPE mesh_state_components gauge\n")
+		fmt.Fprintf(&b, "mesh_state_components %d\n", len(snap))
+
+		// mesh_state_metrics
+		b.WriteString("# HELP mesh_state_metrics Number of metrics entries in the state map.\n")
+		b.WriteString("# TYPE mesh_state_metrics gauge\n")
+		fmt.Fprintf(&b, "mesh_state_metrics %d\n", len(metrics))
 
 		_, _ = fmt.Fprint(w, b.String()) // write error: headers already sent, nothing to do
 	})

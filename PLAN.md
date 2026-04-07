@@ -7,25 +7,25 @@ Items ordered by priority within each tier.
 
 ## Tier 1 — Bugs & Resource Leaks
 
-| ID  | Component | Item                                                  | Status | Notes                                                                                                                                                                           |
-|-----|-----------|-------------------------------------------------------|--------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| B4  | clipsync  | `pullHTTP` HTTP body not closed on non-200            | FIXED  | Moved `defer resp.Body.Close()` before status check.                                                                                                                            |
-| B5  | clipsync  | `downloadFile` HTTP body not closed on non-200        | FIXED  | Same fix as B4. Also fixed nil error return on non-200.                                                                                                                          |
-| B6  | tunnel    | SSH agent socket FD never closed                      | FIXED  | `buildAuthMethods` now returns a cleanup function. Callers defer it.                                                                                                             |
-| B7  | filesync  | HTTP requests not context-aware; 10-min shutdown hang | FIXED  | All outgoing HTTP calls now use `http.NewRequestWithContext`. Context threaded through `sendIndex`, `postIndex`, `downloadFile`, `downloadFileDelta`.                             |
-| B8  | filesync  | `.mesh-delta-tmp` orphan files never cleaned          | FIXED  | `cleanTempFiles` now matches both `.mesh-tmp-` prefix and `.mesh-delta-tmp` suffix.                                                                                              |
-| B9  | proxy     | Relay accept loop missing backoff on EMFILE           | FIXED  | Added 50ms context-aware backoff, matching `ServeSocks` and `ServeHTTPProxy`.                                                                                                    |
-| B10 | tunnel    | `authFailuresByIP` grows without bound                | FIXED  | Changed value type to track `lastSeen` timestamp. `evictOldAuthFailures` runs alongside limiter eviction.                                                                        |
-| B11 | tunnel    | `limiter.Wait(context.Background())` holds goroutine  | FIXED  | Now uses server `ctx` so goroutines unblock on shutdown.                                                                                                                         |
-| B12 | tunnel    | Race: cancel-tcpip-forward vs listener registration   | FIXED  | Mutex now held across `net.Listen` + map insertion.                                                                                                                              |
-| B13 | tunnel    | Cleanup goroutines outlive listener; stale state      | FIXED  | `Delete`/`DeleteMetrics` moved to defer, runs on any exit path. `context.AfterFunc` replaces manual goroutine.                                                                   |
-| B14 | filesync  | Pending exchange `\|resp` cache never evicted         | FIXED  | Added periodic `evictStalePending` goroutine (1-minute interval) that cleans both upload and response caches older than `pendingTTL`.                                             |
-| B15 | filesync  | `http.Transport` not closed on shutdown               | FIXED  | `CloseIdleConnections()` called after `wg.Wait()`.                                                                                                                               |
-| B16 | state     | Components/metrics maps grow without bound            | OPEN   | Needs design decision: TTL, cap, or enforced pairing convention.                                                                                                                 |
-| B17 | filesync  | `out` file closed by defer, not before rename         | FIXED  | File explicitly closed before return so caller can rename on Windows.                                                                                                            |
-| B18 | shell     | Windows: SSH channel not closed on `cmd.Start` fail   | FIXED  | Added `closeCh()` call on Start failure, matching Unix behavior.                                                                                                                 |
-| FS6 | tunnel    | `CountedBiCopy` tx/rx labels swapped                  | FIXED  | Swapped counter assignment so tx counts a→b and rx counts b→a as documented.                                                                                                     |
-| B3  | clipsync  | Clipboard overwritten without user intent             | OPEN   | Needs design. No inbound write gate — any peer can push at any time.                                                                                                             |
+| ID  | Component | Item                                                  | Status | Notes                                                                                                                                                 |
+|-----|-----------|-------------------------------------------------------|--------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| B4  | clipsync  | `pullHTTP` HTTP body not closed on non-200            | FIXED  | Moved `defer resp.Body.Close()` before status check.                                                                                                  |
+| B5  | clipsync  | `downloadFile` HTTP body not closed on non-200        | FIXED  | Same fix as B4. Also fixed nil error return on non-200.                                                                                               |
+| B6  | tunnel    | SSH agent socket FD never closed                      | FIXED  | `buildAuthMethods` now returns a cleanup function. Callers defer it.                                                                                  |
+| B7  | filesync  | HTTP requests not context-aware; 10-min shutdown hang | FIXED  | All outgoing HTTP calls now use `http.NewRequestWithContext`. Context threaded through `sendIndex`, `postIndex`, `downloadFile`, `downloadFileDelta`. |
+| B8  | filesync  | `.mesh-delta-tmp` orphan files never cleaned          | FIXED  | `cleanTempFiles` now matches both `.mesh-tmp-` prefix and `.mesh-delta-tmp` suffix.                                                                   |
+| B9  | proxy     | Relay accept loop missing backoff on EMFILE           | FIXED  | Added 50ms context-aware backoff, matching `ServeSocks` and `ServeHTTPProxy`.                                                                         |
+| B10 | tunnel    | `authFailuresByIP` grows without bound                | FIXED  | Changed value type to track `lastSeen` timestamp. `evictOldAuthFailures` runs alongside limiter eviction.                                             |
+| B11 | tunnel    | `limiter.Wait(context.Background())` holds goroutine  | FIXED  | Now uses server `ctx` so goroutines unblock on shutdown.                                                                                              |
+| B12 | tunnel    | Race: cancel-tcpip-forward vs listener registration   | FIXED  | Mutex now held across `net.Listen` + map insertion.                                                                                                   |
+| B13 | tunnel    | Cleanup goroutines outlive listener; stale state      | FIXED  | `Delete`/`DeleteMetrics` moved to defer, runs on any exit path. `context.AfterFunc` replaces manual goroutine.                                        |
+| B14 | filesync  | Pending exchange `\|resp` cache never evicted         | FIXED  | Added periodic `evictStalePending` goroutine (1-minute interval) that cleans both upload and response caches older than `pendingTTL`.                 |
+| B15 | filesync  | `http.Transport` not closed on shutdown               | FIXED  | `CloseIdleConnections()` called after `wg.Wait()`.                                                                                                    |
+| B16 | state     | Components/metrics maps grow without bound            | OPEN   | Needs design decision: TTL, cap, or enforced pairing convention.                                                                                      |
+| B17 | filesync  | `out` file closed by defer, not before rename         | FIXED  | File explicitly closed before return so caller can rename on Windows.                                                                                 |
+| B18 | shell     | Windows: SSH channel not closed on `cmd.Start` fail   | FIXED  | Added `closeCh()` call on Start failure, matching Unix behavior.                                                                                      |
+| FS6 | tunnel    | `CountedBiCopy` tx/rx labels swapped                  | FIXED  | Swapped counter assignment so tx counts a→b and rx counts b→a as documented.                                                                          |
+| B3  | clipsync  | Clipboard overwritten without user intent             | OPEN   | Needs design. No inbound write gate — any peer can push at any time.                                                                                  |
 
 ---
 
@@ -55,7 +55,7 @@ Ordered by estimated value and complexity. Each needs design before implementati
 
 | ID  | Component | Item                    | Complexity  | Notes                                                                                                                                                                         |
 |-----|-----------|-------------------------|-------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| F15 | core      | Self-monitoring metrics | Low         | Expose open FD count, `runtime.NumGoroutine()`, state map sizes on `/api/metrics`. Log warning when thresholds exceeded. Lightweight — no new dependencies.                   |
+| F15 | core      | Self-monitoring metrics | DONE        | `/api/metrics` exposes `mesh_process_goroutines`, `mesh_process_open_fds` (Unix), `mesh_state_components`, `mesh_state_metrics`. Background self-monitor warns on threshold breach (30s interval). |
 | F13 | clipsync  | Payload size limit      | Low         | Network side partially capped (`maxRequestBodySize`). Gap: local clipboard read has no cap. A large image can OOM the sender. Add a per-format size check in `pollClipboard`. |
 | FS5 | filesync  | Outgoing delta index    | Medium      | `buildIndexExchange(folderID, 0)` always sends full index. Subsequent syncs could send only entries newer than `LastSentSequence`. Requires per-peer sent state tracking.     |
 | F7  | sshd      | Env var forwarding      | Low         | Handle `"env"` request type. Collect before `"shell"/"exec"`, apply configurable allowlist (`AcceptEnv`), append to `cmd.Env`.                                                |
@@ -159,3 +159,7 @@ exchange is unchanged (backward compatible).
 - gitignore vendor dir
 - show last clipboard activity (direction, size, mime, time)
 - clipsync - file/image copy support
+- add metrics page to the web ui
+- keep action history and show in the web ui (clipboard activity, file sync activity, past metrics
+  etc.)
+- Show all log in the web UI

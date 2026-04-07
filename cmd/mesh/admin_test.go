@@ -150,6 +150,15 @@ func TestAdminMetricsEndpoint(t *testing.T) {
 		{"active_streams value", `mesh_active_streams{type="server",id="admintest:22"} 3`},
 		{"uptime TYPE gauge", "# TYPE mesh_uptime_seconds gauge"},
 		{"auth_failures TYPE counter", "# TYPE mesh_auth_failures_total counter"},
+		{"goroutines HELP", "# HELP mesh_process_goroutines"},
+		{"goroutines TYPE gauge", "# TYPE mesh_process_goroutines gauge"},
+		{"goroutines value", "mesh_process_goroutines "},
+		{"state_components HELP", "# HELP mesh_state_components"},
+		{"state_components TYPE gauge", "# TYPE mesh_state_components gauge"},
+		{"state_components value", "mesh_state_components "},
+		{"state_metrics HELP", "# HELP mesh_state_metrics"},
+		{"state_metrics TYPE gauge", "# TYPE mesh_state_metrics gauge"},
+		{"state_metrics value", "mesh_state_metrics "},
 	}
 	for _, c := range checks {
 		if !strings.Contains(text, c.contain) {

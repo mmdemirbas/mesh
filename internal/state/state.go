@@ -152,6 +152,16 @@ func (s *State) DeleteMetrics(compType, id string) {
 	s.metrics.Delete(compType + ":" + id)
 }
 
+// Sizes returns the number of tracked components and metrics entries without
+// allocating snapshot copies.
+func (s *State) Sizes() (components, metrics int) {
+	s.mu.RLock()
+	components = len(s.components)
+	s.mu.RUnlock()
+	s.metrics.Range(func(_, _ any) bool { metrics++; return true })
+	return components, metrics
+}
+
 func (s *State) Snapshot() map[string]Component {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

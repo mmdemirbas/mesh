@@ -386,6 +386,8 @@ func upCmd(nodeNames []string, configPath string) {
 		}
 	}
 
+	go startSelfMonitor(ctx, log)
+
 	var wg sync.WaitGroup
 
 	// Start components for each node
