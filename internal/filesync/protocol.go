@@ -2,6 +2,7 @@ package filesync
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,6 +20,43 @@ import (
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
 	"google.golang.org/protobuf/proto"
 )
+
+func gzipEncode(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	if _, err := w.Write(data); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func gzipDecode(data []byte) ([]byte, error) {
+	r, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(r)
+}
+
+// writeProtoGzip marshals msg, gzip-compresses, and writes to w.
+func writeProtoGzip(w http.ResponseWriter, msg proto.Message) error {
+	data, err := proto.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	compressed, err := gzipEncode(data)
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	w.Header().Set("Content-Encoding", "gzip")
+	_, err = w.Write(compressed)
+	return err
+}
 
 const (
 	maxIndexPayload = 10 * 1024 * 1024 // 10 MB — per-page limit
@@ -114,6 +152,14 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.Header.Get("Content-Encoding") == "gzip" {
+		body, err = gzipDecode(body)
+		if err != nil {
+			http.Error(w, "decompress body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
 	var req pb.IndexExchange
 	if err := proto.Unmarshal(body, &req); err != nil {
 		http.Error(w, "invalid protobuf: "+err.Error(), http.StatusBadRequest)
@@ -146,14 +192,10 @@ func (s *server) handleSinglePageIndex(w http.ResponseWriter, req *pb.IndexExcha
 	slog.Debug("received index from peer", "folder", folderID, "files", len(req.GetFiles()))
 
 	resp := s.node.buildIndexExchange(folderID, req.GetSince())
-	data, err := proto.Marshal(resp)
-	if err != nil {
-		http.Error(w, "marshal response: "+err.Error(), http.StatusInternalServerError)
+	if err := writeProtoGzip(w, resp); err != nil {
+		http.Error(w, "write response: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/x-protobuf")
-	_, _ = w.Write(data)
 }
 
 // handleMultiPageIndex accumulates pages of a multi-page index upload.
@@ -233,14 +275,10 @@ func (s *server) handleMultiPageIndex(w http.ResponseWriter, req *pb.IndexExchan
 		"received_files", len(pe.files), "response_files", len(resp.GetFiles()),
 		"response_pages", len(respPages))
 
-	data, err := proto.Marshal(respPages[0])
-	if err != nil {
-		http.Error(w, "marshal response: "+err.Error(), http.StatusInternalServerError)
+	if err := writeProtoGzip(w, respPages[0]); err != nil {
+		http.Error(w, "write response: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/x-protobuf")
-	_, _ = w.Write(data)
 }
 
 // handleIndexFetch serves a cached response page to a peer that previously
@@ -264,19 +302,15 @@ func (s *server) handleIndexFetch(w http.ResponseWriter, req *pb.IndexExchange) 
 		return
 	}
 
-	data, err := proto.Marshal(pe.responsePages[page])
-	if err != nil {
-		http.Error(w, "marshal response page: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	// Clean up after the last page is served.
 	if int(page) == len(pe.responsePages)-1 {
 		s.pending.Delete(key)
 	}
 
-	w.Header().Set("Content-Type", "application/x-protobuf")
-	_, _ = w.Write(data)
+	if err := writeProtoGzip(w, pe.responsePages[page]); err != nil {
+		http.Error(w, "write response page: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 }
 
 // paginateResponse splits a server response IndexExchange into pages.
@@ -621,14 +655,20 @@ func fetchResponsePages(ctx context.Context, client *http.Client, peerAddr, clie
 	}, nil
 }
 
-// postIndex sends an index request and returns the parsed response.
+// postIndex sends a gzip-compressed index request and returns the parsed response.
 func postIndex(ctx context.Context, client *http.Client, peerAddr string, data []byte) (*pb.IndexExchange, error) {
+	compressed, err := gzipEncode(data)
+	if err != nil {
+		return nil, fmt.Errorf("compress index: %w", err)
+	}
+
 	u := fmt.Sprintf("http://%s/index", peerAddr)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(compressed))
 	if err != nil {
 		return nil, fmt.Errorf("create index request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-protobuf")
+	req.Header.Set("Content-Encoding", "gzip")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("post index to %s: %w", peerAddr, err)
@@ -650,6 +690,13 @@ func postIndex(ctx context.Context, client *http.Client, peerAddr string, data [
 		return &pb.IndexExchange{}, nil
 	}
 
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		respBody, err = gzipDecode(respBody)
+		if err != nil {
+			return nil, fmt.Errorf("decompress response from %s: %w", peerAddr, err)
+		}
+	}
+
 	var respIdx pb.IndexExchange
 	if err := proto.Unmarshal(respBody, &respIdx); err != nil {
 		return nil, fmt.Errorf("unmarshal response from %s: %w", peerAddr, err)
@@ -658,14 +705,20 @@ func postIndex(ctx context.Context, client *http.Client, peerAddr string, data [
 	return &respIdx, nil
 }
 
-// postIndexAck sends an index page and expects an empty ack (200 OK with no body).
+// postIndexAck sends a gzip-compressed index page and expects an empty ack.
 func postIndexAck(ctx context.Context, client *http.Client, peerAddr string, data []byte) error {
+	compressed, err := gzipEncode(data)
+	if err != nil {
+		return fmt.Errorf("compress index: %w", err)
+	}
+
 	u := fmt.Sprintf("http://%s/index", peerAddr)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(compressed))
 	if err != nil {
 		return fmt.Errorf("create index request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-protobuf")
+	req.Header.Set("Content-Encoding", "gzip")
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("post index to %s: %w", peerAddr, err)

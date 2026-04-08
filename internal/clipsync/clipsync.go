@@ -2,6 +2,7 @@ package clipsync
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -27,6 +28,27 @@ import (
 	pb "github.com/mmdemirbas/mesh/internal/clipsync/proto"
 	"github.com/mmdemirbas/mesh/internal/state"
 )
+
+func gzipEncode(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	if _, err := w.Write(data); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func gzipDecode(data []byte) ([]byte, error) {
+	r, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(r)
+}
 
 const (
 	Port         = 7755
@@ -331,11 +353,16 @@ func containsIP(slice []string, host string) bool {
 }
 
 func (n *Node) Broadcast(payload *pb.SyncPayload) {
-	data, _ := proto.Marshal(payload)
+	raw, _ := proto.Marshal(payload)
+	data, err := gzipEncode(raw)
+	if err != nil {
+		slog.Warn("Failed to compress clipboard payload", "error", err)
+		data = raw // fall back to uncompressed
+	}
 
-	// Record send activity.
+	// Record send activity (raw size for accurate metrics).
 	formats := extractFormatNames(payload)
-	n.recordActivity("send", int64(len(data)), formats, "")
+	n.recordActivity("send", int64(len(raw)), formats, "")
 
 	n.stateMu.Lock()
 	n.lastPayload = data
@@ -378,6 +405,7 @@ func (n *Node) postHTTP(addr string, data []byte) {
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/sync", addr), bytes.NewReader(data))
 	req.ContentLength = int64(len(data))
+	req.Header.Set("Content-Encoding", "gzip")
 	resp, err := n.httpClient.Do(req)
 	if err == nil {
 		_ = resp.Body.Close()
@@ -487,6 +515,13 @@ func (n *Node) pullHTTP(peerAddr string) {
 		slog.Debug("Failed to read pulled payload", "peer", cleanLogStr(peerAddr), "error", err) //nolint:gosec // G706: sanitized via cleanLogStr
 		return
 	}
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		body, err = gzipDecode(body)
+		if err != nil {
+			slog.Debug("Failed to decompress pulled payload", "peer", cleanLogStr(peerAddr), "error", err) //nolint:gosec // G706: sanitized via cleanLogStr
+			return
+		}
+	}
 	var p pb.SyncPayload
 	if err := proto.Unmarshal(body, &p); err != nil {
 		slog.Debug("Failed to decode pulled payload", "peer", cleanLogStr(peerAddr), "error", err) //nolint:gosec // G706: sanitized via cleanLogStr
@@ -517,6 +552,13 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 			}
 			return
 		}
+		if r.Header.Get("Content-Encoding") == "gzip" {
+			body, err = gzipDecode(body)
+			if err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+		}
 		var p pb.SyncPayload
 		if err := proto.Unmarshal(body, &p); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -546,6 +588,7 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 		}
 
 		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.Header().Set("Content-Encoding", "gzip")
 		_, _ = w.Write(data)
 	})
 

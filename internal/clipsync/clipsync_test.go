@@ -803,8 +803,12 @@ func TestBroadcast_SetsLastPayload(t *testing.T) {
 		t.Fatal("lastPayload not set after Broadcast")
 	}
 
+	decoded, err := gzipDecode(data)
+	if err != nil {
+		t.Fatalf("decompress lastPayload: %v", err)
+	}
 	var got pb.SyncPayload
-	if err := proto.Unmarshal(data, &got); err != nil {
+	if err := proto.Unmarshal(decoded, &got); err != nil {
 		t.Fatalf("unmarshal lastPayload: %v", err)
 	}
 	if len(got.GetFormats()) != 1 || string(got.GetFormats()[0].GetData()) != "test" {
@@ -844,8 +848,12 @@ func TestBroadcast_PushesToPeers(t *testing.T) {
 
 	select {
 	case received := <-receivedCh:
+		decoded, err := gzipDecode(received)
+		if err != nil {
+			t.Fatalf("decompress received: %v", err)
+		}
 		var got pb.SyncPayload
-		if err := proto.Unmarshal(received, &got); err != nil {
+		if err := proto.Unmarshal(decoded, &got); err != nil {
 			t.Fatalf("unmarshal received: %v", err)
 		}
 		if len(got.GetFormats()) != 1 || string(got.GetFormats()[0].GetData()) != "pushed" {
