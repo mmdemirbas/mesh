@@ -135,6 +135,9 @@ mynode:
       host_key: ~/.ssh/server_key
       authorized_keys: ~/.ssh/authorized_keys
       shell: ["bash", "-l"]
+      accept_env: ["LANG", "LC_*"]         # optional: env vars clients can set
+      banner: ~/.ssh/banner.txt            # optional: pre-auth banner file
+      motd: ~/.ssh/motd.txt                # optional: post-auth message of the day
 ```
 
 **Connections** — failover (default) or multiplex mode:
@@ -274,7 +277,7 @@ task clean          # remove build artifacts
 
 ### Testing
 
-620+ tests across 8 packages, all race-free:
+660+ tests across 8 packages, all race-free:
 
 ```bash
 go test -race -count=1 ./...
@@ -286,12 +289,13 @@ go test -race -count=1 ./...
 cmd/mesh/           CLI, dashboard, status rendering
 internal/
   config/           YAML config, validation
-  tunnel/           SSH client + server, forwarding
+  tunnel/           SSH client + server, forwarding, env, shell
   proxy/            SOCKS5 + HTTP proxy
   netutil/          TCP helpers (BiCopy, keepalive)
   clipsync/         Clipboard sync (UDP discovery, protobuf push/pull)
   filesync/         Folder sync (named peers, config defaults, delta index, block delta, bandwidth throttling)
-  state/            Thread-safe component state
+  state/            Thread-safe component state with TTL eviction
+configs/            Example YAML, production config, JSON schema
 ```
 
 See [CLAUDE.md](CLAUDE.md) for architecture details and conventions.

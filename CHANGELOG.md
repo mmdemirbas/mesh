@@ -29,6 +29,7 @@ First tracked release. Captures the current state of the project.
 - Total clipboard payload size limit (100 MB) to prevent OOM
 - SSH exit-signal reporting per RFC 4254 section 6.10
 - Windows shell defaults to pwsh.exe (modern PowerShell)
+- Outgoing delta index: subsequent syncs send only entries newer than last sent sequence per peer
 
 ### Changed
 - Clipsync config simplified: `lan_discovery` (bool) + `group` (string) replaced by `lan_discovery_group` (list of strings). `allow_send_to` and `allow_receive` removed.
