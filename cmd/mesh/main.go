@@ -25,6 +25,7 @@ import (
 	"github.com/mmdemirbas/mesh/internal/clipsync"
 	"github.com/mmdemirbas/mesh/internal/config"
 	"github.com/mmdemirbas/mesh/internal/filesync"
+	"github.com/mmdemirbas/mesh/internal/gateway"
 	"github.com/mmdemirbas/mesh/internal/proxy"
 	"github.com/mmdemirbas/mesh/internal/state"
 	"github.com/mmdemirbas/mesh/internal/tunnel"
@@ -469,6 +470,18 @@ func upCmd(nodeNames []string, configPath string) {
 				defer wg.Done()
 				if err := filesync.Start(ctx, fs); err != nil {
 					log.Error("Filesync failed to start", "error", err)
+				}
+			}()
+		}
+
+		// 5. Gateway
+		for _, gw := range cfg.Gateway {
+			gw := gw
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := gateway.Start(ctx, gw, log); err != nil {
+					log.Error("Gateway failed to start", "name", gw.Name, "error", err)
 				}
 			}()
 		}
