@@ -16,6 +16,15 @@ import (
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
+const (
+	// maxRequestBodySize caps incoming request bodies (32 MB).
+	maxRequestBodySize = 32 * 1024 * 1024
+	// maxUpstreamResponseSize caps non-streaming upstream response bodies (64 MB).
+	maxUpstreamResponseSize = 64 * 1024 * 1024
+	// maxSSELineSize caps individual SSE lines during streaming (4 MB).
+	maxSSELineSize = 4 * 1024 * 1024
+)
+
 // Start launches a gateway HTTP server that translates between Anthropic and
 // OpenAI API formats. It blocks until ctx is cancelled.
 func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
@@ -105,9 +114,9 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 	metrics := state.Global.GetMetrics("gateway", cfg.Name)
 	start := time.Now()
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
 	if err != nil {
-		writeAnthropicError(w, 400, "cannot read request body")
+		writeAnthropicError(w, 413, "request body too large")
 		return
 	}
 	metrics.BytesRx.Add(int64(len(body)))
@@ -145,13 +154,13 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 
 	upstreamResp, err := client.Do(upstreamReq)
 	if err != nil {
-		writeAnthropicError(w, 502, "upstream request failed: "+err.Error())
+		writeAnthropicError(w, 502, "upstream request failed")
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
 		return
 	}
 	defer upstreamResp.Body.Close()
 
-	respBody, err := io.ReadAll(upstreamResp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(upstreamResp.Body, maxUpstreamResponseSize))
 	if err != nil {
 		writeAnthropicError(w, 502, "cannot read upstream response")
 		return
@@ -159,8 +168,8 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 
 	if upstreamResp.StatusCode != http.StatusOK {
 		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, cfg.Mode)
-		writeAnthropicError(w, status, string(respBody))
-		log.Warn("Upstream error", "status", upstreamResp.StatusCode, "elapsed", time.Since(start))
+		writeAnthropicError(w, status, "upstream error")
+		log.Warn("Upstream error", "status", upstreamResp.StatusCode, "body", string(respBody), "elapsed", time.Since(start))
 		return
 	}
 
@@ -196,9 +205,9 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 	metrics := state.Global.GetMetrics("gateway", cfg.Name)
 	start := time.Now()
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
 	if err != nil {
-		writeOpenAIError(w, 400, "cannot read request body")
+		writeOpenAIError(w, 413, "request body too large")
 		return
 	}
 	metrics.BytesRx.Add(int64(len(body)))
@@ -237,13 +246,13 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 
 	upstreamResp, err := client.Do(upstreamReq)
 	if err != nil {
-		writeOpenAIError(w, 502, "upstream request failed: "+err.Error())
+		writeOpenAIError(w, 502, "upstream request failed")
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
 		return
 	}
 	defer upstreamResp.Body.Close()
 
-	respBody, err := io.ReadAll(upstreamResp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(upstreamResp.Body, maxUpstreamResponseSize))
 	if err != nil {
 		writeOpenAIError(w, 502, "cannot read upstream response")
 		return
@@ -251,8 +260,8 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 
 	if upstreamResp.StatusCode != http.StatusOK {
 		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, cfg.Mode)
-		writeOpenAIError(w, status, string(respBody))
-		log.Warn("Upstream error", "status", upstreamResp.StatusCode, "elapsed", time.Since(start))
+		writeOpenAIError(w, status, "upstream error")
+		log.Warn("Upstream error", "status", upstreamResp.StatusCode, "body", string(respBody), "elapsed", time.Since(start))
 		return
 	}
 

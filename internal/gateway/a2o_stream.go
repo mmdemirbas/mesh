@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -40,10 +41,10 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 	defer upstreamResp.Body.Close()
 
 	if upstreamResp.StatusCode != http.StatusOK {
-		body := make([]byte, 4096)
-		n, _ := upstreamResp.Body.Read(body)
+		errBody, _ := io.ReadAll(io.LimitReader(upstreamResp.Body, 4096))
 		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, cfg.Mode)
-		writeAnthropicError(w, status, string(body[:n]))
+		writeAnthropicError(w, status, "upstream error")
+		log.Warn("Upstream stream error", "status", upstreamResp.StatusCode, "body", string(errBody))
 		return
 	}
 
@@ -69,6 +70,7 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 	st.emitMessageStart()
 
 	scanner := bufio.NewScanner(upstreamResp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxSSELineSize)
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -90,10 +92,13 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 		st.processChunk(&chunk)
 	}
 
+	if err := scanner.Err(); err != nil {
+		log.Warn("SSE scanner error", "error", err)
+	}
+
 	// Finalize.
 	st.finalize()
 
-	metrics.Streams.Add(1)
 	log.Info("Stream completed", "model", clientModel, "elapsed", time.Since(start))
 }
 

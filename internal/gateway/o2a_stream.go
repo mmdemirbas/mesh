@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -41,10 +42,10 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 	defer upstreamResp.Body.Close()
 
 	if upstreamResp.StatusCode != http.StatusOK {
-		body := make([]byte, 4096)
-		n, _ := upstreamResp.Body.Read(body)
+		errBody, _ := io.ReadAll(io.LimitReader(upstreamResp.Body, 4096))
 		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, cfg.Mode)
-		writeOpenAIError(w, status, string(body[:n]))
+		writeOpenAIError(w, status, "upstream error")
+		log.Warn("Upstream stream error", "status", upstreamResp.StatusCode, "body", string(errBody))
 		return
 	}
 
@@ -70,6 +71,7 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 	}
 
 	scanner := bufio.NewScanner(upstreamResp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxSSELineSize)
 	var eventType string
 
 	for scanner.Scan() {
@@ -94,10 +96,13 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 		st.processEvent(eventType, &event)
 	}
 
+	if err := scanner.Err(); err != nil {
+		log.Warn("SSE scanner error", "error", err)
+	}
+
 	// Finalize.
 	st.finalize()
 
-	metrics.Streams.Add(1)
 	log.Info("Stream completed", "model", clientModel, "elapsed", time.Since(start))
 }
 
@@ -110,6 +115,7 @@ type o2aStreamState struct {
 	includeUsage bool
 
 	toolIndex    int
+	inToolBlock  bool
 	sentFirst    bool
 	finishReason string
 	usage        *OpenAIUsage
@@ -133,6 +139,7 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 		if event.ContentBlock != nil {
 			switch event.ContentBlock.Type {
 			case "tool_use":
+				s.inToolBlock = true
 				// Emit tool call start.
 				s.emitChunk(OpenAIChunkChoice{
 					Index: 0,
@@ -150,8 +157,10 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 				}, nil)
 			case "thinking":
 				// Drop.
+				s.inToolBlock = false
+			default:
+				s.inToolBlock = false
 			}
-			// text block start: no output needed for OpenAI.
 		}
 
 	case "content_block_delta":
@@ -180,8 +189,10 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 		}
 
 	case "content_block_stop":
-		// Check if the previous block was a tool — increment index.
-		s.toolIndex++
+		if s.inToolBlock {
+			s.toolIndex++
+			s.inToolBlock = false
+		}
 
 	case "message_delta":
 		if event.Delta != nil && event.Delta.StopReason != "" {

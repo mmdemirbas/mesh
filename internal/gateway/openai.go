@@ -161,7 +161,7 @@ type OpenAIChunkToolCall struct {
 	Index    int                    `json:"index"`
 	ID       string                 `json:"id,omitempty"`
 	Type     string                 `json:"type,omitempty"` // "function"
-	Function OpenAIChunkFuncCall    `json:"function,omitzero"`
+	Function OpenAIChunkFuncCall    `json:"function"`
 }
 
 // OpenAIChunkFuncCall holds partial function data in a streaming chunk.
