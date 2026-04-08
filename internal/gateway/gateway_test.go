@@ -403,6 +403,193 @@ func TestGateway_UpstreamError_ResponseFormat(t *testing.T) {
 	cancel()
 }
 
+func TestGateway_A2O_InvalidJSON(t *testing.T) {
+	cfg := GatewayCfg{
+		Name:     "test-bad-json",
+		Bind:     "127.0.0.1:0",
+		Mode:     ModeAnthropicToOpenAI,
+		Upstream: "http://localhost:9999",
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Bind = ln.Addr().String()
+	ln.Close()
+
+	go func() { Start(ctx, cfg, slog.Default()) }() //nolint:errcheck
+	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+
+	resp, err := http.Post("http://"+cfg.Bind+"/v1/messages", "application/json", strings.NewReader(`{bad json`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+
+	cancel()
+}
+
+func TestGateway_O2A_InvalidJSON(t *testing.T) {
+	cfg := GatewayCfg{
+		Name:     "test-bad-json-o2a",
+		Bind:     "127.0.0.1:0",
+		Mode:     ModeOpenAIToAnthropic,
+		Upstream: "http://localhost:9999",
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Bind = ln.Addr().String()
+	ln.Close()
+
+	go func() { Start(ctx, cfg, slog.Default()) }() //nolint:errcheck
+	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+
+	resp, err := http.Post("http://"+cfg.Bind+"/v1/chat/completions", "application/json", strings.NewReader(`not json`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+
+	cancel()
+}
+
+func TestGateway_A2O_UpstreamConnectionFailure(t *testing.T) {
+	// Upstream on a port that refuses connections.
+	cfg := GatewayCfg{
+		Name:     "test-conn-fail",
+		Bind:     "127.0.0.1:0",
+		Mode:     ModeAnthropicToOpenAI,
+		Upstream: "http://127.0.0.1:1", // port 1 — connection refused
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Bind = ln.Addr().String()
+	ln.Close()
+
+	go func() { Start(ctx, cfg, slog.Default()) }() //nolint:errcheck
+	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+
+	reqBody := `{"model":"claude-sonnet-4-6","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}`
+	resp, err := http.Post("http://"+cfg.Bind+"/v1/messages", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 502 {
+		t.Errorf("status = %d, want 502", resp.StatusCode)
+	}
+
+	cancel()
+}
+
+func TestGateway_A2O_StreamUpstreamError(t *testing.T) {
+	// Upstream returns 500 for a streaming request.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(500)
+		w.Write([]byte(`{"error":"internal"}`)) //nolint:errcheck
+	}))
+	defer upstream.Close()
+
+	cfg := GatewayCfg{
+		Name:     "test-stream-err",
+		Bind:     "127.0.0.1:0",
+		Mode:     ModeAnthropicToOpenAI,
+		Upstream: upstream.URL,
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Bind = ln.Addr().String()
+	ln.Close()
+
+	go func() { Start(ctx, cfg, slog.Default()) }() //nolint:errcheck
+	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+
+	reqBody := `{"model":"claude-sonnet-4-6","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"Hi"}]}`
+	resp, err := http.Post("http://"+cfg.Bind+"/v1/messages", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 500 {
+		t.Errorf("status = %d, want 500", resp.StatusCode)
+	}
+
+	cancel()
+}
+
+func TestGateway_O2A_StreamUpstreamError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(429)
+		w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"too fast"}}`)) //nolint:errcheck
+	}))
+	defer upstream.Close()
+
+	cfg := GatewayCfg{
+		Name:     "test-stream-err-o2a",
+		Bind:     "127.0.0.1:0",
+		Mode:     ModeOpenAIToAnthropic,
+		Upstream: upstream.URL,
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Bind = ln.Addr().String()
+	ln.Close()
+
+	go func() { Start(ctx, cfg, slog.Default()) }() //nolint:errcheck
+	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+
+	reqBody := `{"model":"gpt-4o","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"Hi"}]}`
+	resp, err := http.Post("http://"+cfg.Bind+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 429 {
+		t.Errorf("status = %d, want 429", resp.StatusCode)
+	}
+
+	cancel()
+}
+
 // waitForHTTP polls a URL until it returns 200 or the timeout expires.
 func waitForHTTP(t *testing.T, url string, timeout time.Duration) {
 	t.Helper()
