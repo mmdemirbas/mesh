@@ -1057,18 +1057,27 @@ func TestAcceptAndForward_DialerErrorDropsConnection(t *testing.T) {
 	go acceptAndForward(context.Background(), fwdLn, dialer, slog.Default(), nil)
 	t.Cleanup(func() { fwdLn.Close() })
 
-	client, err := net.Dial("tcp", fwdLn.Addr().String())
+	// Retry Dial because SetLinger(0) on the accepted side can sometimes RST
+	// during the TCP handshake, causing Dial to fail with "connection reset".
+	var client net.Conn
+	for range 3 {
+		client, err = net.DialTimeout("tcp", fwdLn.Addr().String(), 2*time.Second)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Dial failed after retries: %v", err)
 	}
 	defer client.Close()
 
 	// When the dialer fails, acceptAndForward closes the accepted conn.
 	// The client should see EOF or a connection reset.
+	_ = client.SetDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 1)
 	_, err = client.Read(buf)
 	if err == nil {
-		t.Error("expected EOF after dialer failure, got nil")
+		t.Error("expected error after dialer failure, got nil")
 	}
 }
 

@@ -2,9 +2,13 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -280,6 +284,77 @@ func TestServeHTTPProxy_CONNECT(t *testing.T) {
 	got, _ := io.ReadAll(conn)
 	if string(got) != string(testData) {
 		t.Errorf("tunneled data got %q, want %q", got, testData)
+	}
+}
+
+func TestServeHTTPProxy_NonCONNECT(t *testing.T) {
+	// Target HTTP server that echoes the request method and path.
+	targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Echo", r.Method+" "+r.URL.Path)
+		_, _ = w.Write([]byte("proxied"))
+	}))
+	defer targetSrv.Close()
+
+	// HTTP proxy
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = proxyLn.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go ServeHTTPProxy(ctx, proxyLn, "", slog.Default(), nil)
+
+	// Send a plain HTTP GET through the proxy (non-CONNECT path).
+	conn, err := net.DialTimeout("tcp", proxyLn.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	req := "GET " + targetSrv.URL + "/test HTTP/1.1\r\nHost: " + strings.TrimPrefix(targetSrv.URL, "http://") + "\r\nConnection: close\r\n\r\n"
+	_, _ = conn.Write([]byte(req))
+
+	got, _ := io.ReadAll(conn)
+	resp := string(got)
+	if !strings.Contains(resp, "200") {
+		t.Fatalf("expected 200 response, got: %s", resp)
+	}
+	if !strings.Contains(resp, "proxied") {
+		t.Errorf("response body missing expected content, got: %s", resp)
+	}
+}
+
+func TestServeHTTPProxy_NonCONNECT_DialFailure(t *testing.T) {
+	// Proxy with a dialer that always fails
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = proxyLn.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dialer := func(addr string) (net.Conn, error) {
+		return nil, fmt.Errorf("simulated dial failure")
+	}
+	go ServeHTTPProxyWithDialer(ctx, proxyLn, dialer, slog.Default(), nil)
+
+	conn, err := net.DialTimeout("tcp", proxyLn.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	req := "GET http://unreachable.test/path HTTP/1.1\r\nHost: unreachable.test\r\nConnection: close\r\n\r\n"
+	_, _ = conn.Write([]byte(req))
+
+	got, _ := io.ReadAll(conn)
+	if !strings.Contains(string(got), "502") {
+		t.Errorf("expected 502 Bad Gateway, got: %s", string(got))
 	}
 }
 
