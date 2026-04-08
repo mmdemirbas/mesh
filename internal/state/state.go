@@ -1,9 +1,20 @@
 package state
 
 import (
+	"context"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
+)
+
+const (
+	// evictionInterval controls how often the background goroutine sweeps for stale entries.
+	evictionInterval = 5 * time.Minute
+
+	// componentTTL is how long a component entry survives without an Update call.
+	// Active components refresh on every state change; stale orphans get cleaned up.
+	componentTTL = 1 * time.Hour
 )
 
 type Status string
@@ -28,14 +39,15 @@ type Metrics struct {
 }
 
 type Component struct {
-	Type      string    `json:"type"`                 // "proxy", "relay", "server", "connection"
-	ID        string    `json:"id"`                   // unique identifier
-	Status    Status    `json:"status"`               // current status
-	Message   string    `json:"message"`              // error or target info
-	BoundAddr string    `json:"bound_addr"`           // active resolved listener address
-	PeerAddr  string    `json:"peer_addr"`            // resolved remote peer address (connections)
-	FileCount int       `json:"file_count,omitempty"` // tracked file count (filesync folders)
-	LastSync  time.Time `json:"last_sync,omitempty"`  // last successful sync time (filesync)
+	Type        string    `json:"type"`                 // "proxy", "relay", "server", "connection"
+	ID          string    `json:"id"`                   // unique identifier
+	Status      Status    `json:"status"`               // current status
+	Message     string    `json:"message"`              // error or target info
+	BoundAddr   string    `json:"bound_addr"`           // active resolved listener address
+	PeerAddr    string    `json:"peer_addr"`            // resolved remote peer address (connections)
+	FileCount   int       `json:"file_count,omitempty"` // tracked file count (filesync folders)
+	LastSync    time.Time `json:"last_sync,omitempty"`  // last successful sync time (filesync)
+	LastUpdated time.Time `json:"last_updated"`         // used by TTL eviction
 }
 
 type State struct {
@@ -57,6 +69,7 @@ func (s *State) Update(compType, id string, status Status, msg string) {
 	comp.ID = id
 	comp.Status = status
 	comp.Message = msg
+	comp.LastUpdated = time.Now()
 	s.components[key] = comp
 }
 
@@ -66,6 +79,7 @@ func (s *State) UpdateBind(compType, id, boundAddr string) {
 	key := compType + ":" + id
 	comp := s.components[key]
 	comp.BoundAddr = boundAddr
+	comp.LastUpdated = time.Now()
 	s.components[key] = comp
 }
 
@@ -75,6 +89,7 @@ func (s *State) UpdatePeer(compType, id, peerAddr string) {
 	key := compType + ":" + id
 	comp := s.components[key]
 	comp.PeerAddr = peerAddr
+	comp.LastUpdated = time.Now()
 	s.components[key] = comp
 }
 
@@ -84,6 +99,7 @@ func (s *State) UpdateFileCount(compType, id string, count int) {
 	key := compType + ":" + id
 	comp := s.components[key]
 	comp.FileCount = count
+	comp.LastUpdated = time.Now()
 	s.components[key] = comp
 }
 
@@ -93,6 +109,7 @@ func (s *State) UpdateLastSync(compType, id string, t time.Time) {
 	key := compType + ":" + id
 	comp := s.components[key]
 	comp.LastSync = t
+	comp.LastUpdated = time.Now()
 	s.components[key] = comp
 }
 
@@ -170,4 +187,44 @@ func (s *State) Snapshot() map[string]Component {
 		m[k] = v
 	}
 	return m
+}
+
+// StartEviction runs a background goroutine that periodically removes stale
+// component and metric entries. It stops when ctx is cancelled.
+func (s *State) StartEviction(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(evictionInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.evictStale(time.Now())
+			}
+		}
+	}()
+}
+
+// evictStale removes components not updated within componentTTL and their orphaned metrics.
+func (s *State) evictStale(now time.Time) {
+	cutoff := now.Add(-componentTTL)
+
+	s.mu.Lock()
+	var evicted []string
+	for key, comp := range s.components {
+		if !comp.LastUpdated.IsZero() && comp.LastUpdated.Before(cutoff) {
+			delete(s.components, key)
+			evicted = append(evicted, key)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, key := range evicted {
+		s.metrics.Delete(key)
+	}
+
+	if len(evicted) > 0 {
+		slog.Debug("evicted stale state entries", "count", len(evicted))
+	}
 }

@@ -351,6 +351,8 @@ func upCmd(nodeNames []string, configPath string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	state.Global.StartEviction(ctx)
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)

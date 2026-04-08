@@ -3,6 +3,7 @@ package state
 import (
 	"sync"
 	"testing"
+	"time"
 )
 
 func newState() *State {
@@ -278,6 +279,56 @@ func TestSizes_AfterDelete(t *testing.T) {
 	}
 	if mets != 0 {
 		t.Errorf("metrics = %d, want 0", mets)
+	}
+}
+
+func TestEvictStale_RemovesOldEntries(t *testing.T) {
+	s := newState()
+	s.Update("proxy", "old", Listening, "")
+	s.Update("proxy", "fresh", Listening, "")
+
+	// Manually backdate the "old" component.
+	s.mu.Lock()
+	comp := s.components["proxy:old"]
+	comp.LastUpdated = time.Now().Add(-2 * componentTTL)
+	s.components["proxy:old"] = comp
+	s.mu.Unlock()
+
+	// Also create metrics for both.
+	s.GetMetrics("proxy", "old")
+	s.GetMetrics("proxy", "fresh")
+
+	s.evictStale(time.Now())
+
+	snap := s.Snapshot()
+	if _, ok := snap["proxy:old"]; ok {
+		t.Error("stale component should have been evicted")
+	}
+	if _, ok := snap["proxy:fresh"]; !ok {
+		t.Error("fresh component should remain")
+	}
+
+	mSnap := s.SnapshotMetrics()
+	if _, ok := mSnap["proxy:old"]; ok {
+		t.Error("metrics for stale component should have been evicted")
+	}
+	if _, ok := mSnap["proxy:fresh"]; !ok {
+		t.Error("metrics for fresh component should remain")
+	}
+}
+
+func TestEvictStale_SkipsZeroLastUpdated(t *testing.T) {
+	s := newState()
+	// Directly inject a component with zero LastUpdated (legacy).
+	s.mu.Lock()
+	s.components["proxy:legacy"] = Component{Type: "proxy", ID: "legacy", Status: Listening}
+	s.mu.Unlock()
+
+	s.evictStale(time.Now())
+
+	snap := s.Snapshot()
+	if _, ok := snap["proxy:legacy"]; !ok {
+		t.Error("component with zero LastUpdated should not be evicted")
 	}
 }
 
