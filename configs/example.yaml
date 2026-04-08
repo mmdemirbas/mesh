@@ -33,7 +33,7 @@ my-vps-tunnel-service:
   # Endpoints: /ui (dashboard), /ui/filesync, /api/state, /api/logs, /api/metrics.
   # Default: "127.0.0.1:7777" (localhost only).
   # Set to "off" to disable entirely.
-  # admin_addr: "127.0.0.1:7777"
+  admin_addr: "127.0.0.1:7777"
 
   # ==============================================================================
   # 1. Clipboard Synchronization
