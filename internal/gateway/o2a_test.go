@@ -1,0 +1,463 @@
+package gateway
+
+import (
+	"encoding/json"
+	"testing"
+)
+
+func TestTranslateOpenAIRequest_SimpleText(t *testing.T) {
+	cfg := &GatewayCfg{ModelMap: map[string]string{"gpt-4o": "claude-sonnet-4-6"}}
+	maxTok := 1024
+	req := &ChatCompletionRequest{
+		Model:     "gpt-4o",
+		MaxTokens: &maxTok,
+		Messages: []OpenAIMsg{
+			{Role: "user", Content: json.RawMessage(`"Hello"`)},
+		},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Model != "claude-sonnet-4-6" {
+		t.Errorf("model = %q, want claude-sonnet-4-6", out.Model)
+	}
+	if out.MaxTokens != 1024 {
+		t.Errorf("max_tokens = %d, want 1024", out.MaxTokens)
+	}
+	if len(out.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(out.Messages))
+	}
+}
+
+func TestTranslateOpenAIRequest_SystemExtraction(t *testing.T) {
+	cfg := &GatewayCfg{}
+	req := &ChatCompletionRequest{
+		Model: "gpt-4o",
+		Messages: []OpenAIMsg{
+			{Role: "system", Content: json.RawMessage(`"You are helpful."`)},
+			{Role: "system", Content: json.RawMessage(`"Be concise."`)},
+			{Role: "user", Content: json.RawMessage(`"Hi"`)},
+		},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var sysText string
+	json.Unmarshal(out.System, &sysText)
+	if sysText != "You are helpful.\n\nBe concise." {
+		t.Errorf("system = %q", sysText)
+	}
+	if len(out.Messages) != 1 {
+		t.Errorf("messages = %d, want 1 (system extracted)", len(out.Messages))
+	}
+}
+
+func TestTranslateOpenAIRequest_DefaultMaxTokens(t *testing.T) {
+	cfg := &GatewayCfg{DefaultMaxTokens: 16384}
+	req := &ChatCompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []OpenAIMsg{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.MaxTokens != 16384 {
+		t.Errorf("max_tokens = %d, want 16384", out.MaxTokens)
+	}
+}
+
+func TestTranslateOpenAIRequest_TemperatureClamping(t *testing.T) {
+	cfg := &GatewayCfg{}
+	temp := 1.5
+	req := &ChatCompletionRequest{
+		Model:       "gpt-4o",
+		Temperature: &temp,
+		Messages:    []OpenAIMsg{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *out.Temperature != 1.0 {
+		t.Errorf("temperature = %f, want 1.0", *out.Temperature)
+	}
+}
+
+func TestTranslateOpenAIRequest_TemperaturePassthrough(t *testing.T) {
+	cfg := &GatewayCfg{}
+	temp := 0.7
+	req := &ChatCompletionRequest{
+		Model:       "gpt-4o",
+		Temperature: &temp,
+		Messages:    []OpenAIMsg{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *out.Temperature != 0.7 {
+		t.Errorf("temperature = %f, want 0.7", *out.Temperature)
+	}
+}
+
+func TestTranslateOpenAIRequest_ConsecutiveSameRole(t *testing.T) {
+	cfg := &GatewayCfg{}
+	req := &ChatCompletionRequest{
+		Model: "gpt-4o",
+		Messages: []OpenAIMsg{
+			{Role: "user", Content: json.RawMessage(`"First"`)},
+			{Role: "user", Content: json.RawMessage(`"Second"`)},
+		},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1 (merged)", len(out.Messages))
+	}
+	// The merged message should contain both text blocks.
+	var blocks []ContentBlock
+	json.Unmarshal(out.Messages[0].Content, &blocks)
+	if len(blocks) != 2 {
+		t.Errorf("blocks = %d, want 2", len(blocks))
+	}
+}
+
+func TestTranslateOpenAIRequest_ToolMessages(t *testing.T) {
+	cfg := &GatewayCfg{}
+	req := &ChatCompletionRequest{
+		Model: "gpt-4o",
+		Messages: []OpenAIMsg{
+			{Role: "user", Content: json.RawMessage(`"use the tool"`)},
+			{Role: "assistant", Content: nil, ToolCalls: []OpenAIToolCall{
+				{ID: "call_1", Type: "function", Function: OpenAIFuncCall{Name: "read", Arguments: `{"path":"x"}`}},
+			}},
+			{Role: "tool", Content: json.RawMessage(`"file contents"`), ToolCallID: "call_1"},
+		},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3", len(out.Messages))
+	}
+	// Third message should be user with tool_result.
+	if out.Messages[2].Role != "user" {
+		t.Errorf("role = %q, want user", out.Messages[2].Role)
+	}
+	var blocks []ContentBlock
+	json.Unmarshal(out.Messages[2].Content, &blocks)
+	if len(blocks) != 1 || blocks[0].Type != "tool_result" {
+		t.Errorf("blocks = %v", blocks)
+	}
+	if blocks[0].ToolUseID != "call_1" {
+		t.Errorf("tool_use_id = %q, want call_1", blocks[0].ToolUseID)
+	}
+}
+
+func TestTranslateOpenAIRequest_ImageURL(t *testing.T) {
+	cfg := &GatewayCfg{}
+	content := `[{"type":"text","text":"What is this?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,abc123"}}]`
+	req := &ChatCompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []OpenAIMsg{{Role: "user", Content: json.RawMessage(content)}},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var blocks []ContentBlock
+	json.Unmarshal(out.Messages[0].Content, &blocks)
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %d, want 2", len(blocks))
+	}
+	if blocks[1].Type != "image" {
+		t.Errorf("type = %q, want image", blocks[1].Type)
+	}
+	if blocks[1].Source.MediaType != "image/png" {
+		t.Errorf("media_type = %q, want image/png", blocks[1].Source.MediaType)
+	}
+	if blocks[1].Source.Data != "abc123" {
+		t.Errorf("data = %q, want abc123", blocks[1].Source.Data)
+	}
+}
+
+func TestTranslateOpenAIRequest_ToolChoiceAll(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{`"auto"`, `{"type":"auto"}`},
+		{`"none"`, `{"type":"none"}`},
+		{`"required"`, `{"type":"any"}`},
+		{`{"type":"function","function":{"name":"read"}}`, `{"type":"tool","name":"read"}`},
+	}
+
+	for _, tt := range tests {
+		result, err := translateOpenAIToolChoice(json.RawMessage(tt.input))
+		if err != nil {
+			t.Errorf("input %s: %v", tt.input, err)
+			continue
+		}
+		got := string(result)
+		if got != tt.want {
+			t.Errorf("input %s: got %s, want %s", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestTranslateOpenAIRequest_StopString(t *testing.T) {
+	cfg := &GatewayCfg{}
+	req := &ChatCompletionRequest{
+		Model:    "gpt-4o",
+		Stop:     json.RawMessage(`"END"`),
+		Messages: []OpenAIMsg{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.StopSequences) != 1 || out.StopSequences[0] != "END" {
+		t.Errorf("stop = %v, want [END]", out.StopSequences)
+	}
+}
+
+func TestTranslateOpenAIRequest_StopArray(t *testing.T) {
+	cfg := &GatewayCfg{}
+	req := &ChatCompletionRequest{
+		Model:    "gpt-4o",
+		Stop:     json.RawMessage(`["END","STOP"]`),
+		Messages: []OpenAIMsg{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.StopSequences) != 2 {
+		t.Errorf("stop = %v, want [END, STOP]", out.StopSequences)
+	}
+}
+
+func TestTranslateOpenAIRequest_Tools(t *testing.T) {
+	cfg := &GatewayCfg{}
+	req := &ChatCompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []OpenAIMsg{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+		Tools: []OpenAITool{
+			{
+				Type: "function",
+				Function: OpenAIFunction{
+					Name:        "read_file",
+					Description: "Read a file",
+					Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+				},
+			},
+		},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Tools) != 1 {
+		t.Fatalf("tools = %d, want 1", len(out.Tools))
+	}
+	if out.Tools[0].Name != "read_file" {
+		t.Errorf("name = %q, want read_file", out.Tools[0].Name)
+	}
+}
+
+func TestTranslateOpenAIRequest_User(t *testing.T) {
+	cfg := &GatewayCfg{}
+	req := &ChatCompletionRequest{
+		Model:    "gpt-4o",
+		User:     "user-123",
+		Messages: []OpenAIMsg{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Metadata == nil || out.Metadata.UserID != "user-123" {
+		t.Errorf("metadata.user_id = %v", out.Metadata)
+	}
+}
+
+// --- Response tests ---
+
+func TestTranslateAnthropicResponse_SimpleText(t *testing.T) {
+	resp := &MessagesResponse{
+		ID:         "msg_123",
+		Type:       "message",
+		Role:       "assistant",
+		Model:      "claude-sonnet-4-6",
+		StopReason: "end_turn",
+		Content: []ContentBlock{
+			{Type: "text", Text: "Hello there"},
+		},
+		Usage: AnthropicUsage{InputTokens: 10, OutputTokens: 5},
+	}
+
+	out, err := translateAnthropicResponse(resp, "gpt-4o")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if out.Object != "chat.completion" {
+		t.Errorf("object = %q, want chat.completion", out.Object)
+	}
+	if out.Model != "gpt-4o" {
+		t.Errorf("model = %q, want gpt-4o", out.Model)
+	}
+	if len(out.Choices) != 1 {
+		t.Fatalf("choices = %d, want 1", len(out.Choices))
+	}
+	if out.Choices[0].FinishReason != "stop" {
+		t.Errorf("finish_reason = %q, want stop", out.Choices[0].FinishReason)
+	}
+	var text string
+	json.Unmarshal(out.Choices[0].Message.Content, &text)
+	if text != "Hello there" {
+		t.Errorf("content = %q, want 'Hello there'", text)
+	}
+	if out.Usage.PromptTokens != 10 {
+		t.Errorf("prompt_tokens = %d, want 10", out.Usage.PromptTokens)
+	}
+	if out.Usage.CompletionTokens != 5 {
+		t.Errorf("completion_tokens = %d, want 5", out.Usage.CompletionTokens)
+	}
+	if out.Usage.TotalTokens != 15 {
+		t.Errorf("total_tokens = %d, want 15", out.Usage.TotalTokens)
+	}
+}
+
+func TestTranslateAnthropicResponse_ToolUse(t *testing.T) {
+	resp := &MessagesResponse{
+		ID:         "msg_456",
+		Type:       "message",
+		Role:       "assistant",
+		StopReason: "tool_use",
+		Content: []ContentBlock{
+			{Type: "tool_use", ID: "call_1", Name: "read", Input: json.RawMessage(`{"path":"x"}`)},
+		},
+		Usage: AnthropicUsage{InputTokens: 20, OutputTokens: 10},
+	}
+
+	out, err := translateAnthropicResponse(resp, "gpt-4o")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if out.Choices[0].FinishReason != "tool_calls" {
+		t.Errorf("finish_reason = %q, want tool_calls", out.Choices[0].FinishReason)
+	}
+	if len(out.Choices[0].Message.ToolCalls) != 1 {
+		t.Fatalf("tool_calls = %d, want 1", len(out.Choices[0].Message.ToolCalls))
+	}
+	tc := out.Choices[0].Message.ToolCalls[0]
+	if tc.ID != "call_1" {
+		t.Errorf("id = %q, want call_1", tc.ID)
+	}
+	if tc.Function.Name != "read" {
+		t.Errorf("name = %q, want read", tc.Function.Name)
+	}
+}
+
+func TestTranslateAnthropicResponse_StopReasons(t *testing.T) {
+	tests := []struct {
+		reason string
+		want   string
+	}{
+		{"end_turn", "stop"},
+		{"stop_sequence", "stop"},
+		{"max_tokens", "length"},
+		{"tool_use", "tool_calls"},
+		{"unknown", "stop"},
+	}
+
+	for _, tt := range tests {
+		got := mapAnthropicStopReason(tt.reason)
+		if got != tt.want {
+			t.Errorf("mapAnthropicStopReason(%q) = %q, want %q", tt.reason, got, tt.want)
+		}
+	}
+}
+
+func TestTranslateAnthropicResponse_IDPrefix(t *testing.T) {
+	resp := &MessagesResponse{
+		ID:      "msg_123",
+		Content: []ContentBlock{{Type: "text", Text: "Hi"}},
+	}
+	out, _ := translateAnthropicResponse(resp, "m")
+	// msg_123 already has prefix "chatcmpl-" will be prepended? No: ensurePrefix checks for "chatcmpl-".
+	// "msg_123" doesn't start with "chatcmpl-", so it becomes "chatcmpl-msg_123".
+	if out.ID != "chatcmpl-msg_123" {
+		t.Errorf("id = %q, want chatcmpl-msg_123", out.ID)
+	}
+}
+
+func TestTranslateAnthropicResponse_ThinkingDropped(t *testing.T) {
+	resp := &MessagesResponse{
+		ID:         "msg_789",
+		StopReason: "end_turn",
+		Content: []ContentBlock{
+			{Type: "thinking", Thinking: "I think..."},
+			{Type: "text", Text: "Hello"},
+		},
+	}
+
+	out, err := translateAnthropicResponse(resp, "gpt-4o")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should have text only, thinking dropped.
+	var text string
+	json.Unmarshal(out.Choices[0].Message.Content, &text)
+	if text != "Hello" {
+		t.Errorf("content = %q, want Hello", text)
+	}
+	if len(out.Choices[0].Message.ToolCalls) != 0 {
+		t.Error("should have no tool calls")
+	}
+}
+
+func TestTranslateOpenAIRequest_DeveloperRole(t *testing.T) {
+	cfg := &GatewayCfg{}
+	req := &ChatCompletionRequest{
+		Model: "gpt-4o",
+		Messages: []OpenAIMsg{
+			{Role: "developer", Content: json.RawMessage(`"Be helpful"`)},
+			{Role: "user", Content: json.RawMessage(`"Hi"`)},
+		},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var sysText string
+	json.Unmarshal(out.System, &sysText)
+	if sysText != "Be helpful" {
+		t.Errorf("system = %q, want 'Be helpful'", sysText)
+	}
+}
