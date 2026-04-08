@@ -17,6 +17,40 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// signalName maps a Unix signal to its SSH signal name per RFC 4254 section 6.10.
+func signalName(sig syscall.Signal) string {
+	switch sig {
+	case syscall.SIGABRT:
+		return "ABRT"
+	case syscall.SIGALRM:
+		return "ALRM"
+	case syscall.SIGFPE:
+		return "FPE"
+	case syscall.SIGHUP:
+		return "HUP"
+	case syscall.SIGILL:
+		return "ILL"
+	case syscall.SIGINT:
+		return "INT"
+	case syscall.SIGKILL:
+		return "KILL"
+	case syscall.SIGPIPE:
+		return "PIPE"
+	case syscall.SIGQUIT:
+		return "QUIT"
+	case syscall.SIGSEGV:
+		return "SEGV"
+	case syscall.SIGTERM:
+		return "TERM"
+	case syscall.SIGUSR1:
+		return "USR1"
+	case syscall.SIGUSR2:
+		return "USR2"
+	default:
+		return sig.String()
+	}
+}
+
 // defaultShell returns the user's login shell or /bin/sh as fallback.
 func defaultShell() string {
 	if sh := os.Getenv("SHELL"); sh != "" {
@@ -246,6 +280,26 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					wg.Wait()
 
 					err := cmd.Wait()
+
+					if err != nil {
+						if exiterr, ok := err.(*exec.ExitError); ok {
+							if sys, ok := exiterr.Sys().(syscall.WaitStatus); ok && sys.Signaled() {
+								// Process killed by signal — send exit-signal (RFC 4254 section 6.10)
+								sigName := signalName(sys.Signal())
+								payload := ssh.Marshal(struct {
+									Signal     string
+									CoreDumped bool
+									ErrMsg     string
+									Lang       string
+								}{sigName, sys.CoreDump(), "", ""})
+								_, _ = ch.SendRequest("exit-signal", false, payload)
+								closeCh()
+								return
+							}
+						}
+					}
+
+					// Normal exit — send exit-status
 					status := uint32(0)
 					if err != nil {
 						if exiterr, ok := err.(*exec.ExitError); ok {
@@ -254,8 +308,6 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 							}
 						}
 					}
-
-					// Send exit-status
 					msg := make([]byte, 4)
 					binary.BigEndian.PutUint32(msg, status)
 					_, _ = ch.SendRequest("exit-status", false, msg)
