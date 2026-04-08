@@ -299,6 +299,36 @@ func warnInsecurePermissions(path string) {
 	}
 }
 
+// unmarshalConfigs decodes YAML into a node-name → Config map, silently
+// skipping extension keys (prefixed with "x-") so users can define YAML
+// anchors for reuse without breaking the typed schema.
+func unmarshalConfigs(data []byte) (map[string]*Config, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return nil, nil
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("expected mapping, got %v", root.Kind)
+	}
+	cfgs := make(map[string]*Config, len(root.Content)/2)
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		key := root.Content[i].Value
+		if strings.HasPrefix(key, "x-") {
+			continue
+		}
+		var cfg Config
+		if err := root.Content[i+1].Decode(&cfg); err != nil {
+			return nil, fmt.Errorf("%s: %w", key, err)
+		}
+		cfgs[key] = &cfg
+	}
+	return cfgs, nil
+}
+
 // LoadUnvalidated reads and parses a config file without checking for runtime requirements (like file existence).
 func LoadUnvalidated(path string) (map[string]*Config, error) {
 	warnInsecurePermissions(path)
@@ -309,8 +339,8 @@ func LoadUnvalidated(path string) (map[string]*Config, error) {
 
 	expanded := os.ExpandEnv(string(data))
 
-	var cfgs map[string]*Config
-	if err := yaml.Unmarshal([]byte(expanded), &cfgs); err != nil {
+	cfgs, err := unmarshalConfigs([]byte(expanded))
+	if err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 

@@ -284,6 +284,35 @@ static_peers: ["10.0.0.1:7755"]
 	}
 }
 
+func TestUnmarshalConfigsSkipsExtensionKeys(t *testing.T) {
+	input := []byte(`
+x-ignore-global: &ignore_global
+  - ".DS_Store"
+  - "*.tmp"
+
+mynode:
+  log_level: debug
+  filesync:
+    - folders:
+        "/data":
+          ignore: *ignore_global
+`)
+	cfgs, err := unmarshalConfigs(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfgs["x-ignore-global"]; ok {
+		t.Error("extension key x-ignore-global should be skipped")
+	}
+	cfg, ok := cfgs["mynode"]
+	if !ok {
+		t.Fatal("expected mynode in config")
+	}
+	if cfg.LogLevel != "debug" {
+		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "debug")
+	}
+}
+
 // yamlUnmarshal is a test helper that uses the same YAML library as production.
 func yamlUnmarshal(data []byte, v interface{}) error {
 	return yaml.Unmarshal(data, v)
@@ -771,8 +800,8 @@ func TestFilesyncResolve(t *testing.T) {
 				Bind:  "0.0.0.0:7756",
 				Peers: map[string][]string{"hw": {"10.0.0.1:7756"}},
 				Defaults: FilesyncDefaults{
-					Peers:     []string{"hw"},
-					Direction: "send-only",
+					Peers:          []string{"hw"},
+					Direction:      "send-only",
 					IgnorePatterns: []string{"*.tmp"},
 				},
 				Folders: map[string]FolderCfgRaw{
@@ -958,12 +987,12 @@ func TestFilesyncResolve(t *testing.T) {
 		{
 			name: "sorted by ID",
 			cfg: FilesyncCfg{
-				Bind:  "0.0.0.0:7756",
-				Peers: map[string][]string{"hw": {"10.0.0.1:7756"}},
+				Bind:     "0.0.0.0:7756",
+				Peers:    map[string][]string{"hw": {"10.0.0.1:7756"}},
 				Defaults: FilesyncDefaults{Peers: []string{"hw"}},
 				Folders: map[string]FolderCfgRaw{
-					"zebra": {Path: "/tmp/z"},
-					"alpha": {Path: "/tmp/a"},
+					"zebra":  {Path: "/tmp/z"},
+					"alpha":  {Path: "/tmp/a"},
 					"middle": {Path: "/tmp/m"},
 				},
 			},
