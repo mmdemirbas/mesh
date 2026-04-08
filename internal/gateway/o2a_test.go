@@ -461,3 +461,71 @@ func TestTranslateOpenAIRequest_DeveloperRole(t *testing.T) {
 		t.Errorf("system = %q, want 'Be helpful'", sysText)
 	}
 }
+
+func TestTranslateOpenAIRequest_ImageURL_PlainURL(t *testing.T) {
+	cfg := &GatewayCfg{}
+	content := `[{"type":"image_url","image_url":{"url":"https://example.com/photo.jpg"}}]`
+	req := &ChatCompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []OpenAIMsg{{Role: "user", Content: json.RawMessage(content)}},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var blocks []ContentBlock
+	json.Unmarshal(out.Messages[0].Content, &blocks)
+	if len(blocks) != 1 || blocks[0].Type != "image" {
+		t.Fatalf("blocks = %v", blocks)
+	}
+	if blocks[0].Source.Type != "url" {
+		t.Errorf("source.type = %q, want url", blocks[0].Source.Type)
+	}
+	if blocks[0].Source.URL != "https://example.com/photo.jpg" {
+		t.Errorf("source.url = %q", blocks[0].Source.URL)
+	}
+}
+
+func TestTranslateOpenAIRequest_ConsecutiveAssistantMerge(t *testing.T) {
+	cfg := &GatewayCfg{}
+	req := &ChatCompletionRequest{
+		Model: "gpt-4o",
+		Messages: []OpenAIMsg{
+			{Role: "user", Content: json.RawMessage(`"Hi"`)},
+			{Role: "assistant", Content: json.RawMessage(`"First"`)},
+			{Role: "assistant", Content: json.RawMessage(`"Second"`)},
+		},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// user + merged assistant = 2 messages.
+	if len(out.Messages) != 2 {
+		t.Fatalf("messages = %d, want 2 (assistant merged)", len(out.Messages))
+	}
+	var blocks []ContentBlock
+	json.Unmarshal(out.Messages[1].Content, &blocks)
+	if len(blocks) != 2 {
+		t.Errorf("merged assistant blocks = %d, want 2", len(blocks))
+	}
+}
+
+func TestTranslateOpenAIRequest_EmptyMessages(t *testing.T) {
+	cfg := &GatewayCfg{}
+	req := &ChatCompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []OpenAIMsg{},
+	}
+
+	out, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Messages) != 0 {
+		t.Errorf("messages = %d, want 0", len(out.Messages))
+	}
+}

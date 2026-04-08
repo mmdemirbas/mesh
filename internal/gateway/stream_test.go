@@ -344,6 +344,224 @@ func TestO2AStream_ThinkingDropped(t *testing.T) {
 	}
 }
 
+func TestA2OStream_ToolNameAndArgsInSameChunk(t *testing.T) {
+	// Edge case: tool name + arguments arrive in the same SSE chunk.
+	chunks := []string{
+		makeOpenAIChunk("chatcmpl-4", "gpt-4o", &OpenAIChunkChoice{
+			Index: 0,
+			Delta: OpenAIChunkDelta{Role: "assistant"},
+		}),
+		// Name AND arguments in the same chunk.
+		makeOpenAIChunkRaw("chatcmpl-4", "gpt-4o", `{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_time","arguments":"{}"}}]}}`),
+		makeOpenAIChunkWithFinish("chatcmpl-4", "gpt-4o", "tool_calls", nil),
+	}
+
+	upstream := makeSSEServer(chunks)
+	defer upstream.Close()
+
+	events := runA2OStreamTest(t, upstream.URL, "claude-sonnet-4-6", nil)
+
+	// Should have both content_block_start AND content_block_delta for the tool.
+	var hasStart, hasDelta bool
+	for _, e := range events {
+		if e.eventType == "content_block_start" {
+			var data struct {
+				ContentBlock struct{ Type string } `json:"content_block"`
+			}
+			json.Unmarshal([]byte(e.data), &data)
+			if data.ContentBlock.Type == "tool_use" {
+				hasStart = true
+			}
+		}
+		if e.eventType == "content_block_delta" {
+			var data struct {
+				Delta struct{ Type string } `json:"delta"`
+			}
+			json.Unmarshal([]byte(e.data), &data)
+			if data.Delta.Type == "input_json_delta" {
+				hasDelta = true
+			}
+		}
+	}
+	if !hasStart {
+		t.Error("no content_block_start for tool_use")
+	}
+	if !hasDelta {
+		t.Error("no input_json_delta from same chunk as tool name")
+	}
+}
+
+func TestA2OStream_ParallelToolCalls(t *testing.T) {
+	chunks := []string{
+		makeOpenAIChunk("chatcmpl-5", "gpt-4o", &OpenAIChunkChoice{
+			Index: 0,
+			Delta: OpenAIChunkDelta{Role: "assistant"},
+		}),
+		// First tool call.
+		makeOpenAIChunkRaw("chatcmpl-5", "gpt-4o", `{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"read","arguments":"{}"}}]}}`),
+		// Second tool call.
+		makeOpenAIChunkRaw("chatcmpl-5", "gpt-4o", `{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"write","arguments":"{}"}}]}}`),
+		makeOpenAIChunkWithFinish("chatcmpl-5", "gpt-4o", "tool_calls", nil),
+	}
+
+	upstream := makeSSEServer(chunks)
+	defer upstream.Close()
+
+	events := runA2OStreamTest(t, upstream.URL, "claude-sonnet-4-6", nil)
+
+	var toolStarts []string
+	for _, e := range events {
+		if e.eventType == "content_block_start" {
+			var data struct {
+				ContentBlock struct {
+					Type string `json:"type"`
+					Name string `json:"name"`
+				} `json:"content_block"`
+			}
+			json.Unmarshal([]byte(e.data), &data)
+			if data.ContentBlock.Type == "tool_use" {
+				toolStarts = append(toolStarts, data.ContentBlock.Name)
+			}
+		}
+	}
+	if len(toolStarts) != 2 {
+		t.Fatalf("tool starts = %d, want 2", len(toolStarts))
+	}
+	if toolStarts[0] != "read" || toolStarts[1] != "write" {
+		t.Errorf("tool names = %v, want [read, write]", toolStarts)
+	}
+}
+
+func TestO2AStream_ParallelToolCalls(t *testing.T) {
+	anthropicEvents := []string{
+		`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_p","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}`,
+		`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_a","name":"read","input":{}}}`,
+		`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}`,
+		`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":0}`,
+		`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_b","name":"write","input":{}}}`,
+		`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}`,
+		`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":1}`,
+		`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":10,"output_tokens":20}}`,
+		`event: message_stop` + "\n" + `data: {"type":"message_stop"}`,
+	}
+
+	upstream := makeAnthropicSSEServer(anthropicEvents)
+	defer upstream.Close()
+
+	events := runO2AStreamTest(t, upstream.URL, "gpt-4o", nil, false)
+
+	// Collect tool call starts with their indices.
+	type toolStart struct {
+		index int
+		name  string
+	}
+	var starts []toolStart
+	for _, e := range events {
+		if e.data == "[DONE]" {
+			continue
+		}
+		var chunk ChatCompletionChunk
+		if err := json.Unmarshal([]byte(e.data), &chunk); err != nil {
+			continue
+		}
+		if len(chunk.Choices) > 0 {
+			for _, tc := range chunk.Choices[0].Delta.ToolCalls {
+				if tc.ID != "" {
+					starts = append(starts, toolStart{index: tc.Index, name: tc.Function.Name})
+				}
+			}
+		}
+	}
+	if len(starts) != 2 {
+		t.Fatalf("tool starts = %d, want 2", len(starts))
+	}
+	if starts[0].index != 0 || starts[0].name != "read" {
+		t.Errorf("tool[0] = %+v, want {0, read}", starts[0])
+	}
+	if starts[1].index != 1 || starts[1].name != "write" {
+		t.Errorf("tool[1] = %+v, want {1, write}", starts[1])
+	}
+}
+
+func TestO2AStream_MidStreamError(t *testing.T) {
+	anthropicEvents := []string{
+		`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_e","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":5,"output_tokens":0}}}`,
+		`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}`,
+		`event: error` + "\n" + `data: {"type":"error","error":{"type":"overloaded_error","message":"server is overloaded"}}`,
+		`event: message_stop` + "\n" + `data: {"type":"message_stop"}`,
+	}
+
+	upstream := makeAnthropicSSEServer(anthropicEvents)
+	defer upstream.Close()
+
+	events := runO2AStreamTest(t, upstream.URL, "gpt-4o", nil, false)
+
+	// Should contain text "Hello" + error message content + [DONE].
+	var hasError bool
+	for _, e := range events {
+		if e.data == "[DONE]" {
+			continue
+		}
+		var chunk ChatCompletionChunk
+		if err := json.Unmarshal([]byte(e.data), &chunk); err != nil {
+			continue
+		}
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != nil {
+			if *chunk.Choices[0].Delta.Content == "server is overloaded" {
+				hasError = true
+			}
+		}
+	}
+	if !hasError {
+		t.Error("mid-stream error message not found in output")
+	}
+
+	// Should end with [DONE].
+	lastEvent := events[len(events)-1]
+	if lastEvent.data != "[DONE]" {
+		t.Errorf("last event = %q, want [DONE]", lastEvent.data)
+	}
+}
+
+func TestO2AStream_MixedTextAndTool(t *testing.T) {
+	// Text block followed by tool block — verifies toolIndex is correct.
+	anthropicEvents := []string{
+		`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_m","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":5,"output_tokens":0}}}`,
+		`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me read that."}}`,
+		`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":0}`,
+		`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_1","name":"read_file","input":{}}}`,
+		`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"/tmp\"}"}}`,
+		`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":1}`,
+		`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":5,"output_tokens":10}}`,
+		`event: message_stop` + "\n" + `data: {"type":"message_stop"}`,
+	}
+
+	upstream := makeAnthropicSSEServer(anthropicEvents)
+	defer upstream.Close()
+
+	events := runO2AStreamTest(t, upstream.URL, "gpt-4o", nil, false)
+
+	// The tool call should have index 0 (first tool, text blocks don't count).
+	for _, e := range events {
+		if e.data == "[DONE]" {
+			continue
+		}
+		var chunk ChatCompletionChunk
+		if err := json.Unmarshal([]byte(e.data), &chunk); err != nil {
+			continue
+		}
+		if len(chunk.Choices) > 0 {
+			for _, tc := range chunk.Choices[0].Delta.ToolCalls {
+				if tc.ID == "call_1" && tc.Index != 0 {
+					t.Errorf("tool index = %d, want 0 (text block stop should not increment)", tc.Index)
+				}
+			}
+		}
+	}
+}
+
 // --- Test Helpers ---
 
 type sseEvent struct {

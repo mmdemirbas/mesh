@@ -509,3 +509,70 @@ func TestTranslateAnthropicRequest_EmptyToolInput(t *testing.T) {
 		t.Errorf("arguments = %q, want '{}'", tc.Function.Arguments)
 	}
 }
+
+func TestTranslateAnthropicRequest_ImageURLSource(t *testing.T) {
+	cfg := &GatewayCfg{}
+	content := `[{"type":"image","source":{"type":"url","url":"https://example.com/image.png"}}]`
+	req := &MessagesRequest{
+		Model:     "claude-sonnet-4-6",
+		MaxTokens: 100,
+		Messages:  []AnthropicMsg{{Role: "user", Content: json.RawMessage(content)}},
+	}
+
+	out, err := translateAnthropicRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var parts []ContentPart
+	json.Unmarshal(out.Messages[0].Content, &parts)
+	if len(parts) != 1 || parts[0].Type != "image_url" {
+		t.Fatalf("parts = %v", parts)
+	}
+	if parts[0].ImageURL.URL != "https://example.com/image.png" {
+		t.Errorf("url = %q, want direct URL", parts[0].ImageURL.URL)
+	}
+}
+
+func TestTranslateAnthropicRequest_ToolResultWithImage(t *testing.T) {
+	cfg := &GatewayCfg{}
+	content := `[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"screenshot taken"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"abc123"}}]}]`
+	req := &MessagesRequest{
+		Model:     "claude-sonnet-4-6",
+		MaxTokens: 100,
+		Messages:  []AnthropicMsg{{Role: "user", Content: json.RawMessage(content)}},
+	}
+
+	out, err := translateAnthropicRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should produce: tool message (text only) + user message (image follow-up).
+	if len(out.Messages) < 2 {
+		t.Fatalf("messages = %d, want at least 2 (tool + image follow-up)", len(out.Messages))
+	}
+	if out.Messages[0].Role != "tool" {
+		t.Errorf("msg[0].role = %q, want tool", out.Messages[0].Role)
+	}
+	if out.Messages[1].Role != "user" {
+		t.Errorf("msg[1].role = %q, want user (image follow-up)", out.Messages[1].Role)
+	}
+}
+
+func TestTranslateAnthropicRequest_EmptyMessages(t *testing.T) {
+	cfg := &GatewayCfg{}
+	req := &MessagesRequest{
+		Model:     "claude-sonnet-4-6",
+		MaxTokens: 100,
+		Messages:  []AnthropicMsg{},
+	}
+
+	out, err := translateAnthropicRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Messages) != 0 {
+		t.Errorf("messages = %d, want 0", len(out.Messages))
+	}
+}

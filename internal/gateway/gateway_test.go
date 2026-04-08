@@ -302,19 +302,127 @@ func TestGateway_UpstreamError(t *testing.T) {
 	cancel()
 }
 
+func TestGateway_O2A_UpstreamError_529(t *testing.T) {
+	// Anthropic 529 (overloaded) -> OpenAI client sees 503.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(529)
+		w.Write([]byte(`{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}`)) //nolint:errcheck
+	}))
+	defer upstream.Close()
+
+	cfg := GatewayCfg{
+		Name:     "test-529",
+		Bind:     "127.0.0.1:0",
+		Mode:     ModeOpenAIToAnthropic,
+		Upstream: upstream.URL,
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Bind = ln.Addr().String()
+	ln.Close()
+
+	go func() {
+		Start(ctx, cfg, slog.Default()) //nolint:errcheck
+	}()
+
+	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+
+	reqBody := `{"model":"gpt-4o","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}`
+	resp, err := http.Post("http://"+cfg.Bind+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 503 {
+		t.Errorf("status = %d, want 503 (Anthropic 529 -> OpenAI 503)", resp.StatusCode)
+	}
+
+	cancel()
+}
+
+func TestGateway_UpstreamError_ResponseFormat(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(429)
+		w.Write([]byte(`rate limited`)) //nolint:errcheck
+	}))
+	defer upstream.Close()
+
+	cfg := GatewayCfg{
+		Name:     "test-err-format",
+		Bind:     "127.0.0.1:0",
+		Mode:     ModeAnthropicToOpenAI,
+		Upstream: upstream.URL,
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Bind = ln.Addr().String()
+	ln.Close()
+
+	go func() {
+		Start(ctx, cfg, slog.Default()) //nolint:errcheck
+	}()
+
+	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+
+	reqBody := `{"model":"claude-sonnet-4-6","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}`
+	resp, err := http.Post("http://"+cfg.Bind+"/v1/messages", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 429 {
+		t.Fatalf("status = %d, want 429", resp.StatusCode)
+	}
+
+	// Verify the error body is valid Anthropic error JSON.
+	var errResp AnthropicErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+		t.Fatalf("cannot decode error response: %v", err)
+	}
+	if errResp.Type != "error" {
+		t.Errorf("type = %q, want error", errResp.Type)
+	}
+	if errResp.Error.Type != "rate_limit_error" {
+		t.Errorf("error.type = %q, want rate_limit_error", errResp.Error.Type)
+	}
+
+	cancel()
+}
+
 // waitForHTTP polls a URL until it returns 200 or the timeout expires.
 func waitForHTTP(t *testing.T, url string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == 200 {
-				return
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-timer.C:
+			t.Fatalf("timeout waiting for %s", url)
+			return
+		case <-ticker.C:
+			resp, err := http.Get(url)
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == 200 {
+					return
+				}
 			}
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timeout waiting for %s", url)
 }
