@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -571,7 +572,12 @@ func TestCountedBiCopy_StreamsTrackedDuringTransfer(t *testing.T) {
 	if s := streams.Load(); s != 1 {
 		t.Errorf("active streams during transfer = %d, want 1", s)
 	}
-	// tx should have counted client→target bytes
+	// tx should have counted client→target bytes.
+	// The server's Read can return before countingWriter.Add executes
+	// (data delivered via kernel buffer), so yield to let it complete.
+	for i := 0; i < 1000 && tx.Load() == 0 && rx.Load() == 0; i++ {
+		runtime.Gosched()
+	}
 	if tx.Load() == 0 && rx.Load() == 0 {
 		t.Error("no bytes counted during active transfer")
 	}

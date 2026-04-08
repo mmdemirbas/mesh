@@ -38,7 +38,7 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 		log.Error("Upstream stream request failed", "error", err)
 		return
 	}
-	defer upstreamResp.Body.Close()
+	defer func() { _ = upstreamResp.Body.Close() }()
 
 	if upstreamResp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(upstreamResp.Body, 4096))
@@ -320,7 +320,7 @@ func (s *a2oStreamState) finalize() {
 
 func (s *a2oStreamState) emit(event string, data any) {
 	b, _ := json.Marshal(data)
-	fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, b)
+	_, _ = fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, b)
 	s.flusher.Flush()
 	s.metrics.BytesTx.Add(int64(len(b) + len(event) + 20))
 }

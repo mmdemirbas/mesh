@@ -73,7 +73,7 @@ func writeOpenAIError(w http.ResponseWriter, status int, msg string) {
 	b, _ := json.Marshal(resp)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	w.Write(b) //nolint:errcheck
+	_, _ = w.Write(b)
 }
 
 // writeAnthropicError writes an Anthropic-format error response.
@@ -92,7 +92,7 @@ func writeAnthropicError(w http.ResponseWriter, status int, msg string) {
 	b, _ := json.Marshal(resp)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	w.Write(b) //nolint:errcheck
+	_, _ = w.Write(b)
 }
 
 // translateUpstreamError maps an upstream HTTP error status to the client-facing

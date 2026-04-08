@@ -217,7 +217,8 @@ func translateAnthropicMessage(m AnthropicMsg) ([]OpenAIMsg, error) {
 	var out []OpenAIMsg
 
 	// Assistant message with text and/or tool calls.
-	if m.Role == "assistant" {
+	switch m.Role {
+	case "assistant":
 		msg := OpenAIMsg{Role: "assistant"}
 		if len(textParts) > 0 {
 			// If only text parts, concatenate to string.
@@ -234,7 +235,7 @@ func translateAnthropicMessage(m AnthropicMsg) ([]OpenAIMsg, error) {
 			msg.ToolCalls = toolCalls
 		}
 		out = append(out, msg)
-	} else if m.Role == "user" {
+	case "user":
 		// User message may have text, images, and tool_results.
 		// Tool results become separate tool-role messages.
 		if len(textParts) > 0 {

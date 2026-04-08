@@ -39,7 +39,7 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 		log.Error("Upstream stream request failed", "error", err)
 		return
 	}
-	defer upstreamResp.Body.Close()
+	defer func() { _ = upstreamResp.Body.Close() }()
 
 	if upstreamResp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(upstreamResp.Body, 4096))
@@ -245,7 +245,7 @@ func (s *o2aStreamState) finalize() {
 	}
 
 	// Emit [DONE].
-	fmt.Fprint(s.w, "data: [DONE]\n\n")
+	_, _ = fmt.Fprint(s.w, "data: [DONE]\n\n")
 	s.flusher.Flush()
 }
 
@@ -264,7 +264,7 @@ func (s *o2aStreamState) emitUsageChunk(usage *OpenAIUsage) {
 		Usage:   usage,
 	}
 	b, _ := json.Marshal(chunk)
-	fmt.Fprintf(s.w, "data: %s\n\n", b)
+	_, _ = fmt.Fprintf(s.w, "data: %s\n\n", b)
 	s.flusher.Flush()
 	s.metrics.BytesTx.Add(int64(len(b) + 8))
 }
@@ -282,7 +282,7 @@ func (s *o2aStreamState) emitChunk(choice OpenAIChunkChoice) {
 		Choices: []OpenAIChunkChoice{choice},
 	}
 	b, _ := json.Marshal(chunk)
-	fmt.Fprintf(s.w, "data: %s\n\n", b)
+	_, _ = fmt.Fprintf(s.w, "data: %s\n\n", b)
 	s.flusher.Flush()
 	s.metrics.BytesTx.Add(int64(len(b) + 8))
 }

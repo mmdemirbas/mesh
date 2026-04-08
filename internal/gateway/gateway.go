@@ -73,7 +73,7 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`)) //nolint:errcheck
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
 	ln, err := net.Listen("tcp", cfg.Bind)
@@ -81,7 +81,7 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 		state.Global.Update("gateway", cfg.Name, state.Failed, err.Error())
 		return fmt.Errorf("listen %s: %w", cfg.Bind, err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	state.Global.Update("gateway", cfg.Name, state.Listening, cfg.Bind)
 	state.Global.UpdateBind("gateway", cfg.Name, ln.Addr().String())
@@ -99,7 +99,7 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		srv.Shutdown(shutdownCtx) //nolint:errcheck
+		_ = srv.Shutdown(shutdownCtx)
 	}()
 
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -161,7 +161,7 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
 		return
 	}
-	defer upstreamResp.Body.Close()
+	defer func() { _ = upstreamResp.Body.Close() }()
 
 	respBody, err := io.ReadAll(io.LimitReader(upstreamResp.Body, maxUpstreamResponseSize))
 	if err != nil {
@@ -192,7 +192,7 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 	metrics.BytesTx.Add(int64(len(result)))
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(result) //nolint:errcheck
+	_, _ = w.Write(result)
 
 	log.Info("Request completed",
 		"model", clientModel,
@@ -252,7 +252,7 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
 		return
 	}
-	defer upstreamResp.Body.Close()
+	defer func() { _ = upstreamResp.Body.Close() }()
 
 	respBody, err := io.ReadAll(io.LimitReader(upstreamResp.Body, maxUpstreamResponseSize))
 	if err != nil {
@@ -283,7 +283,7 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 	metrics.BytesTx.Add(int64(len(result)))
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(result) //nolint:errcheck
+	_, _ = w.Write(result)
 
 	log.Info("Request completed",
 		"model", clientModel,
