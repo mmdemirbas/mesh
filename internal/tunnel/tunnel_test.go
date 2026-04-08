@@ -1114,3 +1114,200 @@ func TestAcceptAndForward_StreamsMetric(t *testing.T) {
 		t.Errorf("streams = %d, want 1 while connection is active", got)
 	}
 }
+
+// --- Integration: SSH server + client roundtrip (T2, T3) ---
+
+// TestSSHServerExec starts a real SSH server and connects a client to execute a command.
+// freePort returns a free TCP port on localhost.
+func freePort(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	return addr
+}
+
+func TestSSHServerExec(t *testing.T) {
+	keyPath := generateTestKey(t)
+
+	signer, err := ssh.ParsePrivateKey([]byte(testKeyPEM))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authKeysPath := t.TempDir() + "/authorized_keys"
+	if err := os.WriteFile(authKeysPath, ssh.MarshalAuthorizedKey(signer.PublicKey()), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	addr := freePort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewSSHServer(config.Listener{
+		Type:           "sshd",
+		Bind:           addr,
+		HostKey:        keyPath,
+		AuthorizedKeys: authKeysPath,
+		Shell:          []string{"echo", "hello-mesh"},
+	}, slog.Default())
+
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- srv.Run(ctx) }()
+
+	// Wait for server to be listening
+	for range 50 {
+		snap := state.Global.Snapshot()
+		for k, c := range snap {
+			if strings.HasPrefix(k, "server:") && c.Status == state.Listening {
+				goto ready
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	select {
+	case err := <-srvErr:
+		t.Fatalf("server exited before listening: %v", err)
+	default:
+		t.Fatal("server did not reach listening state")
+	}
+ready:
+
+	// Connect as SSH client
+	clientCfg := &ssh.ClientConfig{
+		User:            "test",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // test only
+		Timeout:         5 * time.Second,
+	}
+	client, err := ssh.Dial("tcp", addr, clientCfg)
+	if err != nil {
+		t.Fatalf("ssh dial: %v", err)
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer session.Close()
+
+	// Shell is configured as ["echo", "hello-mesh"]. A "shell" request starts it directly.
+	var stdout strings.Builder
+	session.Stdout = &stdout
+	if err := session.Shell(); err != nil {
+		t.Fatalf("session.Shell: %v", err)
+	}
+	if err := session.Wait(); err != nil {
+		t.Logf("session.Wait: %v (expected for non-shell commands)", err)
+	}
+	if !strings.Contains(stdout.String(), "hello-mesh") {
+		t.Errorf("output = %q, want to contain 'hello-mesh'", stdout.String())
+	}
+
+	cancel()
+}
+
+// TestSSHServerLocalForward starts an SSH server + client and tests local port forwarding.
+func TestSSHServerLocalForward(t *testing.T) {
+	keyPath := generateTestKey(t)
+
+	signer, err := ssh.ParsePrivateKey([]byte(testKeyPEM))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authKeysPath := t.TempDir() + "/authorized_keys"
+	if err := os.WriteFile(authKeysPath, ssh.MarshalAuthorizedKey(signer.PublicKey()), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Target echo server (what we're forwarding to)
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echoLn.Close()
+
+	go func() {
+		for {
+			c, err := echoLn.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_, _ = io.Copy(c, c) // echo
+			}()
+		}
+	}()
+
+	addr := freePort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewSSHServer(config.Listener{
+		Type:           "sshd",
+		Bind:           addr,
+		HostKey:        keyPath,
+		AuthorizedKeys: authKeysPath,
+	}, slog.Default())
+
+	go func() { _ = srv.Run(ctx) }()
+
+	// Wait for listening
+	for range 50 {
+		snap := state.Global.Snapshot()
+		for _, c := range snap {
+			if c.Type == "server" && c.Status == state.Listening {
+				goto ready
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("server did not reach listening state")
+ready:
+
+	// SSH client — retry dial to handle startup race with freePort
+	clientCfg := &ssh.ClientConfig{
+		User:            "test",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // test only
+		Timeout:         5 * time.Second,
+	}
+	var client *ssh.Client
+	for range 10 {
+		client, err = ssh.Dial("tcp", addr, clientCfg)
+		if err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("ssh dial: %v", err)
+	}
+	defer client.Close()
+
+	// Open a direct-tcpip channel to the echo server through SSH
+	fwdConn, err := client.Dial("tcp", echoLn.Addr().String())
+	if err != nil {
+		t.Fatalf("ssh forward dial: %v", err)
+	}
+	defer fwdConn.Close()
+
+	testData := []byte("forwarded-data-roundtrip")
+	_, _ = fwdConn.Write(testData)
+
+	// Read back — echo server will reflect
+	buf := make([]byte, len(testData))
+	_, err = io.ReadFull(fwdConn, buf)
+	if err != nil {
+		t.Fatalf("read forwarded response: %v", err)
+	}
+	if string(buf) != string(testData) {
+		t.Errorf("forwarded data = %q, want %q", buf, testData)
+	}
+
+	cancel()
+}
