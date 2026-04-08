@@ -50,6 +50,9 @@ type Listener struct {
 	AuthorizedKeys string `yaml:"authorized_keys,omitempty"`
 	// Command to execute on SSH session start (e.g., ["bash", "-l"]). Default drops into a basic shell.
 	Shell []string `yaml:"shell,omitempty"`
+	// Environment variable names that clients are allowed to set via SSH env requests.
+	// Supports wildcard patterns (e.g., "LANG", "LC_*"). Empty means no env forwarding.
+	AcceptEnv []string `yaml:"accept_env,omitempty"`
 	// Additional overrides for the listener.
 	// Only a subset of OpenSSH config keys are parsed: Ciphers, MACs, KexAlgorithms, ConnectTimeout, IPQoS.
 	Options map[string]string `yaml:"options,omitempty"`

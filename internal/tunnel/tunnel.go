@@ -320,7 +320,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 		case "direct-tcpip":
 			go handleDirectTCPIP(newChan, s.log, s.cfg.Options, serverMetrics)
 		case "session":
-			go handleSession(connCtx, newChan, s.cfg.Shell, s.log)
+			go handleSession(connCtx, newChan, s.cfg.Shell, s.cfg.AcceptEnv, s.log)
 		default:
 			_ = newChan.Reject(ssh.UnknownChannelType, "unsupported")
 		}

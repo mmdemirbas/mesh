@@ -79,7 +79,7 @@ func sessionEnv(shell, termName string) []string {
 }
 
 // handleSession handles an SSH session channel, which includes PTY allocation and shell execution.
-func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, log *slog.Logger) {
+func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, acceptEnv []string, log *slog.Logger) {
 	ch, reqs, err := newChan.Accept()
 	if err != nil {
 		log.Error("Accept session channel failed", "error", err)
@@ -91,7 +91,8 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 		cmd       *exec.Cmd
 		cmdStart  sync.Once
 		closeOnce sync.Once
-		termName  = "xterm" // default; updated by pty-req
+		termName  = "xterm"    // default; updated by pty-req
+		clientEnv []string     // env vars accepted from client via "env" requests
 	)
 	closeCh := func() { closeOnce.Do(func() { _ = ch.Close() }) }
 	defer closeCh()
@@ -213,7 +214,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 
 				// Utilize context to enforce reaping on daemon exit
 				cmd = exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: intentional — launches user's login shell
-				cmd.Env = sessionEnv(shell, termName)
+				cmd.Env = append(sessionEnv(shell, termName), clientEnv...)
 				if home, err := os.UserHomeDir(); err == nil {
 					cmd.Dir = home
 				}
@@ -314,6 +315,30 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					closeCh()
 				}()
 			})
+
+		case "env":
+			// RFC 4254 section 6.4 — environment variable request
+			var envReq struct {
+				Name  string
+				Value string
+			}
+			if err := ssh.Unmarshal(req.Payload, &envReq); err != nil {
+				if req.WantReply {
+					_ = req.Reply(false, nil)
+				}
+				continue
+			}
+			if envMatches(envReq.Name, acceptEnv) {
+				clientEnv = append(clientEnv, envReq.Name+"="+envReq.Value)
+				if req.WantReply {
+					_ = req.Reply(true, nil)
+				}
+			} else {
+				log.Debug("Rejected env var", "name", envReq.Name)
+				if req.WantReply {
+					_ = req.Reply(false, nil)
+				}
+			}
 
 		default:
 			if req.WantReply {

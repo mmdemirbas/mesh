@@ -51,7 +51,7 @@ func sessionEnv(shell, termName string) []string {
 // "PTY allocation request failed." The shell runs with plain pipes — this works
 // well for cmd.exe, PowerShell, and most CLI tools. Programs that query terminal
 // attributes (e.g., curses/ncurses) won't render correctly, but that's rare on Windows.
-func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, log *slog.Logger) {
+func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, acceptEnv []string, log *slog.Logger) {
 	ch, reqs, err := newChan.Accept()
 	if err != nil {
 		log.Error("Accept session channel failed", "error", err)
@@ -62,6 +62,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 		cmd       *exec.Cmd
 		cmdStart  sync.Once
 		closeOnce sync.Once
+		clientEnv []string
 	)
 	closeCh := func() { closeOnce.Do(func() { ch.Close() }) }
 
@@ -116,7 +117,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					cmd.Stdin = ch
 					cmd.Stdout = ch
 					cmd.Stderr = ch
-					cmd.Env = sessionEnv(shell, "xterm")
+					cmd.Env = append(sessionEnv(shell, "xterm"), clientEnv...)
 					if home, err := os.UserHomeDir(); err == nil {
 						cmd.Dir = home
 					}
@@ -150,6 +151,28 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 						closeCh()
 					}()
 				})
+			case "env":
+				var envReq struct {
+					Name  string
+					Value string
+				}
+				if err := ssh.Unmarshal(req.Payload, &envReq); err != nil {
+					if req.WantReply {
+						_ = req.Reply(false, nil)
+					}
+					continue
+				}
+				if envMatches(envReq.Name, acceptEnv) {
+					clientEnv = append(clientEnv, envReq.Name+"="+envReq.Value)
+					if req.WantReply {
+						_ = req.Reply(true, nil)
+					}
+				} else {
+					if req.WantReply {
+						_ = req.Reply(false, nil)
+					}
+				}
+
 			default:
 				if req.WantReply {
 					_ = req.Reply(false, nil)
