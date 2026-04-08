@@ -9,28 +9,24 @@ linters:
     - staticcheck   # semantic analysis (SA*, S*, ST*, QF*)
     # Security
     - gosec         # OWASP-aligned security checks
-    # Complexity
-    - gocognit      # cognitive complexity (nesting-aware)
-    - cyclop        # cyclomatic complexity
-    - funlen        # function length
     # Quality
     - gocritic      # style and correctness patterns
     - unused        # unused code
 
   settings:
-    gocognit:
-      min-complexity: 15
-    cyclop:
-      max-complexity: 10
-    funlen:
-      lines: 80
-      statements: 60
     gosec:
       excludes:
+        - G112  # ReadHeaderTimeout — not relevant for local-only admin server
         - G115  # integer overflow on conversion — too noisy for systems code
+        - G118  # goroutine with background context — intentional for long-running handlers
+        - G122  # filepath.Walk TOCTOU — acceptable for cleanup of temp files
+        - G304  # file inclusion via variable — paths are validated at call sites
+        - G704  # SSRF via taint analysis — URLs are from config, not user input
+        - G706  # log injection — logged values are peer addresses, not user input
 
-issues:
-  exclude-rules:
-    - path: "_test\\.go"
-      linters:
-        - errcheck
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec

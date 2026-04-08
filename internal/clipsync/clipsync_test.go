@@ -725,7 +725,7 @@ func TestPostHTTP_UsesZeroCopyReader(t *testing.T) {
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
 	n.postHTTP(net.JoinHostPort("127.0.0.1", port), data)
 
-	if received == nil || len(received) == 0 {
+	if len(received) == 0 {
 		t.Error("no data received")
 	}
 }

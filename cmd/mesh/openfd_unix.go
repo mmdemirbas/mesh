@@ -12,7 +12,7 @@ func openFDCount() int {
 		return -1
 	}
 	names, err := f.Readdirnames(-1)
-	f.Close()
+	_ = f.Close()
 	if err != nil {
 		return -1
 	}
