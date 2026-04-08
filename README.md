@@ -34,6 +34,12 @@ A single-binary, cross-platform networking tool that replaces `ssh`, `sshd`, `au
 
 ## Installation
 
+### go install
+
+```bash
+go install github.com/mmdemirbas/mesh/cmd/mesh@latest
+```
+
 ### From source
 
 Requires Go 1.26+ and [Task](https://taskfile.dev/).
@@ -183,12 +189,9 @@ auth:
 mynode:
   clipsync:
     - bind: "0.0.0.0:7755"
-      lan_discovery: true
+      lan_discovery_group: ["home"]      # enable LAN discovery for group "home"; empty disables
       static_peers: ["192.168.1.10:7755"]
-      allow_send_to: ["all"]
-      allow_receive: ["all"]
-      poll_interval: "3s"  # optional, default 3s
-      group: "team-alpha"  # optional, isolates discovery groups on the same LAN
+      poll_interval: "3s"                # optional, default 3s
 ```
 
 **Folder sync:**
@@ -239,6 +242,24 @@ All options can be set at connection or forward-set level:
 | `GatewayPorts` | Remote forward bind policy (`yes`/`no`/`clientspecified`) |
 | `PermitOpen` | Restrict tunneled destinations (comma or space separated, e.g., `*:22,host:80`) |
 | `StrictHostKeyChecking` | Host key verification (`no` to disable — insecure) |
+
+## Admin Server
+
+Every `mesh up` starts a local HTTP server on `127.0.0.1:7777` with a web dashboard and API endpoints.
+
+- **Web UI**: `http://127.0.0.1:7777/ui` — tabs for Dashboard, Clipsync, Filesync, Logs, Metrics, API, Debug
+- **Port file**: `~/.mesh/run/mesh-<node>.port` — written on startup for tooling integration
+
+### API Endpoints
+
+```bash
+curl http://127.0.0.1:7777/api/state       # component state (JSON)
+curl http://127.0.0.1:7777/api/logs         # recent log lines (JSON array)
+curl http://127.0.0.1:7777/api/logs/file    # full log file (text, supports ?offset=&limit=)
+curl http://127.0.0.1:7777/api/metrics      # Prometheus text format
+```
+
+Configure with `admin_addr` in node config. Set to `"off"` to disable.
 
 ## Development
 
