@@ -7,9 +7,14 @@ import "os"
 // openFDCount returns the number of open file descriptors for this process.
 // Returns -1 if the count cannot be determined.
 func openFDCount() int {
-	entries, err := os.ReadDir("/dev/fd")
+	f, err := os.Open("/dev/fd")
 	if err != nil {
 		return -1
 	}
-	return len(entries)
+	names, err := f.Readdirnames(-1)
+	f.Close()
+	if err != nil {
+		return -1
+	}
+	return len(names)
 }
