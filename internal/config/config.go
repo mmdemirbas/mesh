@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mmdemirbas/mesh/internal/gateway"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,6 +26,8 @@ type Config struct {
 	Clipsync []ClipsyncCfg `yaml:"clipsync,omitempty"`
 	// Filesync configuration (Syncthing-style folder synchronization).
 	Filesync []FilesyncCfg `yaml:"filesync,omitempty"`
+	// LLM API gateway instances (Anthropic <-> OpenAI format translation).
+	Gateway []gateway.GatewayCfg `yaml:"gateway,omitempty"`
 	// Log level: "debug", "info", "warn", or "error". Defaults to "info".
 	LogLevel string `yaml:"log_level,omitempty" jsonschema:"enum=debug,enum=info,enum=warn,enum=error"`
 	// Admin server listen address for the local HTTP API and web UI.
@@ -519,6 +522,12 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	for i, gw := range c.Gateway {
+		if err := gw.Validate(); err != nil {
+			return fmt.Errorf("gateway[%d] %q: %w", i, gw.Name, err)
+		}
+	}
+
 	// Check for duplicate names
 	if err := c.checkDuplicateNames(); err != nil {
 		return err
@@ -564,6 +573,15 @@ func (c *Config) checkDuplicateNames() error {
 		}
 		listenerNames[l.Name] = i
 	}
+
+	gwNames := make(map[string]int)
+	for i, gw := range c.Gateway {
+		if prev, ok := gwNames[gw.Name]; ok {
+			return fmt.Errorf("duplicate gateway name %q: gateway[%d] and gateway[%d]", gw.Name, prev, i)
+		}
+		gwNames[gw.Name] = i
+	}
+
 	return nil
 }
 
@@ -627,6 +645,11 @@ func (c *Config) checkDuplicateBinds() error {
 	}
 	for i, fs := range c.Filesync {
 		if err := check(fs.Bind, fmt.Sprintf("filesync[%d]", i)); err != nil {
+			return err
+		}
+	}
+	for i, gw := range c.Gateway {
+		if err := check(gw.Bind, fmt.Sprintf("gateway[%d]", i)); err != nil {
 			return err
 		}
 	}
