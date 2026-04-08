@@ -51,7 +51,7 @@ func sessionEnv(shell, termName string) []string {
 // "PTY allocation request failed." The shell runs with plain pipes — this works
 // well for cmd.exe, PowerShell, and most CLI tools. Programs that query terminal
 // attributes (e.g., curses/ncurses) won't render correctly, but that's rare on Windows.
-func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, acceptEnv []string, log *slog.Logger) {
+func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, acceptEnv []string, motd []byte, log *slog.Logger) {
 	ch, reqs, err := newChan.Accept()
 	if err != nil {
 		log.Error("Accept session channel failed", "error", err)
@@ -134,6 +134,10 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 
 					if req.WantReply {
 						_ = req.Reply(true, nil)
+					}
+
+					if len(motd) > 0 {
+						_, _ = ch.Write(motd)
 					}
 
 					go func() {

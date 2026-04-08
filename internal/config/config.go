@@ -53,6 +53,10 @@ type Listener struct {
 	// Environment variable names that clients are allowed to set via SSH env requests.
 	// Supports wildcard patterns (e.g., "LANG", "LC_*"). Empty means no env forwarding.
 	AcceptEnv []string `yaml:"accept_env,omitempty"`
+	// Path to a text file displayed to clients before authentication (pre-auth banner).
+	Banner string `yaml:"banner,omitempty"`
+	// Path to a text file displayed after successful authentication (message of the day).
+	MOTD string `yaml:"motd,omitempty"`
 	// Additional overrides for the listener.
 	// Only a subset of OpenSSH config keys are parsed: Ciphers, MACs, KexAlgorithms, ConnectTimeout, IPQoS.
 	Options map[string]string `yaml:"options,omitempty"`
@@ -337,6 +341,8 @@ func LoadUnvalidated(path string) (map[string]*Config, error) {
 			if cfg.Listeners[i].Type == "sshd" {
 				cfg.Listeners[i].HostKey = expandHome(cfg.Listeners[i].HostKey)
 				cfg.Listeners[i].AuthorizedKeys = expandHome(cfg.Listeners[i].AuthorizedKeys)
+				cfg.Listeners[i].Banner = expandHome(cfg.Listeners[i].Banner)
+				cfg.Listeners[i].MOTD = expandHome(cfg.Listeners[i].MOTD)
 			}
 		}
 		for i := range cfg.Connections {

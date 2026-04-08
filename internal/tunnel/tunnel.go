@@ -210,6 +210,30 @@ func (s *SSHServer) Run(ctx context.Context) error {
 		},
 	}
 	sshCfg.AddHostKey(hostKey)
+
+	// Pre-auth banner (RFC 4252 section 5.4)
+	if s.cfg.Banner != "" {
+		bannerData, err := os.ReadFile(s.cfg.Banner) //nolint:gosec // G304: path from user config, validated at load time
+		if err != nil {
+			s.log.Warn("Failed to read banner file", "path", s.cfg.Banner, "error", err)
+		} else {
+			bannerText := string(bannerData)
+			sshCfg.BannerCallback = func(conn ssh.ConnMetadata) string {
+				return bannerText
+			}
+		}
+	}
+
+	// Read MOTD file at startup for post-auth display
+	var motdText []byte
+	if s.cfg.MOTD != "" {
+		motdText, err = os.ReadFile(s.cfg.MOTD) //nolint:gosec // G304: path from user config, validated at load time
+		if err != nil {
+			s.log.Warn("Failed to read motd file", "path", s.cfg.MOTD, "error", err)
+			motdText = nil
+		}
+	}
+
 	applySSHConfigOptions(&sshCfg.Config, s.cfg.Options)
 
 	listener, err := net.Listen("tcp", s.cfg.Bind)
@@ -235,11 +259,11 @@ func (s *SSHServer) Run(ctx context.Context) error {
 			s.log.Error("Accept failed", "error", err)
 			continue
 		}
-		go s.handleConn(ctx, conn, sshCfg, serverMetrics)
+		go s.handleConn(ctx, conn, sshCfg, serverMetrics, motdText)
 	}
 }
 
-func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.ServerConfig, serverMetrics *state.Metrics) {
+func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.ServerConfig, serverMetrics *state.Metrics, motd []byte) {
 	tcpKeepAlive := 30 * time.Second
 	if val := config.GetOption(s.cfg.Options, "TCPKeepAlive"); val != "" {
 		if seconds, err := strconv.Atoi(val); err == nil && seconds > 0 {
@@ -320,7 +344,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 		case "direct-tcpip":
 			go handleDirectTCPIP(newChan, s.log, s.cfg.Options, serverMetrics)
 		case "session":
-			go handleSession(connCtx, newChan, s.cfg.Shell, s.cfg.AcceptEnv, s.log)
+			go handleSession(connCtx, newChan, s.cfg.Shell, s.cfg.AcceptEnv, motd, s.log)
 		default:
 			_ = newChan.Reject(ssh.UnknownChannelType, "unsupported")
 		}

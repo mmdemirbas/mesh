@@ -79,7 +79,7 @@ func sessionEnv(shell, termName string) []string {
 }
 
 // handleSession handles an SSH session channel, which includes PTY allocation and shell execution.
-func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, acceptEnv []string, log *slog.Logger) {
+func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, acceptEnv []string, motd []byte, log *slog.Logger) {
 	ch, reqs, err := newChan.Accept()
 	if err != nil {
 		log.Error("Accept session channel failed", "error", err)
@@ -263,6 +263,11 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 
 				if req.WantReply {
 					_ = req.Reply(true, nil)
+				}
+
+				// Write MOTD before starting I/O relay
+				if len(motd) > 0 {
+					_, _ = ch.Write(motd)
 				}
 
 				go func() {
