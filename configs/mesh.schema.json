@@ -96,6 +96,13 @@
           "type": "array",
           "description": "Filesync configuration (folder synchronization)."
         },
+        "gateway": {
+          "items": {
+            "$ref": "#/$defs/GatewayCfg"
+          },
+          "type": "array",
+          "description": "LLM API gateway instances (Anthropic <-> OpenAI format translation)."
+        },
         "log_level": {
           "type": "string",
           "enum": [
@@ -167,6 +174,64 @@
         "targets"
       ],
       "description": "Connection is an outbound SSH connection to a peer or standard SSH server."
+    },
+    "GatewayCfg": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Friendly name for this gateway instance."
+        },
+        "bind": {
+          "type": "string",
+          "description": "Local listening address (must be loopback, e.g., \"127.0.0.1:3457\")."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "anthropic-to-openai",
+            "openai-to-anthropic"
+          ],
+          "description": "Translation direction: \"anthropic-to-openai\" or \"openai-to-anthropic\"."
+        },
+        "upstream": {
+          "type": "string",
+          "description": "Upstream endpoint URL (e.g., \"https://api.anthropic.com/v1/messages\")."
+        },
+        "api_key_env": {
+          "type": "string",
+          "description": "Name of the environment variable holding the upstream API key."
+        },
+        "proxy": {
+          "type": "string",
+          "description": "Optional outbound proxy for upstream requests (e.g., \"socks5://127.0.0.1:1081\")."
+        },
+        "timeout": {
+          "type": "string",
+          "default": "600s",
+          "description": "Upstream request timeout (e.g., \"600s\"). Default: \"600s\"."
+        },
+        "model_map": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Model name remapping: client model name -> upstream model name."
+        },
+        "default_max_tokens": {
+          "type": "integer",
+          "default": 32768,
+          "description": "Default max_tokens when the client omits it. Default: 32768."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "bind",
+        "mode",
+        "upstream"
+      ],
+      "description": "GatewayCfg configures a single LLM API gateway instance for bidirectional Anthropic/OpenAI translation."
     },
     "FilesyncCfg": {
       "properties": {

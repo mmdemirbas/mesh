@@ -26,6 +26,7 @@ The following are in scope for security reports:
 - Denial of service via resource exhaustion
 - Clipboard data interception or manipulation
 - Privilege escalation
+- LLM API gateway: API key exposure, request/response body leaks, bind address bypass
 
 ## Known Limitations
 
@@ -37,7 +38,7 @@ The following are in scope for security reports:
 - SSH keys and agent-based auth are preferred over passwords
 - Passwords never appear in config files (use `password_command` to fetch from external tools)
 - Config files with sensitive directives warn if world-readable (permission check on load)
-- Admin API binds to localhost only
+- Admin API and LLM gateway bind to localhost only (gateway refuses non-loopback addresses)
 - All file operations sanitize paths against traversal
 - Rate limiting on SSH server authentication
 - Handshake timeouts on all protocol handlers (SSH, SOCKS5, HTTP proxy)

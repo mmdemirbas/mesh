@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- LLM API gateway: bidirectional translation between Anthropic Messages API and OpenAI Chat Completions API. Supports streaming (SSE), tool use, image content, model name remapping, and error translation. Two modes: `anthropic-to-openai` (run Claude Code against non-Anthropic backends) and `openai-to-anthropic` (use Claude from OpenAI-only tools like Cursor/Aider)
+
 ## [0.0.1] - 2026-04-08
 
 First tracked release. Captures the current state of the project.
