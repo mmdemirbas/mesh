@@ -9,13 +9,18 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"sync"
 
 	"golang.org/x/crypto/ssh"
 )
 
-// defaultShell returns the Windows command interpreter.
+// defaultShell returns the Windows shell, preferring modern PowerShell (pwsh.exe).
+// Falls back to COMSPEC (typically cmd.exe) if pwsh is not installed.
 func defaultShell() string {
+	if path, err := exec.LookPath("pwsh.exe"); err == nil {
+		return path
+	}
 	if comspec := os.Getenv("COMSPEC"); comspec != "" {
 		return comspec
 	}
@@ -94,7 +99,6 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					var args []string
 
 					if req.Type == "exec" {
-						// Run the client's command via shell /C
 						var payload struct{ Command string }
 						if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
 							log.Warn("Failed to parse exec payload", "error", err)
@@ -104,7 +108,12 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 							return
 						}
 						name = shell
-						args = []string{"/C", payload.Command}
+						base := filepath.Base(name)
+						if base == "pwsh.exe" || base == "powershell.exe" {
+							args = []string{"-Command", payload.Command}
+						} else {
+							args = []string{"/C", payload.Command}
+						}
 					} else {
 						// Interactive shell session
 						name = shell
