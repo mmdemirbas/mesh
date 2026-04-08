@@ -1572,15 +1572,8 @@ func (n *Node) runUDPBeacon(ctx context.Context, magicHeader string, port int) {
 		// Global broadcast fallback
 		addrs := []*net.UDPAddr{{IP: net.IPv4bcast, Port: port}}
 
-		if runtime.GOOS == "windows" {
-			cachedBcastAddrs = addrs
-			return addrs
-		}
-
-		// 2. Mitigate Windows Driver/EDR Faults
-		// Windows network drivers frequently crash (0xc0000005) when blasted with
-		// malformed per-interface UDP broadcasts. The global 255.255.255.255 is
-		// natively routed and 100% stable on Windows for LAN discovery.
+		// Windows network drivers can crash with per-interface UDP broadcasts.
+		// The global 255.255.255.255 is stable on Windows for LAN discovery.
 		if runtime.GOOS == "windows" {
 			cachedBcastAddrs = addrs
 			return addrs

@@ -54,10 +54,12 @@ func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer
 				return
 			}
 			log.Debug("HTTP proxy accept error (transient)", "error", err)
+			backoff := time.NewTimer(50 * time.Millisecond)
 			select {
 			case <-ctx.Done():
+				backoff.Stop()
 				return
-			case <-time.After(50 * time.Millisecond): // backoff on transient errors
+			case <-backoff.C:
 			}
 			continue
 		}
@@ -139,7 +141,6 @@ func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *
 	defer func() { _ = remote.Close() }()
 
 	if _, err := conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")); err != nil {
-		_ = remote.Close()
 		return
 	}
 	// Clear handshake deadline before entering data relay

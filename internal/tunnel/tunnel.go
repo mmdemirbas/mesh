@@ -94,11 +94,11 @@ func evictOldLimiters(limiters map[string]*limiterEntry, maxAge time.Duration, n
 	}
 }
 
-// matchesAnyAuthorizedKey reports whether incoming matches any key in authorized.
-func matchesAnyAuthorizedKey(incoming ssh.PublicKey, authorized []ssh.PublicKey) bool {
+// matchesAnyAuthorizedKey reports whether incoming matches any pre-marshaled authorized key.
+func matchesAnyAuthorizedKey(incoming ssh.PublicKey, authorizedBytes [][]byte) bool {
 	inBytes := incoming.Marshal()
-	for _, ak := range authorized {
-		if bytes.Equal(inBytes, ak.Marshal()) {
+	for _, akBytes := range authorizedBytes {
+		if bytes.Equal(inBytes, akBytes) {
 			return true
 		}
 	}
@@ -137,6 +137,11 @@ func (s *SSHServer) Run(ctx context.Context) error {
 	if err != nil {
 		state.Global.Update("server", s.cfg.Bind, state.Failed, err.Error())
 		return fmt.Errorf("load authorized keys %s: %w", s.cfg.AuthorizedKeys, err)
+	}
+	// Pre-marshal authorized keys once to avoid repeated marshaling on every auth attempt.
+	authorizedKeyBytes := make([][]byte, len(authorizedKeys))
+	for i, ak := range authorizedKeys {
+		authorizedKeyBytes[i] = ak.Marshal()
 	}
 
 	var (
@@ -194,7 +199,7 @@ func (s *SSHServer) Run(ctx context.Context) error {
 				return nil, err
 			}
 
-			if matchesAnyAuthorizedKey(key, authorizedKeys) {
+			if matchesAnyAuthorizedKey(key, authorizedKeyBytes) {
 				s.log.Debug("Auth accepted", "remote", conn.RemoteAddr(), "user", conn.User())
 				return &ssh.Permissions{}, nil
 			}

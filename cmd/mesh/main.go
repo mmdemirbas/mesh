@@ -353,6 +353,7 @@ func upCmd(nodeNames []string, configPath string) {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 	go func() {
 		sig := <-sigCh
 		log.Info("Shutting down", "signal", sig)
@@ -495,57 +496,56 @@ type humanLogHandler struct {
 	slog.Handler
 }
 
-func (h *humanLogHandler) Handle(ctx context.Context, r slog.Record) error {
-	attrs := make(map[string]slog.Value)
-	r.Attrs(func(a slog.Attr) bool {
-		attrs[a.Key] = a.Value
-		return true
-	})
+// Package-level key classification maps — allocated once, avoids per-record map allocations.
+var (
+	humanLogInlineKeys = map[string]bool{
+		"target": true, "bind": true, "addr": true, "peer": true,
+		"remote": true, "listen": true, "name": true, "file": true, "path": true,
+	}
+	humanLogDetailKeys = map[string]bool{
+		"tcp": true, "ssh": true, "elapsed": true, "retry_in": true,
+		"version": true, "node": true, "config": true, "signal": true,
+		"type": true, "set": true, "formats": true, "files": true,
+		"count": true, "size": true, "user": true, "from": true,
+		"status": true, "fail_count": true,
+	}
+)
 
-	// Build a human-readable message by consuming known attributes.
+func (h *humanLogHandler) Handle(ctx context.Context, r slog.Record) error {
 	var msg strings.Builder
 	msg.WriteString(r.Message)
-	consumed := map[string]bool{}
 
-	// Inline "target", "bind", "addr", "peer", "remote", "listen" into the message
-	for _, key := range []string{"target", "bind", "addr", "peer", "remote", "listen", "name", "file", "path"} {
-		if v, ok := attrs[key]; ok {
-			msg.WriteString(" " + v.String())
-			consumed[key] = true
-		}
-	}
-
-	// Group timing/detail attrs as parenthetical
 	var details []string
-	for _, key := range []string{"tcp", "ssh", "elapsed", "retry_in", "version", "node", "config", "signal",
-		"type", "set", "formats", "files", "count", "size", "user", "from", "status", "fail_count"} {
-		if v, ok := attrs[key]; ok {
-			details = append(details, key+": "+v.String())
-			consumed[key] = true
-		}
-	}
-	if len(details) > 0 {
-		msg.WriteString(" (" + strings.Join(details, ", ") + ")")
-	}
-
-	// "error" goes last, separated
-	if v, ok := attrs["error"]; ok {
-		msg.WriteString(": " + v.String())
-		consumed["error"] = true
-	}
-
-	// Rebuild record with new message and only unconsumed attributes
-	r.Message = msg.String()
+	var errorVal string
 	var remaining []slog.Attr
+
+	// Single pass: classify each attr and build message parts.
 	r.Attrs(func(a slog.Attr) bool {
-		if !consumed[a.Key] {
+		switch {
+		case humanLogInlineKeys[a.Key]:
+			msg.WriteString(" ")
+			msg.WriteString(a.Value.String())
+		case humanLogDetailKeys[a.Key]:
+			details = append(details, a.Key+": "+a.Value.String())
+		case a.Key == "error":
+			errorVal = a.Value.String()
+		default:
 			remaining = append(remaining, a)
 		}
 		return true
 	})
 
-	// Create a clean record without the consumed attrs
-	newRecord := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
+	if len(details) > 0 {
+		msg.WriteString(" (")
+		msg.WriteString(strings.Join(details, ", "))
+		msg.WriteByte(')')
+	}
+	if errorVal != "" {
+		msg.WriteString(": ")
+		msg.WriteString(errorVal)
+	}
+
+	newRecord := slog.NewRecord(r.Time, r.Level, msg.String(), r.PC)
 	newRecord.AddAttrs(remaining...)
 	return h.Handler.Handle(ctx, newRecord)
 }
@@ -656,7 +656,9 @@ func statusCmd(nodeNames []string, configPath string, watch bool) {
 	// Watch mode — alternate screen buffer, overwrite in-place
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	winch := winchSignal()
+	defer signal.Stop(sigCh)
+	winch, stopWinch := winchSignal()
+	defer stopWinch()
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()

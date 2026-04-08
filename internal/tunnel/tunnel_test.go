@@ -524,6 +524,14 @@ func TestEvictOldLimiters_DoesNotTouchFreshUnderPressure(t *testing.T) {
 
 // --- matchesAnyAuthorizedKey ---
 
+func marshalKeys(keys ...ssh.PublicKey) [][]byte {
+	out := make([][]byte, len(keys))
+	for i, k := range keys {
+		out[i] = k.Marshal()
+	}
+	return out
+}
+
 func TestMatchesAnyAuthorizedKey(t *testing.T) {
 	keyA := newTestPublicKey(t)
 	keyB := newTestPublicKey(t)
@@ -532,16 +540,16 @@ func TestMatchesAnyAuthorizedKey(t *testing.T) {
 	tests := []struct {
 		name       string
 		incoming   ssh.PublicKey
-		authorized []ssh.PublicKey
+		authorized [][]byte
 		want       bool
 	}{
-		{"match first", keyA, []ssh.PublicKey{keyA, keyB}, true},
-		{"match last", keyB, []ssh.PublicKey{keyA, keyB}, true},
-		{"match middle", keyB, []ssh.PublicKey{keyA, keyB, keyC}, true},
-		{"no match", keyC, []ssh.PublicKey{keyA, keyB}, false},
-		{"empty authorized list", keyA, []ssh.PublicKey{}, false},
-		{"single key matches", keyA, []ssh.PublicKey{keyA}, true},
-		{"single key no match", keyB, []ssh.PublicKey{keyA}, false},
+		{"match first", keyA, marshalKeys(keyA, keyB), true},
+		{"match last", keyB, marshalKeys(keyA, keyB), true},
+		{"match middle", keyB, marshalKeys(keyA, keyB, keyC), true},
+		{"no match", keyC, marshalKeys(keyA, keyB), false},
+		{"empty authorized list", keyA, nil, false},
+		{"single key matches", keyA, marshalKeys(keyA), true},
+		{"single key no match", keyB, marshalKeys(keyA), false},
 	}
 
 	for _, tt := range tests {
@@ -558,7 +566,7 @@ func TestMatchesAnyAuthorizedKey_DifferentKeyTypesDoNotMatch(t *testing.T) {
 	// Generate two independent ed25519 keys; their public bytes must differ.
 	keyA := newTestPublicKey(t)
 	keyB := newTestPublicKey(t)
-	if matchesAnyAuthorizedKey(keyA, []ssh.PublicKey{keyB}) {
+	if matchesAnyAuthorizedKey(keyA, marshalKeys(keyB)) {
 		t.Error("two distinct keys should not match")
 	}
 }

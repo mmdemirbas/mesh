@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -32,9 +31,8 @@ const (
 type folderWatcher struct {
 	watcher *fsnotify.Watcher
 	// dirtyCh is signaled (non-blocking) when any watched file changes.
-	dirtyCh    chan struct{}
-	mu         sync.Mutex
-	roots      []string
+	dirtyCh chan struct{}
+	roots   []string
 	ignore     map[string]*ignoreMatcher // folderRoot -> matcher
 	watchCount int                       // current number of active watches
 	capped     bool                      // true if maxWatches was reached
@@ -136,6 +134,9 @@ func (fw *folderWatcher) run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			if debounceTimer != nil {
+				debounceTimer.Stop()
+			}
 			return
 
 		case event, ok := <-fw.watcher.Events:
