@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -634,7 +635,8 @@ func TestSafePath(t *testing.T) {
 		{"nested file", "sub/nested.txt", false},
 		{"dotdot prefix", "../escape.txt", true},
 		{"dotdot mid", "sub/../../escape.txt", true},
-		{"absolute path", "/etc/passwd", true},
+		{"absolute unix path", "/etc/passwd", runtime.GOOS != "windows"},
+		{"absolute windows path", `C:\Windows\System32`, runtime.GOOS == "windows"},
 		{"null byte", "file\x00.txt", true},
 		{"empty path", "", false}, // resolves to root itself, which is allowed
 	}
