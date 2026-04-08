@@ -37,6 +37,7 @@ type FileIndex struct {
 // PeerState tracks per-peer sync progress.
 type PeerState struct {
 	LastSeenSequence int64     `yaml:"last_seen_sequence"`
+	LastSentSequence int64     `yaml:"last_sent_sequence"` // our index sequence last sent to this peer
 	LastSync         time.Time `yaml:"last_sync"`
 }
 

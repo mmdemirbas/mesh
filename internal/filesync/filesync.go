@@ -456,13 +456,16 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	// Build and send our index, requesting only entries newer than what we've seen.
 	fs.indexMu.RLock()
 	peerLastSeq := int64(0)
+	ourLastSentSeq := int64(0)
 	if ps, ok := fs.peers[peerAddr]; ok {
 		peerLastSeq = ps.LastSeenSequence
+		ourLastSentSeq = ps.LastSentSequence
 	}
+	ourCurrentSeq := fs.index.Sequence
 	fs.indexMu.RUnlock()
 
-	exchange := n.buildIndexExchange(folderID, 0) // send full index to peer
-	exchange.Since = peerLastSeq                  // ask peer to send only entries newer than this
+	exchange := n.buildIndexExchange(folderID, ourLastSentSeq) // send only entries newer than last sent
+	exchange.Since = peerLastSeq                               // ask peer to send only entries newer than this
 	remoteIdx, err := sendIndex(ctx, n.httpClient, peerAddr, exchange)
 	if err != nil {
 		slog.Debug("sync failed", "folder", folderID, "peer", peerAddr, "error", err)
@@ -479,7 +482,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			"folder", folderID, "peer", peerAddr,
 			"remote_seq", remoteIdx.GetSequence(), "last_seen", peerLastSeq)
 		fs.indexMu.Lock()
-		fs.peers[peerAddr] = PeerState{LastSeenSequence: 0, LastSync: time.Now()}
+		fs.peers[peerAddr] = PeerState{LastSeenSequence: 0, LastSentSequence: 0, LastSync: time.Now()}
 		fs.indexMu.Unlock()
 		return
 	}
@@ -498,6 +501,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		fs.indexMu.Lock()
 		fs.peers[peerAddr] = PeerState{
 			LastSeenSequence: remoteIdx.GetSequence(),
+			LastSentSequence: ourCurrentSeq,
 			LastSync:         time.Now(),
 		}
 		fs.indexMu.Unlock()
@@ -624,6 +628,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	fs.indexMu.Lock()
 	fs.peers[peerAddr] = PeerState{
 		LastSeenSequence: remoteIdx.GetSequence(),
+		LastSentSequence: ourCurrentSeq,
 		LastSync:         time.Now(),
 	}
 	fs.indexMu.Unlock()
