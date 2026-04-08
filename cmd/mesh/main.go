@@ -279,7 +279,7 @@ func upCmd(nodeNames []string, configPath string) {
 	}
 
 	// Phase 2: Set up log destination — file (dashboard mode) or stderr (classic mode).
-	ring := newLogRing(10)
+	ring := newLogRing(1000)
 	var logFilePath string
 
 	if useDashboard {
@@ -393,7 +393,7 @@ func upCmd(nodeNames []string, configPath string) {
 				defer func(n string) { _ = os.Remove(portFilePath(n)) }(name)
 			}
 
-			adminSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: buildAdminMux(ring)}
+			adminSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: buildAdminMux(ring, logFilePath)}
 			go func() { _ = adminSrv.Serve(adminLn) }()
 			context.AfterFunc(ctx, func() { _ = adminSrv.Close() })
 		}

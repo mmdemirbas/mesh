@@ -3,10 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/pprof"
+	"os"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,7 +24,7 @@ var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 // buildAdminMux returns the HTTP handler for the local admin server.
 // All endpoints are read-only and served on localhost only.
-func buildAdminMux(ring *logRing) *http.ServeMux {
+func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// GET / — redirect to web dashboard.
@@ -44,6 +47,53 @@ func buildAdminMux(ring *logRing) *http.ServeMux {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(plain) // write error: headers already sent, nothing to do
+	})
+
+	// GET /api/logs/file — full log file with optional offset/limit.
+	// Query params: offset (byte offset, default 0), limit (max bytes, default 1MB).
+	mux.HandleFunc("/api/logs/file", func(w http.ResponseWriter, r *http.Request) {
+		if logFilePath == "" {
+			http.Error(w, "log file not available (non-dashboard mode)", http.StatusNotFound)
+			return
+		}
+
+		offset := int64(0)
+		limit := int64(1024 * 1024) // 1 MB default
+
+		if v := r.URL.Query().Get("offset"); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+				limit = n
+			}
+		}
+
+		f, err := os.Open(logFilePath) //nolint:gosec // G304: path from internal config, not user input
+		if err != nil {
+			http.Error(w, "open log file: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer func() { _ = f.Close() }()
+
+		info, err := f.Stat()
+		if err != nil {
+			http.Error(w, "stat log file: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Log-Size", strconv.FormatInt(info.Size(), 10))
+
+		if offset > 0 {
+			if _, err := f.Seek(offset, io.SeekStart); err != nil {
+				http.Error(w, "seek: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		_, _ = io.Copy(w, io.LimitReader(f, limit))
 	})
 
 	// GET /api/metrics — Prometheus text format. All data is derived from existing

@@ -35,7 +35,7 @@ func adminTestSetup(t *testing.T) *logRing {
 
 func TestAdminStateEndpoints(t *testing.T) {
 	ring := adminTestSetup(t)
-	srv := httptest.NewServer(buildAdminMux(ring))
+	srv := httptest.NewServer(buildAdminMux(ring, ""))
 	defer srv.Close()
 
 	for _, path := range []string{"/api/state"} {
@@ -76,7 +76,7 @@ func TestAdminLogsEndpoint(t *testing.T) {
 	ring.Write([]byte("\x1b[32mgreen text\x1b[0m\n"))
 	ring.Write([]byte("plain line\n"))
 
-	srv := httptest.NewServer(buildAdminMux(ring))
+	srv := httptest.NewServer(buildAdminMux(ring, ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/logs")
@@ -115,7 +115,7 @@ func TestAdminLogsEndpoint(t *testing.T) {
 
 func TestAdminMetricsEndpoint(t *testing.T) {
 	ring := adminTestSetup(t)
-	srv := httptest.NewServer(buildAdminMux(ring))
+	srv := httptest.NewServer(buildAdminMux(ring, ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/metrics")
@@ -179,7 +179,7 @@ func TestAdminMetricsDownComponent(t *testing.T) {
 	})
 
 	ring := newLogRing(4)
-	srv := httptest.NewServer(buildAdminMux(ring))
+	srv := httptest.NewServer(buildAdminMux(ring, ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/metrics")
@@ -197,7 +197,7 @@ func TestAdminMetricsDownComponent(t *testing.T) {
 
 func TestAdminUIEndpoint(t *testing.T) {
 	ring := newLogRing(4)
-	srv := httptest.NewServer(buildAdminMux(ring))
+	srv := httptest.NewServer(buildAdminMux(ring, ""))
 	defer srv.Close()
 
 	for _, path := range []string{"/ui", "/ui/filesync", "/ui/logs", "/ui/api"} {
@@ -225,7 +225,7 @@ func TestAdminUIEndpoint(t *testing.T) {
 
 func TestAdminRootRedirect(t *testing.T) {
 	ring := newLogRing(4)
-	srv := httptest.NewServer(buildAdminMux(ring))
+	srv := httptest.NewServer(buildAdminMux(ring, ""))
 	defer srv.Close()
 
 	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -248,7 +248,7 @@ func TestAdminRootRedirect(t *testing.T) {
 
 func TestAdminLogsEmpty(t *testing.T) {
 	ring := newLogRing(8)
-	srv := httptest.NewServer(buildAdminMux(ring))
+	srv := httptest.NewServer(buildAdminMux(ring, ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/logs")
@@ -268,7 +268,7 @@ func TestAdminLogsEmpty(t *testing.T) {
 
 func TestAdminServerRandomPortBind(t *testing.T) {
 	ring := newLogRing(4)
-	mux := buildAdminMux(ring)
+	mux := buildAdminMux(ring, "")
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

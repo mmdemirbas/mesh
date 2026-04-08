@@ -325,6 +325,9 @@ tbody tr:last-child td { border-bottom: none; }
         <div class="filter-btn" data-level="WRN">Warn</div>
         <div class="filter-btn" data-level="ERR">Error</div>
         <div class="filter-btn" data-level="DBG">Debug</div>
+        <div style="flex:1"></div>
+        <div class="filter-btn active" id="log-mode-recent" onclick="setLogMode('recent')">Recent</div>
+        <div class="filter-btn" id="log-mode-file" onclick="setLogMode('file')">Full Log</div>
       </div>
       <div class="card-body">
         <div class="log-container" id="log-lines" style="max-height:75vh"></div>
@@ -414,6 +417,8 @@ let state = {}, logs = [], folders = [], conflicts = [], clipActivities = [], me
 let compSort = {col:'type', asc:true};
 let fsSort = {col:'id', asc:true};
 let logLevel = 'all';
+let logMode = 'recent'; // 'recent' (ring buffer) or 'file' (full log file)
+let fileLogLines = [], fileLogSize = 0, fileLogLoaded = false;
 const HIST_LEN = 60;
 const chartHist = {tx:[], rx:[], streams:[], goroutines:[], fds:[]};
 let prevTotalTx = 0, prevTotalRx = 0, firstTick = true;
@@ -467,6 +472,25 @@ async function tick() {
   } catch(e) {
     document.getElementById('hdr-status').textContent = 'error: ' + e.message;
   }
+}
+
+function setLogMode(mode) {
+  logMode = mode;
+  document.getElementById('log-mode-recent').classList.toggle('active', mode === 'recent');
+  document.getElementById('log-mode-file').classList.toggle('active', mode === 'file');
+  if (mode === 'file' && !fileLogLoaded) loadFileLogs();
+  renderLogs();
+}
+async function loadFileLogs() {
+  try {
+    const resp = await fetch('/api/logs/file?limit=5242880'); // 5 MB
+    if (!resp.ok) { fileLogLines = ['(log file not available)']; fileLogLoaded = true; renderLogs(); return; }
+    fileLogSize = parseInt(resp.headers.get('X-Log-Size') || '0', 10);
+    const text = await resp.text();
+    fileLogLines = text.split('\n').filter(l => l.length > 0);
+    fileLogLoaded = true;
+    renderLogs();
+  } catch(e) { fileLogLines = ['(error loading log file: ' + e.message + ')']; fileLogLoaded = true; renderLogs(); }
 }
 
 // --- Render ---
@@ -591,25 +615,27 @@ function colorLog(line) {
 function renderLogs() {
   const filter = document.getElementById('log-search').value.toLowerCase();
   const el = document.getElementById('log-lines');
-  if (!logs.length) { el.innerHTML = '<div style="color:var(--text-muted);padding:16px">No logs yet</div>'; return; }
+  const src = logMode === 'file' ? fileLogLines : logs;
+  if (!src.length) {
+    el.innerHTML = '<div style="color:var(--text-muted);padding:16px">' +
+      (logMode === 'file' && !fileLogLoaded ? 'Loading...' : 'No logs yet') + '</div>';
+    return;
+  }
 
-  let shown = 0, total = logs.length;
-  const html = logs.map(l => {
-    const plain = l;
-    // Level filter
+  let shown = 0, total = src.length;
+  const html = src.map(l => {
     if (logLevel !== 'all') {
-      if (!plain.includes(' '+logLevel+' ')) return '';
+      if (!l.includes(' '+logLevel+' ')) return '';
     }
-    // Text filter
-    if (filter && !plain.toLowerCase().includes(filter)) return '';
+    if (filter && !l.toLowerCase().includes(filter)) return '';
     shown++;
     return '<div class="log-line">' + colorLog(x(l)) + '</div>';
   }).join('');
 
   el.innerHTML = html || '<div style="color:var(--text-muted);padding:16px">No matching logs</div>';
-  document.getElementById('log-count').textContent = shown + ' / ' + total + ' lines';
+  const suffix = logMode === 'file' && fileLogSize > 0 ? ' (file: ' + (fileLogSize/1024).toFixed(0) + ' KB)' : '';
+  document.getElementById('log-count').textContent = shown + ' / ' + total + ' lines' + suffix;
 
-  // Auto-scroll only if user is near bottom
   if (el.scrollHeight - el.scrollTop - el.clientHeight < 100) {
     el.scrollTop = el.scrollHeight;
   }
@@ -855,6 +881,7 @@ document.querySelectorAll('.filter-btn[data-level]').forEach(btn => {
 const endpoints = [
   {method:'GET', path:'/api/state', desc:'JSON snapshot of all component states (type, id, status, message, peer_addr, bound_addr, file_count, last_sync).'},
   {method:'GET', path:'/api/logs', desc:'Recent log lines as a JSON string array. ANSI escape codes are stripped.'},
+  {method:'GET', path:'/api/logs/file?offset=0&limit=1048576', desc:'Full log file (plain text). Query params: offset (byte), limit (bytes, default 1MB). Header X-Log-Size gives total file size.'},
   {method:'GET', path:'/api/metrics', desc:'Prometheus text format metrics: mesh_component_up, mesh_bytes_tx_total, mesh_bytes_rx_total, mesh_active_streams, mesh_uptime_seconds, mesh_auth_failures_total.'},
   {method:'GET', path:'/api/filesync/folders', desc:'Filesync folder statuses as JSON array: id, path, direction, file_count, peers.'},
   {method:'GET', path:'/api/filesync/conflicts', desc:'Conflict files as JSON array: folder_id, path.'},
