@@ -59,6 +59,10 @@ const (
 	// Files larger than this are skipped to avoid OOM and transfer timeouts.
 	maxSyncFileSize = 50 * 1024 * 1024 // 50 MB
 
+	// maxClipboardPayload caps the total size of all clipboard formats read locally.
+	// Prevents OOM when a large image or multiple large items are on the clipboard.
+	maxClipboardPayload = 100 * 1024 * 1024 // 100 MB
+
 	// maxRequestBodySize caps the /sync endpoint body.
 	// Allows up to ~20 files at maxSyncFileSize with base64 overhead (~33%).
 	maxRequestBodySize = maxSyncFileSize * 20 * 4 / 3
@@ -1049,14 +1053,23 @@ func readClipboardFormats() (formats []*pb.ClipFormat) {
 
 func loadFormatsFromDir(dir string) []*pb.ClipFormat {
 	var formats []*pb.ClipFormat
+	var totalSize int
 	for _, entry := range clipFormatTable {
 		data, err := os.ReadFile(filepath.Join(dir, entry.fileName)) //nolint:gosec // G304: dir is the node's private filesDir; entry.fileName is a fixed constant
 		if err != nil || len(data) == 0 {
 			continue
 		}
 		if len(data) > maxSyncFileSize {
+			slog.Warn("Skipping clipboard format: exceeds per-file size limit",
+				"format", entry.mimeType, "size_mb", len(data)>>20, "limit_mb", maxSyncFileSize>>20)
 			continue
 		}
+		if totalSize+len(data) > maxClipboardPayload {
+			slog.Warn("Skipping remaining clipboard formats: total payload size limit reached",
+				"format", entry.mimeType, "total_mb", totalSize>>20, "limit_mb", maxClipboardPayload>>20)
+			break
+		}
+		totalSize += len(data)
 		formats = append(formats, &pb.ClipFormat{MimeType: entry.mimeType, Data: data})
 	}
 
