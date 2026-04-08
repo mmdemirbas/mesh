@@ -416,8 +416,3 @@ func mustMarshal(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
 }
-
-func mustMarshalBytes(v any) []byte {
-	b, _ := json.Marshal(v)
-	return b
-}

@@ -190,7 +190,6 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 
 	result, _ := json.Marshal(anthResp)
 	metrics.BytesTx.Add(int64(len(result)))
-	metrics.Streams.Add(1)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(result) //nolint:errcheck
@@ -282,7 +281,6 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 
 	result, _ := json.Marshal(oaiResp)
 	metrics.BytesTx.Add(int64(len(result)))
-	metrics.Streams.Add(1)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(result) //nolint:errcheck

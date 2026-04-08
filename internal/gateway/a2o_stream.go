@@ -109,13 +109,12 @@ type a2oStreamState struct {
 	flusher     http.Flusher
 	metrics     *state.Metrics
 
-	blockIndex    int
-	inTextBlock   bool
-	inToolBlock   bool
-	lastToolIndex int
-	usage         AnthropicUsage
-	stopReason    string
-	hasBlock      bool
+	blockIndex  int
+	inTextBlock bool
+	inToolBlock bool
+	usage       AnthropicUsage
+	stopReason  string
+	hasBlock    bool
 }
 
 func (s *a2oStreamState) processChunk(chunk *ChatCompletionChunk) {
@@ -165,7 +164,6 @@ func (s *a2oStreamState) processChunk(chunk *ChatCompletionChunk) {
 				// New tool call — close previous block.
 				s.closeCurrentBlock()
 				s.startToolBlock(tc.ID, tc.Function.Name)
-				s.lastToolIndex = tc.Index
 			}
 
 			// Argument delta.
