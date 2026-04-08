@@ -160,7 +160,7 @@ func buildAdminMux(ring *logRing) *http.ServeMux {
 		_ = json.NewEncoder(w).Encode(conflicts)
 	})
 
-	// GET /ui, /ui/filesync, /ui/logs, /ui/api — unified SPA dashboard.
+	// GET /ui, /ui/filesync, /ui/logs, /ui/metrics, /ui/api — unified SPA dashboard.
 	// The tab parameter selects the initial view.
 	uiHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -169,6 +169,7 @@ func buildAdminMux(ring *logRing) *http.ServeMux {
 	mux.Handle("/ui", uiHandler)
 	mux.Handle("/ui/filesync", uiHandler)
 	mux.Handle("/ui/logs", uiHandler)
+	mux.Handle("/ui/metrics", uiHandler)
 	mux.Handle("/ui/api", uiHandler)
 
 	return mux

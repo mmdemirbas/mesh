@@ -332,6 +332,12 @@ func upCmd(nodeNames []string, configPath string) {
 
 	log.Info("mesh starting", "version", version, "nodes", strings.Join(nodeNames, ","), "config", configPath)
 
+	// Warn about unsupported SSH options now that the proper logger is active
+	// (Phase 2 routes logs to file in dashboard mode, not stderr).
+	for _, cfg := range cfgs {
+		config.WarnUnsupportedOptions(cfg)
+	}
+
 	// Write PID files for all nodes (same PID)
 	for _, name := range nodeNames {
 		if err := writePidFile(name); err != nil {

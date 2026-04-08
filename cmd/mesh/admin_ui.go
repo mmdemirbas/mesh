@@ -1,8 +1,8 @@
 package main
 
 // adminUI is the unified single-page web dashboard served at /ui, /ui/filesync,
-// /ui/logs, and /ui/api. Tab is selected from the URL path. Polls API endpoints
-// every second. No external dependencies — vanilla JS + CSS only.
+// /ui/logs, /ui/metrics, and /ui/api. Tab is selected from the URL path. Polls
+// API endpoints every second. No external dependencies — vanilla JS + CSS only.
 var adminUI = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -174,6 +174,37 @@ tbody tr:last-child td { border-bottom: none; }
   color: var(--text-dim); border: 1px solid var(--border);
 }
 
+/* Metrics */
+.met-family { border-bottom: 1px solid var(--border); }
+.met-family:last-child { border-bottom: none; }
+.met-family-header {
+  padding: 10px 16px; cursor: pointer; display: flex; align-items: center;
+  justify-content: space-between; gap: 12px; user-select: none;
+}
+.met-family-header:hover { background: var(--bg-hover); }
+.met-family-name { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--cyan); }
+.met-family-type { font-size: 11px; color: var(--text-muted); text-transform: uppercase; }
+.met-family-help { font-size: 11px; color: var(--text-dim); flex: 1; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.met-family-arrow { color: var(--text-muted); font-size: 10px; transition: transform 0.15s; }
+.met-family.open .met-family-arrow { transform: rotate(90deg); }
+.met-samples { display: none; padding: 0 16px 10px; }
+.met-family.open .met-samples { display: block; }
+.met-samples table { font-size: 12px; }
+.met-samples td { padding: 4px 12px; }
+.met-samples .met-labels { color: var(--text-dim); }
+.met-samples .met-value { color: var(--green); font-weight: 600; text-align: right; }
+
+/* Charts */
+.chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.chart-card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 16px;
+}
+.chart-title { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
+.chart-value { font-size: 20px; font-weight: 700; font-family: var(--mono); }
+.chart-sub { display: flex; gap: 16px; margin-bottom: 8px; }
+.chart-canvas { width: 100%; height: 80px; display: block; border-radius: 4px; }
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -194,6 +225,7 @@ tbody tr:last-child td { border-bottom: none; }
   <div class="tab active" data-tab="dashboard">Dashboard</div>
   <div class="tab" data-tab="filesync">Filesync</div>
   <div class="tab" data-tab="logs">Logs</div>
+  <div class="tab" data-tab="metrics">Metrics</div>
   <div class="tab" data-tab="api">API</div>
 </div>
 
@@ -279,6 +311,43 @@ tbody tr:last-child td { border-bottom: none; }
     </div>
   </div>
 
+  <!-- Metrics panel -->
+  <div class="panel" id="p-metrics">
+    <div class="stats" id="met-stats"></div>
+    <div class="chart-grid" id="met-charts">
+      <div class="chart-card">
+        <div class="chart-title">Network Traffic</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--green)"><span id="chart-tx-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">tx</span></div>
+          <div class="chart-value" style="color:var(--purple)"><span id="chart-rx-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">rx</span></div>
+        </div>
+        <canvas class="chart-canvas" id="chart-traffic"></canvas>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Active Streams</div>
+        <div class="chart-value" id="chart-streams-val" style="margin-bottom:8px">0</div>
+        <canvas class="chart-canvas" id="chart-streams"></canvas>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Goroutines</div>
+        <div class="chart-value" id="chart-goroutines-val" style="margin-bottom:8px">0</div>
+        <canvas class="chart-canvas" id="chart-goroutines"></canvas>
+      </div>
+      <div class="chart-card" id="chart-fds-card">
+        <div class="chart-title">Open File Descriptors</div>
+        <div class="chart-value" id="chart-fds-val" style="margin-bottom:8px">0</div>
+        <canvas class="chart-canvas" id="chart-fds"></canvas>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span>Prometheus Metrics</span>
+        <input class="search-input" id="met-search" placeholder="Filter metrics..." style="width:220px">
+      </div>
+      <div class="card-body" id="met-body" style="padding:0"></div>
+    </div>
+  </div>
+
   <!-- API panel -->
   <div class="panel" id="p-api">
     <div class="card">
@@ -290,15 +359,16 @@ tbody tr:last-child td { border-bottom: none; }
 
 <script>
 // --- State ---
-let state = {}, logs = [], folders = [], conflicts = [];
+let state = {}, logs = [], folders = [], conflicts = [], metricsText = '';
 let compSort = {col:'type', asc:true};
 let fsSort = {col:'id', asc:true};
 let logLevel = 'all';
-let txHistory = [], rxHistory = [];
-const HIST_LEN = 30;
+const HIST_LEN = 60;
+const chartHist = {tx:[], rx:[], streams:[], goroutines:[], fds:[]};
+let prevTotalTx = 0, prevTotalRx = 0, firstTick = true;
 
 // --- Tabs ---
-const tabMap = {'/ui':'dashboard','/ui/filesync':'filesync','/ui/logs':'logs','/ui/api':'api'};
+const tabMap = {'/ui':'dashboard','/ui/filesync':'filesync','/ui/logs':'logs','/ui/metrics':'metrics','/ui/api':'api'};
 let activeTab = tabMap[location.pathname] || 'dashboard';
 
 function showTab(name) {
@@ -316,22 +386,30 @@ window.addEventListener('popstate', () => { showTab(tabMap[location.pathname] ||
 showTab(activeTab);
 
 // --- Data fetch ---
-let prevTx = 0, prevRx = 0;
-
 async function tick() {
   try {
-    const [sr, lr, fr, cr] = await Promise.all([
+    const [sr, lr, fr, cr, mr] = await Promise.all([
       fetch('/api/state').then(r=>r.json()),
       fetch('/api/logs').then(r=>r.json()),
       fetch('/api/filesync/folders').then(r=>r.json()),
       fetch('/api/filesync/conflicts').then(r=>r.json()),
+      fetch('/api/metrics').then(r=>r.text()),
     ]);
-    state = sr; logs = lr; folders = fr; conflicts = cr;
+    state = sr; logs = lr; folders = fr; conflicts = cr; metricsText = mr;
 
-    // Track traffic history for sparkline
-    let totalTx = 0, totalRx = 0;
-    // We don't have per-tick byte counters from /api/state, but we can compute totals
-    // from the state snapshot and diff them.
+    // Accumulate chart history from metrics
+    const nowTx = sumMetric(metricsText, 'mesh_bytes_tx_total');
+    const nowRx = sumMetric(metricsText, 'mesh_bytes_rx_total');
+    if (!firstTick) {
+      pushHist('tx', Math.max(0, nowTx - prevTotalTx));
+      pushHist('rx', Math.max(0, nowRx - prevTotalRx));
+    } else { firstTick = false; }
+    prevTotalTx = nowTx; prevTotalRx = nowRx;
+    pushHist('streams', sumMetric(metricsText, 'mesh_active_streams'));
+    pushHist('goroutines', valMetric(metricsText, 'mesh_process_goroutines'));
+    const fds = valMetric(metricsText, 'mesh_process_open_fds');
+    if (fds !== null) pushHist('fds', fds);
+
     document.getElementById('hdr-status').textContent = 'updated ' + new Date().toLocaleTimeString();
     render();
   } catch(e) {
@@ -347,6 +425,8 @@ function render() {
   renderFilesync();
   renderConflicts();
   renderLogs();
+  renderMetrics();
+  renderCharts();
 }
 
 function x(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -480,6 +560,214 @@ function renderLogs() {
     el.scrollTop = el.scrollHeight;
   }
 }
+
+// --- Charts ---
+function valMetric(text, name) {
+  const m = text.match(new RegExp('^' + name + '\\s+(\\S+)', 'm'));
+  return m ? parseFloat(m[1]) : null;
+}
+function sumMetric(text, name) {
+  let sum = 0, re = new RegExp('^' + name + '(?:\\{[^}]*\\})?\\s+(\\S+)', 'gm'), m;
+  while ((m = re.exec(text)) !== null) sum += parseFloat(m[1]) || 0;
+  return sum;
+}
+function pushHist(key, val) {
+  const arr = chartHist[key];
+  arr.push(val == null ? 0 : val);
+  if (arr.length > HIST_LEN) arr.shift();
+}
+function fmtRate(n) {
+  if (n < 1024) return n.toFixed(0) + ' B/s';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB/s';
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB/s';
+  return (n / 1073741824).toFixed(2) + ' GB/s';
+}
+function drawChart(id, series, colors) {
+  const canvas = document.getElementById(id);
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width) return;
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const w = rect.width, h = rect.height;
+  ctx.clearRect(0, 0, w, h);
+  // Global max across all series
+  let max = 1;
+  for (const s of series) for (const v of s) if (v > max) max = v;
+  // Grid lines
+  ctx.strokeStyle = '#2a2d3a';
+  ctx.lineWidth = 0.5;
+  for (let i = 1; i < 4; i++) {
+    const y = h * i / 4;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  }
+  // Draw each series
+  const step = w / (HIST_LEN - 1);
+  series.forEach((data, si) => {
+    if (!data.length) return;
+    const off = HIST_LEN - data.length;
+    ctx.beginPath();
+    data.forEach((v, i) => {
+      const px = (off + i) * step;
+      const py = h - (v / max) * (h - 6) - 3;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    ctx.strokeStyle = colors[si];
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    // Fill under line
+    ctx.lineTo((off + data.length - 1) * step, h);
+    ctx.lineTo(off * step, h);
+    ctx.closePath();
+    ctx.globalAlpha = 0.08;
+    ctx.fillStyle = colors[si];
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  });
+}
+function renderCharts() {
+  const last = arr => arr.length ? arr[arr.length - 1] : 0;
+  // Traffic (dual line)
+  document.getElementById('chart-tx-val').textContent = fmtRate(last(chartHist.tx));
+  document.getElementById('chart-rx-val').textContent = fmtRate(last(chartHist.rx));
+  drawChart('chart-traffic', [chartHist.tx, chartHist.rx], ['#34d399', '#a78bfa']);
+  // Active Streams
+  document.getElementById('chart-streams-val').textContent = last(chartHist.streams).toLocaleString();
+  drawChart('chart-streams', [chartHist.streams], ['#60a5fa']);
+  // Goroutines
+  document.getElementById('chart-goroutines-val').textContent = last(chartHist.goroutines).toLocaleString();
+  drawChart('chart-goroutines', [chartHist.goroutines], ['#22d3ee']);
+  // FDs (hidden on platforms without open_fds)
+  const fdsCard = document.getElementById('chart-fds-card');
+  if (chartHist.fds.length && chartHist.fds.some(v => v > 0)) {
+    fdsCard.style.display = '';
+    document.getElementById('chart-fds-val').textContent = last(chartHist.fds).toLocaleString();
+    drawChart('chart-fds', [chartHist.fds], ['#fbbf24']);
+  } else {
+    fdsCard.style.display = 'none';
+  }
+}
+
+// --- Metrics ---
+function parseMetrics(text) {
+  const families = [];
+  let cur = null;
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    if (line.startsWith('# HELP ')) {
+      const rest = line.slice(7);
+      const sp = rest.indexOf(' ');
+      const name = rest.slice(0, sp), help = rest.slice(sp+1);
+      cur = {name, help, type:'', samples:[]};
+      families.push(cur);
+    } else if (line.startsWith('# TYPE ')) {
+      if (cur) { const rest = line.slice(7); cur.type = rest.slice(rest.indexOf(' ')+1); }
+    } else if (!line.startsWith('#')) {
+      // sample line: metric_name{labels} value  OR  metric_name value
+      const m = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+(.+)$/);
+      if (m) {
+        const labels = m[2] ? m[2].slice(1,-1) : '';
+        const val = m[3];
+        if (cur && m[1] === cur.name) {
+          cur.samples.push({labels, value: val});
+        } else {
+          // orphan sample or different metric name
+          if (!cur || m[1] !== cur.name) {
+            cur = {name: m[1], help:'', type:'', samples:[{labels, value: val}]};
+            families.push(cur);
+          }
+        }
+      }
+    }
+  }
+  return families;
+}
+
+let metOpenFamilies = new Set();
+
+function renderMetrics() {
+  const filter = document.getElementById('met-search').value.toLowerCase();
+  const families = parseMetrics(metricsText);
+  const filtered = families.filter(f => {
+    if (!filter) return true;
+    if (f.name.toLowerCase().includes(filter)) return true;
+    if (f.help.toLowerCase().includes(filter)) return true;
+    return f.samples.some(s => s.labels.toLowerCase().includes(filter) || s.value.includes(filter));
+  });
+
+  // Stats
+  const totalSamples = families.reduce((s,f) => s + f.samples.length, 0);
+  const gauges = families.filter(f => f.type === 'gauge').length;
+  const counters = families.filter(f => f.type === 'counter').length;
+  document.getElementById('met-stats').innerHTML =
+    stat('Metric Families', families.length, '') +
+    stat('Total Samples', totalSamples, '') +
+    stat('Gauges', gauges, '') +
+    stat('Counters', counters, '');
+
+  const el = document.getElementById('met-body');
+  if (!filtered.length) {
+    el.innerHTML = '<div style="color:var(--text-muted);padding:20px">No metrics</div>';
+    return;
+  }
+
+  el.innerHTML = filtered.map(f => {
+    const isOpen = metOpenFamilies.has(f.name);
+    const cls = isOpen ? ' open' : '';
+    let samplesHtml = '';
+    if (f.samples.length === 1 && !f.samples[0].labels) {
+      // Single value — show inline
+      samplesHtml = '<span style="font-family:var(--mono);color:var(--green);font-weight:600;font-size:13px">' + x(fmtVal(f.samples[0].value)) + '</span>';
+      return '<div class="met-family' + cls + '" data-met="' + x(f.name) + '">' +
+        '<div class="met-family-header">' +
+          '<span class="met-family-name">' + x(f.name) + '</span>' +
+          '<span class="met-family-help">' + x(f.help) + '</span>' +
+          '<span class="met-family-type">' + x(f.type) + '</span>' +
+          samplesHtml +
+        '</div></div>';
+    }
+    // Multi-sample — collapsible table
+    const rows = f.samples.map(s => {
+      const labelParts = s.labels ? s.labels.split(',').map(l => {
+        const eq = l.indexOf('=');
+        const k = l.slice(0, eq), v = l.slice(eq+1).replace(/^"|"$/g, '');
+        return '<span style="color:var(--text-muted)">' + x(k) + '</span>=<span style="color:var(--purple)">' + x(v) + '</span>';
+      }).join(' ') : '';
+      return '<tr><td class="met-labels">' + labelParts + '</td><td class="met-value">' + x(fmtVal(s.value)) + '</td></tr>';
+    }).join('');
+    return '<div class="met-family' + cls + '" data-met="' + x(f.name) + '">' +
+      '<div class="met-family-header">' +
+        '<span class="met-family-arrow">&#9654;</span>' +
+        '<span class="met-family-name">' + x(f.name) + '</span>' +
+        '<span class="met-family-help">' + x(f.help) + '</span>' +
+        '<span class="met-family-type">' + x(f.type) + '</span>' +
+        '<span style="font-family:var(--mono);color:var(--text-dim);font-size:11px">' + f.samples.length + ' series</span>' +
+      '</div>' +
+      '<div class="met-samples"><table><tbody>' + rows + '</tbody></table></div>' +
+    '</div>';
+  }).join('');
+}
+
+function fmtVal(v) {
+  const n = parseFloat(v);
+  if (isNaN(n)) return v;
+  if (Number.isInteger(n)) return n.toLocaleString();
+  return n.toLocaleString(undefined, {minimumFractionDigits:1, maximumFractionDigits:3});
+}
+
+document.getElementById('met-body').addEventListener('click', e => {
+  const hdr = e.target.closest('.met-family-header');
+  if (!hdr) return;
+  const fam = hdr.parentElement;
+  if (!fam.querySelector('.met-samples')) return; // single-value, not collapsible
+  const name = fam.dataset.met;
+  if (metOpenFamilies.has(name)) { metOpenFamilies.delete(name); fam.classList.remove('open'); }
+  else { metOpenFamilies.add(name); fam.classList.add('open'); }
+});
+document.getElementById('met-search').addEventListener('input', renderMetrics);
 
 // --- Sorting ---
 document.querySelectorAll('#p-dashboard th[data-sort]').forEach(th => {

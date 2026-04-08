@@ -53,24 +53,24 @@ Items ordered by priority within each tier.
 
 Ordered by estimated value and complexity. Each needs design before implementation.
 
-| ID  | Component | Item                    | Complexity  | Notes                                                                                                                                                                         |
-|-----|-----------|-------------------------|-------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| ID  | Component | Item                    | Complexity  | Notes                                                                                                                                                                                              |
+|-----|-----------|-------------------------|-------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | F15 | core      | Self-monitoring metrics | DONE        | `/api/metrics` exposes `mesh_process_goroutines`, `mesh_process_open_fds` (Unix), `mesh_state_components`, `mesh_state_metrics`. Background self-monitor warns on threshold breach (30s interval). |
-| F13 | clipsync  | Payload size limit      | Low         | Network side partially capped (`maxRequestBodySize`). Gap: local clipboard read has no cap. A large image can OOM the sender. Add a per-format size check in `pollClipboard`. |
-| FS5 | filesync  | Outgoing delta index    | Medium      | `buildIndexExchange(folderID, 0)` always sends full index. Subsequent syncs could send only entries newer than `LastSentSequence`. Requires per-peer sent state tracking.     |
-| F7  | sshd      | Env var forwarding      | Low         | Handle `"env"` request type. Collect before `"shell"/"exec"`, apply configurable allowlist (`AcceptEnv`), append to `cmd.Env`.                                                |
-| F9  | sshd      | Exit-signal reporting   | Low         | Check `WaitStatus.Signaled()`, map to SSH signal name, send `exit-signal` instead of `exit-status`.                                                                           |
-| F10 | sshd      | Banner and MOTD         | Low         | `ssh.ServerConfig.BannerCallback` for pre-auth. Channel data write before shell for post-auth MOTD. Config: `banner` and `motd` fields.                                       |
-| F8  | sshd      | Signal forwarding       | Medium      | Handle `"signal"` request type for non-PTY sessions. Map SSH signal names to `syscall.Signal`. Send to process group via `syscall.Kill(-pgid, sig)`.                          |
-| F12 | sshd      | Windows shell default   | Decision    | Current: `cmd.exe` via `COMSPEC`. PowerShell (`pwsh.exe`) is modern but not universally available. Decide and document. No ConPTY support yet.                                |
-| F2  | cli       | `mesh init` command     | Medium      | Interactive config generator. Scaffolds a starter YAML with common patterns.                                                                                                  |
-| F5  | sshd      | SFTP subsystem          | Medium      | Handle `"subsystem"` request with `sftp` name. Requires `github.com/pkg/sftp` dependency (new). Enables `scp`, `sftp`, `rsync`.                                               |
-| F6  | sshd      | SSH agent forwarding    | Medium      | Handle `auth-agent-req@openssh.com`. Create per-session Unix socket, set `SSH_AUTH_SOCK`. Unix-only.                                                                          |
-| F3  | cli       | SSH client subcommands  | Medium-High | Emulate `ssh` CLI for one-off connections without YAML. Needs argument parsing, ephemeral config construction.                                                                |
-| F4  | sshd      | User switching          | High        | `setuid`/`setgid` on Unix, `CreateProcessAsUser` on Windows. Requires root/capabilities. Security-critical.                                                                   |
-| F1  | core      | Config hot-reload       | High        | File watcher, config diff, per-component context tree with independent cancellation. Currently all components share one root context with no restart capability.              |
-| F11 | sshd      | X11 forwarding          | High        | Xauth cookie handling, Unix socket, channel multiplexing. Low demand.                                                                                                         |
-| F14 | gateway   | LLM API gateway         | High        | Bidirectional translation between Anthropic and OpenAI API formats. Detailed plan in [GATEWAY_PLAN.md](GATEWAY_PLAN.md).                                                      |
+| F13 | clipsync  | Payload size limit      | Low         | Network side partially capped (`maxRequestBodySize`). Gap: local clipboard read has no cap. A large image can OOM the sender. Add a per-format size check in `pollClipboard`.                      |
+| FS5 | filesync  | Outgoing delta index    | Medium      | `buildIndexExchange(folderID, 0)` always sends full index. Subsequent syncs could send only entries newer than `LastSentSequence`. Requires per-peer sent state tracking.                          |
+| F7  | sshd      | Env var forwarding      | Low         | Handle `"env"` request type. Collect before `"shell"/"exec"`, apply configurable allowlist (`AcceptEnv`), append to `cmd.Env`.                                                                     |
+| F9  | sshd      | Exit-signal reporting   | Low         | Check `WaitStatus.Signaled()`, map to SSH signal name, send `exit-signal` instead of `exit-status`.                                                                                                |
+| F10 | sshd      | Banner and MOTD         | Low         | `ssh.ServerConfig.BannerCallback` for pre-auth. Channel data write before shell for post-auth MOTD. Config: `banner` and `motd` fields.                                                            |
+| F8  | sshd      | Signal forwarding       | Medium      | Handle `"signal"` request type for non-PTY sessions. Map SSH signal names to `syscall.Signal`. Send to process group via `syscall.Kill(-pgid, sig)`.                                               |
+| F12 | sshd      | Windows shell default   | Decision    | Current: `cmd.exe` via `COMSPEC`. PowerShell (`pwsh.exe`) is modern but not universally available. Decide and document. No ConPTY support yet.                                                     |
+| F2  | cli       | `mesh init` command     | Medium      | Interactive config generator. Scaffolds a starter YAML with common patterns.                                                                                                                       |
+| F5  | sshd      | SFTP subsystem          | Medium      | Handle `"subsystem"` request with `sftp` name. Requires `github.com/pkg/sftp` dependency (new). Enables `scp`, `sftp`, `rsync`.                                                                    |
+| F6  | sshd      | SSH agent forwarding    | Medium      | Handle `auth-agent-req@openssh.com`. Create per-session Unix socket, set `SSH_AUTH_SOCK`. Unix-only.                                                                                               |
+| F3  | cli       | SSH client subcommands  | Medium-High | Emulate `ssh` CLI for one-off connections without YAML. Needs argument parsing, ephemeral config construction.                                                                                     |
+| F4  | sshd      | User switching          | High        | `setuid`/`setgid` on Unix, `CreateProcessAsUser` on Windows. Requires root/capabilities. Security-critical.                                                                                        |
+| F1  | core      | Config hot-reload       | High        | File watcher, config diff, per-component context tree with independent cancellation. Currently all components share one root context with no restart capability.                                   |
+| F11 | sshd      | X11 forwarding          | High        | Xauth cookie handling, Unix socket, channel multiplexing. Low demand.                                                                                                                              |
+| F14 | gateway   | LLM API gateway         | High        | Bidirectional translation between Anthropic and OpenAI API formats. Detailed plan in [GATEWAY_PLAN.md](GATEWAY_PLAN.md).                                                                           |
 
 ---
 
@@ -159,7 +159,11 @@ exchange is unchanged (backward compatible).
 - gitignore vendor dir
 - show last clipboard activity (direction, size, mime, time)
 - clipsync - file/image copy support
-- add metrics page to the web ui
+- clipsync - compress before sharing?
 - keep action history and show in the web ui (clipboard activity, file sync activity, past metrics
   etc.)
 - Show all log in the web UI
+- Profile the app. Optimize CPU usage AND also memory usage. We could simplify or even remove the
+  cli dashboard. Or just make it very brief. Deails is on the web UI.
+- filesync: compress index content before trasnferring?
+- filesync: yaml could be too verbose. Consider json / hocon, more optimized versions for transfer. protobuf?

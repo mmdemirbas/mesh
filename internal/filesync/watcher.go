@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +16,9 @@ import (
 const (
 	// debounceInterval batches rapid filesystem events into a single scan trigger.
 	debounceInterval = 500 * time.Millisecond
+
+	// staleWatchInterval controls how often we clean up watches for deleted directories.
+	staleWatchInterval = 5 * time.Minute
 )
 
 // folderWatcher monitors multiple folder roots for filesystem changes and
@@ -92,10 +96,15 @@ func (fw *folderWatcher) findMatcher(path string) (*ignoreMatcher, bool) {
 }
 
 // run processes fsnotify events, debounces them, and signals dirtyCh.
-// It also adds watchers for newly created directories.
+// It also adds watchers for newly created directories and removes watchers
+// for deleted directories to prevent FD leaks (macOS kqueue holds one FD
+// per watched path).
 func (fw *folderWatcher) run(ctx context.Context) {
 	var debounceTimer *time.Timer
 	var debounceC <-chan time.Time
+
+	staleTicker := time.NewTicker(staleWatchInterval)
+	defer staleTicker.Stop()
 
 	for {
 		select {
@@ -107,11 +116,22 @@ func (fw *folderWatcher) run(ctx context.Context) {
 				return
 			}
 
+			// Skip events for filesync temp files — they are transient and
+			// should not trigger scans or watcher updates.
+			if isTempFile(event.Name) {
+				continue
+			}
+
 			// Add watcher for new directories.
 			if event.Has(fsnotify.Create) {
 				if info, err := os.Lstat(event.Name); err == nil && info.IsDir() {
 					fw.addRecursive(event.Name)
 				}
+			}
+
+			// Remove watcher for deleted/renamed directories to free kqueue FDs.
+			if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+				_ = fw.watcher.Remove(event.Name)
 			}
 
 			// Signal dirty with debounce.
@@ -136,8 +156,33 @@ func (fw *folderWatcher) run(ctx context.Context) {
 			case fw.dirtyCh <- struct{}{}:
 			default:
 			}
+
+		case <-staleTicker.C:
+			fw.removeStaleWatches()
 		}
 	}
+}
+
+// removeStaleWatches removes watches for paths that no longer exist on disk.
+// This is a safety net for cases where Remove/Rename events are missed.
+func (fw *folderWatcher) removeStaleWatches() {
+	removed := 0
+	for _, path := range fw.watcher.WatchList() {
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			_ = fw.watcher.Remove(path)
+			removed++
+		}
+	}
+	if removed > 0 {
+		slog.Debug("cleaned stale fsnotify watches", "removed", removed)
+	}
+}
+
+// isTempFile returns true if the path is a filesync temp file that should
+// not trigger scan events.
+func isTempFile(path string) bool {
+	base := filepath.Base(path)
+	return strings.HasPrefix(base, ".mesh-tmp-") || strings.HasSuffix(base, ".mesh-delta-tmp")
 }
 
 // close shuts down the fsnotify watcher.

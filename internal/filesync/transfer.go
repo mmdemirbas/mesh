@@ -192,8 +192,11 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// Fall back to full download on error.
+	// Fall back to full download on error. Drain the delta response body first
+	// so the connection can be reused instead of leaking.
 	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
 		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
 	}
 

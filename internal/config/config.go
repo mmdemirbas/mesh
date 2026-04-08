@@ -327,7 +327,6 @@ func LoadUnvalidated(path string) (map[string]*Config, error) {
 		if cfg == nil {
 			continue
 		}
-		WarnUnsupportedOptions(cfg)
 
 		// Expand ~ in all path fields
 		for i := range cfg.Listeners {
