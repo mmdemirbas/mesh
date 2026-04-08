@@ -188,7 +188,7 @@ func translateAnthropicMessage(m AnthropicMsg) ([]OpenAIMsg, error) {
 			})
 
 		case "tool_result":
-			content := extractToolResultContent(b)
+			content, imgs := extractToolResultParts(b)
 			if b.IsError {
 				content = "[ERROR] " + content
 			}
@@ -198,8 +198,6 @@ func translateAnthropicMessage(m AnthropicMsg) ([]OpenAIMsg, error) {
 				Content:    c,
 				ToolCallID: b.ToolUseID,
 			})
-			// Handle images inside tool_result.
-			imgs := extractToolResultImages(b)
 			for _, img := range imgs {
 				imgContent, _ := json.Marshal([]ContentPart{
 					{Type: "text", Text: "[tool result image for tool_use_id=" + b.ToolUseID + "]"},
@@ -256,54 +254,48 @@ func translateAnthropicMessage(m AnthropicMsg) ([]OpenAIMsg, error) {
 	return out, nil
 }
 
-// extractToolResultContent extracts text from a tool_result content field.
-func extractToolResultContent(b ContentBlock) string {
+// extractToolResultParts extracts text and images from a tool_result content
+// field in a single unmarshal pass.
+func extractToolResultParts(b ContentBlock) (string, []ContentPart) {
 	if len(b.Content) == 0 {
-		return ""
+		return "", nil
 	}
 
 	// Try string.
 	var s string
 	if err := json.Unmarshal(b.Content, &s); err == nil {
-		return s
+		return s, nil
 	}
 
-	// Try array of blocks — concatenate text.
-	var blocks []ContentBlock
-	if err := json.Unmarshal(b.Content, &blocks); err == nil {
-		var parts []string
-		for _, sub := range blocks {
-			if sub.Type == "text" && sub.Text != "" {
-				parts = append(parts, sub.Text)
-			}
-		}
-		return strings.Join(parts, "\n\n")
-	}
-
-	return string(b.Content)
-}
-
-// extractToolResultImages pulls image ContentParts from a tool_result's nested content blocks.
-func extractToolResultImages(b ContentBlock) []ContentPart {
+	// Try array of blocks — extract text and images in one pass.
 	var blocks []ContentBlock
 	if err := json.Unmarshal(b.Content, &blocks); err != nil {
-		return nil
+		return string(b.Content), nil
 	}
+
+	var textParts []string
 	var imgs []ContentPart
 	for _, sub := range blocks {
-		if sub.Type == "image" && sub.Source != nil {
-			part := ContentPart{Type: "image_url"}
-			if sub.Source.Type == "base64" {
-				part.ImageURL = &ImageURL{
-					URL: "data:" + sub.Source.MediaType + ";base64," + sub.Source.Data,
-				}
-			} else {
-				part.ImageURL = &ImageURL{URL: sub.Source.URL}
+		switch sub.Type {
+		case "text":
+			if sub.Text != "" {
+				textParts = append(textParts, sub.Text)
 			}
-			imgs = append(imgs, part)
+		case "image":
+			if sub.Source != nil {
+				part := ContentPart{Type: "image_url"}
+				if sub.Source.Type == "base64" {
+					part.ImageURL = &ImageURL{
+						URL: "data:" + sub.Source.MediaType + ";base64," + sub.Source.Data,
+					}
+				} else {
+					part.ImageURL = &ImageURL{URL: sub.Source.URL}
+				}
+				imgs = append(imgs, part)
+			}
 		}
 	}
-	return imgs
+	return strings.Join(textParts, "\n\n"), imgs
 }
 
 func allText(parts []ContentPart) bool {

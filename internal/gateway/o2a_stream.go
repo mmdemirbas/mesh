@@ -35,7 +35,7 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 
 	upstreamResp, err := client.Do(upstreamReq)
 	if err != nil {
-		writeOpenAIError(w, 502, "upstream request failed: "+err.Error())
+		writeOpenAIError(w, 502, "upstream request failed")
 		log.Error("Upstream stream request failed", "error", err)
 		return
 	}
@@ -68,6 +68,7 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 		flusher:      flusher,
 		metrics:      metrics,
 		includeUsage: includeUsage,
+		created:      nowUnix(),
 	}
 
 	scanner := bufio.NewScanner(upstreamResp.Body)
@@ -120,6 +121,7 @@ type o2aStreamState struct {
 	finishReason string
 	usage        *OpenAIUsage
 	messageID    string
+	created      int64
 }
 
 func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEvent) {
@@ -132,7 +134,7 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 		s.emitChunk(OpenAIChunkChoice{
 			Index: 0,
 			Delta: OpenAIChunkDelta{Role: "assistant", Content: strPtr("")},
-		}, nil)
+		})
 		s.sentFirst = true
 
 	case "content_block_start":
@@ -154,7 +156,7 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 							},
 						}},
 					},
-				}, nil)
+				})
 			case "thinking":
 				// Drop.
 				s.inToolBlock = false
@@ -172,7 +174,7 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 			s.emitChunk(OpenAIChunkChoice{
 				Index: 0,
 				Delta: OpenAIChunkDelta{Content: &event.Delta.Text},
-			}, nil)
+			})
 
 		case "input_json_delta":
 			s.emitChunk(OpenAIChunkChoice{
@@ -185,7 +187,7 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 						},
 					}},
 				},
-			}, nil)
+			})
 		}
 
 	case "content_block_stop":
@@ -221,7 +223,7 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 		s.emitChunk(OpenAIChunkChoice{
 			Index: 0,
 			Delta: OpenAIChunkDelta{Content: &errMsg},
-		}, nil)
+		})
 	}
 }
 
@@ -235,7 +237,7 @@ func (s *o2aStreamState) finalize() {
 		Index:        0,
 		Delta:        OpenAIChunkDelta{},
 		FinishReason: &s.finishReason,
-	}, nil)
+	})
 
 	// Emit usage chunk if requested (with empty choices per OpenAI spec).
 	if s.includeUsage && s.usage != nil {
@@ -256,7 +258,7 @@ func (s *o2aStreamState) emitUsageChunk(usage *OpenAIUsage) {
 	chunk := ChatCompletionChunk{
 		ID:      ensurePrefix(id, "chatcmpl-"),
 		Object:  "chat.completion.chunk",
-		Created: nowUnix(),
+		Created: s.created,
 		Model:   s.clientModel,
 		Choices: []OpenAIChunkChoice{},
 		Usage:   usage,
@@ -267,7 +269,7 @@ func (s *o2aStreamState) emitUsageChunk(usage *OpenAIUsage) {
 	s.metrics.BytesTx.Add(int64(len(b) + 8))
 }
 
-func (s *o2aStreamState) emitChunk(choice OpenAIChunkChoice, usage *OpenAIUsage) {
+func (s *o2aStreamState) emitChunk(choice OpenAIChunkChoice) {
 	id := s.messageID
 	if id == "" {
 		id = "chatcmpl-stream"
@@ -275,10 +277,9 @@ func (s *o2aStreamState) emitChunk(choice OpenAIChunkChoice, usage *OpenAIUsage)
 	chunk := ChatCompletionChunk{
 		ID:      ensurePrefix(id, "chatcmpl-"),
 		Object:  "chat.completion.chunk",
-		Created: nowUnix(),
+		Created: s.created,
 		Model:   s.clientModel,
 		Choices: []OpenAIChunkChoice{choice},
-		Usage:   usage,
 	}
 	b, _ := json.Marshal(chunk)
 	fmt.Fprintf(s.w, "data: %s\n\n", b)

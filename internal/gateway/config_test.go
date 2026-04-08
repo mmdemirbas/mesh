@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -45,7 +46,7 @@ func TestGatewayCfg_Validate(t *testing.T) {
 			} else {
 				if err == nil {
 					t.Errorf("expected error containing %q, got nil", tt.wantErr)
-				} else if !contains(err.Error(), tt.wantErr) {
+				} else if !strings.Contains(err.Error(), tt.wantErr) {
 					t.Errorf("error %q does not contain %q", err.Error(), tt.wantErr)
 				}
 			}
@@ -85,15 +86,3 @@ func TestGatewayCfg_TimeoutDuration(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchSubstring(s, substr)
-}
-
-func searchSubstring(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}

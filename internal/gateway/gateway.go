@@ -126,7 +126,7 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 
 	var req MessagesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeAnthropicError(w, 400, "invalid JSON: "+err.Error())
+		writeAnthropicError(w, 400, "invalid json: "+err.Error())
 		return
 	}
 
@@ -216,7 +216,7 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 
 	var req ChatCompletionRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeOpenAIError(w, 400, "invalid JSON: "+err.Error())
+		writeOpenAIError(w, 400, "invalid json: "+err.Error())
 		return
 	}
 

@@ -34,7 +34,7 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 
 	upstreamResp, err := client.Do(upstreamReq)
 	if err != nil {
-		writeAnthropicError(w, 502, "upstream request failed: "+err.Error())
+		writeAnthropicError(w, 502, "upstream request failed")
 		log.Error("Upstream stream request failed", "error", err)
 		return
 	}
@@ -85,7 +85,7 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 
 		var chunk ChatCompletionChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			log.Warn("Cannot parse SSE chunk", "error", err)
+			log.Warn("cannot parse SSE chunk", "error", err)
 			continue
 		}
 
@@ -174,34 +174,95 @@ func (s *a2oStreamState) processChunk(chunk *ChatCompletionChunk) {
 	}
 }
 
+// Typed structs for SSE events — avoids map[string]any allocations per chunk.
+
+type a2oBlockStart struct {
+	Type         string      `json:"type"`
+	Index        int         `json:"index"`
+	ContentBlock a2oBlockDef `json:"content_block"`
+}
+
+type a2oBlockDef struct {
+	Type  string         `json:"type"`
+	Text  string         `json:"text,omitempty"`
+	ID    string         `json:"id,omitempty"`
+	Name  string         `json:"name,omitempty"`
+	Input map[string]any `json:"input,omitempty"`
+}
+
+type a2oBlockDelta struct {
+	Type  string         `json:"type"`
+	Index int            `json:"index"`
+	Delta a2oDeltaInner  `json:"delta"`
+}
+
+type a2oDeltaInner struct {
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	PartialJSON string `json:"partial_json,omitempty"`
+}
+
+type a2oBlockStop struct {
+	Type  string `json:"type"`
+	Index int    `json:"index"`
+}
+
+type a2oMsgStart struct {
+	Type    string     `json:"type"`
+	Message a2oMsgDef  `json:"message"`
+}
+
+type a2oMsgDef struct {
+	ID      string         `json:"id"`
+	Type    string         `json:"type"`
+	Role    string         `json:"role"`
+	Model   string         `json:"model"`
+	Content []any          `json:"content"`
+	Usage   AnthropicUsage `json:"usage"`
+}
+
+type a2oMsgDelta struct {
+	Type  string         `json:"type"`
+	Delta a2oStopDelta   `json:"delta"`
+	Usage AnthropicUsage `json:"usage"`
+}
+
+type a2oStopDelta struct {
+	StopReason string `json:"stop_reason"`
+}
+
+type a2oMsgStop struct {
+	Type string `json:"type"`
+}
+
 func (s *a2oStreamState) startTextBlock() {
 	s.closeCurrentBlock()
-	s.emit("content_block_start", map[string]any{
-		"type":          "content_block_start",
-		"index":         s.blockIndex,
-		"content_block": map[string]any{"type": "text", "text": ""},
+	s.emit("content_block_start", a2oBlockStart{
+		Type:         "content_block_start",
+		Index:        s.blockIndex,
+		ContentBlock: a2oBlockDef{Type: "text", Text: ""},
 	})
 	s.inTextBlock = true
 	s.hasBlock = true
 }
 
 func (s *a2oStreamState) emitTextDelta(text string) {
-	s.emit("content_block_delta", map[string]any{
-		"type":  "content_block_delta",
-		"index": s.blockIndex,
-		"delta": map[string]any{"type": "text_delta", "text": text},
+	s.emit("content_block_delta", a2oBlockDelta{
+		Type:  "content_block_delta",
+		Index: s.blockIndex,
+		Delta: a2oDeltaInner{Type: "text_delta", Text: text},
 	})
 }
 
 func (s *a2oStreamState) startToolBlock(id, name string) {
-	s.emit("content_block_start", map[string]any{
-		"type":  "content_block_start",
-		"index": s.blockIndex,
-		"content_block": map[string]any{
-			"type":  "tool_use",
-			"id":    id,
-			"name":  name,
-			"input": map[string]any{},
+	s.emit("content_block_start", a2oBlockStart{
+		Type:  "content_block_start",
+		Index: s.blockIndex,
+		ContentBlock: a2oBlockDef{
+			Type:  "tool_use",
+			ID:    id,
+			Name:  name,
+			Input: map[string]any{},
 		},
 	})
 	s.inToolBlock = true
@@ -209,18 +270,18 @@ func (s *a2oStreamState) startToolBlock(id, name string) {
 }
 
 func (s *a2oStreamState) emitInputJSONDelta(partial string) {
-	s.emit("content_block_delta", map[string]any{
-		"type":  "content_block_delta",
-		"index": s.blockIndex,
-		"delta": map[string]any{"type": "input_json_delta", "partial_json": partial},
+	s.emit("content_block_delta", a2oBlockDelta{
+		Type:  "content_block_delta",
+		Index: s.blockIndex,
+		Delta: a2oDeltaInner{Type: "input_json_delta", PartialJSON: partial},
 	})
 }
 
 func (s *a2oStreamState) closeCurrentBlock() {
 	if s.inTextBlock || s.inToolBlock {
-		s.emit("content_block_stop", map[string]any{
-			"type":  "content_block_stop",
-			"index": s.blockIndex,
+		s.emit("content_block_stop", a2oBlockStop{
+			Type:  "content_block_stop",
+			Index: s.blockIndex,
 		})
 		s.blockIndex++
 		s.inTextBlock = false
@@ -229,15 +290,14 @@ func (s *a2oStreamState) closeCurrentBlock() {
 }
 
 func (s *a2oStreamState) emitMessageStart() {
-	s.emit("message_start", map[string]any{
-		"type": "message_start",
-		"message": map[string]any{
-			"id":      "msg_stream",
-			"type":    "message",
-			"role":    "assistant",
-			"model":   s.clientModel,
-			"content": []any{},
-			"usage":   map[string]any{"input_tokens": 0, "output_tokens": 0},
+	s.emit("message_start", a2oMsgStart{
+		Type: "message_start",
+		Message: a2oMsgDef{
+			ID:      "msg_stream",
+			Type:    "message",
+			Role:    "assistant",
+			Model:   s.clientModel,
+			Content: []any{},
 		},
 	})
 }
@@ -249,16 +309,13 @@ func (s *a2oStreamState) finalize() {
 		s.stopReason = "end_turn"
 	}
 
-	s.emit("message_delta", map[string]any{
-		"type":  "message_delta",
-		"delta": map[string]any{"stop_reason": s.stopReason},
-		"usage": map[string]any{
-			"input_tokens":  s.usage.InputTokens,
-			"output_tokens": s.usage.OutputTokens,
-		},
+	s.emit("message_delta", a2oMsgDelta{
+		Type:  "message_delta",
+		Delta: a2oStopDelta{StopReason: s.stopReason},
+		Usage: s.usage,
 	})
 
-	s.emit("message_stop", map[string]any{"type": "message_stop"})
+	s.emit("message_stop", a2oMsgStop{Type: "message_stop"})
 }
 
 func (s *a2oStreamState) emit(event string, data any) {
