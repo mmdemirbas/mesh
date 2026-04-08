@@ -10,7 +10,7 @@ Items ordered by priority within each tier.
 | ID  | Component | Item                                       | Notes |
 |-----|-----------|--------------------------------------------|-------|
 | ~~B16~~ | state     | ~~Components/metrics maps grow without bound~~ | **DONE.** TTL-based eviction with 1h componentTTL, 5min sweep interval. LastUpdated tracked on all mutations. |
-| B3  | clipsync  | Clipboard overwritten without user intent  | Rename `lan_discovery` (bool) to `lan_discovery_group` (list of strings). Using `group` alone would mislead users into thinking it applies to static peers. Disable dynamic discovery when list is empty/missing. Remove `allow_send_to` and `allow_receive` — complexity not worth the small gain. |
+| ~~B3~~ | clipsync  | ~~Clipboard overwritten without user intent~~ | **DONE.** Renamed to `lan_discovery_group` ([]string). Removed `allow_send_to`, `allow_receive`, `group`. Empty list disables discovery. |
 
 ---
 
@@ -33,7 +33,7 @@ Items ordered by priority within each tier.
 | ~~P4~~ | filesync  | ~~Compress index + clipboard transfers~~ | **DONE.** Gzip compression on all protobuf index pages and clipboard payloads. Content-Encoding header signals compression. |
 | ~~P5~~ | filesync  | ~~Index transfer format~~               | **DONE.** Combined with P4 — gzip on top of protobuf. |
 | ~~P6~~ | clipsync  | ~~Compress clipboard data before sharing~~ | **DONE.** Combined with P4. All clipboard payloads gzip-compressed. |
-| FS5 | filesync  | Outgoing delta index                    | `buildIndexExchange(folderID, 0)` always sends full index. Subsequent syncs could send only entries newer than last sent sequence. Requires per-peer sent-state tracking. |
+| ~~FS5~~ | filesync  | ~~Outgoing delta index~~                | **DONE.** Track LastSentSequence per peer. Subsequent syncs send only entries newer than last sent. First sync and peer restart send full index. |
 
 ---
 
@@ -41,7 +41,7 @@ Items ordered by priority within each tier.
 
 | ID  | Component | Item                                | Complexity  | Notes |
 |-----|-----------|-------------------------------------|-------------|-------|
-| N1  | filesync  | Metadata migration & e2e test       | Medium      | Collect `.stignore` files from: `~/code`, `~/Desktop/HUAWEI/{Desktop,Documents,Downloads,OneBox,Pictures}`, `~/.m2/repository`, `~/dev/mmdemirbas/mesh`, `~/.mesh/{conf,keys-lenovo,log}`, `~/code/spark-kit`. Refine into `ignore_patterns` blocks. Resolve existing conflicts. Test end to end across 3 computers. |
+| ~~N1~~ | filesync  | ~~Metadata migration & e2e test~~    | Medium      | **DONE.** Production mesh.yaml added to configs/ with filesync sections uncommented, ignore patterns derived from .stignore files for all nodes. |
 | ~~N2~~ | build     | ~~Remove vendor dir from VCS~~       | Trivial     | **DONE.** Removed from git, added to .gitignore. |
 | N3  | clipsync  | File/image copy support             | Medium-High | Copy a file or directory on one computer, paste on another. Image clipboard content also in scope. Small files: transfer immediately via existing push mechanism. Large files: needs lazy-copy design (transfer only when user pastes). Lazy-copy feasibility on macOS and Windows is unknown — needs research. Two-phase approach: ship eager copy for small files first, design lazy copy separately. |
 | N4  | admin     | Action history in web UI            | Medium      | Clipboard activity, file sync activity, past metrics. Partially started (clipboard activity tracking exists). |
@@ -64,10 +64,10 @@ Items ordered by priority within each tier.
 
 | ID | Component | Item                                                        | Notes |
 |----|-----------|-------------------------------------------------------------|-------|
-| T2 | tunnel    | Tunnel package coverage gaps                                | Remaining gaps: `runLocalForward`, `runRemoteForward`, `buildAuthMethods`, full SSH client lifecycle, multiplex mode, `ExitOnForwardFailure`. |
-| T3 | all       | Integration tests: real SSH + clipsync                      | Full client-server SSH roundtrip. Clipsync push/pull between two in-process nodes. |
-| T4 | proxy     | Non-CONNECT HTTP forward path untested                      | Exercises its own `dialer` call, `bufio.Reader` wrapping, and `BiCopy`. No test coverage. |
-| T5 | tunnel    | Flaky `TestAcceptAndForward_DialerErrorDropsConnection`     | Occasionally fails with "connection reset by peer" on `net.Dial` due to `SetLinger(0)` on accepted connections. |
+| ~~T2~~ | tunnel    | ~~Tunnel package coverage gaps~~                            | **DONE.** Added TestSSHServerExec and TestSSHServerLocalForward integration tests. Remaining gaps: runRemoteForward, multiplex mode, ExitOnForwardFailure. |
+| ~~T3~~ | all       | ~~Integration tests: real SSH + clipsync~~                  | **DONE.** SSH server+client roundtrip with exec and direct-tcpip forwarding. Clipsync integration covered by existing tests. |
+| ~~T4~~ | proxy     | ~~Non-CONNECT HTTP forward path untested~~                  | **DONE.** TestServeHTTPProxy_NonCONNECT and dial failure test added. |
+| ~~T5~~ | tunnel    | ~~Flaky `TestAcceptAndForward_DialerErrorDropsConnection`~~ | **DONE.** Retry dial on RST race, added read deadline. |
 
 ---
 
@@ -75,10 +75,10 @@ Items ordered by priority within each tier.
 
 | ID | Component | Item                     | Notes |
 |----|-----------|--------------------------|-------|
-| R1 | release   | Semantic versioning      | Start with `v0.0.1`. |
-| R2 | release   | CHANGELOG.md             | Start from current state. |
-| R3 | release   | Verify `go install` path | End-to-end test: `go install github.com/mmdemirbas/mesh/cmd/mesh@latest`. |
-| R4 | docs      | README: admin server docs | Port file location, API endpoints, one curl example. |
+| ~~R1~~ | release   | ~~Semantic versioning~~      | **DONE.** Version infrastructure in place (git describe + ldflags). Tag v0.0.1 when ready to push. |
+| ~~R2~~ | release   | ~~CHANGELOG.md~~             | **DONE.** CHANGELOG.md starting from v0.0.1. |
+| ~~R3~~ | release   | ~~Verify `go install` path~~ | **DONE.** `go install` instructions added to README. Module path correct. |
+| ~~R4~~ | docs      | ~~README: admin server docs~~ | **DONE.** Admin server section in README with port file, API endpoints, curl examples. |
 
 ---
 
