@@ -150,14 +150,20 @@ func appendMerging(msgs []AnthropicMsg, role string, blocks []ContentBlock) []An
 	if len(msgs) > 0 && msgs[len(msgs)-1].Role == role {
 		// Merge into existing message.
 		var existing []ContentBlock
-		json.Unmarshal(msgs[len(msgs)-1].Content, &existing)
+		if err := json.Unmarshal(msgs[len(msgs)-1].Content, &existing); err != nil {
+			// Prior content was a string, not an array — wrap it as a text block.
+			var s string
+			if json.Unmarshal(msgs[len(msgs)-1].Content, &s) == nil {
+				existing = []ContentBlock{{Type: "text", Text: s}}
+			}
+		}
 		existing = append(existing, blocks...)
-		msgs[len(msgs)-1].Content = json.RawMessage(mustMarshalBytes(existing))
+		msgs[len(msgs)-1].Content = json.RawMessage(mustMarshal(existing))
 		return msgs
 	}
 	return append(msgs, AnthropicMsg{
 		Role:    role,
-		Content: json.RawMessage(mustMarshalBytes(blocks)),
+		Content: json.RawMessage(mustMarshal(blocks)),
 	})
 }
 

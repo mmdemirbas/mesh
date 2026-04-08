@@ -90,7 +90,10 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 
 	log.Info("Gateway started", "bind", ln.Addr(), "mode", cfg.Mode, "upstream", cfg.Upstream)
 
-	srv := &http.Server{Handler: mux}
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 
 	go func() {
 		<-ctx.Done()

@@ -58,11 +58,9 @@ func (c *GatewayCfg) Validate() error {
 	if err != nil {
 		return fmt.Errorf("invalid bind address %q: %w", c.Bind, err)
 	}
-	if host != "" && host != "localhost" {
-		ip := net.ParseIP(host)
-		if ip != nil && !ip.IsLoopback() {
-			return fmt.Errorf("bind address %q is not loopback; gateway must bind to 127.0.0.1 or ::1", c.Bind)
-		}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("bind address %q must be an explicit loopback IP (127.0.0.1 or ::1)", c.Bind)
 	}
 
 	if c.DefaultMaxTokens < 0 {

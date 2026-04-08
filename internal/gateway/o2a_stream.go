@@ -215,8 +215,8 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 	case "error":
 		// Mid-stream error. Emit as content and close.
 		errMsg := "upstream error"
-		if event.Delta != nil && event.Delta.Text != "" {
-			errMsg = event.Delta.Text
+		if event.Error != nil && event.Error.Message != "" {
+			errMsg = event.Error.Message
 		}
 		s.emitChunk(OpenAIChunkChoice{
 			Index: 0,
@@ -237,17 +237,34 @@ func (s *o2aStreamState) finalize() {
 		FinishReason: &s.finishReason,
 	}, nil)
 
-	// Emit usage chunk if requested.
+	// Emit usage chunk if requested (with empty choices per OpenAI spec).
 	if s.includeUsage && s.usage != nil {
-		s.emitChunk(OpenAIChunkChoice{
-			Index: 0,
-			Delta: OpenAIChunkDelta{},
-		}, s.usage)
+		s.emitUsageChunk(s.usage)
 	}
 
 	// Emit [DONE].
 	fmt.Fprint(s.w, "data: [DONE]\n\n")
 	s.flusher.Flush()
+}
+
+// emitUsageChunk emits a trailing usage-only chunk with choices: [] per OpenAI spec.
+func (s *o2aStreamState) emitUsageChunk(usage *OpenAIUsage) {
+	id := s.messageID
+	if id == "" {
+		id = "chatcmpl-stream"
+	}
+	chunk := ChatCompletionChunk{
+		ID:      ensurePrefix(id, "chatcmpl-"),
+		Object:  "chat.completion.chunk",
+		Created: nowUnix(),
+		Model:   s.clientModel,
+		Choices: []OpenAIChunkChoice{},
+		Usage:   usage,
+	}
+	b, _ := json.Marshal(chunk)
+	fmt.Fprintf(s.w, "data: %s\n\n", b)
+	s.flusher.Flush()
+	s.metrics.BytesTx.Add(int64(len(b) + 8))
 }
 
 func (s *o2aStreamState) emitChunk(choice OpenAIChunkChoice, usage *OpenAIUsage) {
