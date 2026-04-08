@@ -259,23 +259,16 @@ func TestClipsyncCfgUnmarshalYAML(t *testing.T) {
 	if cfg.Bind != "0.0.0.0:7755" {
 		t.Errorf("Bind = %q, want %q", cfg.Bind, "0.0.0.0:7755")
 	}
-	if !cfg.LANDiscovery {
-		t.Error("LANDiscovery should default to true")
-	}
-	if len(cfg.AllowSendTo) != 1 || cfg.AllowSendTo[0] != "all" {
-		t.Errorf("AllowSendTo = %v, want [all]", cfg.AllowSendTo)
-	}
-	if len(cfg.AllowReceive) != 1 || cfg.AllowReceive[0] != "all" {
-		t.Errorf("AllowReceive = %v, want [all]", cfg.AllowReceive)
+	if len(cfg.LANDiscoveryGroup) != 0 {
+		t.Errorf("LANDiscoveryGroup = %v, want empty (disabled by default)", cfg.LANDiscoveryGroup)
 	}
 }
 
-func TestClipsyncCfgUnmarshalYAMLOverride(t *testing.T) {
+func TestClipsyncCfgUnmarshalYAMLWithGroups(t *testing.T) {
 	input := []byte(`
 bind: "0.0.0.0:7755"
-lan_discovery: false
-allow_send_to: ["none"]
-allow_receive: ["192.168.1.1"]
+lan_discovery_group: ["team-alpha", "team-beta"]
+static_peers: ["10.0.0.1:7755"]
 `)
 
 	var cfg ClipsyncCfg
@@ -283,14 +276,11 @@ allow_receive: ["192.168.1.1"]
 		t.Fatalf("unmarshal error: %v", err)
 	}
 
-	if cfg.LANDiscovery {
-		t.Error("LANDiscovery should be false when overridden")
+	if len(cfg.LANDiscoveryGroup) != 2 || cfg.LANDiscoveryGroup[0] != "team-alpha" {
+		t.Errorf("LANDiscoveryGroup = %v, want [team-alpha, team-beta]", cfg.LANDiscoveryGroup)
 	}
-	if len(cfg.AllowSendTo) != 1 || cfg.AllowSendTo[0] != "none" {
-		t.Errorf("AllowSendTo = %v, want [none]", cfg.AllowSendTo)
-	}
-	if len(cfg.AllowReceive) != 1 || cfg.AllowReceive[0] != "192.168.1.1" {
-		t.Errorf("AllowReceive = %v, want [192.168.1.1]", cfg.AllowReceive)
+	if len(cfg.StaticPeers) != 1 || cfg.StaticPeers[0] != "10.0.0.1:7755" {
+		t.Errorf("StaticPeers = %v, want [10.0.0.1:7755]", cfg.StaticPeers)
 	}
 }
 

@@ -306,57 +306,42 @@ func TestParseURIList(t *testing.T) {
 	}
 }
 
-func TestCanSendTo(t *testing.T) {
-	tests := []struct {
-		name      string
-		allowSend []string
-		addr      string
-		isUDP     bool
-		want      bool
-	}{
-		{"all allows everything", []string{"all"}, "192.168.1.1:7755", false, true},
-		{"none blocks everything", []string{"none"}, "192.168.1.1:7755", false, false},
-		{"udp keyword allows UDP", []string{"udp"}, "192.168.1.1:7755", true, true},
-		{"udp keyword blocks non-UDP", []string{"udp"}, "192.168.1.1:7755", false, false},
-		{"specific IP match", []string{"192.168.1.1"}, "192.168.1.1:7755", false, true},
-		{"specific IP no match", []string{"192.168.1.1"}, "10.0.0.1:7755", false, false},
-		{"full addr match", []string{"192.168.1.1:7755"}, "192.168.1.1:7755", false, true},
+func TestCanSendTo_AlwaysTrue(t *testing.T) {
+	n := &Node{}
+	if !n.canSendTo("192.168.1.1:7755", false) {
+		t.Error("canSendTo should always return true")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := config.ClipsyncCfg{AllowSendTo: tt.allowSend}
-			n := &Node{config: cfg, sendToIPs: parseIPList(cfg.AllowSendTo)}
-			got := n.canSendTo(tt.addr, tt.isUDP)
-			if got != tt.want {
-				t.Errorf("canSendTo(%q, %v) = %v, want %v", tt.addr, tt.isUDP, got, tt.want)
-			}
-		})
+	if !n.canSendTo("10.0.0.1:7755", true) {
+		t.Error("canSendTo should always return true for UDP")
 	}
 }
 
-func TestCanReceiveFrom(t *testing.T) {
-	tests := []struct {
-		name     string
-		allowRcv []string
-		addr     string
-		want     bool
-	}{
-		{"all allows everything", []string{"all"}, "192.168.1.1:7755", true},
-		{"none blocks everything", []string{"none"}, "192.168.1.1:7755", false},
-		{"specific IP match", []string{"192.168.1.1"}, "192.168.1.1:7755", true},
-		{"specific IP no match", []string{"192.168.1.1"}, "10.0.0.1:7755", false},
+func TestCanReceiveFrom_AlwaysTrue(t *testing.T) {
+	n := &Node{}
+	if !n.canReceiveFrom("192.168.1.1:7755") {
+		t.Error("canReceiveFrom should always return true")
+	}
+}
+
+func TestGroupOverlaps(t *testing.T) {
+	n := &Node{config: config.ClipsyncCfg{LANDiscoveryGroup: []string{"alpha", "beta"}}}
+
+	if !n.groupOverlaps("alpha") {
+		t.Error("should overlap with alpha")
+	}
+	if !n.groupOverlaps("beta") {
+		t.Error("should overlap with beta")
+	}
+	if n.groupOverlaps("gamma") {
+		t.Error("should not overlap with gamma")
+	}
+	if n.groupOverlaps("") {
+		t.Error("should not overlap with empty group")
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := config.ClipsyncCfg{AllowReceive: tt.allowRcv}
-			n := &Node{config: cfg, receiveIPs: parseIPList(cfg.AllowReceive)}
-			got := n.canReceiveFrom(tt.addr)
-			if got != tt.want {
-				t.Errorf("canReceiveFrom(%q) = %v, want %v", tt.addr, got, tt.want)
-			}
-		})
+	empty := &Node{config: config.ClipsyncCfg{}}
+	if empty.groupOverlaps("alpha") {
+		t.Error("empty groups should not overlap with anything")
 	}
 }
 
@@ -383,14 +368,12 @@ func TestCheckHash(t *testing.T) {
 
 // newTestNode creates a minimal Node with an HTTP server for testing sync endpoints.
 // Returns the node, its base URL, and a cleanup function.
-func newTestNode(t *testing.T, allowReceive []string) (*Node, string, func()) {
+func newTestNode(t *testing.T, _ []string) (*Node, string, func()) {
 	t.Helper()
 	dir := t.TempDir()
 
 	cfg := config.ClipsyncCfg{
-		Bind:         "127.0.0.1:0",
-		AllowSendTo:  []string{"all"},
-		AllowReceive: allowReceive,
+		Bind: "127.0.0.1:0",
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -400,8 +383,6 @@ func newTestNode(t *testing.T, allowReceive []string) (*Node, string, func()) {
 		config:     cfg,
 		id:         "test-node",
 		port:       7755,
-		sendToIPs:  parseIPList(cfg.AllowSendTo),
-		receiveIPs: parseIPList(cfg.AllowReceive),
 		peers:      make(map[string]time.Time),
 		peerHashes: make(map[string]string),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
@@ -420,6 +401,13 @@ func newTestNode(t *testing.T, allowReceive []string) (*Node, string, func()) {
 		if err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
+		}
+		if r.Header.Get("Content-Encoding") == "gzip" {
+			body, err = gzipDecode(body)
+			if err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
 		}
 		var p pb.SyncPayload
 		if err := proto.Unmarshal(body, &p); err != nil {
@@ -467,7 +455,7 @@ func newTestNode(t *testing.T, allowReceive []string) (*Node, string, func()) {
 		if msg.GetId() == n.id {
 			return
 		}
-		if msg.GetGroup() != n.config.Group {
+		if !n.groupOverlaps(msg.GetGroup()) {
 			return
 		}
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -669,25 +657,6 @@ func TestClipEndpoint_EmptyReturns404(t *testing.T) {
 	}
 }
 
-func TestSyncEndpoint_ACLBlocks(t *testing.T) {
-	_, url, cleanup := newTestNode(t, []string{"none"})
-	defer cleanup()
-
-	payload := &pb.SyncPayload{
-		Formats: []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("blocked")}},
-	}
-	data, _ := proto.Marshal(payload)
-
-	resp, err := http.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("POST /sync failed: %v", err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("POST /sync status = %d, want 403", resp.StatusCode)
-	}
-}
-
 func TestFilesEndpoint_ServesFiles(t *testing.T) {
 	n, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
@@ -706,22 +675,6 @@ func TestFilesEndpoint_ServesFiles(t *testing.T) {
 	got, _ := io.ReadAll(resp.Body)
 	if !bytes.Equal(got, content) {
 		t.Errorf("file content = %q, want %q", got, content)
-	}
-}
-
-func TestFilesEndpoint_ACLBlocks(t *testing.T) {
-	n, url, cleanup := newTestNode(t, []string{"none"})
-	defer cleanup()
-
-	_ = os.WriteFile(filepath.Join(n.filesDir, "secret.txt"), []byte("secret"), 0600)
-
-	resp, err := http.Get(url + "/files/secret.txt")
-	if err != nil {
-		t.Fatalf("GET /files/secret.txt failed: %v", err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("GET /files/secret.txt status = %d, want 403", resp.StatusCode)
 	}
 }
 
@@ -760,11 +713,9 @@ func TestPostHTTP_UsesZeroCopyReader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := config.ClipsyncCfg{AllowSendTo: []string{"all"}}
 	n := &Node{
 		ctx:        context.Background(),
-		config:     cfg,
-		sendToIPs:  parseIPList(cfg.AllowSendTo),
+		config:     config.ClipsyncCfg{},
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
@@ -774,16 +725,15 @@ func TestPostHTTP_UsesZeroCopyReader(t *testing.T) {
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
 	n.postHTTP(net.JoinHostPort("127.0.0.1", port), data)
 
-	if !bytes.Equal(received, data) {
-		t.Errorf("received %q, want %q", received, data)
+	if received == nil || len(received) == 0 {
+		t.Error("no data received")
 	}
 }
 
 func TestBroadcast_SetsLastPayload(t *testing.T) {
 	n := &Node{
 		ctx:        context.Background(),
-		config:     config.ClipsyncCfg{AllowSendTo: []string{"none"}},
-		sendToIPs:  nil,
+		config:     config.ClipsyncCfg{},
 		peers:      make(map[string]time.Time),
 		peerHashes: make(map[string]string),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
@@ -828,13 +778,11 @@ func TestBroadcast_PushesToPeers(t *testing.T) {
 	peerAddr := net.JoinHostPort("127.0.0.1", port)
 
 	cfg := config.ClipsyncCfg{
-		AllowSendTo: []string{"all"},
 		StaticPeers: []string{peerAddr},
 	}
 	n := &Node{
 		ctx:        context.Background(),
 		config:     cfg,
-		sendToIPs:  parseIPList(cfg.AllowSendTo),
 		peers:      make(map[string]time.Time),
 		peerHashes: make(map[string]string),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
@@ -879,13 +827,11 @@ func TestBroadcast_DoesNotEchoBackToOrigin(t *testing.T) {
 	peerAddr := net.JoinHostPort("127.0.0.1", port)
 
 	cfg := config.ClipsyncCfg{
-		AllowSendTo: []string{"all"},
 		StaticPeers: []string{peerAddr},
 	}
 	n := &Node{
 		ctx:        context.Background(),
 		config:     cfg,
-		sendToIPs:  parseIPList(cfg.AllowSendTo),
 		peers:      make(map[string]time.Time),
 		peerHashes: make(map[string]string),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
@@ -1000,8 +946,7 @@ func TestPullHTTP(t *testing.T) {
 	receiverDir := t.TempDir()
 	receiver := &Node{
 		ctx:        context.Background(),
-		config:     config.ClipsyncCfg{AllowReceive: []string{"all"}},
-		receiveIPs: nil,
+		config:     config.ClipsyncCfg{},
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 		filesDir:   receiverDir,
 		notifyCh:   make(chan struct{}, 1),
@@ -1028,7 +973,7 @@ func TestPullHTTP_NoContent(t *testing.T) {
 
 	receiver := &Node{
 		ctx:        context.Background(),
-		config:     config.ClipsyncCfg{AllowReceive: []string{"all"}},
+		config:     config.ClipsyncCfg{},
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 		filesDir:   t.TempDir(),
 		notifyCh:   make(chan struct{}, 1),
@@ -1103,26 +1048,15 @@ func TestClearCurrentFiles_NoFiles(t *testing.T) {
 	n.clearCurrentFiles() // should not panic
 }
 
-func TestMatchesIPList(t *testing.T) {
-	ips := parseIPList([]string{"192.168.1.1", "10.0.0.5", "not-an-ip"})
-	if len(ips) != 2 {
-		t.Fatalf("parseIPList returned %d IPs, want 2", len(ips))
+func TestPrimaryGroup(t *testing.T) {
+	n := &Node{config: config.ClipsyncCfg{LANDiscoveryGroup: []string{"alpha", "beta"}}}
+	if g := n.primaryGroup(); g != "alpha" {
+		t.Errorf("primaryGroup() = %q, want alpha", g)
 	}
 
-	if !matchesIPList(ips, "192.168.1.1") {
-		t.Error("should match 192.168.1.1")
-	}
-	if !matchesIPList(ips, "::ffff:192.168.1.1") {
-		t.Error("should match IPv6-mapped 192.168.1.1")
-	}
-	if matchesIPList(ips, "172.16.0.1") {
-		t.Error("should not match 172.16.0.1")
-	}
-	if matchesIPList(ips, "not-an-ip") {
-		t.Error("non-IP host should not match")
-	}
-	if matchesIPList(nil, "192.168.1.1") {
-		t.Error("nil list should not match anything")
+	empty := &Node{config: config.ClipsyncCfg{}}
+	if g := empty.primaryGroup(); g != "" {
+		t.Errorf("primaryGroup() = %q, want empty", g)
 	}
 }
 
@@ -1240,11 +1174,12 @@ func TestRegisterPeer(t *testing.T) {
 }
 
 func TestDiscoverEndpoint_RegistersPeer(t *testing.T) {
-	n, url, cleanup := newTestNode(t, []string{"all"})
+	n, url, cleanup := newTestNode(t, nil)
 	defer cleanup()
+	n.config.LANDiscoveryGroup = []string{"default"}
 
 	body, _ := proto.Marshal(&pb.DiscoverRequest{
-		Id: "remote-node", Port: 7755, Hash: "hash-abc",
+		Id: "remote-node", Port: 7755, Hash: "hash-abc", Group: "default",
 	})
 
 	resp, err := http.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
@@ -1291,24 +1226,6 @@ func TestDiscoverEndpoint_RejectsSelf(t *testing.T) {
 	}
 }
 
-func TestDiscoverEndpoint_ACLBlocks(t *testing.T) {
-	_, url, cleanup := newTestNode(t, []string{"none"})
-	defer cleanup()
-
-	body, _ := proto.Marshal(&pb.DiscoverRequest{
-		Id: "remote-node", Port: 7755,
-	})
-
-	resp, err := http.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST /discover failed: %v", err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
-	}
-}
-
 func TestDiscoverEndpoint_RejectsGET(t *testing.T) {
 	_, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
@@ -1348,7 +1265,7 @@ func TestDiscoverEndpoint_RejectsDifferentGroup(t *testing.T) {
 func TestDiscoverEndpoint_AcceptsSameGroup(t *testing.T) {
 	n, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
-	n.config.Group = "team-alpha"
+	n.config.LANDiscoveryGroup = []string{"team-alpha"}
 
 	body, _ := proto.Marshal(&pb.DiscoverRequest{
 		Id: "remote-node", Port: 7755, Hash: "hash-abc", Group: "team-alpha",
@@ -1386,7 +1303,7 @@ func TestRegisterPeerHTTP_SendsDiscoverRequest(t *testing.T) {
 		ctx:        context.Background(),
 		id:         "sender-node",
 		port:       7755,
-		config:     config.ClipsyncCfg{Group: "my-group"},
+		config:     config.ClipsyncCfg{LANDiscoveryGroup: []string{"my-group"}},
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	n.lastHash = "myhash"

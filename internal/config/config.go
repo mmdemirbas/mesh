@@ -92,27 +92,10 @@ type Connection struct {
 
 // ClipsyncCfg represents the YAML configuration structure.
 type ClipsyncCfg struct {
-	Bind         string   `yaml:"bind"`                    // e.g., "0.0.0.0:7755"
-	LANDiscovery bool     `yaml:"lan_discovery,omitempty"` // default: true
-	StaticPeers  []string `yaml:"static_peers,omitempty"`
-	AllowSendTo  []string `yaml:"allow_send_to,omitempty"` // "all", "none", "udp", or specific IPs. Default: ["all"]
-	AllowReceive []string `yaml:"allow_receive,omitempty"` // "all", "none", "udp", or specific IPs. Default: ["all"]
-	PollInterval string   `yaml:"poll_interval,omitempty"` // Clipboard polling interval (e.g., "3s", "5s"). Default: "3s"
-	Group        string   `yaml:"group,omitempty"`         // Group name for LAN discovery isolation. Peers with different groups ignore each other.
-}
-
-// UnmarshalYAML provides default values for ClipsyncCfg.
-func (c *ClipsyncCfg) UnmarshalYAML(value *yaml.Node) error {
-	type plain ClipsyncCfg
-	// Set defaults
-	c.LANDiscovery = true
-	c.AllowSendTo = []string{"all"}
-	c.AllowReceive = []string{"all"}
-
-	if err := value.Decode((*plain)(c)); err != nil {
-		return err
-	}
-	return nil
+	Bind              string   `yaml:"bind"`                          // e.g., "0.0.0.0:7755"
+	LANDiscoveryGroup []string `yaml:"lan_discovery_group,omitempty"` // Group names for LAN discovery. Empty disables dynamic discovery. Peers with no overlapping group ignore each other.
+	StaticPeers       []string `yaml:"static_peers,omitempty"`
+	PollInterval      string   `yaml:"poll_interval,omitempty"` // Clipboard polling interval (e.g., "3s", "5s"). Default: "3s"
 }
 
 // FilesyncCfg configures a folder synchronization instance.

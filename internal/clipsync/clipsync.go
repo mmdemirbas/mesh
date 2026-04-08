@@ -135,10 +135,6 @@ type Node struct {
 	id     string
 	port   int
 
-	// Pre-parsed IPs from config for fast ACL checks without per-call parsing.
-	sendToIPs  []net.IP
-	receiveIPs []net.IP
-
 	peers      map[string]time.Time // Tracks dynamic UDP peers
 	peerHashes map[string]string    // Tracks last seen hash per peer
 	peersMu    sync.RWMutex
@@ -194,8 +190,6 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 		config:     cfg,
 		id:         generateID(),
 		port:       port,
-		sendToIPs:  parseIPList(cfg.AllowSendTo),
-		receiveIPs: parseIPList(cfg.AllowReceive),
 		peers:      make(map[string]time.Time),
 		peerHashes: make(map[string]string),
 		httpClient: &http.Client{Timeout: 2 * time.Minute},
@@ -207,7 +201,7 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 
 	go n.runHTTPServer(ctx)
 
-	if cfg.LANDiscovery {
+	if len(cfg.LANDiscoveryGroup) > 0 {
 		go n.runUDPServer(ctx, magicHeader, port)
 		go n.runUDPBeacon(ctx, magicHeader, port)
 		go n.cleanupPeers(ctx)
@@ -282,58 +276,30 @@ func formatBytes(b int64) string {
 	}
 }
 
-// ─── Network & ACL Logic ─────────────────────────────────────────────────────
+// ─── Network Logic ──────────────────────────────────────────────────────────
 
-// parseIPList pre-parses IP addresses from a config slice for fast ACL lookups.
-// Non-IP entries (like "all", "none", "udp") are skipped.
-func parseIPList(entries []string) []net.IP {
-	var ips []net.IP
-	for _, s := range entries {
-		if ip := net.ParseIP(s); ip != nil {
-			ips = append(ips, ip)
-		}
-	}
-	return ips
-}
+// canSendTo returns whether the node should push clipboard data to addr.
+func (n *Node) canSendTo(_ string, _ bool) bool { return true }
 
-func (n *Node) canSendTo(addr string, isUDP bool) bool {
-	if contains(n.config.AllowSendTo, "none") {
-		return false
-	}
-	if contains(n.config.AllowSendTo, "all") {
-		return true
-	}
-	if isUDP && contains(n.config.AllowSendTo, "udp") {
-		return true
-	}
-	host, _, _ := net.SplitHostPort(addr)
-	return matchesIPList(n.sendToIPs, host) || contains(n.config.AllowSendTo, addr)
-}
+// canReceiveFrom returns whether the node should accept clipboard data from addr.
+func (n *Node) canReceiveFrom(_ string) bool { return true }
 
-func (n *Node) canReceiveFrom(addr string) bool {
-	if contains(n.config.AllowReceive, "none") {
-		return false
-	}
-	if contains(n.config.AllowReceive, "all") {
-		return true
-	}
-	host, _, _ := net.SplitHostPort(addr)
-	return matchesIPList(n.receiveIPs, host) || contains(n.config.AllowReceive, addr)
-}
-
-// matchesIPList checks if the IP in host matches any pre-parsed IP in the list,
-// handling IPv6-mapped IPv4 addresses (e.g., "::ffff:192.168.1.5" matches "192.168.1.5").
-func matchesIPList(ips []net.IP, host string) bool {
-	hostIP := net.ParseIP(host)
-	if hostIP == nil {
-		return false
-	}
-	for _, ip := range ips {
-		if hostIP.Equal(ip) {
+// groupOverlaps returns true if the remote group matches any of our configured groups.
+func (n *Node) groupOverlaps(remoteGroup string) bool {
+	for _, g := range n.config.LANDiscoveryGroup {
+		if g == remoteGroup {
 			return true
 		}
 	}
 	return false
+}
+
+// primaryGroup returns the first configured LAN discovery group, or empty string.
+func (n *Node) primaryGroup() string {
+	if len(n.config.LANDiscoveryGroup) > 0 {
+		return n.config.LANDiscoveryGroup[0]
+	}
+	return ""
 }
 
 // containsIP checks if the IP in host matches any entry in the slice,
@@ -621,7 +587,7 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 		if msg.GetId() == n.id {
 			return // self-discovery
 		}
-		if msg.GetGroup() != n.config.Group {
+		if !n.groupOverlaps(msg.GetGroup()) {
 			return // different group
 		}
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -1560,7 +1526,7 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 		if err := proto.Unmarshal(buf[:nBytes], &msg); err != nil || msg.GetMagic() != magicHeader || msg.GetId() == n.id {
 			continue
 		}
-		if msg.GetGroup() != n.config.Group {
+		if !n.groupOverlaps(msg.GetGroup()) {
 			continue
 		}
 
@@ -1583,7 +1549,7 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 				Id:    n.id,
 				Port:  int32(n.port),
 				Hash:  h,
-				Group: n.config.Group,
+				Group: n.primaryGroup(),
 			})
 			if err == nil {
 				// Reply to the peer's UDP server port (same as ours), not the
@@ -1681,7 +1647,7 @@ func (n *Node) runUDPBeacon(ctx context.Context, magicHeader string, port int) {
 	}
 
 	// Pre-allocate beacon message to avoid allocation each tick.
-	beacon := &pb.Beacon{Magic: magicHeader, Id: n.id, Port: int32(n.port), Group: n.config.Group}
+	beacon := &pb.Beacon{Magic: magicHeader, Id: n.id, Port: int32(n.port), Group: n.primaryGroup()}
 
 	for {
 		select {
@@ -1775,7 +1741,7 @@ func (n *Node) registerPeerHTTP(peerAddr string) {
 		Id:    n.id,
 		Port:  int32(n.port),
 		Hash:  h,
-		Group: n.config.Group,
+		Group: n.primaryGroup(),
 	})
 	if err != nil {
 		return

@@ -41,9 +41,12 @@
           "type": "string",
           "description": "e.g., \"0.0.0.0:7755\""
         },
-        "lan_discovery": {
-          "type": "boolean",
-          "description": "default: true"
+        "lan_discovery_group": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Group names for LAN discovery. Empty disables dynamic discovery. Peers with no overlapping group ignore each other."
         },
         "static_peers": {
           "items": {
@@ -51,27 +54,9 @@
           },
           "type": "array"
         },
-        "allow_send_to": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "\"all\", \"none\", \"udp\", or specific IPs. Default: [\"all\"]"
-        },
-        "allow_receive": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "\"all\", \"none\", \"udp\", or specific IPs. Default: [\"all\"]"
-        },
         "poll_interval": {
           "type": "string",
           "description": "Clipboard polling interval (e.g., \"3s\", \"5s\"). Default: \"3s\""
-        },
-        "group": {
-          "type": "string",
-          "description": "Group name for LAN discovery isolation. Peers with different groups ignore each other. Default: empty (global group)."
         }
       },
       "additionalProperties": false,

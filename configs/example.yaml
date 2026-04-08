@@ -47,8 +47,9 @@ my-vps-tunnel-service:
     # "0.0.0.0:7755" allows incoming pulls from any peer.
     - bind: "0.0.0.0:7755"
 
-      # Enable automatic discovery of peers on the same local subnet using UDP port 7755.
-      lan_discovery: true
+      # LAN discovery group names. Peers with overlapping groups discover each other
+      # via UDP broadcast on port 7755. Empty list disables dynamic discovery.
+      lan_discovery_group: ["default"]
 
       # 'static_peers': Explicitly define peer addresses (IP:PORT) to sync with.
       # This is highly useful for syncing across VLANs, VPNs, or the internet where
@@ -57,19 +58,9 @@ my-vps-tunnel-service:
         - "192.168.1.100:7755"
         - "10.0.0.5:7755"
 
-      # Discretionary Access Control (ACL)
-      # Define which hosts are allowed to receive your copied data, or send data to you.
-      # Values can be specific IP strings, "udp", "all", or "none".
-      allow_send_to: ["all"]
-      allow_receive: ["all"]
-
       # How often to poll the OS clipboard for changes. Default: "3s".
       # Lower values detect changes faster but spawn more subprocess calls.
       # poll_interval: "3s"
-
-      # Group name for LAN discovery isolation. Only peers with the same group
-      # name will discover and sync with each other. Default: empty (global group).
-      # group: "team-alpha"
 
   # ==============================================================================
   # 2. File Synchronization
