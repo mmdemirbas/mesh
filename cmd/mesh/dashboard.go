@@ -169,6 +169,9 @@ func (m dashboardModel) buildContent() string {
 	}
 
 	logLines := m.ring.Lines()
+	if len(logLines) > 10 {
+		logLines = logLines[len(logLines)-10:]
+	}
 	if len(logLines) > 0 {
 		if maxWidth < 80 {
 			maxWidth = 80
