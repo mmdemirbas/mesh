@@ -75,20 +75,34 @@ tasks:
       - task: build
 
   release:
-    desc: "Run quality gate, then tag and push a release (usage: task release -- v0.5.0)"
-    requires:
-      vars: [CLI_ARGS]
+    desc: "Run quality gate, then tag and push a release (usage: task release [-- major|minor|patch])"
     preconditions:
-      - sh: "echo '{{.CLI_ARGS}}' | grep -qE '^v[0-9]'"
-        msg: "Version must start with 'v' followed by a number (e.g. v0.5.0)"
-      - sh: "test -z \"$(git tag -l {{.CLI_ARGS}})\""
-        msg: "Tag {{.CLI_ARGS}} already exists"
+      - sh: 'echo "{{.CLI_ARGS | default "patch"}}" | grep -qxE "major|minor|patch"'
+        msg: "Argument must be one of: major, minor, patch"
       - sh: "test -z \"$(git status --porcelain)\""
         msg: "Working tree is dirty — commit or stash changes first"
+    vars:
+      BUMP: '{{.CLI_ARGS | default "patch"}}'
+      LATEST:
+        sh: "git tag -l 'v*' --sort=-v:refname | head -1 | sed 's/^v//' | grep . || echo '0.0.0'"
+      MAJOR:
+        sh: "echo '{{.LATEST}}' | cut -d. -f1"
+      MINOR:
+        sh: "echo '{{.LATEST}}' | cut -d. -f2"
+      PATCH:
+        sh: "echo '{{.LATEST}}' | cut -d. -f3"
+      VERSION:
+        sh: |
+          case '{{.BUMP}}' in
+            major) echo "v$(({{.MAJOR}}+1)).0.0" ;;
+            minor) echo "v{{.MAJOR}}.$(({{.MINOR}}+1)).0" ;;
+            patch) echo "v{{.MAJOR}}.{{.MINOR}}.$(({{.PATCH}}+1))" ;;
+          esac
     cmds:
+      - "echo 'Releasing {{.VERSION}} ({{.BUMP}} bump from v{{.LATEST}})'"
       - task: quality
-      - git tag {{.CLI_ARGS}}
-      - git push origin {{.CLI_ARGS}}
+      - git tag {{.VERSION}}
+      - git push origin {{.VERSION}}
 
   clean:
     desc: Remove build artifacts
