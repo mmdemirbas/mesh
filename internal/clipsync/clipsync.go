@@ -45,8 +45,63 @@ const (
 	// OOM from an attacker flooding unique source addresses via UDP.
 	// Kept very low — typical LAN setups have 2-10 peers.
 	maxPeers = 32
+
+	// activityHistorySize is the number of recent clipboard activities to retain.
+	activityHistorySize = 20
 )
 
+// ClipActivity describes a single clipboard sync event.
+type ClipActivity struct {
+	Direction string    `json:"direction"` // "send" or "receive"
+	Size      int64     `json:"size"`      // payload size in bytes
+	Formats   []string  `json:"formats"`   // MIME types or file names
+	Peer      string    `json:"peer"`      // peer address (receive only)
+	Time      time.Time `json:"time"`
+}
+
+// activeNodes tracks running clipsync nodes for admin API access.
+var (
+	activeNodes   []*Node
+	activeNodesMu sync.RWMutex
+)
+
+func registerNode(n *Node) {
+	activeNodesMu.Lock()
+	activeNodes = append(activeNodes, n)
+	activeNodesMu.Unlock()
+}
+
+func unregisterNode(n *Node) {
+	activeNodesMu.Lock()
+	for i, node := range activeNodes {
+		if node == n {
+			activeNodes = append(activeNodes[:i], activeNodes[i+1:]...)
+			break
+		}
+	}
+	activeNodesMu.Unlock()
+}
+
+// GetActivities returns recent clipboard activities across all active nodes.
+func GetActivities() []ClipActivity {
+	activeNodesMu.RLock()
+	defer activeNodesMu.RUnlock()
+
+	var result []ClipActivity
+	for _, n := range activeNodes {
+		n.activityMu.RLock()
+		result = append(result, n.activities...)
+		n.activityMu.RUnlock()
+	}
+	// Sort by time descending (most recent first).
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Time.After(result[j].Time)
+	})
+	if len(result) > activityHistorySize {
+		result = result[:activityHistorySize]
+	}
+	return result
+}
 
 type Node struct {
 	ctx    context.Context // parent context; cancelled on shutdown
@@ -76,6 +131,9 @@ type Node struct {
 	currentFiles   []string // absolute paths of files in filesDir tied to current clipboard content
 
 	clipMu sync.Mutex // serializes all clipboard read/write process spawning
+
+	activityMu sync.RWMutex
+	activities []ClipActivity // ring buffer, most recent last
 }
 
 // Start initializes the mesh node based on the provided configuration.
@@ -130,13 +188,72 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 		go n.refreshHTTPRegistration(ctx)
 	}
 
+	m := state.Global.GetMetrics("clipsync", cfg.Bind)
+	m.StartTime.Store(time.Now().UnixNano())
 	state.Global.Update("clipsync", cfg.Bind, state.Listening, "")
 	for _, addr := range cfg.StaticPeers {
 		state.Global.Update("clipsync-peer", cfg.Bind+"|"+addr, state.Connected, "static")
 	}
 
+	registerNode(n)
+	context.AfterFunc(ctx, func() { unregisterNode(n) })
+
 	go n.pollClipboard(ctx, pollInterval)
 	return n, nil
+}
+
+// recordActivity appends a clipboard activity to the ring buffer and updates
+// the state message shown in the dashboard.
+func (n *Node) recordActivity(direction string, size int64, formats []string, peer string) {
+	a := ClipActivity{
+		Direction: direction,
+		Size:      size,
+		Formats:   formats,
+		Peer:      peer,
+		Time:      time.Now(),
+	}
+	n.activityMu.Lock()
+	n.activities = append(n.activities, a)
+	if len(n.activities) > activityHistorySize {
+		n.activities = n.activities[len(n.activities)-activityHistorySize:]
+	}
+	n.activityMu.Unlock()
+
+	// Update metrics.
+	m := state.Global.GetMetrics("clipsync", n.config.Bind)
+	if direction == "send" {
+		m.BytesTx.Add(size)
+	} else {
+		m.BytesRx.Add(size)
+	}
+
+	// Update component message with last activity summary.
+	summary := formatActivitySummary(a)
+	state.Global.Update("clipsync", n.config.Bind, state.Listening, summary)
+}
+
+// formatActivitySummary builds a compact human-readable summary of a clipboard activity.
+func formatActivitySummary(a ClipActivity) string {
+	dir := "sent"
+	if a.Direction == "receive" {
+		dir = "received"
+	}
+	fmts := strings.Join(a.Formats, ", ")
+	if fmts == "" {
+		fmts = "unknown"
+	}
+	return fmt.Sprintf("%s %s %s", dir, formatBytes(a.Size), fmts)
+}
+
+func formatBytes(b int64) string {
+	switch {
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(b)/float64(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(b)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }
 
 // ─── Network & ACL Logic ─────────────────────────────────────────────────────
@@ -216,6 +333,10 @@ func containsIP(slice []string, host string) bool {
 func (n *Node) Broadcast(payload *pb.SyncPayload) {
 	data, _ := proto.Marshal(payload)
 
+	// Record send activity.
+	formats := extractFormatNames(payload)
+	n.recordActivity("send", int64(len(data)), formats, "")
+
 	n.stateMu.Lock()
 	n.lastPayload = data
 	origin := n.originAddr
@@ -276,7 +397,33 @@ func cleanLogStr(s string) string {
 
 // ─── HTTP Server & File Handling ─────────────────────────────────────────────
 
+// extractFormatNames returns a summary of the payload content types.
+func extractFormatNames(p *pb.SyncPayload) []string {
+	if files := p.GetFiles(); len(files) > 0 {
+		names := make([]string, 0, len(files))
+		for _, f := range files {
+			names = append(names, f.GetFileName())
+		}
+		return names
+	}
+	seen := make(map[string]bool)
+	var mimes []string
+	for _, f := range p.GetFormats() {
+		mt := f.GetMimeType()
+		if mt != "" && !seen[mt] {
+			seen[mt] = true
+			mimes = append(mimes, mt)
+		}
+	}
+	return mimes
+}
+
 func (n *Node) processPayload(p *pb.SyncPayload, peerHostPort string) {
+	// Record receive activity.
+	data, _ := proto.Marshal(p)
+	formats := extractFormatNames(p)
+	n.recordActivity("receive", int64(len(data)), formats, peerHostPort)
+
 	if len(p.GetFiles()) > 0 {
 		var writtenPaths []string
 		for _, f := range p.GetFiles() {

@@ -399,8 +399,12 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 	if len(cfg.Clipsync) > 0 {
 		addHeader(sectionTitle("clipsync"))
 		for _, cs := range cfg.Clipsync {
-			indicator, st, _ := getComponentInfo("clipsync", cs.Bind)
-			addRow("", indicator, colorAddr(cs.Bind), "", "", st, "", metricsSnapshot{})
+			indicator, st, comp := getComponentInfo("clipsync", cs.Bind)
+			addRow("", indicator, colorAddr(cs.Bind), "", "", st, "", readMetrics(metricsMap["clipsync:"+cs.Bind]))
+			// Show last clipboard activity if available.
+			if comp.Message != "" {
+				addRow("   ", "⌁", cGray+comp.Message+cReset, "", "", "", "", metricsSnapshot{})
+			}
 
 			type peerEntry struct{ addr, label string }
 			var peerList []peerEntry

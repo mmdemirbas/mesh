@@ -223,6 +223,7 @@ tbody tr:last-child td { border-bottom: none; }
 
 <div class="tabs" id="tabs">
   <div class="tab active" data-tab="dashboard">Dashboard</div>
+  <div class="tab" data-tab="clipsync">Clipsync</div>
   <div class="tab" data-tab="filesync">Filesync</div>
   <div class="tab" data-tab="logs">Logs</div>
   <div class="tab" data-tab="metrics">Metrics</div>
@@ -258,6 +259,26 @@ tbody tr:last-child td { border-bottom: none; }
       <div class="card-header"><span>Recent Logs</span></div>
       <div class="card-body">
         <div class="log-container" id="dash-logs" style="max-height:200px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Clipsync panel -->
+  <div class="panel" id="p-clipsync">
+    <div class="stats" id="cs-stats"></div>
+    <div class="card">
+      <div class="card-header"><span>Recent Activity</span></div>
+      <div class="card-body">
+        <table>
+          <thead><tr>
+            <th>Direction</th>
+            <th>Size</th>
+            <th>Content</th>
+            <th>Peer</th>
+            <th>Time</th>
+          </tr></thead>
+          <tbody id="cs-body"></tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -389,7 +410,7 @@ tbody tr:last-child td { border-bottom: none; }
 
 <script>
 // --- State ---
-let state = {}, logs = [], folders = [], conflicts = [], metricsText = '';
+let state = {}, logs = [], folders = [], conflicts = [], clipActivities = [], metricsText = '';
 let compSort = {col:'type', asc:true};
 let fsSort = {col:'id', asc:true};
 let logLevel = 'all';
@@ -398,7 +419,7 @@ const chartHist = {tx:[], rx:[], streams:[], goroutines:[], fds:[]};
 let prevTotalTx = 0, prevTotalRx = 0, firstTick = true;
 
 // --- Tabs ---
-const tabMap = {'/ui':'dashboard','/ui/filesync':'filesync','/ui/logs':'logs','/ui/metrics':'metrics','/ui/api':'api','/ui/debug':'debug'};
+const tabMap = {'/ui':'dashboard','/ui/clipsync':'clipsync','/ui/filesync':'filesync','/ui/logs':'logs','/ui/metrics':'metrics','/ui/api':'api','/ui/debug':'debug'};
 let activeTab = tabMap[location.pathname] || 'dashboard';
 
 function showTab(name) {
@@ -418,14 +439,15 @@ showTab(activeTab);
 // --- Data fetch ---
 async function tick() {
   try {
-    const [sr, lr, fr, cr, mr] = await Promise.all([
+    const [sr, lr, fr, cr, car, mr] = await Promise.all([
       fetch('/api/state').then(r=>r.json()),
       fetch('/api/logs').then(r=>r.json()),
       fetch('/api/filesync/folders').then(r=>r.json()),
       fetch('/api/filesync/conflicts').then(r=>r.json()),
+      fetch('/api/clipsync/activity').then(r=>r.json()),
       fetch('/api/metrics').then(r=>r.text()),
     ]);
-    state = sr; logs = lr; folders = fr; conflicts = cr; metricsText = mr;
+    state = sr; logs = lr; folders = fr; conflicts = cr; clipActivities = car; metricsText = mr;
 
     // Accumulate chart history from metrics
     const nowTx = sumMetric(metricsText, 'mesh_bytes_tx_total');
@@ -452,6 +474,7 @@ function render() {
   renderStats();
   renderComponents();
   renderDashLogs();
+  renderClipsync();
   renderFilesync();
   renderConflicts();
   renderLogs();
@@ -861,6 +884,46 @@ async function tryEndpoint(i) {
       el.textContent = await r.text();
     }
   } catch(e) { el.textContent = 'Error: ' + e.message; }
+}
+
+// --- Clipsync ---
+function renderClipsync() {
+  const sends = clipActivities.filter(a => a.direction === 'send').length;
+  const recvs = clipActivities.filter(a => a.direction === 'receive').length;
+  const totalSize = clipActivities.reduce((s,a) => s + (a.size||0), 0);
+  document.getElementById('cs-stats').innerHTML =
+    stat('Total Events', clipActivities.length, sends+' sent, '+recvs+' received') +
+    stat('Total Size', fmtBytes(totalSize), '');
+
+  const el = document.getElementById('cs-body');
+  if (!clipActivities.length) {
+    el.innerHTML = '<tr><td colspan="5" style="color:var(--text-muted);padding:20px">No clipboard activity yet</td></tr>';
+    return;
+  }
+  el.innerHTML = clipActivities.map(a => {
+    const dir = a.direction === 'send'
+      ? '<span style="color:var(--green)">&#x2191; send</span>'
+      : '<span style="color:var(--purple)">&#x2193; receive</span>';
+    const fmts = (a.formats||[]).map(f => x(f)).join(', ') || '<span style="color:var(--text-muted)">-</span>';
+    const peer = a.peer ? x(a.peer) : '<span style="color:var(--text-muted)">-</span>';
+    const ago = timeAgo(a.time);
+    return '<tr><td>'+dir+'</td><td>'+fmtBytes(a.size)+'</td><td style="color:var(--text-dim)">'+fmts+'</td><td>'+peer+'</td><td style="color:var(--text-muted)">'+ago+'</td></tr>';
+  }).join('');
+}
+
+function fmtBytes(b) {
+  if (b >= 1<<20) return (b/(1<<20)).toFixed(1)+' MB';
+  if (b >= 1<<10) return (b/(1<<10)).toFixed(1)+' KB';
+  return b+' B';
+}
+
+function timeAgo(ts) {
+  if (!ts) return '-';
+  const d = Date.now() - new Date(ts).getTime();
+  if (d < 1000) return 'just now';
+  if (d < 60000) return Math.floor(d/1000)+'s ago';
+  if (d < 3600000) return Math.floor(d/60000)+'m ago';
+  return Math.floor(d/3600000)+'h ago';
 }
 
 // --- Debug ---

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mmdemirbas/mesh/internal/clipsync"
 	"github.com/mmdemirbas/mesh/internal/filesync"
 	"github.com/mmdemirbas/mesh/internal/state"
 	"github.com/mmdemirbas/mesh/internal/tunnel"
@@ -161,6 +162,16 @@ func buildAdminMux(ring *logRing) *http.ServeMux {
 		_ = json.NewEncoder(w).Encode(conflicts)
 	})
 
+	// GET /api/clipsync/activity — recent clipboard sync activities.
+	mux.HandleFunc("/api/clipsync/activity", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		activities := clipsync.GetActivities()
+		if activities == nil {
+			activities = []clipsync.ClipActivity{}
+		}
+		_ = json.NewEncoder(w).Encode(activities)
+	})
+
 	// GET /ui, /ui/filesync, /ui/logs, /ui/metrics, /ui/api — unified SPA dashboard.
 	// The tab parameter selects the initial view.
 	uiHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -168,6 +179,7 @@ func buildAdminMux(ring *logRing) *http.ServeMux {
 		_, _ = fmt.Fprint(w, adminUI)
 	})
 	mux.Handle("/ui", uiHandler)
+	mux.Handle("/ui/clipsync", uiHandler)
 	mux.Handle("/ui/filesync", uiHandler)
 	mux.Handle("/ui/logs", uiHandler)
 	mux.Handle("/ui/metrics", uiHandler)
