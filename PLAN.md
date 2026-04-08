@@ -1,20 +1,11 @@
 # PLAN.md
 
-Roadmap for mesh. Last verified on 2026-04-08. Updated 2026-04-08.
+Roadmap for mesh. Last updated 2026-04-08.
 Items ordered by priority within each tier.
 
 ---
 
-## Tier 1 — Bugs & Design Issues
-
-| ID  | Component | Item                                       | Notes |
-|-----|-----------|--------------------------------------------|-------|
-| ~~B16~~ | state     | ~~Components/metrics maps grow without bound~~ | **DONE.** TTL-based eviction with 1h componentTTL, 5min sweep interval. LastUpdated tracked on all mutations. |
-| ~~B3~~ | clipsync  | ~~Clipboard overwritten without user intent~~ | **DONE.** Renamed to `lan_discovery_group` ([]string). Removed `allow_send_to`, `allow_receive`, `group`. Empty list disables discovery. |
-
----
-
-## Tier 2 — Security
+## Tier 1 — Security
 
 | ID  | Component | Item                            | Notes |
 |-----|-----------|---------------------------------|-------|
@@ -23,79 +14,28 @@ Items ordered by priority within each tier.
 
 ---
 
-## Tier 3 — Performance & Optimization
+## Tier 2 — Performance & Optimization
 
-| ID  | Component | Item                                    | Notes |
-|-----|-----------|---------------------------------------- |-------|
-| P1  | core      | Profile and optimize CPU + memory       | Full profiling pass. Identify hot paths and memory hogs. |
-| P2  | cli       | Simplify CLI dashboard                  | Keep CLI dashboard but strip non-essential detail. See [CLI Dashboard Simplification](#cli-dashboard-simplification) below. |
-| P3  | filesync  | Adaptive watch/scan                     | No new config properties. Implement a self-tuning heuristic that watches hot paths and polls the rest. See [Adaptive Watch/Scan Design](#adaptive-watchscan-design) below. |
-| ~~P4~~ | filesync  | ~~Compress index + clipboard transfers~~ | **DONE.** Gzip compression on all protobuf index pages and clipboard payloads. Content-Encoding header signals compression. |
-| ~~P5~~ | filesync  | ~~Index transfer format~~               | **DONE.** Combined with P4 — gzip on top of protobuf. |
-| ~~P6~~ | clipsync  | ~~Compress clipboard data before sharing~~ | **DONE.** Combined with P4. All clipboard payloads gzip-compressed. |
-| ~~FS5~~ | filesync  | ~~Outgoing delta index~~                | **DONE.** Track LastSentSequence per peer. Subsequent syncs send only entries newer than last sent. First sync and peer restart send full index. |
+| ID | Component | Item                              | Notes |
+|----|-----------|-----------------------------------|-------|
+| P1 | core      | Profile and optimize CPU + memory | Full profiling pass. Identify hot paths and memory hogs. |
+| P2 | cli       | Simplify CLI dashboard            | Keep CLI dashboard but strip non-essential detail. See [CLI Dashboard Simplification](#cli-dashboard-simplification) below. |
+| P3 | filesync  | Adaptive watch/scan               | No new config properties. Implement a self-tuning heuristic that watches hot paths and polls the rest. See [Adaptive Watch/Scan Design](#adaptive-watchscan-design) below. |
 
 ---
 
-## Tier 4 — Features
+## Tier 3 — Features
 
 | ID  | Component | Item                                | Complexity  | Notes |
 |-----|-----------|-------------------------------------|-------------|-------|
-| ~~N1~~ | filesync  | ~~Metadata migration & e2e test~~    | Medium      | **DONE.** Production mesh.yaml added to configs/ with filesync sections uncommented, ignore patterns derived from .stignore files for all nodes. |
-| ~~N2~~ | build     | ~~Remove vendor dir from VCS~~       | Trivial     | **DONE.** Removed from git, added to .gitignore. |
 | N3  | clipsync  | File/image copy support             | Medium-High | Copy a file or directory on one computer, paste on another. Image clipboard content also in scope. Small files: transfer immediately via existing push mechanism. Large files: needs lazy-copy design (transfer only when user pastes). Lazy-copy feasibility on macOS and Windows is unknown — needs research. Two-phase approach: ship eager copy for small files first, design lazy copy separately. |
 | N4  | admin     | Action history in web UI            | Medium      | Clipboard activity, file sync activity, past metrics. Partially started (clipboard activity tracking exists). |
-| ~~N5~~ | admin     | ~~Show all logs in web UI~~          | Low         | **DONE.** Ring buffer increased to 1000 lines. /api/logs/file endpoint for full log file with pagination. UI has Recent/Full Log toggle. |
 | N6  | admin     | Tree-table layout for web dashboard | Medium      | Components listed in a flat table. A tree-table with collapsible nodes would better represent the hierarchy. |
-| ~~F13~~ | clipsync  | ~~Payload size limit~~               | Low         | **DONE.** Total clipboard payload capped at 100MB. Per-file 50MB limit. Warning log on skip. |
-| ~~F7~~ | sshd      | ~~Env var forwarding~~               | Low         | **DONE.** `accept_env` config field with wildcard patterns. "env" request handler on Unix and Windows. |
-| ~~F9~~ | sshd      | ~~Exit-signal reporting~~            | Low         | **DONE.** `exit-signal` sent per RFC 4254 section 6.10 when process killed by signal. Signal name mapping included. |
-| ~~F10~~ | sshd      | ~~Banner and MOTD~~                  | Low         | **DONE.** `banner` and `motd` config fields. BannerCallback for pre-auth. MOTD written to channel post-auth. |
 | F8  | sshd      | Signal forwarding                   | Medium      | `handleSession()` doesn't process `signal` request type (RFC 4254 section 6.9). Parse signal name, map to `syscall.Signal`, send to process group. `SysProcAttr.Setpgid = true` already set. Windows: no-op. |
-| ~~F12~~ | sshd      | ~~Windows shell default~~            | Low         | **DONE.** Default shell prefers pwsh.exe, falls back to COMSPEC/cmd.exe. Exec uses -Command for PowerShell. |
 | F2  | cli       | `mesh init` command                 | Medium      | Interactive config generator. Scaffolds starter YAML with common patterns. |
 | F5  | sshd      | SFTP subsystem                      | Medium      | Add `subsystem` request handling for `sftp` name. Requires `github.com/pkg/sftp` (new dependency). Enables `scp`, `sftp`, `rsync` over mesh tunnels. Consider chroot/home-dir restriction. |
 | F6  | sshd      | SSH agent forwarding                | Medium      | Handle `auth-agent-req@openssh.com`. Create temp Unix socket per session, forward over SSH, set `SSH_AUTH_SOCK`. Unix-only. Consider opt-in per listener. |
 | F14 | gateway   | LLM API gateway                     | High        | Bidirectional translation between Anthropic and OpenAI API formats. See [GATEWAY_PLAN.md](GATEWAY_PLAN.md). Plan needs review and refinement before implementation. |
-
----
-
-## Tier 5 — Testing
-
-| ID | Component | Item                                                        | Notes |
-|----|-----------|-------------------------------------------------------------|-------|
-| ~~T2~~ | tunnel    | ~~Tunnel package coverage gaps~~                            | **DONE.** Added TestSSHServerExec and TestSSHServerLocalForward integration tests. Remaining gaps: runRemoteForward, multiplex mode, ExitOnForwardFailure. |
-| ~~T3~~ | all       | ~~Integration tests: real SSH + clipsync~~                  | **DONE.** SSH server+client roundtrip with exec and direct-tcpip forwarding. Clipsync integration covered by existing tests. |
-| ~~T4~~ | proxy     | ~~Non-CONNECT HTTP forward path untested~~                  | **DONE.** TestServeHTTPProxy_NonCONNECT and dial failure test added. |
-| ~~T5~~ | tunnel    | ~~Flaky `TestAcceptAndForward_DialerErrorDropsConnection`~~ | **DONE.** Retry dial on RST race, added read deadline. |
-
----
-
-## Tier 6 — Release / Packaging
-
-| ID | Component | Item                     | Notes |
-|----|-----------|--------------------------|-------|
-| ~~R1~~ | release   | ~~Semantic versioning~~      | **DONE.** Version infrastructure in place (git describe + ldflags). Tag v0.0.1 when ready to push. |
-| ~~R2~~ | release   | ~~CHANGELOG.md~~             | **DONE.** CHANGELOG.md starting from v0.0.1. |
-| ~~R3~~ | release   | ~~Verify `go install` path~~ | **DONE.** `go install` instructions added to README. Module path correct. |
-| ~~R4~~ | docs      | ~~README: admin server docs~~ | **DONE.** Admin server section in README with port file, API endpoints, curl examples. |
-
----
-
-## Code Quality
-
-All items completed 2026-04-08.
-
-| ID  | Component | Item                                        | Notes |
-|-----|-----------|---------------------------------------------|-------|
-| ~~CQ1~~ | tunnel   | ~~Pre-compute `ak.Marshal()` at load time~~ | **DONE.** Authorized keys pre-marshaled once at load. |
-| ~~CQ2~~ | filesync | ~~Stop debounce timer on context cancel~~    | **DONE.** timer.Stop() in ctx.Done() case. |
-| ~~CQ3~~ | filesync | ~~Remove unused `fw.mu sync.Mutex` field~~   | **DONE.** Field and sync import removed. |
-| ~~CQ4~~ | proxy    | ~~Replace `time.After` with `time.NewTimer`~~ | **DONE.** Explicit timer with Stop() on context cancel. |
-| ~~CQ5~~ | proxy    | ~~Remove redundant `remote.Close()` before defer~~ | **DONE.** Defer handles close. |
-| ~~CQ6~~ | clipsync | ~~Remove duplicate Windows check~~           | **DONE.** Second block removed, comments consolidated. |
-| ~~CQ7~~ | cmd      | ~~Call `signal.Stop` for signal channels~~   | **DONE.** signal.Stop added for SIGINT/SIGTERM/SIGWINCH. winchSignal returns stop function. |
-| ~~CQ8~~ | cmd      | ~~Reduce allocations in `humanLogHandler.Handle`~~ | **DONE.** Package-level key maps, single-pass classification. Zero per-record map allocations. |
 
 ---
 
