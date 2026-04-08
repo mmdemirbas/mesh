@@ -227,6 +227,7 @@ tbody tr:last-child td { border-bottom: none; }
   <div class="tab" data-tab="logs">Logs</div>
   <div class="tab" data-tab="metrics">Metrics</div>
   <div class="tab" data-tab="api">API</div>
+  <div class="tab" data-tab="debug">Debug</div>
 </div>
 
 <div class="content">
@@ -355,6 +356,35 @@ tbody tr:last-child td { border-bottom: none; }
       <div class="card-body" id="api-list"></div>
     </div>
   </div>
+
+  <!-- Debug panel -->
+  <div class="panel" id="p-debug">
+    <div class="stats" id="dbg-stats"></div>
+    <div class="card">
+      <div class="card-header">
+        <span>Profiling</span>
+      </div>
+      <div class="card-body padded" style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="endpoint-try" onclick="dbgProfile('goroutine')">Goroutine Dump</button>
+        <button class="endpoint-try" onclick="dbgProfile('heap')">Heap Profile</button>
+        <button class="endpoint-try" onclick="dbgProfile('allocs')">Allocs Profile</button>
+        <button class="endpoint-try" onclick="dbgProfile('threadcreate')">Thread Create</button>
+        <button class="endpoint-try" onclick="dbgProfile('block')">Block Profile</button>
+        <button class="endpoint-try" onclick="dbgProfile('mutex')">Mutex Profile</button>
+        <button class="endpoint-try" onclick="dbgCpuProfile()">CPU Profile (10s)</button>
+        <button class="endpoint-try" onclick="dbgTrace()">Trace (5s)</button>
+      </div>
+    </div>
+    <div class="card" id="dbg-result-card" style="display:none">
+      <div class="card-header">
+        <span id="dbg-result-title">Result</span>
+        <button class="endpoint-try" onclick="document.getElementById('dbg-result-card').style.display='none'">Close</button>
+      </div>
+      <div class="card-body">
+        <pre class="log-container" id="dbg-result" style="max-height:70vh;white-space:pre-wrap;word-break:break-all;padding:12px 16px"></pre>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -368,7 +398,7 @@ const chartHist = {tx:[], rx:[], streams:[], goroutines:[], fds:[]};
 let prevTotalTx = 0, prevTotalRx = 0, firstTick = true;
 
 // --- Tabs ---
-const tabMap = {'/ui':'dashboard','/ui/filesync':'filesync','/ui/logs':'logs','/ui/metrics':'metrics','/ui/api':'api'};
+const tabMap = {'/ui':'dashboard','/ui/filesync':'filesync','/ui/logs':'logs','/ui/metrics':'metrics','/ui/api':'api','/ui/debug':'debug'};
 let activeTab = tabMap[location.pathname] || 'dashboard';
 
 function showTab(name) {
@@ -427,6 +457,7 @@ function render() {
   renderLogs();
   renderMetrics();
   renderCharts();
+  renderDebugStats();
 }
 
 function x(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -829,6 +860,68 @@ async function tryEndpoint(i) {
     } else {
       el.textContent = await r.text();
     }
+  } catch(e) { el.textContent = 'Error: ' + e.message; }
+}
+
+// --- Debug ---
+function renderDebugStats() {
+  const goroutines = valMetric(metricsText, 'mesh_process_goroutines') || 0;
+  const fds = valMetric(metricsText, 'mesh_process_open_fds');
+  const stateComps = valMetric(metricsText, 'mesh_state_components') || 0;
+  const stateMetrics = valMetric(metricsText, 'mesh_state_metrics') || 0;
+  let html = stat('Goroutines', goroutines, '') +
+    stat('State Components', stateComps, '') +
+    stat('State Metrics', stateMetrics, '');
+  if (fds !== null) html += stat('Open FDs', fds, '', fds > 10000 ? 'var(--red)' : fds > 1000 ? 'var(--yellow)' : '');
+  document.getElementById('dbg-stats').innerHTML = html;
+}
+
+async function dbgProfile(name) {
+  const card = document.getElementById('dbg-result-card');
+  const el = document.getElementById('dbg-result');
+  const title = document.getElementById('dbg-result-title');
+  card.style.display = 'block';
+  title.textContent = name + ' profile';
+  el.textContent = 'Loading...';
+  try {
+    const r = await fetch('/debug/pprof/' + name + '?debug=1');
+    el.textContent = await r.text();
+  } catch(e) { el.textContent = 'Error: ' + e.message; }
+}
+
+async function dbgCpuProfile() {
+  const card = document.getElementById('dbg-result-card');
+  const el = document.getElementById('dbg-result');
+  const title = document.getElementById('dbg-result-title');
+  card.style.display = 'block';
+  title.textContent = 'CPU Profile';
+  el.textContent = 'Collecting CPU profile for 10 seconds...\nThe result will download as a binary file for use with:\n  go tool pprof <file>';
+  try {
+    const r = await fetch('/debug/pprof/profile?seconds=10');
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'cpu-profile.pb.gz'; a.click();
+    URL.revokeObjectURL(url);
+    el.textContent = 'CPU profile downloaded.\nAnalyze with:\n  go tool pprof cpu-profile.pb.gz';
+  } catch(e) { el.textContent = 'Error: ' + e.message; }
+}
+
+async function dbgTrace() {
+  const card = document.getElementById('dbg-result-card');
+  const el = document.getElementById('dbg-result');
+  const title = document.getElementById('dbg-result-title');
+  card.style.display = 'block';
+  title.textContent = 'Execution Trace';
+  el.textContent = 'Collecting trace for 5 seconds...\nThe result will download as a binary file for use with:\n  go tool trace <file>';
+  try {
+    const r = await fetch('/debug/pprof/trace?seconds=5');
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'trace.out'; a.click();
+    URL.revokeObjectURL(url);
+    el.textContent = 'Trace downloaded.\nAnalyze with:\n  go tool trace trace.out';
   } catch(e) { el.textContent = 'Error: ' + e.message; }
 }
 

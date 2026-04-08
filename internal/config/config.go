@@ -295,16 +295,17 @@ func Load(path, serviceName string) (*Config, error) {
 	return cfg, nil
 }
 
-// warnInsecurePermissions logs a warning if the config file is readable by group or others.
-// This matters when the config contains password_command or other sensitive directives.
+// warnInsecurePermissions logs a warning if the config file is writable by group or others.
+// Writable configs are dangerous because they can be tampered with. Readable-by-others
+// is acceptable since secrets are stored externally via password_command, not inline.
 func warnInsecurePermissions(path string) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return
 	}
 	mode := info.Mode().Perm()
-	if mode&0077 != 0 {
-		slog.Warn("Config file has insecure permissions; consider chmod 600", "path", path, "mode", fmt.Sprintf("%04o", mode))
+	if mode&0022 != 0 {
+		slog.Warn("Config file is writable by group/others; consider chmod 644 or 600", "path", path, "mode", fmt.Sprintf("%04o", mode))
 	}
 }
 

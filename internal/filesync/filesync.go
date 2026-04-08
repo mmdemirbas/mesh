@@ -271,7 +271,9 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	roots := make([]string, 0, len(cfg.ResolvedFolders))
 	ignoreMap := make(map[string]*ignoreMatcher)
 	for _, fs := range n.folders {
-		if fs.cfg.Direction == "disabled" {
+		// Skip disabled and dry-run folders: disabled does nothing, dry-run only
+		// compares without modifying files so real-time watching is unnecessary.
+		if fs.cfg.Direction == "disabled" || fs.cfg.Direction == "dry-run" {
 			continue
 		}
 		roots = append(roots, fs.cfg.Path)
@@ -542,7 +544,11 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			action := action
 			go func() {
 				defer wg.Done()
-				sem <- struct{}{}
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
 				defer func() { <-sem }()
 
 				err := downloadFromPeer(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)

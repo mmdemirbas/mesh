@@ -357,6 +357,10 @@ func upCmd(nodeNames []string, configPath string) {
 		sig := <-sigCh
 		log.Info("Shutting down", "signal", sig)
 		cancel()
+		// Second signal forces immediate exit for stuck shutdowns.
+		sig = <-sigCh
+		log.Warn("Forced exit", "signal", sig)
+		os.Exit(1)
 	}()
 
 	// Determine admin server address: first non-empty admin_addr across nodes wins.
@@ -477,18 +481,8 @@ func upCmd(nodeNames []string, configPath string) {
 	wg.Wait()
 	log.Info("mesh gracefully stopped")
 
-	if useDashboard {
-		// The deferred runDashboard cleanup restores the original screen (alternate buffer exit).
-		// Print the final static status to the normal terminal so the user sees the shutdown state.
-		// Small delay to let the alternate screen buffer exit complete.
-		time.Sleep(50 * time.Millisecond)
-		snap := state.Global.Snapshot()
-		metrics := state.Global.SnapshotMetrics()
-		for _, name := range nodeNames {
-			s, _ := renderStatus(cfgs[name], snap, metrics, name)
-			fmt.Print(s)
-		}
-	}
+	// Dashboard cleanup happens via bubbletea's deferred alternate-screen exit.
+	// No final status print — it pollutes the console scrollback.
 }
 
 // humanLogHandler rewrites slog records into natural prose before passing them

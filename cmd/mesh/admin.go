@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/pprof"
 	"regexp"
 	"runtime"
 	"strings"
@@ -171,6 +172,15 @@ func buildAdminMux(ring *logRing) *http.ServeMux {
 	mux.Handle("/ui/logs", uiHandler)
 	mux.Handle("/ui/metrics", uiHandler)
 	mux.Handle("/ui/api", uiHandler)
+	mux.Handle("/ui/debug", uiHandler)
+
+	// pprof endpoints for runtime profiling (CPU, memory, goroutines).
+	// Only accessible on localhost via the admin server.
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
 	return mux
 }

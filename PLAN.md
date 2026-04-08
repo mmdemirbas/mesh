@@ -157,7 +157,6 @@ exchange is unchanged (backward compatible).
 - filesync - copy metadata from all 3 computers and generate filesync equivalents. Resolve existing
   conflicts. Sync ignores. Test end to end.
 - gitignore vendor dir
-- show last clipboard activity (direction, size, mime, time)
 - clipsync - file/image copy support
 - clipsync - compress before sharing?
 - keep action history and show in the web ui (clipboard activity, file sync activity, past metrics
@@ -167,3 +166,4 @@ exchange is unchanged (backward compatible).
   cli dashboard. Or just make it very brief. Deails is on the web UI.
 - filesync: compress index content before trasnferring?
 - filesync: yaml could be too verbose. Consider json / hocon, more optimized versions for transfer. protobuf?
+- filesync: watch or scan? both are costly. find sweet spot.
