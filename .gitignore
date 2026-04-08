@@ -5,6 +5,7 @@
 /out/
 
 # Go
+/vendor/
 *.test
 *.out
 *.prof
