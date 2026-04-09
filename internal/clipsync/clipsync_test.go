@@ -316,10 +316,30 @@ func TestCanSendTo_AlwaysTrue(t *testing.T) {
 	}
 }
 
-func TestCanReceiveFrom_AlwaysTrue(t *testing.T) {
-	n := &Node{}
-	if !n.canReceiveFrom("192.168.1.1:7755") {
-		t.Error("canReceiveFrom should always return true")
+func TestCanReceiveFrom(t *testing.T) {
+	n := &Node{
+		config: config.ClipsyncCfg{
+			StaticPeers: []string{"10.0.0.5:7755"},
+		},
+		peers: make(map[string]time.Time),
+	}
+	n.peers["192.168.1.10:7755"] = time.Now()
+
+	tests := []struct {
+		name string
+		addr string
+		want bool
+	}{
+		{"loopback IPv4", "127.0.0.1:7755", true},
+		{"loopback IPv6", "[::1]:7755", true},
+		{"static peer", "10.0.0.5:9999", true},
+		{"dynamic peer", "192.168.1.10:8080", true},
+		{"unknown peer", "192.168.1.99:7755", false},
+	}
+	for _, tt := range tests {
+		if got := n.canReceiveFrom(tt.addr); got != tt.want {
+			t.Errorf("canReceiveFrom(%q) = %v, want %v (%s)", tt.addr, got, tt.want, tt.name)
+		}
 	}
 }
 

@@ -41,13 +41,25 @@ func gzipEncode(data []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// maxDecompressedSize caps gzip decompression output to prevent zip bombs.
+// Set to 2x maxClipboardPayload — generous for legitimate data but prevents
+// a small compressed payload from expanding to gigabytes.
+const maxDecompressedSize = maxClipboardPayload * 2
+
 func gzipDecode(data []byte) ([]byte, error) {
 	r, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = r.Close() }()
-	return io.ReadAll(r)
+	result, err := io.ReadAll(io.LimitReader(r, maxDecompressedSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(result)) > maxDecompressedSize {
+		return nil, fmt.Errorf("decompressed data exceeds limit (%d bytes)", maxDecompressedSize)
+	}
+	return result, nil
 }
 
 const (
@@ -279,10 +291,43 @@ func formatBytes(b int64) string {
 // ─── Network Logic ──────────────────────────────────────────────────────────
 
 // canSendTo returns whether the node should push clipboard data to addr.
+// Sending is always allowed — the target is already in our configured/discovered peer list.
 func (n *Node) canSendTo(_ string, _ bool) bool { return true }
 
 // canReceiveFrom returns whether the node should accept clipboard data from addr.
-func (n *Node) canReceiveFrom(_ string) bool { return true }
+// Trusted sources: loopback (SSH tunnels), configured static peers, UDP-discovered peers.
+func (n *Node) canReceiveFrom(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	// Check static peers.
+	for _, peer := range n.config.StaticPeers {
+		peerHost, _, err := net.SplitHostPort(peer)
+		if err != nil {
+			peerHost = peer
+		}
+		if peerHost == host {
+			return true
+		}
+	}
+	// Check dynamically discovered peers.
+	n.peersMu.RLock()
+	defer n.peersMu.RUnlock()
+	for peer := range n.peers {
+		peerHost, _, err := net.SplitHostPort(peer)
+		if err != nil {
+			peerHost = peer
+		}
+		if peerHost == host {
+			return true
+		}
+	}
+	return false
+}
 
 // groupOverlaps returns true if the remote group matches any of our configured groups.
 func (n *Node) groupOverlaps(remoteGroup string) bool {
@@ -373,7 +418,11 @@ func (n *Node) Broadcast(payload *pb.SyncPayload) {
 func (n *Node) postHTTP(addr string, data []byte) {
 	ctx, cancel := context.WithTimeout(n.ctx, 5*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/sync", addr), bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/sync", addr), bytes.NewReader(data))
+	if err != nil {
+		slog.Warn("Invalid peer address for sync push", "peer", cleanLogStr(addr), "error", err)
+		return
+	}
 	req.ContentLength = int64(len(data))
 	req.Header.Set("Content-Encoding", "gzip")
 	resp, err := n.httpClient.Do(req)
