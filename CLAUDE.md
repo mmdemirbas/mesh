@@ -1,6 +1,10 @@
 # mesh — Architecture & Conventions
 
 > For AI assistants and new contributors. Read this before making changes.
+>
+> **Local environment**: See `CLAUDE.local.md` (git-excluded) for machine-specific
+> paths, log locations, and debugging checklist. Always check it before diagnosing
+> production issues.
 
 ## What is mesh?
 

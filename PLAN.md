@@ -25,7 +25,9 @@ When working on items from this plan, follow these rules:
 
 Crashes, active CVEs, broken functionality, exploitable security issues.
 
-(All items completed.)
+| ID   | Component | Item                                         | Notes |
+|------|-----------|----------------------------------------------|-------|
+| ~~B1~~   | ~~state~~     | ~~Listeners/connections evicted after 1 hour~~ | Done. `evictStale` was removing `Listening`/`Connected` entries that never refreshed `LastUpdated`. Fixed by exempting stable states from eviction. |
 
 ---
 
@@ -50,7 +52,6 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
-| ~~S8~~   | ~~sshd~~      | ~~`PermitOpen` bypass via alternate hostnames~~  | Done. Documented string-based matching limitation. |
 | S11  | clipsync  | UDP beacon port used for SSRF               | `msg.GetPort()` from unauthenticated beacon. Mitigated by fixing S2. |
 
 ### Performance
@@ -87,8 +88,6 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | D6   | release   | Binary signing                              | No cosign/Sigstore. |
 | D8   | ops       | `time.Sleep` in `downCmd` and tests         | Replace with channel-based sync. |
 | D10  | build     | darwin/arm64 dist allows CGO                | Align Taskfile with GoReleaser. |
-| ~~DEP2~~ | ~~build~~     | ~~`cmd/schema-gen` pulls CVE-affected dep~~     | Done. Extracted to separate Go module with replace directive. |
-| ~~DEP3~~ | ~~build~~     | ~~Charmbracelet TUI pulls 17 transitive modules~~ | Done. Replaced with raw terminal using golang.org/x/term. 21 modules removed. |
 
 ---
 
@@ -199,6 +198,7 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | F2   | `mesh init` command                 | Interactive config generator: node name, role, SSH config. Writes minimal YAML. |
 | F5   | SFTP subsystem                      | subsystem "sftp" handler using github.com/pkg/sftp. Read-only, configurable root. |
 | F6   | SSH agent forwarding                | auth-agent-req@openssh.com handler. Temp Unix socket, SSH_AUTH_SOCK env injection, bidirectional proxy. |
+| B1   | Fix stale state eviction            | `evictStale` was removing `Listening`/`Connected` entries after 1 hour. Stable states now exempt from eviction. |
 
 ---
 
