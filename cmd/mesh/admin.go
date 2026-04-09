@@ -31,6 +31,12 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 		mCacheTime time.Time
 	)
 
+	// GET /healthz — health check. Always returns 200 if the process is up.
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("ok\n"))
+	})
+
 	// GET / — redirect to web dashboard.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui", http.StatusFound)

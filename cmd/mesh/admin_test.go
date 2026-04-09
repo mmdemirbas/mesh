@@ -337,3 +337,22 @@ func keys[K comparable, V any](m map[K]V) []K {
 	}
 	return out
 }
+
+func TestAdminHealthz(t *testing.T) {
+	ring := adminTestSetup(t)
+	srv := httptest.NewServer(buildAdminMux(ring, ""))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if strings.TrimSpace(string(body)) != "ok" {
+		t.Errorf("body = %q, want ok", body)
+	}
+}
