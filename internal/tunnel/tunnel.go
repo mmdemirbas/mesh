@@ -707,21 +707,8 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 			}
 		}
 
-		tcpKeepAlive := defaultTCPKeepAlive
-		if val := config.GetOption(opts, "TCPKeepAlive"); val != "" {
-			if seconds, err := strconv.Atoi(val); err == nil && seconds > 0 {
-				tcpKeepAlive = time.Duration(seconds) * time.Second
-			}
-		}
-		netutil.ApplyTCPKeepAlive(conn, tcpKeepAlive)
-
-		t1 := time.Now()
-		if sshCfg.Timeout > 0 {
-			_ = conn.SetDeadline(time.Now().Add(sshCfg.Timeout))
-		}
-		sshConn, chans, reqs, err := ssh.NewClientConn(conn, hostPort, sshCfg)
+		client, t1, err := connectSSH(conn, hostPort, sshCfg, opts, t0)
 		if err != nil {
-			_ = conn.Close()
 			state.Global.Update("connection", id, state.Retrying, err.Error())
 			log.Error("SSH handshake failed", "elapsed", time.Since(t1).Round(time.Millisecond), "error", err)
 			t := time.NewTimer(retryDelay(retryInterval))
@@ -733,8 +720,6 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 				continue
 			}
 		}
-		_ = conn.SetDeadline(time.Time{})
-		client := ssh.NewClient(sshConn, chans, reqs)
 
 		state.Global.Update("connection", id, state.Connected, target)
 		state.Global.UpdatePeer("connection", id, conn.RemoteAddr().String())
@@ -810,21 +795,8 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 
 		log.Info("Connecting", "target", target)
 
-		tcpKeepAlive := defaultTCPKeepAlive
-		if val := config.GetOption(opts, "TCPKeepAlive"); val != "" {
-			if seconds, err := strconv.Atoi(val); err == nil && seconds > 0 {
-				tcpKeepAlive = time.Duration(seconds) * time.Second
-			}
-		}
-		netutil.ApplyTCPKeepAlive(conn, tcpKeepAlive)
-
-		t1 := time.Now()
-		if sshCfg.Timeout > 0 {
-			_ = conn.SetDeadline(time.Now().Add(sshCfg.Timeout))
-		}
-		sshConn, chans, reqs, err := ssh.NewClientConn(conn, host, sshCfg)
+		client, t1, err := connectSSH(conn, host, sshCfg, opts, t0)
 		if err != nil {
-			_ = conn.Close()
 			state.Global.Update("connection", id, state.Retrying, err.Error())
 			log.Error("SSH handshake failed", "target", target, "elapsed", time.Since(t1).Round(time.Millisecond), "error", err)
 			t := time.NewTimer(retryDelay(retryInterval))
@@ -836,8 +808,6 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 				continue
 			}
 		}
-		_ = conn.SetDeadline(time.Time{}) // clear deadline; data flows indefinitely
-		client := ssh.NewClient(sshConn, chans, reqs)
 
 		state.Global.Update("connection", id, state.Connected, target)
 		state.Global.UpdatePeer("connection", id, conn.RemoteAddr().String())
@@ -864,6 +834,32 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		case <-t.C:
 		}
 	}
+}
+
+// connectSSH applies TCP keepalive to conn and performs the SSH handshake.
+// t0 is the dial start time used to compute TCP elapsed time in the caller's log.
+// Returns the ssh.Client and the handshake-start time so the caller can log both durations.
+// On handshake error conn is closed and the error is returned; the caller must retry.
+func connectSSH(conn net.Conn, hostPort string, sshCfg *ssh.ClientConfig, opts map[string]string, t0 time.Time) (*ssh.Client, time.Time, error) {
+	tcpKeepAlive := defaultTCPKeepAlive
+	if val := config.GetOption(opts, "TCPKeepAlive"); val != "" {
+		if seconds, err := strconv.Atoi(val); err == nil && seconds > 0 {
+			tcpKeepAlive = time.Duration(seconds) * time.Second
+		}
+	}
+	netutil.ApplyTCPKeepAlive(conn, tcpKeepAlive)
+
+	t1 := time.Now()
+	if sshCfg.Timeout > 0 {
+		_ = conn.SetDeadline(time.Now().Add(sshCfg.Timeout))
+	}
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, hostPort, sshCfg)
+	if err != nil {
+		_ = conn.Close()
+		return nil, t1, err
+	}
+	_ = conn.SetDeadline(time.Time{}) // clear deadline; data flows indefinitely
+	return ssh.NewClient(sshConn, chans, reqs), t1, nil
 }
 
 func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *config.ForwardSet, opts map[string]string, log *slog.Logger) error {
