@@ -2,7 +2,6 @@ package filesync
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,39 +17,16 @@ import (
 	"golang.org/x/time/rate"
 
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
+	"github.com/mmdemirbas/mesh/internal/gziputil"
 	"google.golang.org/protobuf/proto"
 )
 
 func gzipEncode(data []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	w := gzip.NewWriter(&buf)
-	if _, err := w.Write(data); err != nil {
-		return nil, err
-	}
-	if err := w.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return gziputil.Encode(data)
 }
 
-// maxDecompressedSize caps gzip decompression output to prevent zip bombs.
-// Set to 4x maxIndexPayload — generous for legitimate index data.
-const maxDecompressedSize = maxIndexPayload * 4
-
 func gzipDecode(data []byte) ([]byte, error) {
-	r, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = r.Close() }()
-	result, err := io.ReadAll(io.LimitReader(r, maxDecompressedSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(result)) > maxDecompressedSize {
-		return nil, fmt.Errorf("decompressed data exceeds limit (%d bytes)", maxDecompressedSize)
-	}
-	return result, nil
+	return gziputil.Decode(data, maxIndexPayload*4)
 }
 
 // writeProtoGzip marshals msg, gzip-compresses, and writes to w.

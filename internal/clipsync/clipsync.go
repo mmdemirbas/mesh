@@ -2,7 +2,6 @@ package clipsync
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -26,40 +25,16 @@ import (
 
 	config "github.com/mmdemirbas/mesh/internal/config"
 	pb "github.com/mmdemirbas/mesh/internal/clipsync/proto"
+	"github.com/mmdemirbas/mesh/internal/gziputil"
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
 func gzipEncode(data []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	w := gzip.NewWriter(&buf)
-	if _, err := w.Write(data); err != nil {
-		return nil, err
-	}
-	if err := w.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return gziputil.Encode(data)
 }
 
-// maxDecompressedSize caps gzip decompression output to prevent zip bombs.
-// Set to 2x maxClipboardPayload — generous for legitimate data but prevents
-// a small compressed payload from expanding to gigabytes.
-const maxDecompressedSize = maxClipboardPayload * 2
-
 func gzipDecode(data []byte) ([]byte, error) {
-	r, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = r.Close() }()
-	result, err := io.ReadAll(io.LimitReader(r, maxDecompressedSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(result)) > maxDecompressedSize {
-		return nil, fmt.Errorf("decompressed data exceeds limit (%d bytes)", maxDecompressedSize)
-	}
-	return result, nil
+	return gziputil.Decode(data, maxClipboardPayload*2)
 }
 
 const (
