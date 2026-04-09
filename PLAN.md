@@ -25,9 +25,7 @@ When working on items from this plan, follow these rules:
 
 Crashes, active CVEs, broken functionality, exploitable security issues.
 
-| ID   | Component | Item                                         | Notes |
-|------|-----------|----------------------------------------------|-------|
-| ~~B1~~   | ~~state~~     | ~~Listeners/connections evicted after 1 hour~~ | Done. `evictStale` was removing `Listening`/`Connected` entries that never refreshed `LastUpdated`. Fixed by exempting stable states from eviction. |
+(All items completed.)
 
 ---
 
@@ -199,6 +197,11 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | F5   | SFTP subsystem                      | subsystem "sftp" handler using github.com/pkg/sftp. Read-only, configurable root. |
 | F6   | SSH agent forwarding                | auth-agent-req@openssh.com handler. Temp Unix socket, SSH_AUTH_SOCK env injection, bidirectional proxy. |
 | B1   | Fix stale state eviction            | `evictStale` was removing `Listening`/`Connected` entries after 1 hour. Stable states now exempt from eviction. |
+| B2   | Fix dashboard defer order + leaks   | Raw mode restored before alt-screen leave; stdin goroutine leaked on ctx.Done; SIGWINCH not wired into event loop; double buildContent on keypress. |
+| B3   | Fix SFTP Serve blocking reqs loop   | `sftp.Serve()` blocked the channel request drain loop, stalling the SSH mux. Moved to goroutine. Reply deferred until NewServer confirms success. |
+| B4   | Fix agent fwd double close + leak   | `ln.Close()` called from two goroutines without sync.Once. `io.Copy` used receive-one pattern instead of WaitGroup. |
+| B5   | Fix maxRequestBodySize scaling      | Compile-time constant did not scale with configured `max_file_copy_size`. Now computed from `maxFileSize` at startup. |
+| B6   | Fix schema-gen AddGoComments path   | Relative path `./internal/config` was wrong when running from `cmd/schema-gen/`. Fixed to `../../internal/config`. |
 
 ---
 
