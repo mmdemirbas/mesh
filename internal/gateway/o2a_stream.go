@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -70,6 +69,8 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 		includeUsage: includeUsage,
 		created:      nowUnix(),
 	}
+	st.jsonEnc = json.NewEncoder(&st.jsonBuf)
+	st.jsonEnc.SetEscapeHTML(false)
 
 	scanner := bufio.NewScanner(upstreamResp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxSSELineSize)
@@ -122,6 +123,8 @@ type o2aStreamState struct {
 	usage        *OpenAIUsage
 	messageID    string
 	created      int64
+	jsonBuf      bytes.Buffer  // reused across emit calls to avoid per-chunk allocation
+	jsonEnc      *json.Encoder // writes to jsonBuf, reuses internal encode state
 }
 
 func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEvent) {
@@ -245,7 +248,7 @@ func (s *o2aStreamState) finalize() {
 	}
 
 	// Emit [DONE].
-	_, _ = fmt.Fprint(s.w, "data: [DONE]\n\n")
+	_, _ = io.WriteString(s.w, "data: [DONE]\n\n")
 	s.flusher.Flush()
 }
 
@@ -263,8 +266,15 @@ func (s *o2aStreamState) emitUsageChunk(usage *OpenAIUsage) {
 		Choices: []OpenAIChunkChoice{},
 		Usage:   usage,
 	}
-	b, _ := json.Marshal(chunk)
-	_, _ = fmt.Fprintf(s.w, "data: %s\n\n", b)
+	s.jsonBuf.Reset()
+	_ = s.jsonEnc.Encode(chunk)
+	b := s.jsonBuf.Bytes()
+	if len(b) > 0 && b[len(b)-1] == '\n' {
+		b = b[:len(b)-1]
+	}
+	_, _ = io.WriteString(s.w, "data: ")
+	_, _ = s.w.Write(b)
+	_, _ = io.WriteString(s.w, "\n\n")
 	s.flusher.Flush()
 	s.metrics.BytesTx.Add(int64(len(b) + 8))
 }
@@ -281,8 +291,15 @@ func (s *o2aStreamState) emitChunk(choice OpenAIChunkChoice) {
 		Model:   s.clientModel,
 		Choices: []OpenAIChunkChoice{choice},
 	}
-	b, _ := json.Marshal(chunk)
-	_, _ = fmt.Fprintf(s.w, "data: %s\n\n", b)
+	s.jsonBuf.Reset()
+	_ = s.jsonEnc.Encode(chunk)
+	b := s.jsonBuf.Bytes()
+	if len(b) > 0 && b[len(b)-1] == '\n' {
+		b = b[:len(b)-1]
+	}
+	_, _ = io.WriteString(s.w, "data: ")
+	_, _ = s.w.Write(b)
+	_, _ = io.WriteString(s.w, "\n\n")
 	s.flusher.Flush()
 	s.metrics.BytesTx.Add(int64(len(b) + 8))
 }

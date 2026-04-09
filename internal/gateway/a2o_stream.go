@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -65,6 +64,8 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 		flusher:     flusher,
 		metrics:     metrics,
 	}
+	st.jsonEnc = json.NewEncoder(&st.jsonBuf)
+	st.jsonEnc.SetEscapeHTML(false)
 
 	// Emit message_start.
 	st.emitMessageStart()
@@ -115,6 +116,8 @@ type a2oStreamState struct {
 	usage       AnthropicUsage
 	stopReason  string
 	hasBlock    bool
+	jsonBuf     bytes.Buffer    // reused across emit calls to avoid per-chunk allocation
+	jsonEnc     *json.Encoder   // writes to jsonBuf, reuses internal encode state
 }
 
 func (s *a2oStreamState) processChunk(chunk *ChatCompletionChunk) {
@@ -319,8 +322,17 @@ func (s *a2oStreamState) finalize() {
 }
 
 func (s *a2oStreamState) emit(event string, data any) {
-	b, _ := json.Marshal(data)
-	_, _ = fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, b)
+	s.jsonBuf.Reset()
+	_ = s.jsonEnc.Encode(data)
+	b := s.jsonBuf.Bytes()
+	if len(b) > 0 && b[len(b)-1] == '\n' {
+		b = b[:len(b)-1] // Encoder appends \n; trim for SSE format
+	}
+	_, _ = io.WriteString(s.w, "event: ")
+	_, _ = io.WriteString(s.w, event)
+	_, _ = io.WriteString(s.w, "\ndata: ")
+	_, _ = s.w.Write(b)
+	_, _ = io.WriteString(s.w, "\n\n")
 	s.flusher.Flush()
 	s.metrics.BytesTx.Add(int64(len(b) + len(event) + 20))
 }
