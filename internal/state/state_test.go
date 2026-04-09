@@ -368,6 +368,123 @@ func TestEvictStale_SkipsStableStates(t *testing.T) {
 	}
 }
 
+// TestEvictStale_RealWorldScenario reproduces the production bug where a running
+// mesh instance lost all dashboard status after ~1 hour. The root cause was that
+// long-lived components (SSH server listener, SSH client connections, port
+// forwards, proxies, clipsync, filesync) set their state to Listening/Connected
+// once at startup and never called Update again. After componentTTL (1 hour),
+// evictStale removed them, causing all status indicators to turn white/gray.
+//
+// This test sets up every component type that exists in a real deployment,
+// advances time beyond the TTL, and verifies none of them are evicted.
+func TestEvictStale_RealWorldScenario(t *testing.T) {
+	t.Parallel()
+	s := newState()
+
+	// Simulate a real mesh node with all component types.
+	components := []struct {
+		compType string
+		id       string
+		status   Status
+	}{
+		// SSH server listening on port 2222
+		{"server", "0.0.0.0:2222", Listening},
+		// SOCKS and HTTP proxy listeners
+		{"proxy", "127.0.0.1:2080", Listening},
+		{"proxy", "127.0.0.1:2081", Listening},
+		// Outbound SSH connection to bastion
+		{"connection", "bastion [tunnel-sshd]", Connected},
+		{"connection", "bastion [tunnel-proxy]", Connected},
+		// Local port forwards
+		{"forward", "bastion [tunnel-sshd] 127.0.0.1:8080", Listening},
+		{"forward", "bastion [tunnel-proxy] 127.0.0.1:1080", Listening},
+		// Remote forwards (registered by SSH clients connecting to our server)
+		{"dynamic", "127.0.0.1:1111|2222", Listening},
+		{"dynamic", "127.0.0.1:18384|2222", Listening},
+		// Clipsync
+		{"clipsync", "0.0.0.0:7755", Listening},
+		// Filesync
+		{"filesync", "0.0.0.0:7756", Listening},
+		{"filesync-folder", "docs", Connected},
+	}
+
+	for _, c := range components {
+		s.Update(c.compType, c.id, c.status, "")
+		s.GetMetrics(c.compType, c.id)
+	}
+
+	// Simulate 2 hours passing without any state updates — this is the exact
+	// scenario that caused the production bug. Long-lived components never
+	// call Update after their initial state transition.
+	s.mu.Lock()
+	for key, comp := range s.components {
+		comp.LastUpdated = time.Now().Add(-2 * componentTTL)
+		s.components[key] = comp
+	}
+	s.mu.Unlock()
+
+	s.evictStale(time.Now())
+
+	snap := s.Snapshot()
+	for _, c := range components {
+		key := c.compType + ":" + c.id
+		if _, ok := snap[key]; !ok {
+			t.Errorf("component %s should survive eviction (status=%s)", key, c.status)
+		}
+	}
+
+	// Verify metrics are also intact.
+	mSnap := s.SnapshotMetrics()
+	for _, c := range components {
+		key := c.compType + ":" + c.id
+		if _, ok := mSnap[key]; !ok {
+			t.Errorf("metrics for %s should survive eviction", key)
+		}
+	}
+}
+
+// TestEvictStale_TransientStatesStillEvicted verifies that the stable-state
+// exemption does not prevent cleanup of genuinely stale transient entries.
+// Components stuck in Starting/Connecting/Retrying/Failed indicate crashed
+// goroutines and must still be reaped.
+func TestEvictStale_TransientStatesStillEvicted(t *testing.T) {
+	t.Parallel()
+	s := newState()
+
+	transient := []struct {
+		id     string
+		status Status
+	}{
+		{"stuck-starting", Starting},
+		{"stuck-connecting", Connecting},
+		{"stuck-retrying", Retrying},
+		{"stuck-failed", Failed},
+	}
+
+	for _, c := range transient {
+		s.Update("connection", c.id, c.status, "error")
+		s.GetMetrics("connection", c.id)
+	}
+
+	// Backdate beyond TTL.
+	s.mu.Lock()
+	for key, comp := range s.components {
+		comp.LastUpdated = time.Now().Add(-2 * componentTTL)
+		s.components[key] = comp
+	}
+	s.mu.Unlock()
+
+	s.evictStale(time.Now())
+
+	snap := s.Snapshot()
+	for _, c := range transient {
+		key := "connection:" + c.id
+		if _, ok := snap[key]; ok {
+			t.Errorf("transient component %s (status=%s) should be evicted after TTL", key, c.status)
+		}
+	}
+}
+
 func TestEvictStale_SkipsZeroLastUpdated(t *testing.T) {
 	t.Parallel()
 	s := newState()
