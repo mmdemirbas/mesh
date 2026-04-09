@@ -528,6 +528,18 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate admin_addr is loopback-only.
+	if c.AdminAddr != "" && c.AdminAddr != "off" {
+		host, _, err := net.SplitHostPort(c.AdminAddr)
+		if err != nil {
+			return fmt.Errorf("admin_addr: invalid address %q: %w", c.AdminAddr, err)
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf("admin_addr: %q is not a loopback address, refusing to expose admin API on the network", c.AdminAddr)
+		}
+	}
+
 	// Check for duplicate names
 	if err := c.checkDuplicateNames(); err != nil {
 		return err
@@ -669,22 +681,20 @@ func splitHostPort(addr string) (host, port string, err error) {
 }
 
 func validateForwards(fwds []Forward) error {
-	for i, f := range fwds {
-		if f.Bind == "" {
+	for i := range fwds {
+		if fwds[i].Bind == "" {
 			return fmt.Errorf("[%d]: bind is required", i)
 		}
-		if f.Type != "forward" && f.Type != "socks" && f.Type != "http" {
+		if fwds[i].Type == "" {
+			fwds[i].Type = "forward"
+		}
+		if fwds[i].Type != "forward" && fwds[i].Type != "socks" && fwds[i].Type != "http" {
 			return fmt.Errorf("[%d]: type must be 'forward', 'socks', or 'http'", i)
 		}
-		if f.Type == "forward" && f.Target == "" {
+		if fwds[i].Type == "forward" && fwds[i].Target == "" {
 			return fmt.Errorf("[%d]: target is required for forward type", i)
 		}
 	}
-	// Fallback defaulting is handled during Unmarshal or manually if Type is empty.
-	// Since we changed it to explicit, validate requires Type. But wait, we should apply a default if empty.
-	// We can do that by mutating it, but `validForwards` takes a slice by value so it doesn't mutate strings inside.
-	// It's better to expect `Type` to be populated or return an error, but let's handle defaulting in Unmarshal or here.
-	// To safely default `Type="forward"`, we can do it in `LoadUnvalidated` or here if we pass a pointer/slice reference. Let's do it in `LoadUnvalidated`.
 	return nil
 }
 
