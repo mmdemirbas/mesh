@@ -92,6 +92,8 @@ func main() {
 			shell = nodeArgs[0]
 		}
 		completionCmd(shell)
+	case "init":
+		initCmd(configPath)
 	case "help":
 		printHelp()
 	default:
@@ -164,6 +166,7 @@ func printUsage() {
 	fmt.Println("  " + cBlue + "down" + cReset + "       Stop running mesh nodes")
 	fmt.Println("  " + cBlue + "status" + cReset + "     Show live status of running nodes (use " + cYellow + "-w" + cReset + " for watch mode)")
 	fmt.Println("  " + cBlue + "config" + cReset + "     Show the parsed configuration for nodes without starting them")
+	fmt.Println("  " + cBlue + "init" + cReset + "       Generate a starter config file interactively")
 	fmt.Println("  " + cBlue + "completion" + cReset + " Generate shell completion script (bash, zsh, fish)")
 	fmt.Println("  " + cBlue + "help" + cReset + "       Show detailed help including SSH options")
 	fmt.Println()
