@@ -995,10 +995,7 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fs
 	log.Info("Forward -R", "bind", fwd.Bind, "target", fwd.Target)
 	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, fwd.Bind)
 	metrics := state.Global.GetMetrics("forward", compID)
-	metrics.BytesTx.Store(0)
-	metrics.BytesRx.Store(0)
-	metrics.Streams.Store(0)
-	metrics.StartTime.Store(time.Now().UnixNano())
+	metrics.Reset()
 	state.Global.Update("forward", compID, state.Starting, "")
 
 	var listener net.Listener
@@ -1051,10 +1048,7 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fse
 	log.Info("Forward -L", "bind", fwd.Bind, "target", fwd.Target)
 	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, fwd.Bind)
 	metrics := state.Global.GetMetrics("forward", compID)
-	metrics.BytesTx.Store(0)
-	metrics.BytesRx.Store(0)
-	metrics.Streams.Store(0)
-	metrics.StartTime.Store(time.Now().UnixNano())
+	metrics.Reset()
 	state.Global.Update("forward", compID, state.Starting, "")
 
 	listener, err := netutil.ListenReusable(ctx, "tcp", fwd.Bind)
@@ -1088,10 +1082,7 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fset
 	log.Info("Proxy remote bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
 	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, pxy.Bind)
 	metrics := state.Global.GetMetrics("forward", compID)
-	metrics.BytesTx.Store(0)
-	metrics.BytesRx.Store(0)
-	metrics.Streams.Store(0)
-	metrics.StartTime.Store(time.Now().UnixNano())
+	metrics.Reset()
 	state.Global.Update("forward", compID, state.Starting, "")
 
 	var listener net.Listener
@@ -1149,10 +1140,7 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, fsetN
 	log.Info("Proxy local bind", "type", pxy.Type, "bind", pxy.Bind, "target", pxy.Target)
 	compID := fmt.Sprintf("%s [%s] %s", c.cfg.Name, fsetName, pxy.Bind)
 	metrics := state.Global.GetMetrics("forward", compID)
-	metrics.BytesTx.Store(0)
-	metrics.BytesRx.Store(0)
-	metrics.Streams.Store(0)
-	metrics.StartTime.Store(time.Now().UnixNano())
+	metrics.Reset()
 	state.Global.Update("forward", compID, state.Starting, "")
 
 	listener, err := netutil.ListenReusable(ctx, "tcp", pxy.Bind)

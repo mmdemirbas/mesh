@@ -38,6 +38,14 @@ type Metrics struct {
 	StartTime atomic.Int64 // unix nanoseconds; reset on each reconnect
 }
 
+// Reset zeroes counters and sets StartTime to now. Used on reconnect.
+func (m *Metrics) Reset() {
+	m.BytesTx.Store(0)
+	m.BytesRx.Store(0)
+	m.Streams.Store(0)
+	m.StartTime.Store(time.Now().UnixNano())
+}
+
 type Component struct {
 	Type        string    `json:"type"`                 // "proxy", "relay", "server", "connection"
 	ID          string    `json:"id"`                   // unique identifier
