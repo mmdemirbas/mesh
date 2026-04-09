@@ -68,9 +68,7 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 
 ### Cross-Platform
 
-| ID   | Component | Item                                         | Notes |
-|------|-----------|----------------------------------------------|-------|
-| W7   | clipsync  | `runtime.GOOS` instead of build tags        | 6 switch blocks. In progress — build-tagged files being created. |
+(All items completed.)
 
 ### Protocol Compatibility
 
@@ -86,7 +84,6 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | D1   | ops       | Log rotation                                | Unbounded growth. SIGHUP + size-based rotation or external logrotate. |
 | D2   | ops       | systemd / launchd service units             | No service management. Ship templates. |
 | D3   | testing   | Tunnel package coverage at 34%              | Core forwarding functions at 0%. |
-| D5   | testing   | Test parallelism                            | In progress — t.Parallel() being added across all packages. |
 | D6   | release   | Binary signing                              | No cosign/Sigstore. |
 | D8   | ops       | `time.Sleep` in `downCmd` and tests         | Replace with channel-based sync. |
 | D10  | build     | darwin/arm64 dist allows CGO                | Align Taskfile with GoReleaser. |
@@ -198,6 +195,8 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | Q4   | Extract doUpstreamRequest           | Shared upstream HTTP lifecycle for handleA2O and handleO2A. |
 | D9   | Data-path benchmarks                | 16 benchmarks across 5 packages: BiCopy, scan, blockHash, state, gzip. |
 | R5   | Demo tape for GIF generation        | VHS format demo.tape added; run `vhs demo.tape` to generate. |
+| W7   | Clipsync build-tagged platform code | 6 runtime.GOOS switches → clipboard_darwin.go, clipboard_linux.go, clipboard_windows.go, clipboard_other.go. |
+| D5   | Test parallelism                    | t.Parallel() added to 343 test functions and subtests across all packages. |
 
 ---
 
