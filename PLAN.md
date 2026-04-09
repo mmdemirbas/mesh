@@ -33,19 +33,19 @@ Security hardening, correctness, data integrity, protocol compliance.
 |------|-----------|----------------------------------------------|-------|
 | S1   | clipsync  | No TLS for clipsync HTTP                     | HTTPS only, auto-TLS with self-signed certs if none provided. Zero-config. |
 | FS4  | filesync  | No TLS / auth for filesync HTTP              | Same auto-TLS approach as S1 — share the implementation. |
-| S4   | admin     | Admin server allows non-loopback bind        | `admin_addr` not validated as loopback. `0.0.0.0:7777` exposes state, logs, pprof. Reject non-loopback at config validation. |
-| S5   | sshd      | No per-connection channel limit              | Authenticated client can open unlimited channels → goroutine exhaustion. Add `atomic.Int64` counter, reject above 1000. |
-| C2   | sshd      | Default SSH user hardcoded to `root`         | OpenSSH defaults to OS username. Causes unexpected root login attempts. `tunnel.go:536`. |
+| ~~S4~~ | ~~admin~~ | ~~Admin server allows non-loopback bind~~ | Done. Config validation rejects non-loopback `admin_addr`. |
+| ~~S5~~ | ~~sshd~~ | ~~No per-connection channel limit~~        | Done. `atomic.Int64` counter, reject above 1000 with `ssh.ResourceShortage`. |
+| ~~C2~~ | ~~sshd~~ | ~~Default SSH user hardcoded to `root`~~   | Done. Defaults to `os/user.Current().Username`, falls back to `root`. |
 | Q1   | core      | `gzipEncode`/`gzipDecode` duplicated        | Identical in clipsync and filesync. Extract to shared package. Prerequisite for consistent S3 fix. |
-| U1   | config    | `Forward.Type` default not applied           | Struct comment says "Defaults to forward" but validation rejects empty type. Most common config error for new users. |
-| P4   | filesync  | `io.ReadAll` up to 4 GB for delta response   | `transfer.go` reads entire delta response into memory. Cap at 256 MB or stream directly. |
-| S9   | gateway   | Upstream error body logged verbatim (64 MB)  | May contain API key fragments. Goes to log file and ring buffer. Truncate to 512 bytes. |
-| S6   | filesync  | `isLoopback` misses IPv4-mapped IPv6         | String comparison misses `::ffff:127.0.0.1`. Use `net.ParseIP(ip).IsLoopback()`. |
+| ~~U1~~ | ~~config~~ | ~~`Forward.Type` default not applied~~   | Done. `validateForwards` defaults empty Type to `"forward"`. |
+| ~~P4~~ | ~~filesync~~ | ~~`io.ReadAll` up to 4 GB for delta response~~ | Done. Capped at 256 MB. |
+| ~~S9~~ | ~~gateway~~ | ~~Upstream error body logged verbatim (64 MB)~~ | Done. Truncated to 512 bytes via `truncateBody()`. |
+| ~~S6~~ | ~~filesync~~ | ~~`isLoopback` misses IPv4-mapped IPv6~~ | Done. Uses `net.ParseIP(ip).IsLoopback()`. |
 | S7   | sshd      | `GatewayPorts=clientspecified` allows `0.0.0.0` | Reject wildcard bind addresses for remote forwards unless explicitly allowed. |
-| E4   | sshd      | `ServerAliveInterval` Atoi error swallowed   | `"30s"` silently sets interval to 0, disabling keepalives. `tunnel.go:1572`. |
-| E5   | sshd      | `loadSigner`/`loadAuthorizedKeys` bare errors | "ssh: no key found" with no file path context. Wrap with filename. `tunnel.go:1437-1448`. |
+| ~~E4~~ | ~~sshd~~ | ~~`ServerAliveInterval` Atoi error swallowed~~ | Done. Logs warning on invalid value. |
+| ~~E5~~ | ~~sshd~~ | ~~`loadSigner`/`loadAuthorizedKeys` bare errors~~ | Done. Errors wrapped with file path context. |
 | DOC1 | schema    | JSON Schema missing `accept_env`, `banner`, `motd` | `additionalProperties: false` rejects valid configs in IDEs. |
-| W6   | sshd      | `sessionEnv` panics on UNC home directories  | `home[:2]` assumes drive letter. Use `filepath.VolumeName()`. `shell_windows.go:39-40`. |
+| ~~W6~~ | ~~sshd~~ | ~~`sessionEnv` panics on UNC home directories~~ | Done. Uses `filepath.VolumeName()` instead of `home[:2]`. |
 | C3   | gateway   | `thinking` blocks silently dropped           | Extended thinking content dropped in both translation directions. Increasingly used feature. |
 | C4   | gateway   | `response_format` silently dropped           | `json_object` mode parsed but dropped. Clients expecting guaranteed JSON get unstructured text. |
 
@@ -204,6 +204,16 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | ~~W2~~ | Cross-platform ignore matching    | `filepath.Match` → `path.Match` for forward-slash consistency. |
 | ~~W3~~ | Cross-platform atomic rename      | `renameReplace()` helper: remove-then-rename fallback for Windows. |
 | ~~S12~~ | Windows port hijacking defense   | `SO_REUSEADDR` → `SO_EXCLUSIVEADDRUSE` on Windows. |
+| ~~S4~~ | Admin loopback-only bind          | Config validation rejects non-loopback `admin_addr`. |
+| ~~S5~~ | Per-connection channel limit       | `atomic.Int64` counter, reject above 1000 with `ssh.ResourceShortage`. |
+| ~~C2~~ | SSH user defaults to OS username   | `os/user.Current().Username` instead of hardcoded `root`. |
+| ~~U1~~ | Forward.Type defaults to forward   | `validateForwards` applies default when Type is empty. |
+| ~~P4~~ | Delta response size cap            | Capped at 256 MB instead of 4 GB. |
+| ~~S9~~ | Truncate upstream error logs       | Gateway upstream error body truncated to 512 bytes. |
+| ~~S6~~ | IPv4-mapped IPv6 loopback          | `net.ParseIP(ip).IsLoopback()` in filesync. |
+| ~~E4~~ | Keepalive interval parse warning   | Logs warning on non-integer `ServerAliveInterval`. |
+| ~~E5~~ | SSH key error context              | `loadSigner`/`loadAuthorizedKeys` errors include file path. |
+| ~~W6~~ | UNC home directory safety          | `filepath.VolumeName()` instead of `home[:2]` in Windows session env. |
 
 ---
 
