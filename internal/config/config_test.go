@@ -353,10 +353,11 @@ func TestExpandHome(t *testing.T) {
 	}{
 		{"~/foo/bar", filepath.Join(home, "foo/bar")},
 		{"~/.ssh/id_rsa", filepath.Join(home, ".ssh/id_rsa")},
+		{`~\config\mesh.yaml`, filepath.Join(home, `config\mesh.yaml`)}, // Windows-style backslash
 		{"/absolute/path", "/absolute/path"},
 		{"relative/path", "relative/path"},
 		{"", ""},
-		{"~", "~"},                   // no slash after ~, not expanded
+		{"~", home},                  // standalone ~ expands to home
 		{"~user/path", "~user/path"}, // not current user, not expanded
 	}
 

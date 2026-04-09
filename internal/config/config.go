@@ -296,19 +296,9 @@ func Load(path, serviceName string) (*Config, error) {
 	return cfg, nil
 }
 
-// warnInsecurePermissions logs a warning if the config file is writable by group or others.
-// Writable configs are dangerous because they can be tampered with. Readable-by-others
-// is acceptable since secrets are stored externally via password_command, not inline.
-func warnInsecurePermissions(path string) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return
-	}
-	mode := info.Mode().Perm()
-	if mode&0022 != 0 {
-		slog.Warn("Config file is writable by group/others; consider chmod 644 or 600", "path", path, "mode", fmt.Sprintf("%04o", mode))
-	}
-}
+// warnInsecurePermissions is defined in perm_unix.go (checks group/other
+// write bits) and perm_windows.go (no-op — Mode().Perm() returns
+// synthetic 0666 on Windows, producing false positives).
 
 // unmarshalConfigs decodes YAML into a node-name → Config map, silently
 // skipping extension keys (prefixed with "x-") so users can define YAML
@@ -784,7 +774,14 @@ func ParseBandwidth(s string) (int64, error) {
 }
 
 func expandHome(path string) string {
-	if strings.HasPrefix(path, "~/") {
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+		return home
+	}
+	if len(path) >= 2 && path[0] == '~' && (path[1] == '/' || path[1] == '\\') {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return path
