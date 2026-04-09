@@ -11,6 +11,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -126,12 +127,29 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					cmd.Stdin = ch
 					cmd.Stdout = ch
 					cmd.Stderr = ch
-					cmd.Env = append(sessionEnv(shell, "xterm"), clientEnv...)
+					baseEnv := append(sessionEnv(shell, "xterm"), clientEnv...)
+					envCopy := make([]string, len(baseEnv))
+					copy(envCopy, baseEnv)
+					cmd.Env = envCopy
 					if home, err := os.UserHomeDir(); err == nil {
 						cmd.Dir = home
 					}
 
-					err := cmd.Start()
+					// Kill process on context cancel (matches Unix cmd.Cancel behavior).
+					cmd.Cancel = func() error {
+						if cmd.Process != nil {
+							return cmd.Process.Kill()
+						}
+						return nil
+					}
+					cmd.WaitDelay = 3 * time.Second
+
+					// Run cmd.Start in a fresh goroutine to prevent GC stack scan
+					// corruption of the long-lived session goroutine's stack during
+					// syscall.StartProcess (Go runtime bug on Windows).
+					startErr := make(chan error, 1)
+					go func() { startErr <- cmd.Start() }()
+					err := <-startErr
 					if err != nil {
 						log.Error("Start shell failed", "command", name, "error", err)
 						if req.WantReply {

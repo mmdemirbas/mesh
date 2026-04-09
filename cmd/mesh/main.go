@@ -396,7 +396,11 @@ func upCmd(nodeNames []string, configPath string) {
 
 			adminSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: buildAdminMux(ring, logFilePath)}
 			go func() { _ = adminSrv.Serve(adminLn) }()
-			context.AfterFunc(ctx, func() { _ = adminSrv.Close() })
+			context.AfterFunc(ctx, func() {
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = adminSrv.Shutdown(shutdownCtx)
+			})
 		}
 	}
 

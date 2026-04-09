@@ -620,7 +620,9 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 
 	go func() {
 		<-ctx.Done()
-		_ = srv.Close()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
 	}()
 
 	slog.Info("Clipsync HTTP listening", "bind", n.config.Bind)

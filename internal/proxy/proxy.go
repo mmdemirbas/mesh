@@ -33,8 +33,10 @@ func RunStandaloneProxies(ctx context.Context, proxies []config.Listener, log *s
 				pLog.Error("Listen failed", "error", err)
 				return
 			}
-			defer func() { _ = ln.Close() }()
-			stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
+			var lnOnce sync.Once
+			closeLn := func() { lnOnce.Do(func() { _ = ln.Close() }) }
+			defer closeLn()
+			stop := context.AfterFunc(ctx, closeLn)
 			defer stop()
 
 			state.Global.Update("proxy", p.Bind, state.Listening, "")
@@ -72,8 +74,10 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Listener, log *slo
 				rLog.Error("Listen failed", "error", err)
 				return
 			}
-			defer func() { _ = ln.Close() }()
-			stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
+			var lnOnce sync.Once
+			closeLn := func() { lnOnce.Do(func() { _ = ln.Close() }) }
+			defer closeLn()
+			stop := context.AfterFunc(ctx, closeLn)
 			defer stop()
 
 			state.Global.Update("relay", r.Bind, state.Listening, "")

@@ -241,13 +241,15 @@ func (s *SSHServer) Run(ctx context.Context) error {
 		state.Global.Update("server", s.cfg.Bind, state.Failed, err.Error())
 		return fmt.Errorf("listen %s: %w", s.cfg.Bind, err)
 	}
-	defer func() { _ = listener.Close() }()
+	var lnOnce sync.Once
+	closeLn := func() { lnOnce.Do(func() { _ = listener.Close() }) }
+	defer closeLn()
 	state.Global.Update("server", s.cfg.Bind, state.Listening, "")
 	serverMetrics := state.Global.GetMetrics("server", s.cfg.Bind)
 	serverMetrics.StartTime.Store(time.Now().UnixNano())
 	s.log.Info("SSH server listening")
 
-	stop := context.AfterFunc(ctx, func() { _ = listener.Close() })
+	stop := context.AfterFunc(ctx, closeLn)
 	defer stop()
 
 	for {
@@ -916,13 +918,15 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fs
 		state.Global.Update("forward", compID, state.Failed, err.Error())
 		return err
 	}
-	defer func() { _ = listener.Close() }()
+	var lnOnce sync.Once
+	closeLn := func() { lnOnce.Do(func() { _ = listener.Close() }) }
+	defer closeLn()
 
 	state.Global.Update("forward", compID, state.Listening, "")
 	state.Global.UpdateBind("forward", compID, listener.Addr().String())
 
 	// Break accept loop immediately on context cancel
-	stop := context.AfterFunc(ctx, func() { _ = listener.Close() })
+	stop := context.AfterFunc(ctx, closeLn)
 	defer stop()
 	// Clean up state on exit regardless of reason (context cancel or accept error)
 	defer state.Global.Delete("forward", compID)
@@ -951,13 +955,15 @@ func (c *SSHClient) runLocalForward(ctx context.Context, client *ssh.Client, fse
 		state.Global.Update("forward", compID, state.Failed, err.Error())
 		return err
 	}
-	defer func() { _ = listener.Close() }()
+	var lnOnce sync.Once
+	closeLn := func() { lnOnce.Do(func() { _ = listener.Close() }) }
+	defer closeLn()
 
 	state.Global.Update("forward", compID, state.Listening, "")
 	state.Global.UpdateBind("forward", compID, listener.Addr().String())
 
 	// Break accept loop immediately on context cancel
-	stop := context.AfterFunc(ctx, func() { _ = listener.Close() })
+	stop := context.AfterFunc(ctx, closeLn)
 	defer stop()
 	// Clean up state on exit regardless of reason (context cancel or accept error)
 	defer state.Global.Delete("forward", compID)
@@ -1003,18 +1009,18 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fset
 		state.Global.Update("forward", compID, state.Failed, err.Error())
 		return err
 	}
-	defer func() { _ = listener.Close() }()
+	var lnOnce sync.Once
+	closeLn := func() { lnOnce.Do(func() { _ = listener.Close() }) }
+	defer closeLn()
 
 	state.Global.Update("forward", compID, state.Listening, "")
 	state.Global.UpdateBind("forward", compID, listener.Addr().String())
 
 	// Guarantee immediate closure when session aborts, breaking accept loops
-	go func() {
-		<-ctx.Done()
-		_ = listener.Close()
-		state.Global.Delete("forward", compID)
-		state.Global.DeleteMetrics("forward", compID)
-	}()
+	stop := context.AfterFunc(ctx, closeLn)
+	defer stop()
+	defer state.Global.Delete("forward", compID)
+	defer state.Global.DeleteMetrics("forward", compID)
 
 	switch pxy.Type {
 	case "socks":
@@ -1045,18 +1051,18 @@ func (c *SSHClient) runLocalProxy(ctx context.Context, client *ssh.Client, fsetN
 		state.Global.Update("forward", compID, state.Failed, err.Error())
 		return err
 	}
-	defer func() { _ = listener.Close() }()
+	var lnOnce sync.Once
+	closeLn := func() { lnOnce.Do(func() { _ = listener.Close() }) }
+	defer closeLn()
 
 	state.Global.Update("forward", compID, state.Listening, "")
 	state.Global.UpdateBind("forward", compID, listener.Addr().String())
 
 	// Guarantee immediate closure when session aborts, breaking accept loops
-	go func() {
-		<-ctx.Done()
-		_ = listener.Close()
-		state.Global.Delete("forward", compID)
-		state.Global.DeleteMetrics("forward", compID)
-	}()
+	stop := context.AfterFunc(ctx, closeLn)
+	defer stop()
+	defer state.Global.Delete("forward", compID)
+	defer state.Global.DeleteMetrics("forward", compID)
 
 	// For SOCKS, direct traffic through the SSH tunnel
 	sshDialer := func(network, addr string) (net.Conn, error) {

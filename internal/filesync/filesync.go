@@ -249,7 +249,11 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		defer wg.Done()
 		_ = httpSrv.Serve(ln)
 	}()
-	context.AfterFunc(ctx, func() { _ = httpSrv.Close() })
+	context.AfterFunc(ctx, func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shutdownCtx)
+	})
 
 	// Periodic eviction of stale pending index exchanges.
 	wg.Add(1)
