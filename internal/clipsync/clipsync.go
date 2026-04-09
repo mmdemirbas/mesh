@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,17 +43,18 @@ const (
 	MagicHeader  = "CLPSYNC2"
 	PollInterval = 3 * time.Second // Default clipboard polling interval
 
-	// maxSyncFileSize is the per-file size limit for clipboard sync.
+	// defaultMaxSyncFileSize is the per-file size limit for clipboard sync.
 	// Files larger than this are skipped to avoid OOM and transfer timeouts.
-	maxSyncFileSize = 50 * 1024 * 1024 // 50 MB
+	// Overridden by ClipsyncCfg.MaxFileCopySize.
+	defaultMaxSyncFileSize = 50 * 1024 * 1024 // 50 MB
 
 	// maxClipboardPayload caps the total size of all clipboard formats read locally.
 	// Prevents OOM when a large image or multiple large items are on the clipboard.
 	maxClipboardPayload = 100 * 1024 * 1024 // 100 MB
 
 	// maxRequestBodySize caps the /sync endpoint body.
-	// Allows up to ~20 files at maxSyncFileSize with base64 overhead (~33%).
-	maxRequestBodySize = maxSyncFileSize * 20 * 4 / 3
+	// Allows up to ~20 files at defaultMaxSyncFileSize with base64 overhead (~33%).
+	maxRequestBodySize = defaultMaxSyncFileSize * 20 * 4 / 3
 
 	// maxPeers limits the number of dynamically discovered peers to prevent
 	// OOM from an attacker flooding unique source addresses via UDP.
@@ -94,10 +96,11 @@ func GetActivities() []ClipActivity {
 }
 
 type Node struct {
-	ctx    context.Context // parent context; cancelled on shutdown
-	config config.ClipsyncCfg
-	id     string
-	port   int
+	ctx         context.Context // parent context; cancelled on shutdown
+	config      config.ClipsyncCfg
+	id          string
+	port        int
+	maxFileSize int64 // per-file size limit for file copy; from config or defaultMaxSyncFileSize
 
 	peers      map[string]time.Time // Tracks dynamic UDP peers
 	peerHashes map[string]string    // Tracks last seen hash per peer
@@ -149,16 +152,26 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 
 	_, _ = fmt.Sscanf(portStr, "%d", &port)
 
+	maxFileSize := int64(defaultMaxSyncFileSize)
+	if cfg.MaxFileCopySize != "" {
+		parsed, err := parseByteSize(cfg.MaxFileCopySize)
+		if err != nil {
+			return nil, fmt.Errorf("clipsync: invalid max_file_copy_size %q: %w", cfg.MaxFileCopySize, err)
+		}
+		maxFileSize = parsed
+	}
+
 	n := &Node{
-		ctx:        ctx,
-		config:     cfg,
-		id:         generateID(),
-		port:       port,
-		peers:      make(map[string]time.Time),
-		peerHashes: make(map[string]string),
-		httpClient: &http.Client{Timeout: 2 * time.Minute},
-		filesDir:   filesDir,
-		notifyCh:   make(chan struct{}, 1),
+		ctx:         ctx,
+		config:      cfg,
+		id:          generateID(),
+		port:        port,
+		maxFileSize: maxFileSize,
+		peers:       make(map[string]time.Time),
+		peerHashes:  make(map[string]string),
+		httpClient:  &http.Client{Timeout: 2 * time.Minute},
+		filesDir:    filesDir,
+		notifyCh:    make(chan struct{}, 1),
 	}
 
 	n.purgeFilesDir() // remove any files left over from a previous session
@@ -653,7 +666,7 @@ func (n *Node) downloadFile(fileID, fileName, peerAddr string) error {
 		return err
 	}
 	defer func() { _ = dst.Close() }()
-	_, err = io.Copy(dst, io.LimitReader(resp.Body, maxSyncFileSize))
+	_, err = io.Copy(dst, io.LimitReader(resp.Body, n.maxFileSize))
 	return err
 }
 
@@ -692,17 +705,19 @@ func (n *Node) pollClipboard(ctx context.Context, pollInterval time.Duration) {
 		// writes from processPayload cannot race with our reads.
 		n.clipMu.Lock()
 
-		// 1. Check Files
-		paths := readFiles()
-		if len(paths) > 0 {
-			n.clipMu.Unlock()
-			h := hashFilePaths(paths)
-			if n.checkHash(h) {
-				slog.Debug("Local clipboard files changed", "hash", h, "count", len(paths))
-				n.handleFileBroadcast(paths)
+		// 1. Check Files (only when file_copy is enabled)
+		if n.config.FileCopy {
+			paths := readFiles()
+			if len(paths) > 0 {
+				n.clipMu.Unlock()
+				h := hashFilePaths(paths)
+				if n.checkHash(h) {
+					slog.Debug("Local clipboard files changed", "hash", h, "count", len(paths))
+					n.handleFileBroadcast(paths)
+				}
+				polling.Store(false)
+				continue
 			}
-			polling.Store(false)
-			continue
 		}
 
 		// No files on clipboard: any previously tracked files are now orphaned.
@@ -738,9 +753,9 @@ func (n *Node) handleFileBroadcast(paths []string) {
 			slog.Warn("Failed to stat clipboard file", "path", src, "error", err)
 			continue
 		}
-		if info.Size() > maxSyncFileSize {
+		if info.Size() > n.maxFileSize {
 			slog.Warn("Skipping clipboard file: too large for sync", "file", fileName,
-				"size_mb", info.Size()>>20, "limit_mb", maxSyncFileSize>>20)
+				"size_mb", info.Size()>>20, "limit_mb", n.maxFileSize>>20)
 			continue
 		}
 
@@ -825,6 +840,36 @@ func (n *Node) setWrittenHash(h, origin string) {
 	n.lastWrittenHash = h
 	n.originAddr = origin
 	n.stateMu.Unlock()
+}
+
+// parseByteSize parses a human-readable byte size string like "50MB", "100MB", "1GB".
+// Supports suffixes: B, KB, MB, GB (case-insensitive). No suffix means bytes.
+func parseByteSize(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	s = strings.ToUpper(s)
+	var multiplier int64 = 1
+	switch {
+	case strings.HasSuffix(s, "GB"):
+		multiplier = 1024 * 1024 * 1024
+		s = s[:len(s)-2]
+	case strings.HasSuffix(s, "MB"):
+		multiplier = 1024 * 1024
+		s = s[:len(s)-2]
+	case strings.HasSuffix(s, "KB"):
+		multiplier = 1024
+		s = s[:len(s)-2]
+	case strings.HasSuffix(s, "B"):
+		s = s[:len(s)-1]
+	}
+	s = strings.TrimSpace(s)
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid byte size: %w", err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("byte size must be positive")
+	}
+	return n * multiplier, nil
 }
 
 func generateID() string {
@@ -1001,9 +1046,9 @@ func loadFormatsFromDir(dir string) []*pb.ClipFormat {
 		if err != nil || len(data) == 0 {
 			continue
 		}
-		if len(data) > maxSyncFileSize {
+		if len(data) > defaultMaxSyncFileSize {
 			slog.Warn("Skipping clipboard format: exceeds per-file size limit",
-				"format", entry.mimeType, "size_mb", len(data)>>20, "limit_mb", maxSyncFileSize>>20)
+				"format", entry.mimeType, "size_mb", len(data)>>20, "limit_mb", defaultMaxSyncFileSize>>20)
 			continue
 		}
 		if totalSize+len(data) > maxClipboardPayload {

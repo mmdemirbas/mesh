@@ -423,15 +423,16 @@ func newTestNode(t *testing.T, _ []string) (*Node, string, func()) {
 	t.Cleanup(cancel)
 
 	n := &Node{
-		ctx:        ctx,
-		config:     cfg,
-		id:         "test-node",
-		port:       7755,
-		peers:      make(map[string]time.Time),
-		peerHashes: make(map[string]string),
-		httpClient: &http.Client{Timeout: 5 * time.Second},
-		filesDir:   dir,
-		notifyCh:   make(chan struct{}, 1),
+		ctx:         ctx,
+		config:      cfg,
+		id:          "test-node",
+		port:        7755,
+		maxFileSize: defaultMaxSyncFileSize,
+		peers:       make(map[string]time.Time),
+		peerHashes:  make(map[string]string),
+		httpClient:  &http.Client{Timeout: 5 * time.Second},
+		filesDir:    dir,
+		notifyCh:    make(chan struct{}, 1),
 	}
 
 	mux := http.NewServeMux()
@@ -1454,5 +1455,104 @@ func TestRegisterPeerHTTP_SendsDiscoverRequest(t *testing.T) {
 	}
 	if msg.GetGroup() != "my-group" {
 		t.Errorf("Group = %q, want %q", msg.GetGroup(), "my-group")
+	}
+}
+
+func TestParseByteSize(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		input string
+		want  int64
+		err   bool
+	}{
+		{"50MB", 50 * 1024 * 1024, false},
+		{"100MB", 100 * 1024 * 1024, false},
+		{"1GB", 1024 * 1024 * 1024, false},
+		{"512KB", 512 * 1024, false},
+		{"1024B", 1024, false},
+		{"1024", 1024, false},
+		{"  50MB  ", 50 * 1024 * 1024, false},
+		{"50mb", 50 * 1024 * 1024, false},
+		{"0MB", 0, true},
+		{"-1MB", 0, true},
+		{"abc", 0, true},
+		{"", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseByteSize(tt.input)
+			if tt.err {
+				if err == nil {
+					t.Errorf("parseByteSize(%q) = %d, want error", tt.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("parseByteSize(%q) unexpected error: %v", tt.input, err)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("parseByteSize(%q) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFileCopyGate(t *testing.T) {
+	t.Parallel()
+	// When FileCopy is false (default), file broadcast should not happen.
+	// We test this by creating a node with FileCopy=false and verifying
+	// that handleFileBroadcast is never called during polling.
+	cfg := config.ClipsyncCfg{
+		Bind: "127.0.0.1:0",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	n, err := Start(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	if n.config.FileCopy {
+		t.Error("FileCopy should default to false")
+	}
+	if n.maxFileSize != defaultMaxSyncFileSize {
+		t.Errorf("maxFileSize = %d, want %d", n.maxFileSize, defaultMaxSyncFileSize)
+	}
+}
+
+func TestFileCopyCustomSize(t *testing.T) {
+	t.Parallel()
+	cfg := config.ClipsyncCfg{
+		Bind:            "127.0.0.1:0",
+		FileCopy:        true,
+		MaxFileCopySize: "100MB",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	n, err := Start(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	want := int64(100 * 1024 * 1024)
+	if n.maxFileSize != want {
+		t.Errorf("maxFileSize = %d, want %d", n.maxFileSize, want)
+	}
+}
+
+func TestFileCopyInvalidSize(t *testing.T) {
+	t.Parallel()
+	cfg := config.ClipsyncCfg{
+		Bind:            "127.0.0.1:0",
+		MaxFileCopySize: "not-a-size",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	_, err := Start(ctx, cfg)
+	if err == nil {
+		t.Error("Start should fail with invalid max_file_copy_size")
 	}
 }

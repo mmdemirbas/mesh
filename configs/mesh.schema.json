@@ -1,52 +1,37 @@
+Warning: failed to load Go comments: lstat ./internal/config: no such file or directory
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/mmdemirbas/mesh/internal/config/config",
-  "description": "Top-level config is a map of node names to Config objects. Keys prefixed with x- are YAML anchors (ignored by the parser).",
-  "type": "object",
-  "patternProperties": {
-    "^x-": {
-      "description": "YAML anchor definitions for reuse via merge keys."
-    }
-  },
-  "additionalProperties": {
-    "$ref": "#/$defs/Config"
-  },
+  "$ref": "#/$defs/Config",
   "$defs": {
     "AuthCfg": {
       "properties": {
         "agent": {
-          "type": "boolean",
-          "description": "Use the running SSH agent (SSH_AUTH_SOCK) for authentication. Most secure — keys never leave the agent."
+          "type": "boolean"
         },
         "key": {
-          "type": "string",
-          "description": "Path to the private SSH key."
+          "type": "string"
         },
         "password_command": {
-          "type": "string",
-          "description": "Shell command whose stdout is used as the password. Supports macOS Keychain, pass, 1Password CLI, etc.\nExample: \"security find-generic-password -s mesh -w\" (macOS) or \"pass show mesh/server\" (pass/gpg)."
+          "type": "string"
         },
         "known_hosts": {
-          "type": "string",
-          "description": "Path to the known_hosts file for server verification."
+          "type": "string"
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "description": "AuthCfg configures authentication for a connection."
+      "type": "object"
     },
     "ClipsyncCfg": {
       "properties": {
         "bind": {
-          "type": "string",
-          "description": "e.g., \"0.0.0.0:7755\""
+          "type": "string"
         },
         "lan_discovery_group": {
           "items": {
             "type": "string"
           },
-          "type": "array",
-          "description": "Group names for LAN discovery. Empty disables dynamic discovery. Peers with no overlapping group ignore each other."
+          "type": "array"
         },
         "static_peers": {
           "items": {
@@ -55,16 +40,20 @@
           "type": "array"
         },
         "poll_interval": {
-          "type": "string",
-          "description": "Clipboard polling interval (e.g., \"3s\", \"5s\"). Default: \"3s\""
+          "type": "string"
+        },
+        "file_copy": {
+          "type": "boolean"
+        },
+        "max_file_copy_size": {
+          "type": "string"
         }
       },
       "additionalProperties": false,
       "type": "object",
       "required": [
         "bind"
-      ],
-      "description": "ClipsyncCfg represents the YAML configuration structure."
+      ]
     },
     "Config": {
       "properties": {
@@ -72,36 +61,31 @@
           "items": {
             "$ref": "#/$defs/Listener"
           },
-          "type": "array",
-          "description": "Local server ports to bind (e.g., SOCKS, HTTP proxies, Relays, or an embedded SSH server)."
+          "type": "array"
         },
         "connections": {
           "items": {
             "$ref": "#/$defs/Connection"
           },
-          "type": "array",
-          "description": "Outbound SSH connections to other peers, which encapsulate port forwards and proxy rules."
+          "type": "array"
         },
         "clipsync": {
           "items": {
             "$ref": "#/$defs/ClipsyncCfg"
           },
-          "type": "array",
-          "description": "Clipsync configuration."
+          "type": "array"
         },
         "filesync": {
           "items": {
             "$ref": "#/$defs/FilesyncCfg"
           },
-          "type": "array",
-          "description": "Filesync configuration (folder synchronization)."
+          "type": "array"
         },
         "gateway": {
           "items": {
             "$ref": "#/$defs/GatewayCfg"
           },
-          "type": "array",
-          "description": "LLM API gateway instances (Anthropic <-> OpenAI format translation)."
+          "type": "array"
         },
         "log_level": {
           "type": "string",
@@ -110,61 +94,50 @@
             "info",
             "warn",
             "error"
-          ],
-          "description": "Log level: \"debug\", \"info\", \"warn\", or \"error\". Defaults to \"info\"."
+          ]
         },
         "admin_addr": {
-          "type": "string",
-          "default": "127.0.0.1:7777",
-          "description": "Admin server listen address for the local HTTP API and web UI.\nEndpoints: /ui (dashboard), /ui/filesync, /api/state, /api/logs, /api/metrics.\nDefaults to \"127.0.0.1:7777\" (localhost only).\nSet to \"\" to use the default. Set to \"off\" to disable entirely."
+          "type": "string"
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "description": "Config is the top-level mesh configuration schema."
+      "type": "object"
     },
     "Connection": {
       "properties": {
         "name": {
-          "type": "string",
-          "description": "A unique identifier for this connection."
+          "type": "string"
         },
         "mode": {
           "type": "string",
           "enum": [
             "failover",
             "multiplex"
-          ],
-          "description": "Connection mode: \"failover\" (default) tries targets in order until one succeeds;\n\"multiplex\" connects to ALL targets simultaneously."
+          ]
         },
         "targets": {
           "items": {
             "type": "string"
           },
-          "type": "array",
-          "description": "A list of target addresses. In failover mode, tried in order. In multiplex mode, all connected simultaneously.\nFormat: \"user@host:port\" (e.g., [\"root@192.168.1.50:22\", \"root@10.0.0.1:22\"])."
+          "type": "array"
         },
         "retry": {
-          "type": "string",
-          "description": "How long to wait before attempting to reconnect if the session drops (e.g., \"10s\"). Defaults to 10s."
+          "type": "string"
         },
         "auth": {
-          "$ref": "#/$defs/AuthCfg",
-          "description": "Authentication credentials for the target server(s).\nMultiple methods can be configured; tried in order: agent → key → password_command."
+          "$ref": "#/$defs/AuthCfg"
         },
         "options": {
           "additionalProperties": {
             "type": "string"
           },
-          "type": "object",
-          "description": "Common SSH options applied to all forwards in this connection.\nSupported keys: Ciphers, MACs, KexAlgorithms, HostKeyAlgorithms, ConnectTimeout,\nIPQoS, TCPKeepAlive, ServerAliveInterval, ServerAliveCountMax, ExitOnForwardFailure,\nGatewayPorts, PermitOpen, RekeyLimit, StrictHostKeyChecking."
+          "type": "object"
         },
         "forwards": {
           "items": {
             "$ref": "#/$defs/ForwardSet"
           },
-          "type": "array",
-          "description": "A list of forwarding sets. Each set establishes its own purely independent physical SSH connection for maximum throughput.\nIn multiplex mode, forwards are applied to each target connection independently."
+          "type": "array"
         }
       },
       "additionalProperties": false,
@@ -172,104 +145,39 @@
       "required": [
         "name",
         "targets"
-      ],
-      "description": "Connection is an outbound SSH connection to a peer or standard SSH server."
-    },
-    "GatewayCfg": {
-      "properties": {
-        "name": {
-          "type": "string",
-          "description": "Friendly name for this gateway instance."
-        },
-        "bind": {
-          "type": "string",
-          "description": "Local listening address (must be loopback, e.g., \"127.0.0.1:3457\")."
-        },
-        "mode": {
-          "type": "string",
-          "enum": [
-            "anthropic-to-openai",
-            "openai-to-anthropic"
-          ],
-          "description": "Translation direction: \"anthropic-to-openai\" or \"openai-to-anthropic\"."
-        },
-        "upstream": {
-          "type": "string",
-          "description": "Upstream endpoint URL (e.g., \"https://api.anthropic.com/v1/messages\")."
-        },
-        "api_key_env": {
-          "type": "string",
-          "description": "Name of the environment variable holding the upstream API key."
-        },
-        "proxy": {
-          "type": "string",
-          "description": "Optional outbound proxy for upstream requests (e.g., \"socks5://127.0.0.1:1081\")."
-        },
-        "timeout": {
-          "type": "string",
-          "default": "600s",
-          "description": "Upstream request timeout (e.g., \"600s\"). Default: \"600s\"."
-        },
-        "model_map": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "type": "object",
-          "description": "Model name remapping: client model name -> upstream model name."
-        },
-        "default_max_tokens": {
-          "type": "integer",
-          "default": 32768,
-          "description": "Default max_tokens when the client omits it. Default: 32768."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "bind",
-        "mode",
-        "upstream"
-      ],
-      "description": "GatewayCfg configures a single LLM API gateway instance for bidirectional Anthropic/OpenAI translation."
+      ]
     },
     "FilesyncCfg": {
       "properties": {
         "bind": {
-          "type": "string",
-          "description": "Network address for the filesync HTTP server (e.g., \"0.0.0.0:7756\")."
+          "type": "string"
         },
         "peers": {
-          "type": "object",
           "additionalProperties": {
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "type": "array"
           },
-          "description": "Named peer definitions. Key is a short nickname, value is a list of addresses."
+          "type": "object"
         },
         "defaults": {
-          "$ref": "#/$defs/FilesyncDefaults",
-          "description": "Default values applied to all folders unless overridden per-folder."
+          "$ref": "#/$defs/FilesyncDefaults"
         },
         "folders": {
-          "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/FolderCfgRaw"
           },
-          "description": "Folders to synchronize. Key is a human-readable folder ID (must match on all peers)."
+          "type": "object"
         },
         "scan_interval": {
-          "type": "string",
-          "description": "Periodic full rescan interval (e.g., \"60s\", \"5m\"). Default: \"60s\".\nActs as a safety net alongside real-time filesystem notifications."
+          "type": "string"
         },
         "max_concurrent": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Maximum concurrent file transfers per sync cycle. Default: 4."
+          "type": "integer"
         },
         "max_bandwidth": {
-          "type": "string",
-          "description": "Maximum bandwidth for file transfers (e.g., \"10MB\", \"100MB\", \"1GB\"). Value is bytes per second. Default: unlimited."
+          "type": "string"
         }
       },
       "additionalProperties": false,
@@ -277,25 +185,24 @@
       "required": [
         "bind",
         "folders"
-      ],
-      "description": "FilesyncCfg configures a folder synchronization instance."
+      ]
     },
     "FilesyncDefaults": {
       "properties": {
         "peers": {
-          "items": { "type": "string" },
-          "type": "array",
-          "description": "Default peer names for folders that don't specify their own."
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "direction": {
-          "type": "string",
-          "enum": ["send-receive", "send-only", "receive-only", "dry-run", "disabled"],
-          "description": "Default sync direction. Default: \"send-receive\"."
+          "type": "string"
         },
         "ignore_patterns": {
-          "items": { "type": "string" },
-          "type": "array",
-          "description": "Ignore patterns (gitignore-style) applied to all folders. Per-folder patterns are appended."
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "additionalProperties": false,
@@ -304,29 +211,29 @@
     "FolderCfgRaw": {
       "properties": {
         "path": {
-          "type": "string",
-          "description": "Local filesystem path to sync."
+          "type": "string"
         },
         "peers": {
-          "items": { "type": "string" },
-          "type": "array",
-          "description": "Peer names (overrides defaults.peers). Resolved to addresses via the peers map."
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "direction": {
-          "type": "string",
-          "enum": ["send-receive", "send-only", "receive-only", "dry-run", "disabled"],
-          "description": "Sync direction (overrides defaults.direction)."
+          "type": "string"
         },
         "ignore_patterns": {
-          "items": { "type": "string" },
-          "type": "array",
-          "description": "Ignore patterns (gitignore-style), appended to defaults.ignore_patterns."
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "required": ["path"],
-      "description": "FolderCfgRaw configures a single folder for synchronization (before defaults merge)."
+      "required": [
+        "path"
+      ]
     },
     "Forward": {
       "properties": {
@@ -336,65 +243,97 @@
             "forward",
             "socks",
             "http"
-          ],
-          "description": "The type of forward. Can be \"forward\", \"socks\", or \"http\". Defaults to \"forward\"."
+          ]
         },
         "bind": {
-          "type": "string",
-          "description": "The address to bind and listen on."
+          "type": "string"
         },
         "target": {
-          "type": "string",
-          "description": "Where to connect traffic to (or upstream for proxies). Optional for socks/http."
+          "type": "string"
         }
       },
       "additionalProperties": false,
       "type": "object",
       "required": [
         "bind"
-      ],
-      "description": "Forward is a single unified rule for port forwarding or proxying."
+      ]
     },
     "ForwardSet": {
       "properties": {
         "name": {
-          "type": "string",
-          "description": "A unique identifier for this forwarding set."
+          "type": "string"
         },
         "options": {
           "additionalProperties": {
             "type": "string"
           },
-          "type": "object",
-          "description": "Options overrides or adds to connection-level options.\nSupported keys: Ciphers, MACs, KexAlgorithms, HostKeyAlgorithms, ConnectTimeout, IPQoS, TCPKeepAlive, ServerAliveInterval, ServerAliveCountMax, ClientAliveInterval, ClientAliveCountMax, ExitOnForwardFailure, GatewayPorts, PermitOpen, RekeyLimit, StrictHostKeyChecking."
+          "type": "object"
         },
         "remote": {
           "items": {
             "$ref": "#/$defs/Forward"
           },
-          "type": "array",
-          "description": "Reverse forwards (-R). Listens on the remote peer, traffic exits your local machine."
+          "type": "array"
         },
         "local": {
           "items": {
             "$ref": "#/$defs/Forward"
           },
-          "type": "array",
-          "description": "Local forwards (-L). Listens locally, traffic exits the remote peer."
+          "type": "array"
         }
       },
       "additionalProperties": false,
       "type": "object",
       "required": [
         "name"
-      ],
-      "description": "ForwardSet represents a distinct SSH connection for a group of port forwards and proxies."
+      ]
+    },
+    "GatewayCfg": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "bind": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "upstream": {
+          "type": "string"
+        },
+        "api_key_env": {
+          "type": "string"
+        },
+        "proxy": {
+          "type": "string"
+        },
+        "timeout": {
+          "type": "string"
+        },
+        "model_map": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "default_max_tokens": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "bind",
+        "mode",
+        "upstream"
+      ]
     },
     "Listener": {
       "properties": {
         "name": {
-          "type": "string",
-          "description": "Optional friendly name for this listener."
+          "type": "string"
         },
         "type": {
           "type": "string",
@@ -403,53 +342,43 @@
             "http",
             "relay",
             "sshd"
-          ],
-          "description": "The type of listener to create. Can be \"socks\", \"http\", \"relay\", or \"sshd\"."
+          ]
         },
         "bind": {
-          "type": "string",
-          "description": "Local listening address (e.g., \"127.0.0.1:1080\" or \"0.0.0.0:2222\")."
+          "type": "string"
         },
         "target": {
-          "type": "string",
-          "description": "The destination address. Required for \"relay\", optional for \"http\" (forces it to act as a tunnel to a specific proxy)."
+          "type": "string"
         },
         "host_key": {
-          "type": "string",
-          "description": "Path to the private host key. Required when type=\"sshd\"."
+          "type": "string"
         },
         "authorized_keys": {
-          "type": "string",
-          "description": "Path to the authorized_keys file. Required when type=\"sshd\"."
-        },
-        "accept_env": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Environment variables accepted from SSH clients. Supports trailing wildcards (e.g., \"LC_*\")."
-        },
-        "banner": {
-          "type": "string",
-          "description": "Path to a text file shown to clients before authentication (SSH pre-auth banner)."
-        },
-        "motd": {
-          "type": "string",
-          "description": "Path to a text file shown to clients after authentication (message of the day)."
+          "type": "string"
         },
         "shell": {
           "items": {
             "type": "string"
           },
-          "type": "array",
-          "description": "Command to execute on SSH session start (e.g., [\"bash\", \"-l\"]). Default drops into a basic shell."
+          "type": "array"
+        },
+        "accept_env": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "banner": {
+          "type": "string"
+        },
+        "motd": {
+          "type": "string"
         },
         "options": {
           "additionalProperties": {
             "type": "string"
           },
-          "type": "object",
-          "description": "Additional overrides for the listener.\nSupported keys: Ciphers, MACs, KexAlgorithms, HostKeyAlgorithms, ConnectTimeout, IPQoS, TCPKeepAlive, ServerAliveInterval, ServerAliveCountMax, ClientAliveInterval, ClientAliveCountMax, ExitOnForwardFailure, GatewayPorts, PermitOpen, RekeyLimit, StrictHostKeyChecking."
+          "type": "object"
         }
       },
       "additionalProperties": false,
@@ -457,8 +386,7 @@
       "required": [
         "type",
         "bind"
-      ],
-      "description": "Listener represents a local server port (proxy, relay, or sshd)."
+      ]
     }
   }
 }

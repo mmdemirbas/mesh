@@ -98,7 +98,9 @@ type ClipsyncCfg struct {
 	Bind              string   `yaml:"bind"`                          // e.g., "0.0.0.0:7755"
 	LANDiscoveryGroup []string `yaml:"lan_discovery_group,omitempty"` // Group names for LAN discovery. Empty disables dynamic discovery. Peers with no overlapping group ignore each other.
 	StaticPeers       []string `yaml:"static_peers,omitempty"`
-	PollInterval      string   `yaml:"poll_interval,omitempty"` // Clipboard polling interval (e.g., "3s", "5s"). Default: "3s"
+	PollInterval      string   `yaml:"poll_interval,omitempty"`      // Clipboard polling interval (e.g., "3s", "5s"). Default: "3s"
+	FileCopy          bool     `yaml:"file_copy,omitempty"`          // Enable file/image copy between machines. When false (default), only text/HTML/RTF clipboard formats are synced.
+	MaxFileCopySize   string   `yaml:"max_file_copy_size,omitempty"` // Per-file size limit for file copy (e.g., "50MB", "100MB"). Default: "50MB"
 }
 
 // FilesyncCfg configures a folder synchronization instance.
