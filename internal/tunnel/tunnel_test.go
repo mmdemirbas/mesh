@@ -1311,3 +1311,38 @@ ready:
 
 	cancel()
 }
+
+func TestOnceCloseListener_DoubleClose(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ocl := &onceCloseListener{Listener: ln}
+
+	// First close should succeed.
+	if err := ocl.Close(); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+
+	// Second close should return the same result, not panic or crash.
+	if err := ocl.Close(); err != nil {
+		t.Fatalf("second close should return nil (cached result): %v", err)
+	}
+}
+
+func TestOnceCloseListener_AcceptAfterClose(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ocl := &onceCloseListener{Listener: ln}
+	_ = ocl.Close()
+
+	// Accept on a closed listener should return an error, not panic.
+	_, err = ocl.Accept()
+	if err == nil {
+		t.Fatal("Accept on closed listener should return error")
+	}
+}

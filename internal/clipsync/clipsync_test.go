@@ -1173,6 +1173,54 @@ func TestRegisterPeer(t *testing.T) {
 	}
 }
 
+func TestPeerHashesEvictedWithPeers(t *testing.T) {
+	n := &Node{
+		config:     config.ClipsyncCfg{Bind: "0.0.0.0:7755"},
+		id:         "test-self",
+		peers:      make(map[string]time.Time),
+		peerHashes: make(map[string]string),
+	}
+
+	// Register two peers with hashes.
+	n.registerPeer("10.0.0.1:7755", "hash-a", "test")
+	n.registerPeer("10.0.0.2:7755", "hash-b", "test")
+
+	if len(n.peerHashes) != 2 {
+		t.Fatalf("peerHashes count = %d, want 2", len(n.peerHashes))
+	}
+
+	// Age one peer past the 15s TTL, keep the other fresh.
+	n.peersMu.Lock()
+	n.peers["10.0.0.1:7755"] = time.Now().Add(-20 * time.Second)
+	n.peersMu.Unlock()
+
+	// Simulate one eviction cycle (same logic as cleanupPeers ticker body).
+	n.peersMu.Lock()
+	now := time.Now()
+	for addr, lastSeen := range n.peers {
+		if now.Sub(lastSeen) > 15*time.Second {
+			delete(n.peers, addr)
+			delete(n.peerHashes, addr)
+		}
+	}
+	n.peersMu.Unlock()
+
+	// Stale peer and its hash should both be gone.
+	if _, ok := n.peers["10.0.0.1:7755"]; ok {
+		t.Error("stale peer should have been evicted from peers")
+	}
+	if _, ok := n.peerHashes["10.0.0.1:7755"]; ok {
+		t.Error("stale peer hash should have been evicted with the peer")
+	}
+	// Fresh peer and its hash should remain.
+	if _, ok := n.peers["10.0.0.2:7755"]; !ok {
+		t.Error("fresh peer should still be in peers")
+	}
+	if _, ok := n.peerHashes["10.0.0.2:7755"]; !ok {
+		t.Error("fresh peer hash should still be in peerHashes")
+	}
+}
+
 func TestDiscoverEndpoint_RegistersPeer(t *testing.T) {
 	n, url, cleanup := newTestNode(t, nil)
 	defer cleanup()

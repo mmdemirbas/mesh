@@ -34,7 +34,7 @@ configs/            Example YAML, production config (mesh.yaml), JSON schema
 
 **Auth method order** — `buildAuthMethods()` tries: SSH agent → private key → password_command. Multiple methods can be configured; they're all offered to the server. Authorized keys are pre-marshaled at load time to avoid repeated marshaling on every auth attempt.
 
-**SSH server features** — `accept_env` config field controls which client environment variables are accepted (supports trailing wildcards like `LC_*`). `banner` and `motd` config fields point to text files read at startup: banner is shown pre-auth via `ssh.ServerConfig.BannerCallback`, MOTD is written to the session channel post-auth before shell I/O starts. Exit-signal reporting per RFC 4254 section 6.10 — processes killed by a signal send `exit-signal` with the mapped signal name instead of `exit-status` with code 0. Signal-to-name mapping in `env.go`. Windows default shell prefers `pwsh.exe` (modern PowerShell) if installed, falls back to `COMSPEC`/`cmd.exe`. Exec commands use `-Command` for PowerShell, `/C` for cmd.exe.
+**SSH server features** — `accept_env` config field controls which client environment variables are accepted (supports trailing wildcards like `LC_*`). `banner` and `motd` config fields point to text files read at startup: banner is shown pre-auth via `ssh.ServerConfig.BannerCallback`, MOTD is written to the session channel post-auth before shell I/O starts. Signal forwarding per RFC 4254 section 6.9 — `signal` channel requests are parsed and delivered to the process group on Unix via `syscall.Kill(-pid, sig)`, or handled as hard kill on Windows for KILL/TERM/INT/HUP. Exit-signal reporting per RFC 4254 section 6.10 — processes killed by a signal send `exit-signal` with the mapped signal name instead of `exit-status` with code 0. Signal name mapping (`signalName`, `sshSignalNumber`) in `shell_unix.go`. Windows default shell prefers `pwsh.exe` (modern PowerShell) if installed, falls back to `COMSPEC`/`cmd.exe`. Exec commands use `-Command` for PowerShell, `/C` for cmd.exe. Windows shell processes run via fresh goroutine to avoid Go runtime GC stack corruption during `syscall.StartProcess`, with deep-copied environment slices and explicit `cmd.Cancel`/`cmd.WaitDelay` for process cleanup on disconnect.
 
 **Clipsync protocol** — Push-based via HTTP POST with gzip-compressed protobuf serialization (`SyncPayload`, `Beacon`, `DiscoverRequest` in `clipsync/proto/`). `Content-Encoding: gzip` header signals compression on both requests and responses. The sender embeds file data directly in the payload for one-way connectivity (receiver can't pull back). Pull-back via `/files/` endpoint is a fallback for when the receiver CAN reach the sender. UDP discovery uses broadcast beacons (10s interval) with unicast reply for asymmetric networks. Group isolation via `lan_discovery_group` config field (list of strings) — peers with no overlapping group ignore each other; empty list disables dynamic discovery entirely. Clipboard polling interval is configurable via `poll_interval` (default 3s). Local clipboard reads are capped at `maxClipboardPayload` (100 MB total across all formats) to prevent OOM.
 
@@ -78,7 +78,7 @@ Shell completions dynamically resolve node names from the config file.
 - **Tests** — Table-driven. Real TCP/HTTP for integration tests (`httptest.NewServer`). Fuzz tests for parsers (`go test -fuzz`). No `time.Sleep` — use channels/atomic. Race detector always on.
 - **Error handling** — Wrap errors with context: `fmt.Errorf("connections[%d] %q: %w", i, name, err)`. Return errors from libraries; never `log.Fatal` outside `main()`.
 - **Resource cleanup** — `defer` for connections, file handles, goroutines. Every goroutine has a clear exit path tied to context cancellation or channel close.
-- **Channel close safety** — Use `sync.Once`-guarded close functions when multiple goroutines may close the same channel/connection (see `shell_windows.go`, `shell_unix.go`).
+- **Channel close safety** — Use `sync.Once`-guarded close functions when multiple goroutines may close the same channel/connection (see `shell_windows.go`, `shell_unix.go`). For listeners closed from both `defer` and `context.AfterFunc`/goroutines, use `onceCloseListener` wrapper (tunnel.go) or inline `sync.Once` closures (proxy.go, tunnel.go forward handlers).
 
 ## Common Patterns
 
@@ -106,6 +106,22 @@ wg.Wait()
 var closeOnce sync.Once
 closeCh := func() { closeOnce.Do(func() { ch.Close() }) }
 defer closeCh()
+
+// Listener close with context cancel (prevents double-close on Windows)
+var lnOnce sync.Once
+closeLn := func() { lnOnce.Do(func() { _ = ln.Close() }) }
+defer closeLn()
+stop := context.AfterFunc(ctx, closeLn)
+defer stop()
+
+// Retry with proper timer cleanup
+t := time.NewTimer(retryDelay)
+select {
+case <-ctx.Done():
+    t.Stop()
+    return
+case <-t.C:
+}
 ```
 
 ## Security
