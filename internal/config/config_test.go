@@ -10,21 +10,23 @@ import (
 )
 
 func TestGetOption(t *testing.T) {
+	// Simulate config load: keys are normalized to lowercase.
 	opts := map[string]string{
 		"Ciphers":        "aes256-ctr",
 		"ConnectTimeout": "10",
 		"IPQoS":          "lowdelay",
 	}
+	normalizeOptions(opts)
 
 	tests := []struct {
 		key, want string
 	}{
 		{"Ciphers", "aes256-ctr"},
-		{"ciphers", "aes256-ctr"}, // case insensitive
-		{"CIPHERS", "aes256-ctr"}, // all caps
-		{"ConnectTimeout", "10"},  // exact match
+		{"ciphers", "aes256-ctr"}, // lowercase lookup
+		{"CIPHERS", "aes256-ctr"}, // all caps lookup
+		{"ConnectTimeout", "10"},  // original case
 		{"connecttimeout", "10"},  // lowercase
-		{"IPQoS", "lowdelay"},     // mixed case key
+		{"IPQoS", "lowdelay"},     // mixed case lookup key
 		{"ipqos", "lowdelay"},     // lowercase
 		{"NonExistent", ""},       // missing key
 	}
@@ -36,6 +38,28 @@ func TestGetOption(t *testing.T) {
 				t.Errorf("GetOption(%q) = %q, want %q", tt.key, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNormalizeOptions(t *testing.T) {
+	opts := map[string]string{
+		"Ciphers":     "aes256-ctr",
+		"IPQoS":       "lowdelay",
+		"GatewayPorts": "yes",
+	}
+	normalizeOptions(opts)
+
+	if _, ok := opts["Ciphers"]; ok {
+		t.Error("original key 'Ciphers' still present after normalize")
+	}
+	if v := opts["ciphers"]; v != "aes256-ctr" {
+		t.Errorf("opts[ciphers] = %q, want aes256-ctr", v)
+	}
+	if v := opts["ipqos"]; v != "lowdelay" {
+		t.Errorf("opts[ipqos] = %q, want lowdelay", v)
+	}
+	if v := opts["gatewayports"]; v != "yes" {
+		t.Errorf("opts[gatewayports] = %q, want yes", v)
 	}
 }
 

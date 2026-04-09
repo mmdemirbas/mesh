@@ -160,7 +160,7 @@ func TestApplySSHConfigOptions(t *testing.T) {
 	}{
 		{
 			"ciphers",
-			map[string]string{"Ciphers": "aes256-ctr,aes128-ctr"},
+			map[string]string{"ciphers": "aes256-ctr,aes128-ctr"},
 			func(t *testing.T, cfg *ssh.Config) {
 				if len(cfg.Ciphers) != 2 || cfg.Ciphers[0] != "aes256-ctr" || cfg.Ciphers[1] != "aes128-ctr" {
 					t.Errorf("Ciphers = %v", cfg.Ciphers)
@@ -169,7 +169,7 @@ func TestApplySSHConfigOptions(t *testing.T) {
 		},
 		{
 			"kex algorithms",
-			map[string]string{"KexAlgorithms": "curve25519-sha256"},
+			map[string]string{"kexalgorithms": "curve25519-sha256"},
 			func(t *testing.T, cfg *ssh.Config) {
 				if len(cfg.KeyExchanges) != 1 || cfg.KeyExchanges[0] != "curve25519-sha256" {
 					t.Errorf("KeyExchanges = %v", cfg.KeyExchanges)
@@ -178,7 +178,7 @@ func TestApplySSHConfigOptions(t *testing.T) {
 		},
 		{
 			"MACs",
-			map[string]string{"MACs": "hmac-sha2-256,hmac-sha2-512"},
+			map[string]string{"macs": "hmac-sha2-256,hmac-sha2-512"},
 			func(t *testing.T, cfg *ssh.Config) {
 				if len(cfg.MACs) != 2 || cfg.MACs[0] != "hmac-sha2-256" {
 					t.Errorf("MACs = %v", cfg.MACs)
@@ -295,7 +295,7 @@ func TestParseByteSize(t *testing.T) {
 
 func TestApplySSHConfigOptions_RekeyLimit(t *testing.T) {
 	cfg := &ssh.Config{}
-	applySSHConfigOptions(cfg, map[string]string{"RekeyLimit": "1G"})
+	applySSHConfigOptions(cfg, map[string]string{"rekeylimit": "1G"})
 	if cfg.RekeyThreshold != 1024*1024*1024 {
 		t.Errorf("RekeyThreshold = %d, want %d", cfg.RekeyThreshold, 1024*1024*1024)
 	}
@@ -678,7 +678,7 @@ func TestStartKeepAlive_NegativeIntervalReturnsImmediately(t *testing.T) {
 	})
 	done := make(chan struct{})
 	go func() {
-		opts := map[string]string{"ServerAliveInterval": "-1"}
+		opts := map[string]string{"serveraliveinterval": "-1"}
 		startKeepAlive(context.Background(), conn, opts, false, slog.Default())
 		close(done)
 	}()
@@ -1356,18 +1356,18 @@ func TestPermitOpenPolicy(t *testing.T) {
 		want    bool
 	}{
 		{"empty allows all", nil, "example.com", 22, true},
-		{"any allows all", map[string]string{"PermitOpen": "any"}, "10.0.0.1", 80, true},
-		{"none denies all", map[string]string{"PermitOpen": "none"}, "localhost", 22, false},
-		{"exact match", map[string]string{"PermitOpen": "10.0.0.1:22"}, "10.0.0.1", 22, true},
-		{"exact mismatch host", map[string]string{"PermitOpen": "10.0.0.1:22"}, "10.0.0.2", 22, false},
-		{"exact mismatch port", map[string]string{"PermitOpen": "10.0.0.1:22"}, "10.0.0.1", 80, false},
-		{"wildcard host", map[string]string{"PermitOpen": "*:22"}, "anything.example.com", 22, true},
-		{"wildcard host wrong port", map[string]string{"PermitOpen": "*:22"}, "anything.example.com", 80, false},
-		{"wildcard port", map[string]string{"PermitOpen": "db.local:*"}, "db.local", 5432, true},
-		{"wildcard port wrong host", map[string]string{"PermitOpen": "db.local:*"}, "other.local", 5432, false},
-		{"multiple entries comma", map[string]string{"PermitOpen": "10.0.0.1:22,10.0.0.2:80"}, "10.0.0.2", 80, true},
-		{"multiple entries space", map[string]string{"PermitOpen": "10.0.0.1:22 10.0.0.2:80"}, "10.0.0.2", 80, true},
-		{"none overrides others", map[string]string{"PermitOpen": "none,10.0.0.1:22"}, "10.0.0.1", 22, false},
+		{"any allows all", map[string]string{"permitopen": "any"}, "10.0.0.1", 80, true},
+		{"none denies all", map[string]string{"permitopen": "none"}, "localhost", 22, false},
+		{"exact match", map[string]string{"permitopen": "10.0.0.1:22"}, "10.0.0.1", 22, true},
+		{"exact mismatch host", map[string]string{"permitopen": "10.0.0.1:22"}, "10.0.0.2", 22, false},
+		{"exact mismatch port", map[string]string{"permitopen": "10.0.0.1:22"}, "10.0.0.1", 80, false},
+		{"wildcard host", map[string]string{"permitopen": "*:22"}, "anything.example.com", 22, true},
+		{"wildcard host wrong port", map[string]string{"permitopen": "*:22"}, "anything.example.com", 80, false},
+		{"wildcard port", map[string]string{"permitopen": "db.local:*"}, "db.local", 5432, true},
+		{"wildcard port wrong host", map[string]string{"permitopen": "db.local:*"}, "other.local", 5432, false},
+		{"multiple entries comma", map[string]string{"permitopen": "10.0.0.1:22,10.0.0.2:80"}, "10.0.0.2", 80, true},
+		{"multiple entries space", map[string]string{"permitopen": "10.0.0.1:22 10.0.0.2:80"}, "10.0.0.2", 80, true},
+		{"none overrides others", map[string]string{"permitopen": "none,10.0.0.1:22"}, "10.0.0.1", 22, false},
 	}
 
 	for _, tt := range tests {

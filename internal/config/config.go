@@ -247,14 +247,22 @@ type Forward struct {
 	Target string `yaml:"target,omitempty"`
 }
 
-// GetOption retrieves a configuration value by key, case-insensitively.
+// GetOption retrieves a configuration value by key. Keys are assumed to be
+// lowercased at load time by normalizeOptions, so the lookup key is lowered here.
 func GetOption(options map[string]string, key string) string {
-	for k, v := range options {
-		if strings.EqualFold(k, key) {
-			return v
+	return options[strings.ToLower(key)]
+}
+
+// normalizeOptions lowercases all keys in an options map so that subsequent
+// lookups via GetOption are O(1) map hits instead of O(n) linear scans.
+func normalizeOptions(opts map[string]string) {
+	for k, v := range opts {
+		lower := strings.ToLower(k)
+		if lower != k {
+			delete(opts, k)
+			opts[lower] = v
 		}
 	}
-	return ""
 }
 
 // AuthCfg configures authentication for a connection.
@@ -350,6 +358,17 @@ func LoadUnvalidated(path string) (map[string]*Config, error) {
 	for _, cfg := range cfgs {
 		if cfg == nil {
 			continue
+		}
+
+		// Normalize option keys to lowercase for O(1) lookup via GetOption.
+		for i := range cfg.Listeners {
+			normalizeOptions(cfg.Listeners[i].Options)
+		}
+		for i := range cfg.Connections {
+			normalizeOptions(cfg.Connections[i].Options)
+			for j := range cfg.Connections[i].Forwards {
+				normalizeOptions(cfg.Connections[i].Forwards[j].Options)
+			}
 		}
 
 		// Expand ~ in all path fields
