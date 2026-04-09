@@ -70,6 +70,11 @@ func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer
 
 // handleHTTPProxy handles a single HTTP CONNECT proxy connection.
 func handleHTTPProxy(conn net.Conn, dialer func(string) (net.Conn, error), log *slog.Logger, metrics *state.Metrics) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("panic recovered in HTTP proxy handler", "panic", r, "remote", conn.RemoteAddr())
+		}
+	}()
 	defer func() { _ = conn.Close() }()
 
 	// Handshake timeout: SetDeadline works on real TCP but is a no-op on SSH

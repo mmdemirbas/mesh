@@ -38,6 +38,11 @@ func ServeSocks(ctx context.Context, listener net.Listener, dialer func(string, 
 
 // handleSocks5 handles a single SOCKS5 connection.
 func handleSocks5(conn net.Conn, dialer func(string, string) (net.Conn, error), log *slog.Logger, metrics *state.Metrics) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("panic recovered in SOCKS5 handler", "panic", r, "remote", conn.RemoteAddr())
+		}
+	}()
 	defer func() { _ = conn.Close() }()
 
 	if dialer == nil {
