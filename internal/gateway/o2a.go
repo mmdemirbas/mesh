@@ -56,7 +56,11 @@ func translateOpenAIRequest(req *ChatCompletionRequest, cfg *GatewayCfg) (*Messa
 		return nil, err
 	}
 	if system != "" {
-		out.System = json.RawMessage(mustMarshal(system))
+		b, err := json.Marshal(system)
+		if err != nil {
+			return nil, fmt.Errorf("marshal system: %w", err)
+		}
+		out.System = json.RawMessage(b)
 	}
 	out.Messages = msgs
 
@@ -118,14 +122,20 @@ func convertOpenAIMessages(msgs []OpenAIMsg) (string, []AnthropicMsg, error) {
 			if err != nil {
 				return "", nil, err
 			}
-			anthropicMsgs = appendMerging(anthropicMsgs, "user", blocks)
+			anthropicMsgs, err = appendMerging(anthropicMsgs, "user", blocks)
+			if err != nil {
+				return "", nil, err
+			}
 
 		case "assistant":
 			blocks, err := convertOpenAIAssistantContent(m)
 			if err != nil {
 				return "", nil, err
 			}
-			anthropicMsgs = appendMerging(anthropicMsgs, "assistant", blocks)
+			anthropicMsgs, err = appendMerging(anthropicMsgs, "assistant", blocks)
+			if err != nil {
+				return "", nil, err
+			}
 
 		case "tool":
 			// Tool result goes into a user message as a tool_result block.
@@ -135,9 +145,17 @@ func convertOpenAIMessages(msgs []OpenAIMsg) (string, []AnthropicMsg, error) {
 			}
 			text := extractOpenAITextContent(m.Content)
 			if text != "" {
-				block.Content = json.RawMessage(mustMarshal(text))
+				b, err := json.Marshal(text)
+				if err != nil {
+					return "", nil, fmt.Errorf("marshal tool result: %w", err)
+				}
+				block.Content = json.RawMessage(b)
 			}
-			anthropicMsgs = appendMerging(anthropicMsgs, "user", []ContentBlock{block})
+			var mergeErr error
+			anthropicMsgs, mergeErr = appendMerging(anthropicMsgs, "user", []ContentBlock{block})
+			if mergeErr != nil {
+				return "", nil, mergeErr
+			}
 		}
 	}
 
@@ -146,7 +164,7 @@ func convertOpenAIMessages(msgs []OpenAIMsg) (string, []AnthropicMsg, error) {
 
 // appendMerging adds blocks to the message list, merging with the last message
 // if it has the same role (Anthropic requires strict alternation).
-func appendMerging(msgs []AnthropicMsg, role string, blocks []ContentBlock) []AnthropicMsg {
+func appendMerging(msgs []AnthropicMsg, role string, blocks []ContentBlock) ([]AnthropicMsg, error) {
 	if len(msgs) > 0 && msgs[len(msgs)-1].Role == role {
 		// Merge into existing message.
 		var existing []ContentBlock
@@ -158,13 +176,21 @@ func appendMerging(msgs []AnthropicMsg, role string, blocks []ContentBlock) []An
 			}
 		}
 		existing = append(existing, blocks...)
-		msgs[len(msgs)-1].Content = json.RawMessage(mustMarshal(existing))
-		return msgs
+		b, err := json.Marshal(existing)
+		if err != nil {
+			return msgs, fmt.Errorf("marshal merged content: %w", err)
+		}
+		msgs[len(msgs)-1].Content = json.RawMessage(b)
+		return msgs, nil
+	}
+	b, err := json.Marshal(blocks)
+	if err != nil {
+		return msgs, fmt.Errorf("marshal content blocks: %w", err)
 	}
 	return append(msgs, AnthropicMsg{
 		Role:    role,
-		Content: json.RawMessage(mustMarshal(blocks)),
-	})
+		Content: json.RawMessage(b),
+	}), nil
 }
 
 // convertOpenAIUserContent converts a user message's content to Anthropic blocks.
@@ -377,7 +403,11 @@ func translateAnthropicResponse(resp *MessagesResponse, clientModel string) (*Ch
 	}
 
 	if joined := strings.Join(texts, ""); joined != "" {
-		choice.Message.Content = json.RawMessage(mustMarshal(joined))
+		b, err := json.Marshal(joined)
+		if err != nil {
+			return nil, fmt.Errorf("marshal response content: %w", err)
+		}
+		choice.Message.Content = json.RawMessage(b)
 	}
 	choice.Message.Role = "assistant"
 	choice.Message.ToolCalls = toolCalls
@@ -412,7 +442,3 @@ func nowUnix() int64 {
 	return time.Now().Unix()
 }
 
-func mustMarshal(v any) []byte {
-	b, _ := json.Marshal(v)
-	return b
-}
