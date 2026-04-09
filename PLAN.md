@@ -25,9 +25,7 @@ When working on items from this plan, follow these rules:
 
 Crashes, active CVEs, broken functionality, exploitable security issues.
 
-| ID   | Component | Item                                         | Notes |
-|------|-----------|----------------------------------------------|-------|
-| DEP1 | build     | Go 1.26.1 has 4 active CVEs                 | x509 auth bypass, x509 chain work, x509 policy validation, TLS 1.3 KeyUpdate DoS. All reached via gateway/filesync/clipsync code paths. Fixed in Go 1.26.2. |
+(All items completed.)
 
 ---
 
@@ -39,7 +37,6 @@ Security hardening, correctness, data integrity, protocol compliance.
 |------|-----------|----------------------------------------------|-------|
 | S1   | clipsync  | No TLS for clipsync HTTP                     | HTTPS only, auto-TLS with self-signed certs if none provided. Zero-config. |
 | FS4  | filesync  | No TLS / auth for filesync HTTP              | Same auto-TLS approach as S1 — share the implementation. |
-| Q1   | core      | `gzipEncode`/`gzipDecode` duplicated        | Identical in clipsync and filesync. Extract to shared package. Prerequisite for consistent S3 fix and P5 pooling. |
 | C3   | gateway   | `thinking` blocks silently dropped           | Extended thinking content dropped in both translation directions. Increasingly used feature. Needs design decision. |
 | C4   | gateway   | `response_format` silently dropped           | `json_object` mode parsed but dropped. Clients expecting guaranteed JSON get unstructured text. Needs design decision. |
 
@@ -53,41 +50,27 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
-| E7   | config    | Validation errors lack node name context     | Multi-node configs produce ambiguous errors. `config.go:533,538`. |
 | S8   | sshd      | `PermitOpen` bypass via alternate hostnames  | String comparison on unresolved `DestAddr`. Document limitation or restrict to IP-only. |
-| S10  | config    | Writable config enables `password_command` injection | `warnInsecurePermissions` only warns. Consider hard reject. |
 | S11  | clipsync  | UDP beacon port used for SSRF               | `msg.GetPort()` from unauthenticated beacon. Mitigated by fixing S2. |
 
 ### Performance
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
-| P5   | core      | Pool `gzip.Writer`/`gzip.Reader`            | ~300 KB internal state allocated per request. `sync.Pool` with `Reset()`. |
-| P6   | clipsync  | `proto.Marshal` re-serialization for size   | Pass original body size from HTTP handler instead. |
-| P7   | filesync  | Maintain active file count                  | Four O(n) loops → maintain `activeCount` field. |
-| P8   | filesync  | Merge temp cleanup into scan walk           | Eliminate redundant full tree traversal. |
-| P13  | cli       | Use `SnapshotFull()` in dashboard           | Two separate locks → one atomic call. |
 | P3   | filesync  | Adaptive watch/scan                         | Self-tuning heuristic. See [design](#adaptive-watchscan-design) below. |
 
 ### UX & CLI
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
-| U2   | cli       | `mesh down` requires valid config file      | `down` only needs pidfiles. Scan `~/.mesh/run/mesh-*.pid` when no args given. |
 | U3   | cli       | `mesh status -w` shows no metrics           | Always passes `nil` for `metricsMap`. Fetch from admin API. |
-| U6   | cli       | `mesh help` omits filesync, gateway, admin  | Major feature discoverability gap. |
-| U7   | cli       | Config not found gives raw OS error         | No guidance on search paths or examples. Poor first-run experience. |
-| U4   | cli       | Config errors lack YAML line numbers        | Array indices require manual counting in large files. |
-| U8   | cli       | Dashboard log tail hard-coded to 10 lines   | Compute dynamically from viewport height. |
-| U9   | admin     | Web UI fetches all 6 APIs every second      | Gate fetches by active tab. |
 | P2   | cli       | Simplify CLI dashboard                      | See [design](#cli-dashboard-simplification) below. |
 
 ### Cross-Platform
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
-| W7   | clipsync  | `runtime.GOOS` instead of build tags        | 6 switch blocks. CLAUDE.md convention violated. Refactor to build-tagged files. |
-| W8   | cli       | `checkPid`/`killPid` use `runtime.GOOS`    | Same violation. Move to build-tagged files. |
+| W7   | clipsync  | `runtime.GOOS` instead of build tags        | 6 switch blocks. In progress — build-tagged files being created. |
 
 ### Protocol Compatibility
 
@@ -96,21 +79,6 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | C6   | sshd      | Server keepalive uses non-standard type     | `keepalive@golang.org` — non-Go clients may not reply. |
 | C7   | sshd      | Public-key auth only on server side         | No password/keyboard-interactive server auth. Asymmetry may surprise users. |
 
-### Code Quality
-
-| ID   | Component | Item                                         | Notes |
-|------|-----------|----------------------------------------------|-------|
-| Q3   | sshd      | `runForwardSet` duplication                 | ~60 lines retry/handshake boilerplate. Extract `runConnectLoop`. |
-| Q4   | gateway   | `handleA2O`/`handleO2A` duplication         | Extract shared `doUpstreamRequest`. |
-| Q6   | core      | `activeNodes` registry duplicated           | Identical pattern in filesync and clipsync. Extract generic registry. |
-
-### Documentation
-
-| ID    | Component | Item                                         | Notes |
-|-------|-----------|----------------------------------------------|-------|
-| DOC7  | claude    | CLAUDE.md claims `CGO_ENABLED=0` always     | Darwin build omits it. |
-| DOC8  | claude    | CLAUDE.md "never `runtime.GOOS`" violated   | 8 violations across clipsync and main. |
-
 ### DevOps
 
 | ID   | Component | Item                                         | Notes |
@@ -118,10 +86,9 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | D1   | ops       | Log rotation                                | Unbounded growth. SIGHUP + size-based rotation or external logrotate. |
 | D2   | ops       | systemd / launchd service units             | No service management. Ship templates. |
 | D3   | testing   | Tunnel package coverage at 34%              | Core forwarding functions at 0%. |
-| D5   | testing   | Test parallelism                            | Zero `t.Parallel()` across 368 tests. |
+| D5   | testing   | Test parallelism                            | In progress — t.Parallel() being added across all packages. |
 | D6   | release   | Binary signing                              | No cosign/Sigstore. |
 | D8   | ops       | `time.Sleep` in `downCmd` and tests         | Replace with channel-based sync. |
-| D9   | testing   | Benchmark coverage                          | Only 3 benchmarks. No data-path benchmarks. |
 | D10  | build     | darwin/arm64 dist allows CGO                | Align Taskfile with GoReleaser. |
 | DEP2 | build     | `cmd/schema-gen` pulls CVE-affected dep     | Move to separate module to isolate `buger/jsonparser`. |
 | DEP3 | build     | Charmbracelet TUI pulls 17 transitive modules | Consider raw terminal for viewport. |
@@ -134,7 +101,6 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 |------|-----------|-------------------------------------|-------|
 | N3   | clipsync  | File/image copy support             | Copy a file or directory on one computer, paste on another. Image clipboard content also in scope. Small files: transfer immediately via existing push mechanism. Large files: needs lazy-copy design (transfer only when user pastes). Two-phase approach: ship eager copy for small files first, design lazy copy separately. |
 | N4   | admin     | Action history in web UI            | Clipboard activity, file sync activity, past metrics. Partially started. |
-| N6   | admin     | Tree-table layout for web dashboard | Collapsible nodes for component hierarchy. |
 | F2   | cli       | `mesh init` command                 | Interactive config generator. Scaffolds starter YAML. |
 | F5   | sshd      | SFTP subsystem                      | `subsystem` request handling. Requires `github.com/pkg/sftp`. Enables scp/sftp/rsync over mesh. |
 | F6   | sshd      | SSH agent forwarding                | `auth-agent-req@openssh.com`. Temp Unix socket, `SSH_AUTH_SOCK`. Unix-only. |
@@ -149,7 +115,6 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | F4   | sshd      | User switching               | `setuid`/`setgid` (Unix), `CreateProcessAsUser` (Windows). Root required. |
 | F1   | core      | Config hot-reload            | File watcher, config diff, per-component context cancellation. |
 | F11  | sshd      | X11 forwarding               | Xauth, Unix socket, channel multiplex. Low demand. |
-| R5   | docs      | README: demo GIF             | |
 | R6   | release   | Homebrew formula             | |
 | R7   | release   | Dockerfile                   | Multi-stage build, scratch runtime. |
 
@@ -209,6 +174,30 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | DOC5 | README API endpoints                | Added /healthz, /api/filesync/*, /api/clipsync/activity. |
 | DOC6 | README dist claim                   | Fixed to show 4 actual binaries. |
 | DOC9 | Schema options description          | Updated to list all 16 supported SSH option keys. |
+| DEP1 | Go 1.26.2 upgrade                   | Fixed 4 active CVEs (x509 auth bypass, chain, policy; TLS 1.3 KeyUpdate DoS). |
+| DOC7 | CLAUDE.md CGO claim                 | Corrected to note darwin omits CGO_ENABLED. |
+| DOC8 | CLAUDE.md platform-code claim       | Updated to reflect ongoing runtime.GOOS migration. |
+| Q1   | Shared gzip package                 | Extracted internal/gziputil from clipsync and filesync duplicates. |
+| P5   | Pooled gzip.Writer                  | sync.Pool in gziputil.Encode avoids ~300 KB allocation per request. |
+| E7   | Node name in validation errors      | main.go wraps Validate() errors with node name for multi-node clarity. |
+| S10  | Reject world-writable configs       | checkInsecurePermissions returns error instead of warning; LoadUnvalidated fails on 0022 perms. |
+| W8   | Build-tagged checkPid/killPid       | Moved to pid_unix.go / pid_windows.go. Removed runtime.GOOS from main.go. |
+| P6   | Avoid proto.Marshal for size        | processPayload receives body size from caller instead of re-marshaling. |
+| P7   | Active file count from scan         | scan() returns count; activeCount() method replaces 4 inline loops. |
+| P8   | Temp cleanup merged into scan       | Stale .mesh-tmp-* cleaned during walk instead of separate traversal. |
+| P13  | SnapshotFull in dashboard           | Single call replaces separate Snapshot + SnapshotMetrics. |
+| U8   | Dynamic log tail lines              | Computed from viewport height instead of hardcoded 10. |
+| U2   | mesh down without config            | Discovers running nodes from ~/.mesh/run/mesh-*.pid. |
+| U6   | Help text completeness              | Mentions filesync, gateway, admin web UI. |
+| U7   | Config-not-found guidance           | Shows search paths and usage hint instead of raw OS error. |
+| U4   | YAML line numbers in errors         | Parse errors include the line number of the failing node. |
+| U9   | Web UI tab-gated fetches            | Only fetches APIs needed by the active tab. |
+| N6   | Tree-table component grouping       | Dashboard groups components by type with collapsible headers. |
+| Q6   | Generic activeNodes registry        | internal/nodeutil.Registry[T] replaces duplicate patterns in clipsync/filesync. |
+| Q3   | Extract connectSSH helper           | Shared dial+keepalive+handshake for runForwardSet and runForwardSetForTarget. |
+| Q4   | Extract doUpstreamRequest           | Shared upstream HTTP lifecycle for handleA2O and handleO2A. |
+| D9   | Data-path benchmarks                | 16 benchmarks across 5 packages: BiCopy, scan, blockHash, state, gzip. |
+| R5   | Demo tape for GIF generation        | VHS format demo.tape added; run `vhs demo.tape` to generate. |
 
 ---
 
