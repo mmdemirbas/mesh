@@ -32,6 +32,18 @@ import (
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
+// SSH timing defaults.
+const (
+	defaultTCPKeepAlive       = 30 * time.Second
+	defaultHandshakeTimeout   = 30 * time.Second
+	defaultSSHClientTimeout   = 15 * time.Second
+	defaultServerAliveInterval = 15 * time.Second
+)
+
+// keepaliveForwardSet is the name assigned to the synthetic forward set
+// created when a connection has no forwards (keeps the SSH connection alive).
+const keepaliveForwardSet = "keepalive"
+
 // SSH server rate limiting and eviction constants.
 const (
 	// rateLimitPerSec / rateLimitBurst cap auth attempts per remote IP.
@@ -267,7 +279,7 @@ func (s *SSHServer) Run(ctx context.Context) error {
 }
 
 func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.ServerConfig, serverMetrics *state.Metrics, motd []byte) {
-	tcpKeepAlive := 30 * time.Second
+	tcpKeepAlive := defaultTCPKeepAlive
 	if val := config.GetOption(s.cfg.Options, "TCPKeepAlive"); val != "" {
 		if seconds, err := strconv.Atoi(val); err == nil && seconds > 0 {
 			tcpKeepAlive = time.Duration(seconds) * time.Second
@@ -277,7 +289,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 
 	// Set a handshake deadline to prevent slowloris-style attacks where a client
 	// connects but never completes the SSH handshake, holding resources indefinitely.
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(defaultHandshakeTimeout))
 
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, cfg)
 	if err != nil {
@@ -426,7 +438,7 @@ func (c *SSHClient) runMultiplexTarget(ctx context.Context, target string) {
 	// If there are no forwards, create a dummy forward set to keep the connection alive.
 	fsets := c.cfg.Forwards
 	if len(fsets) == 0 {
-		fsets = []config.ForwardSet{{Name: "keepalive"}}
+		fsets = []config.ForwardSet{{Name: keepaliveForwardSet}}
 	}
 
 	var wg sync.WaitGroup
@@ -560,7 +572,7 @@ func (c *SSHClient) buildSSHConfig(fset *config.ForwardSet, id string) (*ssh.Cli
 		User:            defaultUser,
 		Auth:            authMethods,
 		HostKeyCallback: hostKeyCallback,
-		Timeout:         15 * time.Second,
+		Timeout:         defaultSSHClientTimeout,
 	}
 
 	if timeoutStr := config.GetOption(opts, "ConnectTimeout"); timeoutStr != "" {
@@ -588,7 +600,7 @@ func (c *SSHClient) buildSSHConfig(fset *config.ForwardSet, id string) (*ssh.Cli
 func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.ForwardSet, target string) {
 	_, host := parseTarget(target)
 	id := c.cfg.Name + " " + host
-	if fset.Name != "" && fset.Name != "keepalive" {
+	if fset.Name != "" && fset.Name != keepaliveForwardSet {
 		id += " [" + fset.Name + "]"
 	}
 	state.Global.Update("connection", id, state.Starting, "")
@@ -639,7 +651,7 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 			}
 		}
 
-		tcpKeepAlive := 30 * time.Second
+		tcpKeepAlive := defaultTCPKeepAlive
 		if val := config.GetOption(opts, "TCPKeepAlive"); val != "" {
 			if seconds, err := strconv.Atoi(val); err == nil && seconds > 0 {
 				tcpKeepAlive = time.Duration(seconds) * time.Second
@@ -742,7 +754,7 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 
 		log.Info("Connecting", "target", target)
 
-		tcpKeepAlive := 30 * time.Second
+		tcpKeepAlive := defaultTCPKeepAlive
 		if val := config.GetOption(opts, "TCPKeepAlive"); val != "" {
 			if seconds, err := strconv.Atoi(val); err == nil && seconds > 0 {
 				tcpKeepAlive = time.Duration(seconds) * time.Second
@@ -827,7 +839,7 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 
 	// Start keep-alives tied to the session context.
 	// Uses ServerAliveInterval/ServerAliveCountMax from config; defaults to 15s / 3 failures.
-	aliveInterval := 15 * time.Second
+	aliveInterval := defaultServerAliveInterval
 	if val := config.GetOption(opts, "ServerAliveInterval"); val != "" {
 		if s, err := strconv.Atoi(val); err == nil && s > 0 {
 			aliveInterval = time.Duration(s) * time.Second
