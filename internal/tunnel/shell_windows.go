@@ -58,6 +58,11 @@ func sessionEnv(shell, termName string) []string {
 // well for cmd.exe, PowerShell, and most CLI tools. Programs that query terminal
 // attributes (e.g., curses/ncurses) won't render correctly, but that's rare on Windows.
 func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, acceptEnv []string, motd []byte, log *slog.Logger) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("panic recovered in session handler", "panic", r)
+		}
+	}()
 	ch, reqs, err := newChan.Accept()
 	if err != nil {
 		log.Error("Accept session channel failed", "error", err)

@@ -329,6 +329,10 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 				go handleTCPIPForward(connCtx, req, sshConn, &mu, listeners, s.log, s.cfg.Bind, s.cfg.Options, &clientNodeName)
 			case "cancel-tcpip-forward":
 				go handleCancelTCPIPForward(req, &mu, listeners, s.log)
+			case "keepalive@openssh.com":
+				if req.WantReply {
+					_ = req.Reply(true, nil)
+				}
 			default:
 				if req.WantReply {
 					_ = req.Reply(false, nil)
@@ -496,7 +500,8 @@ func (c *SSHClient) buildAuthMethods(id string) ([]ssh.AuthMethod, func(), error
 func runPasswordCommand(command string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: intentional — runs user-configured password_command
+	base := shellCommand(command)
+	cmd := exec.CommandContext(ctx, base.Path, base.Args[1:]...) //nolint:gosec // G204: args from shellCommand (user-configured password_command)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -1163,6 +1168,11 @@ func (l *onceCloseListener) Close() error {
 
 // handleTCPIPForward handles tcpip-forward global requests on the server side.
 func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.ServerConn, mu *sync.Mutex, listeners map[string]net.Listener, log *slog.Logger, parentBind string, options map[string]string, clientNodeName *atomic.Value) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("panic recovered in tcpip-forward handler", "panic", r)
+		}
+	}()
 	var fwdReq struct {
 		BindAddr string
 		BindPort uint32
@@ -1298,6 +1308,11 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 }
 
 func handleCancelTCPIPForward(req *ssh.Request, mu *sync.Mutex, listeners map[string]net.Listener, log *slog.Logger) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("panic recovered in cancel-tcpip-forward handler", "panic", r)
+		}
+	}()
 	var r struct {
 		BindAddr string
 		BindPort uint32
@@ -1322,6 +1337,11 @@ func handleCancelTCPIPForward(req *ssh.Request, mu *sync.Mutex, listeners map[st
 }
 
 func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[string]string, metrics *state.Metrics) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("panic recovered in direct-tcpip handler", "panic", r)
+		}
+	}()
 	var req struct {
 		DestAddr string
 		DestPort uint32

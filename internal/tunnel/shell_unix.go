@@ -114,6 +114,11 @@ func sessionEnv(shell, termName string) []string {
 
 // handleSession handles an SSH session channel, which includes PTY allocation and shell execution.
 func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, acceptEnv []string, motd []byte, log *slog.Logger) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("panic recovered in session handler", "panic", r)
+		}
+	}()
 	ch, reqs, err := newChan.Accept()
 	if err != nil {
 		log.Error("Accept session channel failed", "error", err)
