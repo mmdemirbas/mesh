@@ -7,9 +7,11 @@ import (
 	"encoding/binary"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"sync"
 	"syscall"
 
@@ -114,7 +116,7 @@ func sessionEnv(shell, termName string) []string {
 }
 
 // handleSession handles an SSH session channel, which includes PTY allocation and shell execution.
-func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, acceptEnv []string, motd []byte, sftpEnabled bool, sftpRoot string, log *slog.Logger) {
+func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, acceptEnv []string, motd []byte, sftpEnabled bool, sftpRoot string, allowAgentFwd bool, sshConn ssh.Conn, log *slog.Logger) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("panic recovered in session handler", "panic", r)
@@ -405,6 +407,72 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					_ = req.Reply(false, nil)
 				}
 			}
+
+		case "auth-agent-req@openssh.com":
+			if !allowAgentFwd {
+				log.Debug("Agent forwarding not allowed")
+				if req.WantReply {
+					_ = req.Reply(false, nil)
+				}
+				continue
+			}
+			// Create a temporary Unix socket for the forwarded agent.
+			tmpDir, err := os.MkdirTemp("", "mesh-agent-*")
+			if err != nil {
+				log.Warn("Failed to create agent socket dir", "error", err)
+				if req.WantReply {
+					_ = req.Reply(false, nil)
+				}
+				continue
+			}
+			sockPath := filepath.Join(tmpDir, "agent.sock")
+			ln, err := net.Listen("unix", sockPath)
+			if err != nil {
+				log.Warn("Failed to listen on agent socket", "error", err)
+				_ = os.RemoveAll(tmpDir)
+				if req.WantReply {
+					_ = req.Reply(false, nil)
+				}
+				continue
+			}
+			clientEnv = append(clientEnv, "SSH_AUTH_SOCK="+sockPath)
+			if req.WantReply {
+				_ = req.Reply(true, nil)
+			}
+			log.Info("Agent forwarding enabled", "socket", sockPath)
+
+			// Proxy connections from the socket to auth-agent channels.
+			go func() {
+				defer func() {
+					_ = ln.Close()
+					_ = os.RemoveAll(tmpDir)
+				}()
+				// Close listener when session context ends.
+				go func() {
+					<-ctx.Done()
+					_ = ln.Close()
+				}()
+				for {
+					conn, err := ln.Accept()
+					if err != nil {
+						return
+					}
+					go func() {
+						defer conn.Close()
+						agentCh, reqs, err := sshConn.OpenChannel("auth-agent@openssh.com", nil)
+						if err != nil {
+							log.Debug("Failed to open agent channel", "error", err)
+							return
+						}
+						defer agentCh.Close()
+						go ssh.DiscardRequests(reqs)
+						done := make(chan struct{}, 2)
+						go func() { _, _ = io.Copy(agentCh, conn); done <- struct{}{} }()
+						go func() { _, _ = io.Copy(conn, agentCh); done <- struct{}{} }()
+						<-done
+					}()
+				}
+			}()
 
 		case "subsystem":
 			var payload struct{ Name string }

@@ -62,7 +62,7 @@ func sessionEnv(shell, termName string) []string {
 // "PTY allocation request failed." The shell runs with plain pipes — this works
 // well for cmd.exe, PowerShell, and most CLI tools. Programs that query terminal
 // attributes (e.g., curses/ncurses) won't render correctly, but that's rare on Windows.
-func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, acceptEnv []string, motd []byte, sftpEnabled bool, sftpRoot string, log *slog.Logger) {
+func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, acceptEnv []string, motd []byte, sftpEnabled bool, sftpRoot string, allowAgentFwd bool, sshConn ssh.Conn, log *slog.Logger) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("panic recovered in session handler", "panic", r)

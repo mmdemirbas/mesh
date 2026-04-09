@@ -67,6 +67,10 @@ type Listener struct {
 	// Root directory for the SFTP subsystem. Defaults to the user's home directory.
 	// Paths outside this root are rejected.
 	SFTPRoot string `yaml:"sftp_root,omitempty"`
+	// Allow clients to request SSH agent forwarding. When true, the server
+	// creates a temporary Unix socket and sets SSH_AUTH_SOCK in the session
+	// environment. Unix-only; ignored on Windows.
+	AllowAgentForwarding bool `yaml:"allow_agent_forwarding,omitempty"`
 	// Additional overrides for the listener.
 	// Only a subset of OpenSSH config keys are parsed: Ciphers, MACs, KexAlgorithms, ConnectTimeout, IPQoS.
 	Options map[string]string `yaml:"options,omitempty"`

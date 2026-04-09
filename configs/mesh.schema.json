@@ -374,6 +374,15 @@ Warning: failed to load Go comments: lstat ./internal/config: no such file or di
         "motd": {
           "type": "string"
         },
+        "sftp_enabled": {
+          "type": "boolean"
+        },
+        "sftp_root": {
+          "type": "string"
+        },
+        "allow_agent_forwarding": {
+          "type": "boolean"
+        },
         "options": {
           "additionalProperties": {
             "type": "string"
