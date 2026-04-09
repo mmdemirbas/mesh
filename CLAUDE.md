@@ -162,3 +162,15 @@ Version injected via `-ldflags -X main.version=...` from git tags. `CGO_ENABLED=
 - Don't use `time.After` in select with `ctx.Done()` — use `time.NewTimer` with explicit `Stop()`
 - Don't call `signal.Notify` without a matching `defer signal.Stop` — leaks signal handlers
 - Don't add dependencies for things stdlib handles — exhaust stdlib first
+- Don't write `\n` in raw terminal mode — use `\r\n` (kernel `NL→CRNL` translation is disabled)
+- Don't call blocking functions (like `sftp.Serve()`) inline in channel request loops — use a goroutine
+- Don't assume compile-time constants are correct when the value they derive from becomes configurable — recompute at startup
+- Don't change a function signature without checking every call site AND every test helper that constructs the struct
+
+## Process Rules
+
+**Regression tests are mandatory.** Every bug fix must include a test that reproduces the exact failure scenario. Every new feature must include tests that pin its behavior. Tests are the only reliable way to prevent regressions when working on unrelated changes.
+
+**Post-batch review is mandatory.** After completing a batch of changes (features, refactors, or fixes), review all modified code for collateral damage before considering the work done. Focused work on one area routinely breaks adjacent code — this has happened repeatedly in this project. Use `feature-dev:code-reviewer` agents for independent review.
+
+**Commit after each logical change.** Don't accumulate changes across multiple features into one commit. Each feature, each bug fix, each test addition is its own commit. This makes bisecting and reverting possible.
