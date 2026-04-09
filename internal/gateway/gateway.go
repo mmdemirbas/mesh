@@ -172,7 +172,7 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 	if upstreamResp.StatusCode != http.StatusOK {
 		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, cfg.Mode)
 		writeAnthropicError(w, status, "upstream error")
-		log.Warn("Upstream error", "status", upstreamResp.StatusCode, "body", string(respBody), "elapsed", time.Since(start))
+		log.Warn("Upstream error", "status", upstreamResp.StatusCode, "body", truncateBody(respBody, 512), "elapsed", time.Since(start))
 		return
 	}
 
@@ -268,7 +268,7 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 	if upstreamResp.StatusCode != http.StatusOK {
 		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, cfg.Mode)
 		writeOpenAIError(w, status, "upstream error")
-		log.Warn("Upstream error", "status", upstreamResp.StatusCode, "body", string(respBody), "elapsed", time.Since(start))
+		log.Warn("Upstream error", "status", upstreamResp.StatusCode, "body", truncateBody(respBody, 512), "elapsed", time.Since(start))
 		return
 	}
 
@@ -301,5 +301,14 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 		"completion_tokens", oaiResp.Usage.CompletionTokens,
 		"elapsed", time.Since(start),
 	)
+}
+
+// truncateBody returns a string of at most maxLen bytes from body,
+// appending "...(truncated)" if truncation occurred.
+func truncateBody(body []byte, maxLen int) string {
+	if len(body) <= maxLen {
+		return string(body)
+	}
+	return string(body[:maxLen]) + "...(truncated)"
 }
 
