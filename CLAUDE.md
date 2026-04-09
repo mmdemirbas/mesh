@@ -73,7 +73,7 @@ Shell completions dynamically resolve node names from the config file.
 - **ANSI colors** — Package-level vars (`cReset`, `cBold`, etc.), disabled when `NO_COLOR` is set.
 - **Address sorting** — `compareAddr()` with `addrKey` pre-parsed into `uint64` pairs for zero-allocation IPv4 comparison.
 - **Log handler chain** — `humanLogHandler` wraps tint with package-level key classification maps (zero per-record allocations). Dashboard mode: `humanLogHandler → multiHandler → {tint(file), tint(ring)}`. Non-TTY mode: `humanLogHandler → multiHandler → {tint(stderr), tint(ring)}`. The ring (1000 lines) is always populated regardless of mode so `/api/logs` has data.
-- **Platform code** — Build-tagged files (`_unix.go`, `_windows.go`), never `runtime.GOOS` in core logic.
+- **Platform code** — Build-tagged files (`_unix.go`, `_windows.go`) preferred over `runtime.GOOS` switches. Remaining `runtime.GOOS` uses in clipsync clipboard I/O and CLI pid management are being migrated to build tags.
 - **Config validation** — `validate()` checks at load time. Auth requires at least one method. `known_hosts` or `StrictHostKeyChecking: no` required for SSH.
 - **Tests** — Table-driven. Real TCP/HTTP for integration tests (`httptest.NewServer`). Fuzz tests for parsers (`go test -fuzz`). No `time.Sleep` — use channels/atomic. Race detector always on.
 - **Error handling** — Wrap errors with context: `fmt.Errorf("connections[%d] %q: %w", i, name, err)`. Return errors from libraries; never `log.Fatal` outside `main()`.
@@ -143,7 +143,7 @@ task bench              # go test -bench=. -benchmem ./...
 task dist               # cross-compile darwin/linux/windows
 ```
 
-Version injected via `-ldflags -X main.version=...` from git tags. `CGO_ENABLED=0` for static binaries.
+Version injected via `-ldflags -X main.version=...` from git tags. `CGO_ENABLED=0` for Linux and Windows static binaries. Darwin omits `CGO_ENABLED` to auto-detect (1 when native toolchain is available).
 
 ## What NOT to Do
 
