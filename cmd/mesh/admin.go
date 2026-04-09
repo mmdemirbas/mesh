@@ -245,6 +245,16 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 		_ = json.NewEncoder(w).Encode(conflicts)
 	})
 
+	// GET /api/filesync/activity — recent filesync activities.
+	mux.HandleFunc("/api/filesync/activity", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		activities := filesync.GetActivities()
+		if activities == nil {
+			activities = []filesync.SyncActivity{}
+		}
+		_ = json.NewEncoder(w).Encode(activities)
+	})
+
 	// GET /api/clipsync/activity — recent clipboard sync activities.
 	mux.HandleFunc("/api/clipsync/activity", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

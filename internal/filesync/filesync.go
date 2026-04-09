@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -42,6 +43,19 @@ type ConflictInfo struct {
 	FolderID string `json:"folder_id"`
 	Path     string `json:"path"`
 }
+
+// SyncActivity records one completed sync cycle for the activity history.
+type SyncActivity struct {
+	Time      time.Time `json:"time"`
+	Folder    string    `json:"folder"`
+	Peer      string    `json:"peer"`
+	Direction string    `json:"direction"` // "download", "upload", "conflict", "delete", "idle"
+	Files     int       `json:"files"`
+	Bytes     int64     `json:"bytes"`
+	Error     string    `json:"error,omitempty"`
+}
+
+const activityHistorySize = 50
 
 // GetFolderStatuses returns status summaries for all active filesync folders.
 func GetFolderStatuses() []FolderStatus {
@@ -78,6 +92,30 @@ func GetConflicts() []ConflictInfo {
 	return result
 }
 
+// GetActivities returns the most recent sync activities across all active nodes.
+func GetActivities() []SyncActivity {
+	var result []SyncActivity
+	activeNodes.ForEach(func(n *Node) {
+		n.activityMu.RLock()
+		result = append(result, n.activities...)
+		n.activityMu.RUnlock()
+	})
+	sort.Slice(result, func(i, j int) bool { return result[i].Time.After(result[j].Time) })
+	if len(result) > activityHistorySize {
+		result = result[:activityHistorySize]
+	}
+	return result
+}
+
+func (n *Node) recordActivity(a SyncActivity) {
+	n.activityMu.Lock()
+	n.activities = append(n.activities, a)
+	if len(n.activities) > activityHistorySize {
+		n.activities = n.activities[len(n.activities)-activityHistorySize:]
+	}
+	n.activityMu.Unlock()
+}
+
 // folderState holds runtime state for a single synced folder.
 type folderState struct {
 	cfg     config.FolderCfg
@@ -103,6 +141,9 @@ type Node struct {
 
 	// scanTrigger signals the sync loop that a scan completed with changes.
 	scanTrigger chan struct{}
+
+	activityMu sync.RWMutex
+	activities []SyncActivity // ring buffer, most recent last
 }
 
 // Start initializes and runs the filesync node. Blocks until ctx is cancelled.
@@ -485,6 +526,10 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	downloads := countActions(actions, ActionDownload)
 	conflicts := countActions(actions, ActionConflict)
 	deletes := countActions(actions, ActionDelete)
+	var totalBytes int64
+	for _, a := range actions {
+		totalBytes += a.RemoteSize
+	}
 	slog.Info("sync actions", "folder", folderID, "peer", peerAddr, "downloads", downloads, "conflicts", conflicts, "deletes", deletes)
 
 	// Dry-run: log what would happen but don't modify files or update peer state.
@@ -584,6 +629,20 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		}
 	}
 	wg.Wait()
+
+	// Record sync activity.
+	direction := "download"
+	if fs.cfg.Direction == "send-only" {
+		direction = "upload"
+	}
+	n.recordActivity(SyncActivity{
+		Time:      time.Now(),
+		Folder:    folderID,
+		Peer:      peerAddr,
+		Direction: direction,
+		Files:     downloads + conflicts + deletes,
+		Bytes:     totalBytes,
+	})
 
 	// Update peer state.
 	fs.indexMu.Lock()

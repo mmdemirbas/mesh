@@ -313,6 +313,15 @@ tbody tr:last-child td { border-bottom: none; }
         </table>
       </div>
     </div>
+    <div class="card">
+      <div class="card-header"><span>Recent Activity</span></div>
+      <div class="card-body">
+        <table>
+          <thead><tr><th>Direction</th><th>Folder</th><th>Peer</th><th>Files</th><th>Size</th><th>Time</th></tr></thead>
+          <tbody id="fsa-body"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 
   <!-- Logs panel -->
@@ -413,7 +422,7 @@ tbody tr:last-child td { border-bottom: none; }
 
 <script>
 // --- State ---
-let state = {}, logs = [], folders = [], conflicts = [], clipActivities = [], metricsText = '';
+let state = {}, logs = [], folders = [], conflicts = [], clipActivities = [], fsActivities = [], metricsText = '';
 let compSort = {col:'type', asc:true};
 let fsSort = {col:'id', asc:true};
 let logLevel = 'all';
@@ -457,6 +466,7 @@ async function tick() {
     if (needFilesync) {
       fetches.push(fetch('/api/filesync/folders').then(r=>r.json()));
       fetches.push(fetch('/api/filesync/conflicts').then(r=>r.json()));
+      fetches.push(fetch('/api/filesync/activity').then(r=>r.json()));
     }
     if (needClipsync) fetches.push(fetch('/api/clipsync/activity').then(r=>r.json()));
 
@@ -464,7 +474,7 @@ async function tick() {
     let i = 0;
     state = results[i++]; metricsText = results[i++];
     if (needLogs) logs = results[i++];
-    if (needFilesync) { folders = results[i++]; conflicts = results[i++]; }
+    if (needFilesync) { folders = results[i++]; conflicts = results[i++]; fsActivities = results[i++]; }
     if (needClipsync) clipActivities = results[i++];
 
     // Accumulate chart history from metrics
@@ -514,6 +524,7 @@ function render() {
   renderClipsync();
   renderFilesync();
   renderConflicts();
+  renderFsActivity();
   renderLogs();
   renderMetrics();
   renderCharts();
@@ -637,6 +648,15 @@ function renderConflicts() {
   el.innerHTML = conflicts.map(c =>
     '<tr><td>'+x(c.folder_id)+'</td><td style="color:var(--red)">'+x(c.path)+'</td></tr>'
   ).join('');
+}
+
+function renderFsActivity() {
+  const el = document.getElementById('fsa-body');
+  if (!fsActivities.length) { el.innerHTML = '<tr><td colspan="6" style="color:var(--text-muted);padding:16px">No activity yet</td></tr>'; return; }
+  el.innerHTML = fsActivities.map(a => {
+    const badge = a.direction === 'download' ? 'badge-ok' : a.direction === 'upload' ? 'badge-warn' : '';
+    return '<tr><td><span class="badge '+badge+'">'+x(a.direction)+'</span></td><td>'+x(a.folder)+'</td><td>'+x(a.peer)+'</td><td>'+a.files+'</td><td>'+fmtBytes(a.bytes)+'</td><td>'+timeAgo(a.time)+'</td></tr>';
+  }).join('');
 }
 
 function colorLog(line) {
