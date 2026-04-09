@@ -112,6 +112,35 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 	return nil
 }
 
+// doUpstreamRequest sends body to upstreamURL via POST, applying Content-Type and
+// any extra headers, and returns the response body. The caller owns the response
+// status code; doUpstreamRequest only returns an error on transport failure or
+// a body read failure. extraHeaders is applied after Content-Type so callers can
+// override it if needed (though in practice they do not).
+func doUpstreamRequest(ctx context.Context, client *http.Client, upstreamURL string, body []byte, extraHeaders map[string]string, log *slog.Logger) (statusCode int, respBody []byte, err error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", upstreamURL, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, fmt.Errorf("cannot create upstream request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range extraHeaders {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Error("Upstream request failed", "error", err)
+		return 0, nil, fmt.Errorf("upstream request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err = io.ReadAll(io.LimitReader(resp.Body, maxUpstreamResponseSize))
+	if err != nil {
+		return 0, nil, fmt.Errorf("cannot read upstream response: %w", err)
+	}
+	return resp.StatusCode, respBody, nil
+}
+
 // handleA2O handles Direction A: client sends Anthropic, gateway forwards as OpenAI.
 func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *http.Client, apiKey string, log *slog.Logger) {
 	metrics := state.Global.GetMetrics("gateway", cfg.Name)
@@ -145,34 +174,22 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 
 	oaiBody, _ := json.Marshal(oaiReq)
 
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), "POST", cfg.Upstream, bytes.NewReader(oaiBody))
-	if err != nil {
-		writeAnthropicError(w, 500, "cannot create upstream request")
-		return
-	}
-	upstreamReq.Header.Set("Content-Type", "application/json")
+	headers := map[string]string{}
 	if apiKey != "" {
-		upstreamReq.Header.Set("Authorization", "Bearer "+apiKey)
+		headers["Authorization"] = "Bearer " + apiKey
 	}
 
-	upstreamResp, err := client.Do(upstreamReq)
+	statusCode, respBody, err := doUpstreamRequest(r.Context(), client, cfg.Upstream, oaiBody, headers, log)
 	if err != nil {
-		writeAnthropicError(w, 502, "upstream request failed")
+		writeAnthropicError(w, 502, err.Error())
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
 		return
 	}
-	defer func() { _ = upstreamResp.Body.Close() }()
 
-	respBody, err := io.ReadAll(io.LimitReader(upstreamResp.Body, maxUpstreamResponseSize))
-	if err != nil {
-		writeAnthropicError(w, 502, "cannot read upstream response")
-		return
-	}
-
-	if upstreamResp.StatusCode != http.StatusOK {
-		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, cfg.Mode)
+	if statusCode != http.StatusOK {
+		status := translateUpstreamErrorStatus(statusCode, cfg.Mode)
 		writeAnthropicError(w, status, "upstream error")
-		log.Warn("Upstream error", "status", upstreamResp.StatusCode, "body", truncateBody(respBody, 512), "elapsed", time.Since(start))
+		log.Warn("Upstream error", "status", statusCode, "body", truncateBody(respBody, 512), "elapsed", time.Since(start))
 		return
 	}
 
@@ -240,35 +257,23 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 
 	anthBody, _ := json.Marshal(anthReq)
 
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), "POST", cfg.Upstream, bytes.NewReader(anthBody))
-	if err != nil {
-		writeOpenAIError(w, 500, "cannot create upstream request")
-		return
-	}
-	upstreamReq.Header.Set("Content-Type", "application/json")
+	headers := map[string]string{}
 	if apiKey != "" {
-		upstreamReq.Header.Set("x-api-key", apiKey)
-		upstreamReq.Header.Set("anthropic-version", "2023-06-01")
+		headers["x-api-key"] = apiKey
+		headers["anthropic-version"] = "2023-06-01"
 	}
 
-	upstreamResp, err := client.Do(upstreamReq)
+	statusCode, respBody, err := doUpstreamRequest(r.Context(), client, cfg.Upstream, anthBody, headers, log)
 	if err != nil {
-		writeOpenAIError(w, 502, "upstream request failed")
+		writeOpenAIError(w, 502, err.Error())
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
 		return
 	}
-	defer func() { _ = upstreamResp.Body.Close() }()
 
-	respBody, err := io.ReadAll(io.LimitReader(upstreamResp.Body, maxUpstreamResponseSize))
-	if err != nil {
-		writeOpenAIError(w, 502, "cannot read upstream response")
-		return
-	}
-
-	if upstreamResp.StatusCode != http.StatusOK {
-		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, cfg.Mode)
+	if statusCode != http.StatusOK {
+		status := translateUpstreamErrorStatus(statusCode, cfg.Mode)
 		writeOpenAIError(w, status, "upstream error")
-		log.Warn("Upstream error", "status", upstreamResp.StatusCode, "body", truncateBody(respBody, 512), "elapsed", time.Since(start))
+		log.Warn("Upstream error", "status", statusCode, "body", truncateBody(respBody, 512), "elapsed", time.Since(start))
 		return
 	}
 
