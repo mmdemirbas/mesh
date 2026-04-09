@@ -1,6 +1,7 @@
 package state
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -348,4 +349,40 @@ func TestConcurrentAccess(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func BenchmarkSnapshot(b *testing.B) {
+	s := &State{components: make(map[string]Component)}
+	for i := range 100 {
+		id := fmt.Sprintf("comp-%d", i)
+		s.Update("server", id, Connected, "peer")
+	}
+	b.ResetTimer()
+	for b.Loop() {
+		_ = s.Snapshot()
+	}
+}
+
+func BenchmarkSnapshotFull(b *testing.B) {
+	s := &State{components: make(map[string]Component)}
+	for i := range 100 {
+		id := fmt.Sprintf("comp-%d", i)
+		s.Update("server", id, Connected, "peer")
+		m := s.GetMetrics("server", id)
+		m.BytesTx.Store(int64(i * 1000))
+	}
+	b.ResetTimer()
+	for b.Loop() {
+		_ = s.SnapshotFull()
+	}
+}
+
+func BenchmarkUpdateDelete(b *testing.B) {
+	s := &State{components: make(map[string]Component)}
+	b.ResetTimer()
+	for b.Loop() {
+		s.Update("bench", "id", Connecting, "")
+		s.Update("bench", "id", Connected, "target")
+		s.Delete("bench", "id")
+	}
 }

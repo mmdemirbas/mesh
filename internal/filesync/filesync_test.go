@@ -1783,3 +1783,46 @@ func testFolderCfg(dir, peerIP string) config.FolderCfg {
 		Peers:     []string{peerIP + ":7756"},
 	}
 }
+
+func BenchmarkScan(b *testing.B) {
+	dir := b.TempDir()
+	// Create 100 files to scan.
+	for i := range 100 {
+		path := filepath.Join(dir, fmt.Sprintf("file_%03d.txt", i))
+		_ = os.WriteFile(path, []byte(fmt.Sprintf("content %d", i)), 0600)
+	}
+	idx := newFileIndex()
+	ignore := &ignoreMatcher{}
+	b.ResetTimer()
+	for b.Loop() {
+		_, _, _ = idx.scan(dir, ignore)
+	}
+}
+
+func BenchmarkBlockSignatures(b *testing.B) {
+	dir := b.TempDir()
+	// 1 MB file = 8 blocks at 128 KB.
+	path := filepath.Join(dir, "bench.dat")
+	data := make([]byte, 1024*1024)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	_ = os.WriteFile(path, data, 0600)
+	b.SetBytes(int64(len(data)))
+	b.ResetTimer()
+	for b.Loop() {
+		_, _ = computeBlockSignatures(path, defaultBlockSize)
+	}
+}
+
+func BenchmarkHashFile(b *testing.B) {
+	dir := b.TempDir()
+	path := filepath.Join(dir, "bench.dat")
+	data := make([]byte, 256*1024) // 256 KB
+	_ = os.WriteFile(path, data, 0600)
+	b.SetBytes(int64(len(data)))
+	b.ResetTimer()
+	for b.Loop() {
+		_, _ = hashFile(path)
+	}
+}

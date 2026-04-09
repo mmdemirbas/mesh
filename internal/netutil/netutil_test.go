@@ -641,3 +641,19 @@ func (f *fakeConn) RemoteAddr() net.Addr             { return nil }
 func (f *fakeConn) SetDeadline(time.Time) error      { return nil }
 func (f *fakeConn) SetReadDeadline(time.Time) error  { return nil }
 func (f *fakeConn) SetWriteDeadline(time.Time) error { return nil }
+
+func BenchmarkBiCopy(b *testing.B) {
+	payload := bytes.Repeat([]byte("benchmark data for BiCopy throughput "), 1000) // ~37 KB
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for b.Loop() {
+		c1, c2 := net.Pipe()
+		go func() {
+			_, _ = c1.Write(payload)
+			_ = c1.Close()
+		}()
+		buf := make([]byte, len(payload))
+		_, _ = io.ReadFull(c2, buf)
+		_ = c2.Close()
+	}
+}
