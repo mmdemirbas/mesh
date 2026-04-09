@@ -304,39 +304,67 @@ func TestSizes_AfterDelete(t *testing.T) {
 	}
 }
 
-func TestEvictStale_RemovesOldEntries(t *testing.T) {
+func TestEvictStale_RemovesOldTransientEntries(t *testing.T) {
 	t.Parallel()
 	s := newState()
-	s.Update("proxy", "old", Listening, "")
-	s.Update("proxy", "fresh", Listening, "")
+	// Use a transient state (Retrying) — these are subject to eviction.
+	s.Update("connection", "old", Retrying, "error")
+	s.Update("connection", "fresh", Retrying, "error")
 
 	// Manually backdate the "old" component.
 	s.mu.Lock()
-	comp := s.components["proxy:old"]
+	comp := s.components["connection:old"]
 	comp.LastUpdated = time.Now().Add(-2 * componentTTL)
-	s.components["proxy:old"] = comp
+	s.components["connection:old"] = comp
 	s.mu.Unlock()
 
 	// Also create metrics for both.
-	s.GetMetrics("proxy", "old")
-	s.GetMetrics("proxy", "fresh")
+	s.GetMetrics("connection", "old")
+	s.GetMetrics("connection", "fresh")
 
 	s.evictStale(time.Now())
 
 	snap := s.Snapshot()
-	if _, ok := snap["proxy:old"]; ok {
-		t.Error("stale component should have been evicted")
+	if _, ok := snap["connection:old"]; ok {
+		t.Error("stale transient component should have been evicted")
 	}
-	if _, ok := snap["proxy:fresh"]; !ok {
+	if _, ok := snap["connection:fresh"]; !ok {
 		t.Error("fresh component should remain")
 	}
 
 	mSnap := s.SnapshotMetrics()
-	if _, ok := mSnap["proxy:old"]; ok {
+	if _, ok := mSnap["connection:old"]; ok {
 		t.Error("metrics for stale component should have been evicted")
 	}
-	if _, ok := mSnap["proxy:fresh"]; !ok {
+	if _, ok := mSnap["connection:fresh"]; !ok {
 		t.Error("metrics for fresh component should remain")
+	}
+}
+
+func TestEvictStale_SkipsStableStates(t *testing.T) {
+	t.Parallel()
+	s := newState()
+	// Listening and Connected are stable — should never be evicted.
+	s.Update("server", "listener", Listening, "")
+	s.Update("connection", "conn", Connected, "target")
+
+	// Backdate both beyond TTL.
+	s.mu.Lock()
+	for _, key := range []string{"server:listener", "connection:conn"} {
+		comp := s.components[key]
+		comp.LastUpdated = time.Now().Add(-2 * componentTTL)
+		s.components[key] = comp
+	}
+	s.mu.Unlock()
+
+	s.evictStale(time.Now())
+
+	snap := s.Snapshot()
+	if _, ok := snap["server:listener"]; !ok {
+		t.Error("Listening component should NOT be evicted regardless of age")
+	}
+	if _, ok := snap["connection:conn"]; !ok {
+		t.Error("Connected component should NOT be evicted regardless of age")
 	}
 }
 

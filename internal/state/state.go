@@ -217,12 +217,20 @@ func (s *State) StartEviction(ctx context.Context) {
 }
 
 // evictStale removes components not updated within componentTTL and their orphaned metrics.
+// Components in stable states (Listening, Connected) are exempt — they represent
+// long-running goroutines that update state once at startup and then serve
+// indefinitely. Only transient states (Starting, Connecting, Retrying, Failed)
+// are subject to eviction, since those indicate a component that likely crashed
+// or leaked without proper cleanup.
 func (s *State) evictStale(now time.Time) {
 	cutoff := now.Add(-componentTTL)
 
 	s.mu.Lock()
 	var evicted []string
 	for key, comp := range s.components {
+		if comp.Status == Listening || comp.Status == Connected {
+			continue // stable long-lived components are never evicted
+		}
 		if !comp.LastUpdated.IsZero() && comp.LastUpdated.Before(cutoff) {
 			delete(s.components, key)
 			evicted = append(evicted, key)
