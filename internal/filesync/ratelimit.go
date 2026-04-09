@@ -27,7 +27,9 @@ func newRateLimitedReader(ctx context.Context, r io.Reader, limiter *rate.Limite
 func (r *rateLimitedReader) Read(p []byte) (int, error) {
 	n, err := r.r.Read(p)
 	if n > 0 {
-		_ = r.limiter.WaitN(r.ctx, n)
+		if waitErr := r.limiter.WaitN(r.ctx, n); waitErr != nil {
+			return n, waitErr
+		}
 	}
 	return n, err
 }

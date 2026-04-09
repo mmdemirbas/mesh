@@ -140,10 +140,12 @@ type FullSnapshot struct {
 	Metrics    map[string]*Metrics
 }
 
-// SnapshotFull returns components and metrics taken under the same lock to
-// avoid cardinality divergence between the two maps. Callers that need
-// additional data from other packages (e.g. auth failures from tunnel)
-// should snapshot those separately immediately after.
+// SnapshotFull returns components and metrics together. Components are read
+// under mu.RLock; metrics use a separate sync.Map, so the two snapshots are
+// NOT strictly atomic — a brief divergence is possible. This is acceptable
+// for display and Prometheus export. Callers that need additional data from
+// other packages (e.g. auth failures from tunnel) should snapshot those
+// separately immediately after.
 func (s *State) SnapshotFull() FullSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
