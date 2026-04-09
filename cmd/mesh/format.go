@@ -4,14 +4,67 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
-var ansiStripRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+// visibleLen returns the terminal display width of s, skipping ANSI CSI escape
+// sequences and counting emoji (U+1F000+) as double-width.
+func visibleLen(s string) int {
+	n := 0
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+			// Try to find CSI final byte (0x40-0x7E).
+			j := i + 2
+			for j < len(s) && (s[j] < '@' || s[j] > '~') {
+				j++
+			}
+			if j < len(s) {
+				i = j + 1 // complete CSI: skip entirely
+				continue
+			}
+			// Incomplete CSI: treat ESC as a regular character.
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r >= 0x1F000 {
+			n += 2
+		} else {
+			n++
+		}
+		i += size
+	}
+	return n
+}
+
+// stripANSI removes ANSI CSI escape sequences from s.
+// Incomplete sequences (no final byte before end of string) are preserved.
+func stripANSI(s string) string {
+	if strings.IndexByte(s, '\x1b') < 0 {
+		return s // fast path: no escape sequences
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+			// Try to find CSI final byte (0x40-0x7E).
+			j := i + 2
+			for j < len(s) && (s[j] < '@' || s[j] > '~') {
+				j++
+			}
+			if j < len(s) {
+				i = j + 1 // complete CSI: strip
+				continue
+			}
+			// Incomplete CSI: preserve raw bytes (fall through).
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
 
 // ANSI color codes. Disabled when NO_COLOR env var is set (https://no-color.org/).
 var (

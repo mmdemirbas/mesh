@@ -17,45 +17,71 @@ import (
 )
 
 // logRing is a fixed-size ring buffer that captures recent log lines for the dashboard.
+// Both raw (ANSI-colored) and pre-stripped plain lines are stored to avoid repeated
+// regex/scan work when the admin API serves plain text.
 type logRing struct {
 	mu    sync.Mutex
-	lines []string
+	raw   []string
+	plain []string
 	size  int
 	pos   int
 	full  bool
 }
 
 func newLogRing(size int) *logRing {
-	return &logRing{lines: make([]string, size), size: size}
+	return &logRing{raw: make([]string, size), plain: make([]string, size), size: size}
 }
 
 func (r *logRing) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// Split into lines; log handlers write one record at a time but may include a trailing newline.
-	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
-		if line == "" {
-			continue
-		}
-		r.lines[r.pos] = line
-		r.pos = (r.pos + 1) % r.size
-		if r.pos == 0 {
-			r.full = true
+	n := len(p)
+	// Trim trailing newlines.
+	for len(p) > 0 && p[len(p)-1] == '\n' {
+		p = p[:len(p)-1]
+	}
+	// Scan for line boundaries directly — avoids string(p) + strings.Split allocations.
+	start := 0
+	for i := 0; i <= len(p); i++ {
+		if i == len(p) || p[i] == '\n' {
+			if i > start {
+				line := string(p[start:i])
+				r.raw[r.pos] = line
+				r.plain[r.pos] = stripANSI(line)
+				r.pos = (r.pos + 1) % r.size
+				if r.pos == 0 {
+					r.full = true
+				}
+			}
+			start = i + 1
 		}
 	}
-	return len(p), nil
+	return n, nil
 }
 
-// Lines returns the buffered log lines in chronological order.
+// Lines returns the buffered log lines (with ANSI codes) in chronological order.
 func (r *logRing) Lines() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !r.full {
-		return append([]string{}, r.lines[:r.pos]...)
+		return append([]string{}, r.raw[:r.pos]...)
 	}
 	out := make([]string, 0, r.size)
-	out = append(out, r.lines[r.pos:]...)
-	out = append(out, r.lines[:r.pos]...)
+	out = append(out, r.raw[r.pos:]...)
+	out = append(out, r.raw[:r.pos]...)
+	return out
+}
+
+// PlainLines returns the buffered log lines (ANSI stripped) in chronological order.
+func (r *logRing) PlainLines() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.full {
+		return append([]string{}, r.plain[:r.pos]...)
+	}
+	out := make([]string, 0, r.size)
+	out = append(out, r.plain[r.pos:]...)
+	out = append(out, r.plain[:r.pos]...)
 	return out
 }
 
@@ -74,6 +100,7 @@ type dashboardModel struct {
 	headerHeight int
 	ready        bool
 	quitting     bool
+	lastContent  string
 }
 
 type tickMsg time.Time
@@ -115,13 +142,19 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.Width = msg.Width
 			m.viewport.Height = vpHeight
 		}
-		m.viewport.SetContent(m.buildContent())
+		content := m.buildContent()
+		m.lastContent = content
+		m.viewport.SetContent(content)
 	case tickMsg:
 		if m.ready {
-			atBottom := m.viewport.AtBottom()
-			m.viewport.SetContent(m.buildContent())
-			if atBottom {
-				m.viewport.GotoBottom()
+			content := m.buildContent()
+			if content != m.lastContent {
+				m.lastContent = content
+				atBottom := m.viewport.AtBottom()
+				m.viewport.SetContent(content)
+				if atBottom {
+					m.viewport.GotoBottom()
+				}
 			}
 		}
 		cmd = tickCmd()
@@ -262,20 +295,6 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		return indicator, color + "[" + msg + "]" + cReset, comp
 	}
 
-	visibleLen := func(str string) int {
-		stripped := ansiStripRe.ReplaceAllString(str, "")
-		n := 0
-		for _, r := range stripped {
-			// Emoji indicators (🟢🟡🔴⚪) are 2-column-wide in terminals
-			if r >= 0x1F000 {
-				n += 2
-			} else {
-				n++
-			}
-		}
-		return n
-	}
-
 	colorAddr := func(addr string) string {
 		if addr == "" {
 			return ""
@@ -328,7 +347,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 	for _, m := range metricsMap {
 		grandTotal.add(readMetrics(m))
 	}
-	titleBase := fmt.Sprintf("%s⚙ Configuration: %s%s%s", cBold, cCyan, nodeName, cReset)
+	titleBase := cBold + "⚙ Configuration: " + cCyan + nodeName + cReset
 
 	// Pre-scan: find the widest bind address among protocol-tagged rows for alignment.
 	maxProtoAddr := 0
@@ -615,11 +634,11 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			var connAgg metricsSnapshot
 			for _, fset := range c.Forwards {
 				for _, fwd := range fset.Local {
-					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
+					compID := c.Name + " [" + fset.Name + "] " + fwd.Bind
 					connAgg.add(readMetrics(metricsMap["forward:"+compID]))
 				}
 				for _, fwd := range fset.Remote {
-					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
+					compID := c.Name + " [" + fset.Name + "] " + fwd.Bind
 					connAgg.add(readMetrics(metricsMap["forward:"+compID]))
 				}
 			}
@@ -664,11 +683,11 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 				// Aggregate forward-set metrics from child forwards
 				var fsetAgg metricsSnapshot
 				for _, fwd := range fset.Local {
-					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
+					compID := c.Name + " [" + fset.Name + "] " + fwd.Bind
 					fsetAgg.add(readMetrics(metricsMap["forward:"+compID]))
 				}
 				for _, fwd := range fset.Remote {
-					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
+					compID := c.Name + " [" + fset.Name + "] " + fwd.Bind
 					fsetAgg.add(readMetrics(metricsMap["forward:"+compID]))
 				}
 				addRow("", indicator, sectionTitle(fset.Name), "", "", st, "", fsetAgg)
@@ -710,7 +729,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 
 				indent := "   "
 				for _, fwd := range fset.Local {
-					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
+					compID := c.Name + " [" + fset.Name + "] " + fwd.Bind
 					_, _, fwdComp := getComponentInfo("forward", compID)
 					snap := readMetrics(metricsMap["forward:"+compID])
 					lStr := colorAddr(fwd.Bind)
@@ -729,7 +748,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 					}
 				}
 				for _, fwd := range fset.Remote {
-					compID := fmt.Sprintf("%s [%s] %s", c.Name, fset.Name, fwd.Bind)
+					compID := c.Name + " [" + fset.Name + "] " + fwd.Bind
 					snap := readMetrics(metricsMap["forward:"+compID])
 					if fwd.Type == "forward" {
 						addRow(indent, "", colorAddr(fwd.Target), arrowLeft, colorAddr(fwd.Bind), "", "", snap)

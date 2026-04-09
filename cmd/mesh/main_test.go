@@ -264,6 +264,97 @@ func TestLogRing_LinesIsACopy(t *testing.T) {
 	}
 }
 
+func TestLogRing_PlainLines(t *testing.T) {
+	r := newLogRing(3)
+
+	// Write lines with ANSI color codes.
+	_, _ = r.Write([]byte("\033[31mred\033[0m\n"))
+	_, _ = r.Write([]byte("plain line\n"))
+	_, _ = r.Write([]byte("\033[1m\033[36mbold cyan\033[0m\n"))
+
+	raw := r.Lines()
+	plain := r.PlainLines()
+
+	if len(raw) != 3 || len(plain) != 3 {
+		t.Fatalf("got %d raw, %d plain, want 3 each", len(raw), len(plain))
+	}
+
+	// Raw lines retain ANSI codes.
+	if !strings.Contains(raw[0], "\033[31m") {
+		t.Errorf("raw[0] should contain ANSI codes, got %q", raw[0])
+	}
+
+	// Plain lines have ANSI codes stripped.
+	wantPlain := []string{"red", "plain line", "bold cyan"}
+	for i, want := range wantPlain {
+		if plain[i] != want {
+			t.Errorf("plain[%d] = %q, want %q", i, plain[i], want)
+		}
+	}
+
+	// Verify wrap: write enough to overflow and check both arrays stay in sync.
+	_, _ = r.Write([]byte("\033[33myellow\033[0m\n"))
+	raw = r.Lines()
+	plain = r.PlainLines()
+	if len(raw) != 3 || len(plain) != 3 {
+		t.Fatalf("after wrap: got %d raw, %d plain, want 3 each", len(raw), len(plain))
+	}
+	if plain[0] != "plain line" || plain[1] != "bold cyan" || plain[2] != "yellow" {
+		t.Errorf("after wrap: plain = %v, want [plain line, bold cyan, yellow]", plain)
+	}
+}
+
+func TestStripANSI(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"no escapes", "hello world", "hello world"},
+		{"empty string", "", ""},
+		{"color code", "\033[31mred\033[0m", "red"},
+		{"bold + color", "\033[1m\033[36mbold\033[0m", "bold"},
+		{"blink", "\033[5mblink\033[0m", "blink"},
+		{"multiple codes", "\033[31mA\033[32mB\033[0mC", "ABC"},
+		{"unicode preserved", "\033[31m🟢 ok\033[0m", "🟢 ok"},
+		{"cursor movement", "\033[2Jcleared", "cleared"},
+		{"no final byte", "\033[", "\033["},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripANSI(tt.input)
+			if got != tt.want {
+				t.Errorf("stripANSI(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestVisibleLen(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  int
+	}{
+		{"plain ASCII", "hello", 5},
+		{"empty", "", 0},
+		{"with color", "\033[31mred\033[0m", 3},
+		{"emoji double-width", "🟢", 2},
+		{"emoji with color", "\033[32m🟢\033[0m ok", 5}, // 2(emoji) + 1(space) + 1(o) + 1(k)
+		{"multiple escapes", "\033[1m\033[36mAB\033[0m", 2},
+		{"no content", "\033[31m\033[0m", 0},
+		{"multibyte non-emoji", "café", 4}, // 'é' is 2 bytes but 1 column
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := visibleLen(tt.input)
+			if got != tt.want {
+				t.Errorf("visibleLen(%q) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRenderStatus_Empty(t *testing.T) {
 	cfg := &config.Config{}
 	output, _ := renderStatus(cfg, nil, nil, "testnode")
@@ -1179,11 +1270,6 @@ func TestRenderStatus_DynamicPortNodeName(t *testing.T) {
 	if !strings.Contains(output, "root@") {
 		t.Error("dynamic port should show SSH client address")
 	}
-}
-
-// stripANSI removes ANSI escape sequences from a string.
-func stripANSI(s string) string {
-	return ansiStripRe.ReplaceAllString(s, "")
 }
 
 // findColumn returns the visual column of the first occurrence of substr in
