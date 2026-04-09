@@ -37,7 +37,7 @@ func TestGatewayCfg_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			cfg := valid
 			tt.modify(&cfg)
 			err := cfg.Validate()
@@ -90,4 +90,3 @@ func TestGatewayCfg_TimeoutDuration(t *testing.T) {
 		t.Errorf("TimeoutDuration() = %f, want 30", got)
 	}
 }
-

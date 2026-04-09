@@ -448,4 +448,3 @@ func mapAnthropicStopReason(reason string) string {
 func nowUnix() int64 {
 	return time.Now().Unix()
 }
-

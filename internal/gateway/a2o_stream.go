@@ -125,8 +125,8 @@ type a2oStreamState struct {
 	usage       AnthropicUsage
 	stopReason  string
 	hasBlock    bool
-	jsonBuf     bytes.Buffer    // reused across emit calls to avoid per-chunk allocation
-	jsonEnc     *json.Encoder   // writes to jsonBuf, reuses internal encode state
+	jsonBuf     bytes.Buffer  // reused across emit calls to avoid per-chunk allocation
+	jsonEnc     *json.Encoder // writes to jsonBuf, reuses internal encode state
 }
 
 func (s *a2oStreamState) processChunk(chunk *ChatCompletionChunk) {
@@ -203,9 +203,9 @@ type a2oBlockDef struct {
 }
 
 type a2oBlockDelta struct {
-	Type  string         `json:"type"`
-	Index int            `json:"index"`
-	Delta a2oDeltaInner  `json:"delta"`
+	Type  string        `json:"type"`
+	Index int           `json:"index"`
+	Delta a2oDeltaInner `json:"delta"`
 }
 
 type a2oDeltaInner struct {
@@ -220,8 +220,8 @@ type a2oBlockStop struct {
 }
 
 type a2oMsgStart struct {
-	Type    string     `json:"type"`
-	Message a2oMsgDef  `json:"message"`
+	Type    string    `json:"type"`
+	Message a2oMsgDef `json:"message"`
 }
 
 type a2oMsgDef struct {

@@ -14,7 +14,7 @@ func TestEnvMatches(t *testing.T) {
 		{"TERM", true},
 		{"LC_ALL", true},
 		{"LC_CTYPE", true},
-		{"LC_", true},   // matches "LC_*" prefix
+		{"LC_", true}, // matches "LC_*" prefix
 		{"HOME", false},
 		{"LANGUAGE", false}, // not a prefix of "LANG"
 		{"", false},
@@ -22,7 +22,7 @@ func TestEnvMatches(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			if got := envMatches(tt.name, allow); got != tt.want {
 				t.Errorf("envMatches(%q) = %v, want %v", tt.name, got, tt.want)
 			}

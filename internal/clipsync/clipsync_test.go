@@ -30,29 +30,6 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestContains(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		slice []string
-		item  string
-		want  bool
-	}{
-		{[]string{"a", "b", "c"}, "b", true},
-		{[]string{"a", "b", "c"}, "d", false},
-		{[]string{}, "a", false},
-		{nil, "a", false},
-		{[]string{"all"}, "all", true},
-		{[]string{"none"}, "all", false},
-	}
-
-	for _, tt := range tests {
-		got := contains(tt.slice, tt.item)
-		if got != tt.want {
-			t.Errorf("contains(%v, %q) = %v, want %v", tt.slice, tt.item, got, tt.want)
-		}
-	}
-}
-
 func TestContainsIP(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -73,7 +50,7 @@ func TestContainsIP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			got := containsIP(tt.slice, tt.host)
 			if got != tt.want {
 				t.Errorf("containsIP(%v, %q) = %v, want %v", tt.slice, tt.host, got, tt.want)
@@ -215,7 +192,7 @@ func TestExtractCFHTMLFragment(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			got := extractCFHTMLFragment(tt.input)
 			if got != tt.want {
 				t.Errorf("extractCFHTMLFragment() = %q, want %q", got, tt.want)
@@ -280,7 +257,7 @@ func TestParsePathList(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			got := parsePathList(tt.input)
 			if len(got) != len(tt.want) {
 				t.Fatalf("len = %d, want %d; got %v", len(got), len(tt.want), got)
@@ -312,7 +289,7 @@ func TestParseURIList(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			got := parseURIList(tt.input)
 			if len(got) != len(tt.want) {
 				t.Fatalf("len = %d, want %d; got %v", len(got), len(tt.want), got)
@@ -1224,7 +1201,7 @@ func TestRegisterPeer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			n := &Node{
 				config:     config.ClipsyncCfg{Bind: "0.0.0.0:7755"},
 				id:         "test-self",

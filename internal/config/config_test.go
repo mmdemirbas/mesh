@@ -34,7 +34,7 @@ func TestGetOption(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.key, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			got := GetOption(opts, tt.key)
 			if got != tt.want {
 				t.Errorf("GetOption(%q) = %q, want %q", tt.key, got, tt.want)
@@ -46,8 +46,8 @@ func TestGetOption(t *testing.T) {
 func TestNormalizeOptions(t *testing.T) {
 	t.Parallel()
 	opts := map[string]string{
-		"Ciphers":     "aes256-ctr",
-		"IPQoS":       "lowdelay",
+		"Ciphers":      "aes256-ctr",
+		"IPQoS":        "lowdelay",
 		"GatewayPorts": "yes",
 	}
 	normalizeOptions(opts)
@@ -88,7 +88,7 @@ func TestNormalizeBind(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			got := normalizeBind(tt.input)
 			if got != tt.want {
 				t.Errorf("normalizeBind(%q) = %q, want %q", tt.input, got, tt.want)
@@ -161,7 +161,7 @@ func TestValidateForwards(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			err := validateForwards(tt.fwds)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateForwards() error = %v, wantErr %v", err, tt.wantErr)
@@ -198,7 +198,7 @@ func TestValidateIPQoS(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			err := validateIPQoS(tt.input)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateIPQoS(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
@@ -275,7 +275,7 @@ func TestCheckDuplicateBinds(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			err := tt.cfg.checkDuplicateBinds()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("checkDuplicateBinds() error = %v, wantErr %v", err, tt.wantErr)
@@ -379,7 +379,7 @@ func TestExpandHome(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			got := expandHome(tt.input)
 			if got != tt.want {
 				t.Errorf("expandHome(%q) = %q, want %q", tt.input, got, tt.want)
@@ -777,7 +777,7 @@ func TestValidate_DuplicateNames(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			err := tt.cfg.Validate()
 			if tt.wantErr == "" {
 				if err != nil {
@@ -1076,7 +1076,7 @@ func TestFilesyncResolve(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			err := tt.cfg.Resolve()
 			if tt.wantErr != "" {
 				if err == nil {
@@ -1194,7 +1194,7 @@ func TestParseBandwidth(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			got, err := ParseBandwidth(tt.input)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ParseBandwidth(%q) error=%v, wantErr=%v", tt.input, err, tt.wantErr)

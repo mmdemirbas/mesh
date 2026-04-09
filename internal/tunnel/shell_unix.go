@@ -133,8 +133,8 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 		cmd       *exec.Cmd
 		cmdStart  sync.Once
 		closeOnce sync.Once
-		termName  = "xterm"    // default; updated by pty-req
-		clientEnv []string     // env vars accepted from client via "env" requests
+		termName  = "xterm" // default; updated by pty-req
+		clientEnv []string  // env vars accepted from client via "env" requests
 	)
 	closeCh := func() { closeOnce.Do(func() { _ = ch.Close() }) }
 	defer closeCh()

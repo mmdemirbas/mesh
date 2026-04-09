@@ -33,7 +33,7 @@ func TestSSHSignalNumber(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			got, ok := sshSignalNumber(tt.name)
 			if ok != tt.ok {
 				t.Errorf("sshSignalNumber(%q) ok = %v, want %v", tt.name, ok, tt.ok)

@@ -316,4 +316,3 @@ func truncateBody(body []byte, maxLen int) string {
 	}
 	return string(body[:maxLen]) + "...(truncated)"
 }
-

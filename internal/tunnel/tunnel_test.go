@@ -48,7 +48,7 @@ func TestParseIPQoS(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			inter, nonInter, err := ParseIPQoS(tt.input)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ParseIPQoS(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
@@ -84,7 +84,7 @@ func TestParseTarget(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			user, host := parseTarget(tt.input)
 			if user != tt.wantUser {
 				t.Errorf("user = %q, want %q", user, tt.wantUser)
@@ -131,7 +131,7 @@ func TestMergeOptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			got := mergeOptions(tt.parent, tt.child)
 			if len(got) != len(tt.want) {
 				t.Fatalf("len = %d, want %d; got %v", len(got), len(tt.want), got)
@@ -213,7 +213,7 @@ func TestApplySSHConfigOptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			cfg := &ssh.Config{}
 			applySSHConfigOptions(cfg, tt.options)
 			tt.check(t, cfg)
@@ -240,7 +240,7 @@ func TestIsHardConnError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			got := isHardConnError(tt.err)
 			if got != tt.want {
 				t.Errorf("isHardConnError(%v) = %v, want %v", tt.err, got, tt.want)
@@ -299,7 +299,7 @@ func TestParseByteSize(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			got := parseByteSize(tt.input)
 			if got != tt.want {
 				t.Errorf("parseByteSize(%q) = %d, want %d", tt.input, got, tt.want)
@@ -504,7 +504,7 @@ func TestEvictOldLimiters(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			lims := make(map[string]*limiterEntry)
 			for ip, age := range tt.ages {
 				lims[ip] = &limiterEntry{lastSeen: now.Add(-age)}
@@ -580,7 +580,7 @@ func TestMatchesAnyAuthorizedKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			got := matchesAnyAuthorizedKey(tt.incoming, tt.authorized)
 			if got != tt.want {
 				t.Errorf("matchesAnyAuthorizedKey = %v, want %v", got, tt.want)
@@ -672,12 +672,14 @@ func (s *stubSSHConn) Close() error {
 	s.once.Do(func() { close(s.closed) })
 	return nil
 }
-func (s *stubSSHConn) RemoteAddr() net.Addr                                               { return &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 22} }
-func (s *stubSSHConn) LocalAddr() net.Addr                                                { return &net.TCPAddr{} }
-func (s *stubSSHConn) User() string                                                       { return "" }
-func (s *stubSSHConn) SessionID() []byte                                                  { return nil }
-func (s *stubSSHConn) ClientVersion() []byte                                              { return nil }
-func (s *stubSSHConn) ServerVersion() []byte                                              { return nil }
+func (s *stubSSHConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 22}
+}
+func (s *stubSSHConn) LocalAddr() net.Addr   { return &net.TCPAddr{} }
+func (s *stubSSHConn) User() string          { return "" }
+func (s *stubSSHConn) SessionID() []byte     { return nil }
+func (s *stubSSHConn) ClientVersion() []byte { return nil }
+func (s *stubSSHConn) ServerVersion() []byte { return nil }
 func (s *stubSSHConn) OpenChannel(string, []byte) (ssh.Channel, <-chan *ssh.Request, error) {
 	return nil, nil, errors.New("not implemented")
 }
@@ -1427,11 +1429,9 @@ func TestPermitOpenPolicy(t *testing.T) {
 		{"none overrides others", map[string]string{"permitopen": "none,10.0.0.1:22"}, "10.0.0.1", 22, false},
 	}
 
-
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			pol := parsePermitOpen(tt.options)
 			got := pol.allows(tt.host, tt.port)
 			if got != tt.want {

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,8 +24,8 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	config "github.com/mmdemirbas/mesh/internal/config"
 	pb "github.com/mmdemirbas/mesh/internal/clipsync/proto"
+	config "github.com/mmdemirbas/mesh/internal/config"
 	"github.com/mmdemirbas/mesh/internal/gziputil"
 	"github.com/mmdemirbas/mesh/internal/nodeutil"
 	"github.com/mmdemirbas/mesh/internal/state"
@@ -51,10 +52,6 @@ const (
 	// maxClipboardPayload caps the total size of all clipboard formats read locally.
 	// Prevents OOM when a large image or multiple large items are on the clipboard.
 	maxClipboardPayload = 100 * 1024 * 1024 // 100 MB
-
-	// defaultMaxRequestBodySize caps the /sync endpoint body.
-	// Allows up to ~20 files at defaultMaxSyncFileSize with base64 overhead (~33%).
-	defaultMaxRequestBodySize = defaultMaxSyncFileSize * 20 * 4 / 3
 
 	// maxPeers limits the number of dynamically discovered peers to prevent
 	// OOM from an attacker flooding unique source addresses via UDP.
@@ -96,10 +93,10 @@ func GetActivities() []ClipActivity {
 }
 
 type Node struct {
-	ctx         context.Context // parent context; cancelled on shutdown
-	config      config.ClipsyncCfg
-	id          string
-	port        int
+	ctx            context.Context // parent context; cancelled on shutdown
+	config         config.ClipsyncCfg
+	id             string
+	port           int
 	maxFileSize    int64 // per-file size limit for file copy; from config or defaultMaxSyncFileSize
 	maxReqBodySize int64 // /sync endpoint body limit; scales with maxFileSize
 
@@ -169,11 +166,11 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 		port:           port,
 		maxFileSize:    maxFileSize,
 		maxReqBodySize: maxFileSize * 20 * 4 / 3,
-		peers:       make(map[string]time.Time),
-		peerHashes:  make(map[string]string),
-		httpClient:  &http.Client{Timeout: 2 * time.Minute},
-		filesDir:    filesDir,
-		notifyCh:    make(chan struct{}, 1),
+		peers:          make(map[string]time.Time),
+		peerHashes:     make(map[string]string),
+		httpClient:     &http.Client{Timeout: 2 * time.Minute},
+		filesDir:       filesDir,
+		notifyCh:       make(chan struct{}, 1),
 	}
 
 	n.purgeFilesDir() // remove any files left over from a previous session
@@ -298,12 +295,7 @@ func (n *Node) canReceiveFrom(remoteAddr string) bool {
 
 // groupOverlaps returns true if the remote group matches any of our configured groups.
 func (n *Node) groupOverlaps(remoteGroup string) bool {
-	for _, g := range n.config.LANDiscoveryGroup {
-		if g == remoteGroup {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(n.config.LANDiscoveryGroup, remoteGroup)
 }
 
 // primaryGroup returns the first configured LAN discovery group, or empty string.
@@ -320,7 +312,7 @@ func containsIP(slice []string, host string) bool {
 	hostIP := net.ParseIP(host)
 	if hostIP == nil {
 		// Not a valid IP, fall back to string match
-		return contains(slice, host)
+		return slices.Contains(slice, host)
 	}
 	for _, s := range slice {
 		entryIP := net.ParseIP(s)
@@ -944,15 +936,6 @@ func hashFormats(formats []*pb.ClipFormat) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
-}
-
 // ─── OS Clipboard CLI Wrappers ───────────────────────────────────────────────
 
 // utf8Env returns a cached copy of the process environment with LC_ALL
@@ -1159,7 +1142,7 @@ func buildCFHTML(fragment string) string {
 // Helper to parse newline-separated paths
 func parsePathList(s string) []string {
 	var out []string
-	for _, line := range strings.Split(strings.TrimSpace(s), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(s), "\n") {
 		if p := strings.TrimSpace(line); p != "" {
 			out = append(out, p)
 		}
@@ -1170,13 +1153,13 @@ func parsePathList(s string) []string {
 // Helper to parse text/uri-list
 func parseURIList(s string) []string {
 	var out []string
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "#") || line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, "file://") {
-			out = append(out, strings.TrimPrefix(line, "file://"))
+		if path, ok := strings.CutPrefix(line, "file://"); ok {
+			out = append(out, path)
 		}
 	}
 	return out

@@ -34,9 +34,9 @@ import (
 
 // SSH timing defaults.
 const (
-	defaultTCPKeepAlive       = 30 * time.Second
-	defaultHandshakeTimeout   = 30 * time.Second
-	defaultSSHClientTimeout   = 15 * time.Second
+	defaultTCPKeepAlive        = 30 * time.Second
+	defaultHandshakeTimeout    = 30 * time.Second
+	defaultSSHClientTimeout    = 15 * time.Second
 	defaultServerAliveInterval = 15 * time.Second
 )
 
@@ -138,11 +138,11 @@ func recordAuthFailure(m *sync.Map, ip string) int64 {
 // connecting to the same host via its IP address (or vice versa). For strict
 // enforcement, use IP addresses in PermitOpen entries.
 type permitOpenPolicy struct {
-	allowAll bool              // "any" or empty
-	denyAll  bool              // "none"
-	exact    map[string]bool   // host:port exact matches
-	wildHost map[uint32]bool   // *:port — port is the key
-	wildPort map[string]bool   // host:* — host is the key
+	allowAll bool            // "any" or empty
+	denyAll  bool            // "none"
+	exact    map[string]bool // host:port exact matches
+	wildHost map[uint32]bool // *:port — port is the key
+	wildPort map[string]bool // host:* — host is the key
 }
 
 func parsePermitOpen(options map[string]string) permitOpenPolicy {
@@ -186,8 +186,8 @@ func (p *permitOpenPolicy) allows(host string, port uint32) bool {
 }
 
 type SSHServer struct {
-	cfg       config.Listener
-	log       *slog.Logger
+	cfg        config.Listener
+	log        *slog.Logger
 	permitOpen permitOpenPolicy
 }
 

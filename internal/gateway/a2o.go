@@ -11,8 +11,8 @@ import (
 // response can echo it back unchanged.
 func translateAnthropicRequest(req *MessagesRequest, cfg *GatewayCfg) (*ChatCompletionRequest, error) {
 	out := &ChatCompletionRequest{
-		Model:    cfg.MapModel(req.Model),
-		Stream:   req.Stream,
+		Model:  cfg.MapModel(req.Model),
+		Stream: req.Stream,
 	}
 
 	if req.Stream {

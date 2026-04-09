@@ -6,18 +6,18 @@ import "encoding/json"
 
 // MessagesRequest is the Anthropic POST /v1/messages request body.
 type MessagesRequest struct {
-	Model         string            `json:"model"`
-	MaxTokens     int               `json:"max_tokens"`
-	System        json.RawMessage   `json:"system,omitempty"`
-	Messages      []AnthropicMsg    `json:"messages"`
-	Temperature   *float64          `json:"temperature,omitempty"`
-	TopP          *float64          `json:"top_p,omitempty"`
-	TopK          *int              `json:"top_k,omitempty"`
-	StopSequences []string          `json:"stop_sequences,omitempty"`
-	Stream        bool              `json:"stream,omitempty"`
-	Tools         []AnthropicTool   `json:"tools,omitempty"`
-	ToolChoice    json.RawMessage   `json:"tool_choice,omitempty"`
-	Metadata      *AnthropicMeta    `json:"metadata,omitempty"`
+	Model         string          `json:"model"`
+	MaxTokens     int             `json:"max_tokens"`
+	System        json.RawMessage `json:"system,omitempty"`
+	Messages      []AnthropicMsg  `json:"messages"`
+	Temperature   *float64        `json:"temperature,omitempty"`
+	TopP          *float64        `json:"top_p,omitempty"`
+	TopK          *int            `json:"top_k,omitempty"`
+	StopSequences []string        `json:"stop_sequences,omitempty"`
+	Stream        bool            `json:"stream,omitempty"`
+	Tools         []AnthropicTool `json:"tools,omitempty"`
+	ToolChoice    json.RawMessage `json:"tool_choice,omitempty"`
+	Metadata      *AnthropicMeta  `json:"metadata,omitempty"`
 }
 
 // AnthropicMsg is a message in the Anthropic messages array.
@@ -104,7 +104,7 @@ type AnthropicErrorResponse struct {
 
 // AnthropicError holds error details.
 type AnthropicError struct {
-	Type    string `json:"type"`    // e.g., "invalid_request_error"
+	Type    string `json:"type"` // e.g., "invalid_request_error"
 	Message string `json:"message"`
 }
 
@@ -133,8 +133,8 @@ type AnthropicStreamEvent struct {
 
 // AnthropicDelta holds incremental content within a streaming event.
 type AnthropicDelta struct {
-	Type       string `json:"type,omitempty"`        // "text_delta", "input_json_delta"
-	Text       string `json:"text,omitempty"`         // for text_delta
+	Type        string `json:"type,omitempty"`         // "text_delta", "input_json_delta"
+	Text        string `json:"text,omitempty"`         // for text_delta
 	PartialJSON string `json:"partial_json,omitempty"` // for input_json_delta
-	StopReason string `json:"stop_reason,omitempty"`  // for message_delta
+	StopReason  string `json:"stop_reason,omitempty"`  // for message_delta
 }

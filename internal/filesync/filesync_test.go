@@ -44,7 +44,7 @@ func TestParseLine(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.line, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			p, ok := parseLine(tt.line)
 			if ok != tt.wantOK {
 				t.Fatalf("parseLine(%q) ok=%v, want %v", tt.line, ok, tt.wantOK)
@@ -95,7 +95,7 @@ func TestShouldIgnore(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			got := m.shouldIgnore(tt.path, tt.isDir)
 			if got != tt.ignore {
 				t.Errorf("shouldIgnore(%q, isDir=%v) = %v, want %v", tt.path, tt.isDir, got, tt.ignore)
@@ -146,7 +146,7 @@ func TestIsConflictFile(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			if got := isConflictFile(tt.name); got != tt.want {
 				t.Errorf("isConflictFile(%q) = %v, want %v", tt.name, got, tt.want)
 			}
@@ -669,7 +669,7 @@ func TestSafePath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-		t.Parallel()
+			t.Parallel()
 			_, err := safePath(root, tt.relPath)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("safePath(%q) error=%v, wantErr=%v", tt.relPath, err, tt.wantErr)

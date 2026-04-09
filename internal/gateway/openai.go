@@ -6,26 +6,26 @@ import "encoding/json"
 
 // ChatCompletionRequest is the OpenAI POST /v1/chat/completions request body.
 type ChatCompletionRequest struct {
-	Model            string            `json:"model"`
-	Messages         []OpenAIMsg       `json:"messages"`
-	MaxTokens        *int              `json:"max_tokens,omitempty"`
-	Temperature      *float64          `json:"temperature,omitempty"`
-	TopP             *float64          `json:"top_p,omitempty"`
-	Stop             json.RawMessage   `json:"stop,omitempty"` // string or []string
-	Stream           bool              `json:"stream,omitempty"`
-	StreamOptions    *StreamOptions    `json:"stream_options,omitempty"`
-	Tools            []OpenAITool      `json:"tools,omitempty"`
-	ToolChoice       json.RawMessage   `json:"tool_choice,omitempty"` // string or object
-	User             string            `json:"user,omitempty"`
+	Model         string          `json:"model"`
+	Messages      []OpenAIMsg     `json:"messages"`
+	MaxTokens     *int            `json:"max_tokens,omitempty"`
+	Temperature   *float64        `json:"temperature,omitempty"`
+	TopP          *float64        `json:"top_p,omitempty"`
+	Stop          json.RawMessage `json:"stop,omitempty"` // string or []string
+	Stream        bool            `json:"stream,omitempty"`
+	StreamOptions *StreamOptions  `json:"stream_options,omitempty"`
+	Tools         []OpenAITool    `json:"tools,omitempty"`
+	ToolChoice    json.RawMessage `json:"tool_choice,omitempty"` // string or object
+	User          string          `json:"user,omitempty"`
 
 	// Fields dropped when translating to Anthropic.
-	N                *int              `json:"n,omitempty"`
-	FrequencyPenalty *float64          `json:"frequency_penalty,omitempty"`
-	PresencePenalty  *float64          `json:"presence_penalty,omitempty"`
-	LogitBias        json.RawMessage   `json:"logit_bias,omitempty"`
-	Logprobs         *bool             `json:"logprobs,omitempty"`
-	Seed             *int              `json:"seed,omitempty"`
-	ResponseFormat   json.RawMessage   `json:"response_format,omitempty"`
+	N                *int            `json:"n,omitempty"`
+	FrequencyPenalty *float64        `json:"frequency_penalty,omitempty"`
+	PresencePenalty  *float64        `json:"presence_penalty,omitempty"`
+	LogitBias        json.RawMessage `json:"logit_bias,omitempty"`
+	Logprobs         *bool           `json:"logprobs,omitempty"`
+	Seed             *int            `json:"seed,omitempty"`
+	ResponseFormat   json.RawMessage `json:"response_format,omitempty"`
 }
 
 // StreamOptions controls streaming behavior.
@@ -35,16 +35,16 @@ type StreamOptions struct {
 
 // OpenAIMsg is a message in the OpenAI messages array.
 type OpenAIMsg struct {
-	Role       string          `json:"role"`
-	Content    json.RawMessage `json:"content,omitempty"` // string or []ContentPart
-	Name       string          `json:"name,omitempty"`
+	Role       string           `json:"role"`
+	Content    json.RawMessage  `json:"content,omitempty"` // string or []ContentPart
+	Name       string           `json:"name,omitempty"`
 	ToolCalls  []OpenAIToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
 
 // ContentPart is a typed content element in an OpenAI message.
 type ContentPart struct {
-	Type     string    `json:"type"`               // "text" or "image_url"
+	Type     string    `json:"type"` // "text" or "image_url"
 	Text     string    `json:"text,omitempty"`
 	ImageURL *ImageURL `json:"image_url,omitempty"`
 }
@@ -57,9 +57,9 @@ type ImageURL struct {
 
 // OpenAIToolCall represents a tool invocation in an assistant message.
 type OpenAIToolCall struct {
-	ID       string           `json:"id"`
-	Type     string           `json:"type"` // "function"
-	Function OpenAIFuncCall   `json:"function"`
+	ID       string         `json:"id"`
+	Type     string         `json:"type"` // "function"
+	Function OpenAIFuncCall `json:"function"`
 }
 
 // OpenAIFuncCall holds the function name and arguments.
@@ -84,8 +84,8 @@ type OpenAIFunction struct {
 
 // OpenAIToolChoiceFunc is the object form of tool_choice.
 type OpenAIToolChoiceFunc struct {
-	Type     string                    `json:"type"` // "function"
-	Function OpenAIToolChoiceFuncName  `json:"function"`
+	Type     string                   `json:"type"` // "function"
+	Function OpenAIToolChoiceFuncName `json:"function"`
 }
 
 // OpenAIToolChoiceFuncName holds just the name for tool_choice objects.
@@ -151,17 +151,17 @@ type OpenAIChunkChoice struct {
 
 // OpenAIChunkDelta holds incremental content in a streaming chunk.
 type OpenAIChunkDelta struct {
-	Role      string               `json:"role,omitempty"`
-	Content   *string              `json:"content,omitempty"`
+	Role      string                `json:"role,omitempty"`
+	Content   *string               `json:"content,omitempty"`
 	ToolCalls []OpenAIChunkToolCall `json:"tool_calls,omitempty"`
 }
 
 // OpenAIChunkToolCall is a partial tool call in a streaming chunk.
 type OpenAIChunkToolCall struct {
-	Index    int                    `json:"index"`
-	ID       string                 `json:"id,omitempty"`
-	Type     string                 `json:"type,omitempty"` // "function"
-	Function OpenAIChunkFuncCall    `json:"function"`
+	Index    int                 `json:"index"`
+	ID       string              `json:"id,omitempty"`
+	Type     string              `json:"type,omitempty"` // "function"
+	Function OpenAIChunkFuncCall `json:"function"`
 }
 
 // OpenAIChunkFuncCall holds partial function data in a streaming chunk.
