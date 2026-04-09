@@ -264,7 +264,7 @@ All options can be set at connection or forward-set level:
 | `ClientAliveCountMax` | Max unanswered server keepalives |
 | `ExitOnForwardFailure` | Stop on forward failure (`yes`/`no`) |
 | `GatewayPorts` | Remote forward bind policy (`yes`/`no`/`clientspecified`) |
-| `PermitOpen` | Restrict tunneled destinations (comma or space separated, e.g., `*:22,host:80`) |
+| `PermitOpen` | Restrict tunneled destinations (comma or space separated, e.g., `*:22,host:80`). String-based matching — use IPs for strict enforcement |
 | `StrictHostKeyChecking` | Host key verification (`no` to disable — insecure) |
 
 ## Admin Server

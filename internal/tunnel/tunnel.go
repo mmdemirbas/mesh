@@ -132,6 +132,11 @@ func recordAuthFailure(m *sync.Map, ip string) int64 {
 // permitOpenPolicy is the pre-parsed result of the PermitOpen SSH option.
 // Matching against a map is O(1) per request instead of re-parsing the
 // comma-separated string on every direct-tcpip channel open.
+//
+// Matching is string-based on the raw DestAddr from the SSH protocol, not on
+// resolved IP addresses. A client can bypass a hostname-based restriction by
+// connecting to the same host via its IP address (or vice versa). For strict
+// enforcement, use IP addresses in PermitOpen entries.
 type permitOpenPolicy struct {
 	allowAll bool              // "any" or empty
 	denyAll  bool              // "none"
