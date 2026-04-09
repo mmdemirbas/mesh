@@ -261,7 +261,7 @@ func upCmd(nodeNames []string, configPath string) {
 			os.Exit(1)
 		}
 		if err := cfg.Validate(); err != nil {
-			log.Error("Config validation failed", "node", name, "error", err)
+			log.Error("Config validation failed", "node", name, "error", fmt.Errorf("node %q: %w", name, err))
 			os.Exit(1)
 		}
 		cfgs[name] = cfg

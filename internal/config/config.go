@@ -296,9 +296,9 @@ func Load(path, serviceName string) (*Config, error) {
 	return cfg, nil
 }
 
-// warnInsecurePermissions is defined in perm_unix.go (checks group/other
-// write bits) and perm_windows.go (no-op — Mode().Perm() returns
-// synthetic 0666 on Windows, producing false positives).
+// checkInsecurePermissions is defined in perm_unix.go (rejects group/other
+// writable configs to prevent password_command injection) and perm_windows.go
+// (no-op — Mode().Perm() returns synthetic 0666 on Windows).
 
 // unmarshalConfigs decodes YAML into a node-name → Config map, silently
 // skipping extension keys (prefixed with "x-") so users can define YAML
@@ -332,7 +332,9 @@ func unmarshalConfigs(data []byte) (map[string]*Config, error) {
 
 // LoadUnvalidated reads and parses a config file without checking for runtime requirements (like file existence).
 func LoadUnvalidated(path string) (map[string]*Config, error) {
-	warnInsecurePermissions(path)
+	if err := checkInsecurePermissions(path); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path) //nolint:gosec // G304: path is the user-specified config file path from the CLI
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
