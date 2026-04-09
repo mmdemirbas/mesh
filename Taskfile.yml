@@ -28,12 +28,6 @@ tasks:
       - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags '{{.LDFLAGS}}' -buildvcs=false -o dist/mesh-linux-amd64 ./cmd/mesh/
       - CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags '{{.LDFLAGS}}' -buildvcs=false -o dist/mesh-windows-amd64.exe ./cmd/mesh/
 
-  install:
-    desc: Copy the dist binary for the current platform (dist/mesh-OS-ARCH) to build/
-    cmds:
-      - mkdir -p build
-      - cp dist/mesh-{{OS}}-{{ARCH}}{{exeExt}} build/mesh{{exeExt}}
-
   schema:
     desc: Regenerate JSON schema from config structs
     cmds:
@@ -65,18 +59,15 @@ tasks:
       - go vet ./...
       - golangci-lint run 2>/dev/null || echo "golangci-lint not installed, skipping (go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest)"
 
-  quality:
-    desc: Quality gate — tests with race+coverage, then lint
+  check:
+    desc: "Pre-release quality gate: vet, staticcheck, fmt, tidy, race tests, build"
     cmds:
-      - go test -race -coverprofile=cover.out ./...
-      - go tool cover -func=cover.out | tail -1
-      - golangci-lint run --output.tab.path stdout ./...
-
-  all:
-    desc: Run lint + test + build
-    cmds:
-      - task: lint
-      - task: test
+      - go vet ./...
+      - staticcheck ./...
+      - cmd: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; echo "gofmt: files above need formatting"; exit 1; }
+      - go mod tidy -diff
+      - go test -race -count=1 ./...
       - task: build
 
   release:
@@ -105,7 +96,7 @@ tasks:
           esac
     cmds:
       - "echo 'Releasing {{.VERSION}} ({{.BUMP}} bump from v{{.LATEST}})'"
-      - task: quality
+      - task: check
       - git tag {{.VERSION}}
       - git push origin {{.VERSION}}
 
