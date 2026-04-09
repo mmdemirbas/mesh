@@ -423,16 +423,17 @@ func newTestNode(t *testing.T, _ []string) (*Node, string, func()) {
 	t.Cleanup(cancel)
 
 	n := &Node{
-		ctx:         ctx,
-		config:      cfg,
-		id:          "test-node",
-		port:        7755,
-		maxFileSize: defaultMaxSyncFileSize,
-		peers:       make(map[string]time.Time),
-		peerHashes:  make(map[string]string),
-		httpClient:  &http.Client{Timeout: 5 * time.Second},
-		filesDir:    dir,
-		notifyCh:    make(chan struct{}, 1),
+		ctx:            ctx,
+		config:         cfg,
+		id:             "test-node",
+		port:           7755,
+		maxFileSize:    defaultMaxSyncFileSize,
+		maxReqBodySize: defaultMaxSyncFileSize * 20 * 4 / 3,
+		peers:          make(map[string]time.Time),
+		peerHashes:     make(map[string]string),
+		httpClient:     &http.Client{Timeout: 5 * time.Second},
+		filesDir:       dir,
+		notifyCh:       make(chan struct{}, 1),
 	}
 
 	mux := http.NewServeMux()
@@ -441,7 +442,7 @@ func newTestNode(t *testing.T, _ []string) (*Node, string, func()) {
 			http.Error(w, "Forbidden by ACL", http.StatusForbidden)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+		r.Body = http.MaxBytesReader(w, r.Body, n.maxReqBodySize)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -1008,11 +1009,13 @@ func TestPullHTTP(t *testing.T) {
 	// Create a receiver node that pulls from the sender
 	receiverDir := t.TempDir()
 	receiver := &Node{
-		ctx:        context.Background(),
-		config:     config.ClipsyncCfg{},
-		httpClient: &http.Client{Timeout: 5 * time.Second},
-		filesDir:   receiverDir,
-		notifyCh:   make(chan struct{}, 1),
+		ctx:            context.Background(),
+		config:         config.ClipsyncCfg{},
+		maxFileSize:    defaultMaxSyncFileSize,
+		maxReqBodySize: defaultMaxSyncFileSize * 20 * 4 / 3,
+		httpClient:     &http.Client{Timeout: 5 * time.Second},
+		filesDir:       receiverDir,
+		notifyCh:       make(chan struct{}, 1),
 	}
 
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(url, "http://"))
@@ -1036,11 +1039,13 @@ func TestPullHTTP_NoContent(t *testing.T) {
 	// lastPayload is nil → /clip returns 404
 
 	receiver := &Node{
-		ctx:        context.Background(),
-		config:     config.ClipsyncCfg{},
-		httpClient: &http.Client{Timeout: 5 * time.Second},
-		filesDir:   t.TempDir(),
-		notifyCh:   make(chan struct{}, 1),
+		ctx:            context.Background(),
+		config:         config.ClipsyncCfg{},
+		maxFileSize:    defaultMaxSyncFileSize,
+		maxReqBodySize: defaultMaxSyncFileSize * 20 * 4 / 3,
+		httpClient:     &http.Client{Timeout: 5 * time.Second},
+		filesDir:       t.TempDir(),
+		notifyCh:       make(chan struct{}, 1),
 	}
 
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(url, "http://"))

@@ -52,9 +52,9 @@ const (
 	// Prevents OOM when a large image or multiple large items are on the clipboard.
 	maxClipboardPayload = 100 * 1024 * 1024 // 100 MB
 
-	// maxRequestBodySize caps the /sync endpoint body.
+	// defaultMaxRequestBodySize caps the /sync endpoint body.
 	// Allows up to ~20 files at defaultMaxSyncFileSize with base64 overhead (~33%).
-	maxRequestBodySize = defaultMaxSyncFileSize * 20 * 4 / 3
+	defaultMaxRequestBodySize = defaultMaxSyncFileSize * 20 * 4 / 3
 
 	// maxPeers limits the number of dynamically discovered peers to prevent
 	// OOM from an attacker flooding unique source addresses via UDP.
@@ -100,7 +100,8 @@ type Node struct {
 	config      config.ClipsyncCfg
 	id          string
 	port        int
-	maxFileSize int64 // per-file size limit for file copy; from config or defaultMaxSyncFileSize
+	maxFileSize    int64 // per-file size limit for file copy; from config or defaultMaxSyncFileSize
+	maxReqBodySize int64 // /sync endpoint body limit; scales with maxFileSize
 
 	peers      map[string]time.Time // Tracks dynamic UDP peers
 	peerHashes map[string]string    // Tracks last seen hash per peer
@@ -162,11 +163,12 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 	}
 
 	n := &Node{
-		ctx:         ctx,
-		config:      cfg,
-		id:          generateID(),
-		port:        port,
-		maxFileSize: maxFileSize,
+		ctx:            ctx,
+		config:         cfg,
+		id:             generateID(),
+		port:           port,
+		maxFileSize:    maxFileSize,
+		maxReqBodySize: maxFileSize * 20 * 4 / 3,
 		peers:       make(map[string]time.Time),
 		peerHashes:  make(map[string]string),
 		httpClient:  &http.Client{Timeout: 2 * time.Minute},
@@ -493,7 +495,7 @@ func (n *Node) pullHTTP(peerAddr string) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRequestBodySize))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, n.maxReqBodySize))
 	if err != nil {
 		slog.Debug("Failed to read pulled payload", "peer", cleanLogStr(peerAddr), "error", err) //nolint:gosec // G706: sanitized via cleanLogStr
 		return
@@ -524,7 +526,7 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 			return
 		}
 
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+		r.Body = http.MaxBytesReader(w, r.Body, n.maxReqBodySize)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			if err.Error() == "http: request body too large" {

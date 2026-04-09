@@ -13,7 +13,7 @@ func main() {
 	r := new(jsonschema.Reflector)
 	r.FieldNameTag = "yaml"
 	// We map the root type Config as the entrypoint for the JSON schema.
-	if err := r.AddGoComments("github.com/mmdemirbas/mesh", "./internal/config"); err != nil {
+	if err := r.AddGoComments("github.com/mmdemirbas/mesh", "../../internal/config"); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load Go comments: %v\n", err)
 	}
 
