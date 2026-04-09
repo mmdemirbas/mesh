@@ -91,9 +91,11 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Listener, log *slo
 					if ctx.Err() != nil {
 						return
 					}
+					backoff := time.NewTimer(50 * time.Millisecond)
 					select {
-					case <-time.After(50 * time.Millisecond):
+					case <-backoff.C:
 					case <-ctx.Done():
+						backoff.Stop()
 						return
 					}
 					continue

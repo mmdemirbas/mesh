@@ -411,10 +411,12 @@ func (n *Node) runScan() {
 // syncLoop periodically reconciles with all configured peers.
 func (n *Node) syncLoop(ctx context.Context) {
 	// Short initial delay to allow the first scan to complete.
+	initDelay := time.NewTimer(2 * time.Second)
 	select {
 	case <-ctx.Done():
+		initDelay.Stop()
 		return
-	case <-time.After(2 * time.Second):
+	case <-initDelay.C:
 	}
 
 	// Sync immediately, then on trigger or timer.

@@ -1516,10 +1516,12 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 			}
 			// 4. Prevent CPU spinning if the Windows network stack temporarily
 			// invalidates the socket (e.g., during WiFi roaming or VPN toggles).
+			backoff := time.NewTimer(100 * time.Millisecond)
 			select {
 			case <-ctx.Done():
+				backoff.Stop()
 				return
-			case <-time.After(100 * time.Millisecond):
+			case <-backoff.C:
 			}
 			continue
 		}
@@ -1689,6 +1691,7 @@ func (n *Node) cleanupPeers(ctx context.Context) {
 		for addr, lastSeen := range n.peers {
 			if now.Sub(lastSeen) > 15*time.Second {
 				delete(n.peers, addr)
+				delete(n.peerHashes, addr)
 				state.Global.Delete("clipsync-peer", n.config.Bind+"|"+addr)
 			}
 		}

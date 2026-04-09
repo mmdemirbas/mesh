@@ -603,10 +603,12 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 		if err != nil {
 			state.Global.Update("connection", id, state.Retrying, err.Error())
 			log.Warn("Target unreachable", "error", err)
+			t := time.NewTimer(retryDelay(retryInterval))
 			select {
 			case <-ctx.Done():
+				t.Stop()
 				return
-			case <-time.After(retryDelay(retryInterval)):
+			case <-t.C:
 				continue
 			}
 		}
@@ -628,10 +630,12 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 			_ = conn.Close()
 			state.Global.Update("connection", id, state.Retrying, err.Error())
 			log.Error("SSH handshake failed", "elapsed", time.Since(t1).Round(time.Millisecond), "error", err)
+			t := time.NewTimer(retryDelay(retryInterval))
 			select {
 			case <-ctx.Done():
+				t.Stop()
 				return
-			case <-time.After(retryDelay(retryInterval)):
+			case <-t.C:
 				continue
 			}
 		}
@@ -653,10 +657,12 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 
 		state.Global.Update("connection", id, state.Retrying, "session ended")
 		log.Warn("Session ended, reconnecting", "retry_in", retryInterval)
+		t := time.NewTimer(retryDelay(retryInterval))
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
-		case <-time.After(retryDelay(retryInterval)):
+		case <-t.C:
 		}
 	}
 }
@@ -693,10 +699,12 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		if target == "" {
 			state.Global.Update("connection", id, state.Retrying, "no reachable target")
 			log.Warn("No reachable target", "retry_in", retryInterval)
+			t := time.NewTimer(retryDelay(retryInterval))
 			select {
 			case <-ctx.Done():
+				t.Stop()
 				return
-			case <-time.After(retryDelay(retryInterval)):
+			case <-t.C:
 				continue
 			}
 		}
@@ -725,10 +733,12 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 			_ = conn.Close()
 			state.Global.Update("connection", id, state.Retrying, err.Error())
 			log.Error("SSH handshake failed", "target", target, "elapsed", time.Since(t1).Round(time.Millisecond), "error", err)
+			t := time.NewTimer(retryDelay(retryInterval))
 			select {
 			case <-ctx.Done():
+				t.Stop()
 				return
-			case <-time.After(retryDelay(retryInterval)):
+			case <-t.C:
 				continue
 			}
 		}
@@ -752,10 +762,12 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 
 		state.Global.Update("connection", id, state.Retrying, "session ended")
 		log.Warn("Session ended, reconnecting", "retry_in", retryInterval)
+		t := time.NewTimer(retryDelay(retryInterval))
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
-		case <-time.After(retryDelay(retryInterval)):
+		case <-t.C:
 		}
 	}
 }
@@ -906,10 +918,12 @@ func (c *SSHClient) runRemoteForward(ctx context.Context, client *ssh.Client, fs
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		t := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return ctx.Err()
-		case <-time.After(backoff): // wait out TIME_WAIT locking
+		case <-t.C: // wait out TIME_WAIT locking
 		}
 		backoff *= 2
 	}
@@ -997,10 +1011,12 @@ func (c *SSHClient) runRemoteProxy(ctx context.Context, client *ssh.Client, fset
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		t := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return ctx.Err()
-		case <-time.After(backoff): // wait out TIME_WAIT locking
+		case <-t.C: // wait out TIME_WAIT locking
 		}
 		backoff *= 2
 	}
@@ -1109,10 +1125,12 @@ func (c *SSHClient) probeTarget(ctx context.Context, handshakeTimeout time.Durat
 		t0 := time.Now()
 		conn, err = dialer.DialContext(ctx, "tcp", hostPort)
 		if err != nil && strings.HasSuffix(host, ".local") {
+			mdnsRetry := time.NewTimer(150 * time.Millisecond) // mDNS usually resolves within 50-100ms
 			select {
 			case <-ctx.Done():
+				mdnsRetry.Stop()
 				return "", nil
-			case <-time.After(150 * time.Millisecond): // mDNS usually resolves within 50-100ms
+			case <-mdnsRetry.C:
 			}
 			conn, err = dialer.DialContext(ctx, "tcp", hostPort)
 		}
@@ -1129,6 +1147,19 @@ func (c *SSHClient) probeTarget(ctx context.Context, handshakeTimeout time.Durat
 }
 
 // --- Shared forwarding helpers ---
+
+// onceCloseListener wraps net.Listener with sync.Once-guarded Close to prevent
+// double-close when both context cancellation and cancel-tcpip-forward race.
+type onceCloseListener struct {
+	net.Listener
+	once sync.Once
+	err  error
+}
+
+func (l *onceCloseListener) Close() error {
+	l.once.Do(func() { l.err = l.Listener.Close() })
+	return l.err
+}
 
 // handleTCPIPForward handles tcpip-forward global requests on the server side.
 func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.ServerConn, mu *sync.Mutex, listeners map[string]net.Listener, log *slog.Logger, parentBind string, options map[string]string, clientNodeName *atomic.Value) {
@@ -1177,6 +1208,7 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 		}
 		return
 	}
+	ln = &onceCloseListener{Listener: ln}
 	listeners[addr] = ln
 	mu.Unlock()
 
@@ -1226,13 +1258,18 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
 
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
 		netutil.ApplyTCPKeepAlive(conn, 0)
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			defer func() { _ = conn.Close() }()
 			origin, ok := conn.RemoteAddr().(*net.TCPAddr)
 			if !ok {
@@ -1360,7 +1397,11 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[str
 
 // acceptAndForward accepts connections and forwards each to a target.
 // If metrics is non-nil, bytes and active stream counts are tracked.
+// Waits for all in-flight forwarding goroutines before returning.
 func acceptAndForward(ctx context.Context, listener net.Listener, dialer func() (net.Conn, error), log *slog.Logger, metrics *state.Metrics) {
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -1370,7 +1411,9 @@ func acceptAndForward(ctx context.Context, listener net.Listener, dialer func() 
 			return
 		}
 		netutil.ApplyTCPKeepAlive(conn, 0)
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			defer func() { _ = conn.Close() }()
 			target, err := dialer()
 			if err != nil {
