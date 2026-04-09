@@ -440,11 +440,10 @@ func extractFormatNames(p *pb.SyncPayload) []string {
 	return mimes
 }
 
-func (n *Node) processPayload(p *pb.SyncPayload, peerHostPort string) {
-	// Record receive activity.
-	data, _ := proto.Marshal(p)
+func (n *Node) processPayload(p *pb.SyncPayload, bodySize int, peerHostPort string) {
+	// Record receive activity using the original body size to avoid re-marshaling.
 	formats := extractFormatNames(p)
-	n.recordActivity("receive", int64(len(data)), formats, peerHostPort)
+	n.recordActivity("receive", int64(bodySize), formats, peerHostPort)
 
 	if len(p.GetFiles()) > 0 {
 		var writtenPaths []string
@@ -523,7 +522,7 @@ func (n *Node) pullHTTP(peerAddr string) {
 	}
 
 	slog.Info("Successfully pulled and ingested payload", "formats", len(p.GetFormats()), "files", len(p.GetFiles()), "peer", cleanLogStr(peerAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
-	n.processPayload(&p, peerAddr)
+	n.processPayload(&p, len(body), peerAddr)
 }
 
 func (n *Node) runHTTPServer(ctx context.Context) {
@@ -563,7 +562,7 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 		peerHostPort := net.JoinHostPort(host, fmt.Sprintf("%d", n.port))
 
 		slog.Info("Received pushed payload via HTTP POST", "formats", len(p.GetFormats()), "from", cleanLogStr(r.RemoteAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
-		n.processPayload(&p, peerHostPort)
+		n.processPayload(&p, len(body), peerHostPort)
 	})
 
 	mux.HandleFunc("/clip", func(w http.ResponseWriter, r *http.Request) {

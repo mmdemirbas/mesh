@@ -134,19 +134,40 @@ func savePeerStates(path string, peers map[string]PeerState) error {
 	return nil
 }
 
-// scan walks the folder tree and updates the index with any changes.
-// Returns true if any files changed.
-func (idx *FileIndex) scan(folderRoot string, ignore *ignoreMatcher) (bool, error) {
-	changed := false
-	seen := make(map[string]struct{})
+// activeCount returns the number of non-deleted files in the index.
+func (idx *FileIndex) activeCount() int {
+	count := 0
+	for _, e := range idx.Files {
+		if !e.Deleted {
+			count++
+		}
+	}
+	return count
+}
 
-	err := filepath.WalkDir(folderRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
+// scan walks the folder, updates the index, cleans stale temp files, and
+// returns whether any files changed and the active (non-deleted) file count.
+func (idx *FileIndex) scan(folderRoot string, ignore *ignoreMatcher) (changed bool, activeCount int, err error) {
+	changed = false
+	seen := make(map[string]struct{})
+	tempCutoff := time.Now().Add(-maxTempFileAge)
+
+	err = filepath.WalkDir(folderRoot, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
 			return nil // skip inaccessible entries
 		}
 
-		rel, err := filepath.Rel(folderRoot, path)
-		if err != nil {
+		// P8: Clean stale temp files during the walk instead of a separate traversal.
+		name := d.Name()
+		if !d.IsDir() && (strings.HasPrefix(name, ".mesh-tmp-") || strings.HasSuffix(name, ".mesh-delta-tmp")) {
+			if info, infoErr := d.Info(); infoErr == nil && info.ModTime().Before(tempCutoff) {
+				_ = os.Remove(path)
+			}
+			return nil
+		}
+
+		rel, relErr := filepath.Rel(folderRoot, path)
+		if relErr != nil {
 			return nil
 		}
 		// Normalize to forward slashes for cross-platform consistency.
@@ -216,7 +237,7 @@ func (idx *FileIndex) scan(folderRoot string, ignore *ignoreMatcher) (bool, erro
 		return nil
 	})
 	if err != nil {
-		return changed, fmt.Errorf("scan %s: %w", folderRoot, err)
+		return changed, len(seen), fmt.Errorf("scan %s: %w", folderRoot, err)
 	}
 
 	// Mark deletions: entries in index not seen on disk.
@@ -234,7 +255,8 @@ func (idx *FileIndex) scan(folderRoot string, ignore *ignoreMatcher) (bool, erro
 		}
 	}
 
-	return changed, nil
+	// P7: len(seen) is the active file count — computed during walk, not a separate loop.
+	return changed, len(seen), nil
 }
 
 // hashFile computes the SHA-256 hex digest of a file.

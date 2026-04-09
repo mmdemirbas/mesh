@@ -156,7 +156,7 @@ func TestScanAndPersist(t *testing.T) {
 
 	idx := newFileIndex()
 	ignore := &ignoreMatcher{}
-	changed, err := idx.scan(dir, ignore)
+	changed, _, err := idx.scan(dir, ignore)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestScanAndPersist(t *testing.T) {
 	}
 
 	// Second scan with no changes.
-	changed, err = idx.scan(dir, ignore)
+	changed, _, err = idx.scan(dir, ignore)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,12 +207,12 @@ func TestScanDetectsDeletion(t *testing.T) {
 
 	idx := newFileIndex()
 	ignore := &ignoreMatcher{}
-	_, _ = idx.scan(dir, ignore)
+	_, _, _ = idx.scan(dir, ignore)
 
 	// Delete b.txt
 	_ = os.Remove(filepath.Join(dir, "b.txt"))
 
-	changed, _ := idx.scan(dir, ignore)
+	changed, _, _ := idx.scan(dir, ignore)
 	if !changed {
 		t.Fatal("expected change after deletion")
 	}
@@ -236,7 +236,7 @@ func TestScanDeletion_TombstoneMtimeIsNow(t *testing.T) {
 
 	idx := newFileIndex()
 	ignore := &ignoreMatcher{}
-	_, _ = idx.scan(dir, ignore)
+	_, _, _ = idx.scan(dir, ignore)
 
 	// Verify the indexed mtime reflects the backdated time.
 	entry := idx.Files["old.txt"]
@@ -246,7 +246,7 @@ func TestScanDeletion_TombstoneMtimeIsNow(t *testing.T) {
 
 	// Delete the file and re-scan.
 	_ = os.Remove(filepath.Join(dir, "old.txt"))
-	_, _ = idx.scan(dir, ignore)
+	_, _, _ = idx.scan(dir, ignore)
 
 	entry = idx.Files["old.txt"]
 	if !entry.Deleted {
@@ -276,7 +276,7 @@ func TestScanRespectsIgnore(t *testing.T) {
 		patterns: []ignorePattern{{pattern: "*.log"}},
 	}
 
-	_, _ = idx.scan(dir, ignore)
+	_, _, _ = idx.scan(dir, ignore)
 
 	if _, ok := idx.Files["keep.txt"]; !ok {
 		t.Error("keep.txt should be indexed")
@@ -1221,7 +1221,7 @@ func TestTwoNodeSync(t *testing.T) {
 	// Node A: scan to build index.
 	idxA := newFileIndex()
 	ignore := &ignoreMatcher{}
-	_, _ = idxA.scan(dirA, ignore)
+	_, _, _ = idxA.scan(dirA, ignore)
 
 	// Node B: empty index.
 	idxB := newFileIndex()
@@ -1443,7 +1443,7 @@ func TestDryRunComputesDiffWithoutExecution(t *testing.T) {
 
 	idx := newFileIndex()
 	ignore := &ignoreMatcher{}
-	_, _ = idx.scan(dir, ignore)
+	_, _, _ = idx.scan(dir, ignore)
 
 	// Simulate a remote index with a file we don't have.
 	remote := &FileIndex{
@@ -1571,7 +1571,7 @@ func TestPersistFolder_Roundtrip(t *testing.T) {
 
 	idx := newFileIndex()
 	ignore := &ignoreMatcher{}
-	_, _ = idx.scan(folderDir, ignore)
+	_, _, _ = idx.scan(folderDir, ignore)
 
 	peers := map[string]PeerState{
 		"192.168.1.10:7756": {LastSeenSequence: 42, LastSync: time.Now().Truncate(time.Second)},
@@ -1638,7 +1638,7 @@ func TestPathChangePreservesIndex(t *testing.T) {
 	idx := newFileIndex()
 	idx.Path = oldDir
 	ignore := &ignoreMatcher{}
-	_, _ = idx.scan(oldDir, ignore)
+	_, _, _ = idx.scan(oldDir, ignore)
 
 	idxPath := filepath.Join(dataDir, "docs", "index.yaml")
 	if err := idx.save(idxPath); err != nil {
@@ -1679,7 +1679,7 @@ func TestIndexPersistsPath(t *testing.T) {
 	idx := newFileIndex()
 	idx.Path = dir
 	ignore := &ignoreMatcher{}
-	_, _ = idx.scan(dir, ignore)
+	_, _, _ = idx.scan(dir, ignore)
 
 	idxPath := filepath.Join(dataDir, "test", "index.yaml")
 	if err := idx.save(idxPath); err != nil {

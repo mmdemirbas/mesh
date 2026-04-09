@@ -436,7 +436,7 @@ func newTestNode(t *testing.T, _ []string) (*Node, string, func()) {
 		}
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
 		peerHostPort := net.JoinHostPort(host, "7755")
-		n.processPayload(&p, peerHostPort)
+		n.processPayload(&p, len(body), peerHostPort)
 	})
 	mux.HandleFunc("/clip", func(w http.ResponseWriter, r *http.Request) {
 		if !n.canReceiveFrom(r.RemoteAddr) {
@@ -611,7 +611,7 @@ func TestSyncEndpoint_PushFilesWithoutData_PullBack(t *testing.T) {
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(url, "http://"))
 	peerHostPort := net.JoinHostPort("127.0.0.1", port)
 
-	n.processPayload(payload, peerHostPort)
+	n.processPayload(payload, 0, peerHostPort)
 
 	// Verify the file was pulled and written
 	got, err := os.ReadFile(filepath.Join(n.filesDir, "pulled.txt"))

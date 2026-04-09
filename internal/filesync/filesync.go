@@ -71,12 +71,7 @@ func GetFolderStatuses() []FolderStatus {
 	for _, n := range activeNodes {
 		for id, fs := range n.folders {
 			fs.indexMu.RLock()
-			count := 0
-			for _, e := range fs.index.Files {
-				if !e.Deleted {
-					count++
-				}
-			}
+			count := fs.index.activeCount()
 			fs.indexMu.RUnlock()
 
 			result = append(result, FolderStatus{
@@ -374,23 +369,13 @@ func (n *Node) runScan() {
 		fs.indexMu.Lock()
 		state.Global.Update("filesync-folder", id, state.Connecting, "scanning")
 
-		changed, err := fs.index.scan(fs.cfg.Path, fs.ignore)
+		changed, count, err := fs.index.scan(fs.cfg.Path, fs.ignore)
 		if err != nil {
 			slog.Warn("scan error", "folder", id, "error", err)
 		}
 
 		// Purge old tombstones.
 		fs.index.purgeTombstones(tombstoneMaxAge)
-
-		// Clean stale temp files.
-		cleanTempFiles(fs.cfg.Path, maxTempFileAge)
-
-		count := 0
-		for _, e := range fs.index.Files {
-			if !e.Deleted {
-				count++
-			}
-		}
 		state.Global.Update("filesync-folder", id, state.Connected, "idle")
 		state.Global.UpdateFileCount("filesync-folder", id, count)
 		fs.indexMu.Unlock()
@@ -512,13 +497,8 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		}
 		fs.indexMu.Unlock()
 
-		count := 0
 		fs.indexMu.RLock()
-		for _, e := range fs.index.Files {
-			if !e.Deleted {
-				count++
-			}
-		}
+		count := fs.index.activeCount()
 		fs.indexMu.RUnlock()
 		now := time.Now()
 		state.Global.Update("filesync-folder", folderID, state.Connected, "idle")
@@ -642,13 +622,8 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	// Persist index after sync.
 	n.persistFolder(folderID)
 
-	count := 0
 	fs.indexMu.RLock()
-	for _, e := range fs.index.Files {
-		if !e.Deleted {
-			count++
-		}
-	}
+	count := fs.index.activeCount()
 	fs.indexMu.RUnlock()
 	state.Global.Update("filesync-folder", folderID, state.Connected, "idle")
 	state.Global.UpdateFileCount("filesync-folder", folderID, count)
