@@ -12,16 +12,16 @@ Crashes, active CVEs, broken functionality, exploitable security issues.
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
 | DEP1 | build     | Go 1.26.1 has 4 active CVEs                 | x509 auth bypass, x509 chain work, x509 policy validation, TLS 1.3 KeyUpdate DoS. All reached via gateway/filesync/clipsync code paths. Fixed in Go 1.26.2. |
-| E1   | core      | No `recover()` on server-side goroutines     | SSH channel handlers, SOCKS5/HTTP proxy handlers, filesync transfer goroutines — none have `recover()`. A single panic from malformed input crashes all subsystems. Only clipsync clipboard I/O has recovery. |
-| E3   | clipsync  | `postHTTP` nil panic from malformed peer     | `http.NewRequestWithContext` error discarded. Malformed peer address from UDP discovery causes nil pointer panic. Concrete crash path with no `recover()`. `clipsync.go:376`. |
-| C1   | sshd      | `keepalive@openssh.com` rejected             | Server replies `false` to keepalive requests. OpenSSH clients disconnect after `ServerAliveCountMax` failures. Add `case "keepalive@openssh.com"` → reply `true`. `tunnel.go:316-338`. |
-| S2   | clipsync  | Unauthenticated HTTP endpoints               | `canReceiveFrom` and `canSendTo` are stubs returning `true`. Any LAN host can POST to `/sync` to inject clipboard content or GET `/clip` to exfiltrate it. Implement IP allowlist from `static_peers` + validated UDP-discovered peers, matching the filesync `validatePeer` pattern. |
-| S3   | core      | Gzip decompression bomb                      | `gzipDecode` in clipsync and filesync calls `io.ReadAll` with no decompressed output limit. A 45-byte gzip bomb expands to gigabytes. Fix: `io.LimitReader` on the gzip reader (e.g., `4 × maxRequestBodySize`). |
-| E2   | gateway   | `json.Marshal` error → nil body 200 OK       | `result, _ := json.Marshal(anthResp)` — if marshal fails, writes empty body with 200. Silent data loss for LLM clients. `gateway.go:191,282`. |
-| W1   | sshd      | `password_command` hardcodes `sh -c`         | Breaks on Windows — `sh` not available. Use build-tagged helpers: `cmd.exe /C` or `powershell -Command` on Windows. `tunnel.go:499`. |
-| W2   | filesync  | `filepath.Match` breaks on Windows           | Ignore patterns use `/`-normalized paths but `filepath.Match` uses `\` on Windows. Wrong files sync/excluded. Use `path.Match`. `ignore.go:98,110,119,142`. |
-| W3   | filesync  | `os.Rename` over existing files fails on Windows | Unix atomically replaces; Windows fails "Access is denied." Breaks index persistence and file downloads. Use `os.Remove` + `os.Rename` or `MoveFileEx`. `index.go:79,116`, `transfer.go:113,237`. |
-| S12  | windows   | `SO_REUSEADDR` allows port hijacking         | On Windows, `SO_REUSEADDR` lets another process steal the listening port. Use `SO_EXCLUSIVEADDRUSE`. `listen_windows.go:18`. |
+| ~~E1~~ | ~~core~~ | ~~No `recover()` on server-side goroutines~~ | Done. Added `recover()` to `handleDirectTCPIP`, `handleSession`, `handleTCPIPForward`, `handleCancelTCPIPForward`, `handleSocks5`, `handleHTTPProxy`. |
+| ~~E3~~ | ~~clipsync~~ | ~~`postHTTP` nil panic from malformed peer~~ | Done. Error from `http.NewRequestWithContext` now checked; malformed peer logged and skipped. |
+| ~~C1~~ | ~~sshd~~ | ~~`keepalive@openssh.com` rejected~~       | Done. Added `case "keepalive@openssh.com"` → reply `true` in server global request handler. |
+| ~~S2~~ | ~~clipsync~~ | ~~Unauthenticated HTTP endpoints~~       | Done. `canReceiveFrom` now validates against loopback, static peers, and UDP-discovered peers. |
+| ~~S3~~ | ~~core~~ | ~~Gzip decompression bomb~~                | Done. `gzipDecode` in clipsync capped at `2 × maxClipboardPayload` (200 MB), filesync at `4 × maxIndexPayload` (40 MB). |
+| ~~E2~~ | ~~gateway~~ | ~~`json.Marshal` error → nil body 200 OK~~ | Done. Marshal errors return 500 with error message in both `handleA2O` and `handleO2A`. |
+| ~~W1~~ | ~~sshd~~ | ~~`password_command` hardcodes `sh -c`~~   | Done. Build-tagged `exec_unix.go` / `exec_windows.go` with `shellCommand()` helper. Windows prefers `pwsh.exe`, falls back to `cmd.exe`. |
+| ~~W2~~ | ~~filesync~~ | ~~`filepath.Match` breaks on Windows~~ | Done. Replaced all `filepath.Match` with `path.Match` in `ignore.go`. |
+| ~~W3~~ | ~~filesync~~ | ~~`os.Rename` over existing files fails on Windows~~ | Done. Added `renameReplace()` helper — tries rename, falls back to remove+rename. Used in `index.go` and `transfer.go`. |
+| ~~S12~~ | ~~windows~~ | ~~`SO_REUSEADDR` allows port hijacking~~ | Done. Replaced with `SO_EXCLUSIVEADDRUSE` in `listen_windows.go`. |
 
 ---
 
@@ -194,6 +194,16 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | ~~P1~~ | Profile and optimize CPU + memory | Regex → byte scanning, dashboard dirty check, log ring allocation, metrics caching, SSE JSON encoder reuse. Commits `363f775`, `a27bbfa`, `3bb6b4d`. |
 | ~~F8~~ | SSH signal forwarding             | Unix: `syscall.Kill(-pid, sig)`. Windows: `Process.Kill()` for KILL/TERM/INT/HUP. |
 | ~~R8~~ | systemd / launchd plist           | Promoted to D2. |
+| ~~E1~~ | Server-side panic recovery        | `recover()` on all SSH channel, SOCKS5, HTTP proxy handler goroutines. |
+| ~~E3~~ | `postHTTP` nil panic fix          | Error check on `http.NewRequestWithContext`; malformed peer logged and skipped. |
+| ~~C1~~ | `keepalive@openssh.com` support   | Server replies `true` to OpenSSH client keepalives. |
+| ~~S2~~ | Clipsync peer authentication      | `canReceiveFrom` validates against loopback, static peers, and discovered peers. |
+| ~~S3~~ | Gzip decompression bomb defense   | `io.LimitReader` on gzip decoder in clipsync (200 MB) and filesync (40 MB). |
+| ~~E2~~ | Gateway marshal error handling    | `json.Marshal` errors return 500 instead of empty 200. |
+| ~~W1~~ | Cross-platform `password_command` | Build-tagged `shellCommand()`: `sh -c` on Unix, `pwsh.exe`/`cmd.exe` on Windows. |
+| ~~W2~~ | Cross-platform ignore matching    | `filepath.Match` → `path.Match` for forward-slash consistency. |
+| ~~W3~~ | Cross-platform atomic rename      | `renameReplace()` helper: remove-then-rename fallback for Windows. |
+| ~~S12~~ | Windows port hijacking defense   | `SO_REUSEADDR` → `SO_EXCLUSIVEADDRUSE` on Windows. |
 
 ---
 
