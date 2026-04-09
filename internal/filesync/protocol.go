@@ -539,9 +539,14 @@ func addrFromRequest(r *http.Request) string {
 	return host
 }
 
-// isLoopback returns true if the IP is a loopback address (127.0.0.1 or ::1).
+// isLoopback returns true if the IP is a loopback address.
+// Handles 127.0.0.1, ::1, and IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1).
 func isLoopback(ip string) bool {
-	return ip == "127.0.0.1" || ip == "::1"
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	return parsed.IsLoopback()
 }
 
 // sendIndex pushes our index to a peer and receives their response.

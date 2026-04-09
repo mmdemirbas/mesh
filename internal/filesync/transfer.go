@@ -200,7 +200,10 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
 	}
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxSyncFileSize))
+	// Cap delta response at 256 MB — delta transfers should be much smaller
+	// than full files since they only contain changed blocks.
+	const maxDeltaResponseSize = 256 * 1024 * 1024
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDeltaResponseSize))
 	if err != nil {
 		return "", fmt.Errorf("read delta response: %w", err)
 	}
