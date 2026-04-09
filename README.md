@@ -19,6 +19,7 @@ A single-binary, cross-platform networking tool that replaces `ssh`, `sshd`, `au
 | docker-compose with 20+ sshpass containers | `mode: multiplex` — one connection per target, all managed |
 | clipboard sync tools | Built-in `clipsync` with UDP LAN discovery |
 | Syncthing / rsync | Built-in `filesync` with block-level delta sync |
+| LLM API proxy/adapter | Built-in `gateway` translates between Anthropic and OpenAI formats |
 
 ## Features
 
@@ -29,6 +30,7 @@ A single-binary, cross-platform networking tool that replaces `ssh`, `sshd`, `au
 - **Parallel SSH sessions** — each `ForwardSet` gets its own SSH connection for throughput isolation
 - **Clipboard sync** — text, images, and files across your network with UDP LAN discovery and group isolation
 - **Folder sync** — File sync with named peers, config-level defaults, delta index exchange, block-level delta transfer, and bandwidth throttling
+- **LLM API gateway** — Bidirectional translation between Anthropic and OpenAI API formats for using any LLM backend with any client
 - **Cross-platform** — macOS, Linux, Windows (including Windows SSH server support)
 - **16 SSH options** — Ciphers, MACs, KexAlgorithms, HostKeyAlgorithms, IPQoS, RekeyLimit, and more
 
@@ -221,6 +223,25 @@ mynode:
           direction: send-only          # overrides defaults
 ```
 
+**LLM API Gateway:**
+
+```yaml
+mynode:
+  gateway:
+    - name: claude-via-oneapi
+      mode: anthropic-to-openai
+      bind: "127.0.0.1:3457"
+      upstream: "http://oneapi.internal/v1/chat/completions"
+      api_key_env: ONEAPI_KEY
+      model_map:
+        claude-sonnet-4-6: glm-4
+    - name: cursor-to-claude
+      mode: openai-to-anthropic
+      bind: "127.0.0.1:3458"
+      upstream: "https://api.anthropic.com/v1/messages"
+      api_key_env: ANTHROPIC_API_KEY
+```
+
 See [`configs/example.yaml`](configs/example.yaml) for a comprehensive reference with all options documented.
 
 ## SSH Options
@@ -277,7 +298,7 @@ task clean          # remove build artifacts
 
 ### Testing
 
-660+ tests across 8 packages, all race-free:
+770+ tests across 9 packages, all race-free:
 
 ```bash
 go test -race -count=1 ./...
@@ -294,6 +315,7 @@ internal/
   netutil/          TCP helpers (BiCopy, keepalive)
   clipsync/         Clipboard sync (UDP discovery, protobuf push/pull)
   filesync/         Folder sync (named peers, config defaults, delta index, block delta, bandwidth throttling)
+  gateway/          LLM API gateway (Anthropic <-> OpenAI format translation)
   state/            Thread-safe component state with TTL eviction
 configs/            Example YAML, production config, JSON schema
 ```
