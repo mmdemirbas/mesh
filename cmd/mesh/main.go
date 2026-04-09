@@ -113,7 +113,7 @@ func resolveNodes(args []string, configPath string) []string {
 func printUsage() {
 	fmt.Println(cBold + cCyan + "mesh" + cReset + " " + cGray + version + cReset + " - Human-friendly networking tool")
 	fmt.Println()
-	fmt.Println("All-in-one replacement for ssh, sshd, autossh, socat, and SOCKS/HTTP proxy servers.")
+	fmt.Println("All-in-one replacement for ssh, sshd, autossh, socat, SOCKS/HTTP proxies, clipboard sync, folder sync, and LLM API gateway.")
 	fmt.Println()
 	fmt.Println(cBold + "Usage:" + cReset)
 	fmt.Println("  mesh " + cYellow + "[-f config.yaml] " + cReset + cCyan + "<command>" + cReset + " [node...] [flags]")
@@ -124,8 +124,14 @@ func printUsage() {
 	fmt.Println("  " + cBlue + "status" + cReset + "     Show live status of running nodes (use " + cYellow + "-w" + cReset + " for watch mode)")
 	fmt.Println("  " + cBlue + "config" + cReset + "     Show the parsed configuration for nodes without starting them")
 	fmt.Println("  " + cBlue + "completion" + cReset + " Generate shell completion script (bash, zsh, fish)")
+	fmt.Println("  " + cBlue + "help" + cReset + "       Show detailed help including SSH options")
 	fmt.Println()
 	fmt.Println("  When no node names are given, all nodes in the config file are used.")
+	fmt.Println()
+	fmt.Println(cBold + "Exit Codes:" + cReset)
+	fmt.Println("  0  Success")
+	fmt.Println("  1  Error (config, permissions, signal failure)")
+	fmt.Println("  3  No running nodes found (status/down)")
 	fmt.Println()
 	fmt.Println(cBold + "Examples:" + cReset)
 	fmt.Println("  " + cGray + "# Start the 'server' node" + cReset)
@@ -186,6 +192,7 @@ func printHelp() {
 		{"GatewayPorts", "Remote forward bind policy (yes/no/clientspecified)"},
 		{"PermitOpen", "Restrict tunneled destinations (e.g., *:22, host:80, none)"},
 		{"RekeyLimit", "Bytes before SSH re-keying (e.g., 1G, 500M)"},
+		{"StrictHostKeyChecking", "Reject unknown host keys (yes/no, default yes)"},
 	} {
 		fmt.Printf("    %s%-24s%s %s\n", cCyan, opt.name, cReset, opt.desc)
 	}
@@ -806,6 +813,10 @@ func downCmd(nodeNames []string) {
 		} else {
 			fmt.Println("Warning: process did not exit within 10 seconds.")
 		}
+	}
+
+	if len(killedPids) == 0 {
+		os.Exit(3)
 	}
 }
 
