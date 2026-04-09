@@ -395,7 +395,7 @@ func upCmd(nodeNames []string, configPath string) {
 		if existingPid, err := readPidFile(name); err == nil {
 			if checkPid(existingPid) {
 				log.Error("Node already running", "node", name, "pid", existingPid)
-				os.Exit(1)
+				return
 			}
 			log.Warn("Removing stale pidfile from previous crash", "node", name, "stale_pid", existingPid)
 			removePidFile(name)
