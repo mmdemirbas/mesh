@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"os/user"
 	"strconv"
 	"strings"
 	"sync"
@@ -344,13 +345,28 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 	// Handle keep-alives (server-side) -- must start before blocking on chans
 	go startKeepAlive(connCtx, sshConn, s.cfg.Options, true, s.log)
 
-	// Handle channel requests
+	// Handle channel requests with per-connection limit to prevent goroutine exhaustion.
+	const maxChannelsPerConn = 1000
+	var activeChannels atomic.Int64
 	for newChan := range chans {
+		if activeChannels.Load() >= maxChannelsPerConn {
+			_ = newChan.Reject(ssh.ResourceShortage, "too many channels")
+			s.log.Warn("Channel limit reached, rejecting", "remote", sshConn.RemoteAddr(), "limit", maxChannelsPerConn)
+			continue
+		}
 		switch newChan.ChannelType() {
 		case "direct-tcpip":
-			go handleDirectTCPIP(newChan, s.log, s.cfg.Options, serverMetrics)
+			activeChannels.Add(1)
+			go func() {
+				defer activeChannels.Add(-1)
+				handleDirectTCPIP(newChan, s.log, s.cfg.Options, serverMetrics)
+			}()
 		case "session":
-			go handleSession(connCtx, newChan, s.cfg.Shell, s.cfg.AcceptEnv, motd, s.log)
+			activeChannels.Add(1)
+			go func() {
+				defer activeChannels.Add(-1)
+				handleSession(connCtx, newChan, s.cfg.Shell, s.cfg.AcceptEnv, motd, s.log)
+			}()
 		default:
 			_ = newChan.Reject(ssh.UnknownChannelType, "unsupported")
 		}
@@ -535,8 +551,13 @@ func (c *SSHClient) buildSSHConfig(fset *config.ForwardSet, id string) (*ssh.Cli
 			"Set auth.known_hosts to a known_hosts file, or add StrictHostKeyChecking: 'no' to options (insecure, allows MITM attacks)")
 	}
 
+	defaultUser := "root"
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		defaultUser = u.Username
+	}
+
 	sshCfg := &ssh.ClientConfig{
-		User:            "root",
+		User:            defaultUser,
 		Auth:            authMethods,
 		HostKeyCallback: hostKeyCallback,
 		Timeout:         15 * time.Second,
@@ -1457,15 +1478,19 @@ func acceptAndForward(ctx context.Context, listener net.Listener, dialer func() 
 func loadSigner(path string) (ssh.Signer, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: path is the user-configured SSH private key path
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read private key %q: %w", path, err)
 	}
-	return ssh.ParsePrivateKey(data)
+	signer, err := ssh.ParsePrivateKey(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key %q: %w", path, err)
+	}
+	return signer, nil
 }
 
 func loadAuthorizedKeys(path string) ([]ssh.PublicKey, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: path is the user-configured authorized_keys file path
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read authorized_keys %q: %w", path, err)
 	}
 	var keys []ssh.PublicKey
 	rest := data
@@ -1589,7 +1614,11 @@ func startKeepAlive(ctx context.Context, conn ssh.Conn, options map[string]strin
 
 	interval := 0
 	if val := config.GetOption(options, intervalKey); val != "" {
-		interval, _ = strconv.Atoi(val)
+		var err error
+		interval, err = strconv.Atoi(val)
+		if err != nil {
+			slog.Warn("Invalid keepalive interval, must be integer seconds", "key", intervalKey, "value", val, "error", err)
+		}
 	}
 	if interval <= 0 {
 		return

@@ -36,8 +36,11 @@ func sessionEnv(shell, termName string) []string {
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		env = append(env, "USERPROFILE="+home)
-		env = append(env, "HOMEDRIVE="+home[:2])
-		env = append(env, "HOMEPATH="+home[2:])
+		vol := filepath.VolumeName(home)
+		if vol != "" {
+			env = append(env, "HOMEDRIVE="+vol)
+			env = append(env, "HOMEPATH="+home[len(vol):])
+		}
 	}
 	if u, err := user.Current(); err == nil {
 		env = append(env, "USERNAME="+u.Username)
