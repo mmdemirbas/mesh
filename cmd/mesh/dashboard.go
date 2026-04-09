@@ -189,21 +189,31 @@ func (m dashboardModel) View() string {
 }
 
 func (m dashboardModel) buildContent() string {
-	snap := state.Global.Snapshot()
-	metrics := state.Global.SnapshotMetrics()
+	// P13: Single SnapshotFull call instead of separate Snapshot + SnapshotMetrics.
+	full := state.Global.SnapshotFull()
 	var bodyLines []string
 	var maxWidth int
 	for _, name := range m.nodeNames {
-		statusOutput, statusWidth := renderStatus(m.cfgs[name], snap, metrics, name)
+		statusOutput, statusWidth := renderStatus(m.cfgs[name], full.Components, full.Metrics, name)
 		bodyLines = append(bodyLines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
 		if statusWidth > maxWidth {
 			maxWidth = statusWidth
 		}
 	}
 
+	// U8: Compute log tail lines dynamically from viewport height.
+	// Reserve space for the separator line, then fill remaining height with logs.
+	statusLines := len(bodyLines)
+	tailLines := m.viewport.Height - statusLines - 1 // -1 for separator
+	if tailLines < 3 {
+		tailLines = 3
+	}
+	if tailLines > 50 {
+		tailLines = 50
+	}
 	logLines := m.ring.Lines()
-	if len(logLines) > 10 {
-		logLines = logLines[len(logLines)-10:]
+	if len(logLines) > tailLines {
+		logLines = logLines[len(logLines)-tailLines:]
 	}
 	if len(logLines) > 0 {
 		if maxWidth < 80 {
