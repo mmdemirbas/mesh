@@ -441,18 +441,31 @@ document.getElementById('tabs').addEventListener('click', e => {
 window.addEventListener('popstate', () => { showTab(tabMap[location.pathname] || 'dashboard'); });
 showTab(activeTab);
 
-// --- Data fetch ---
+// --- Data fetch (gated by active tab) ---
 async function tick() {
   try {
-    const [sr, lr, fr, cr, car, mr] = await Promise.all([
+    // Always fetch state (needed by dashboard) and metrics (needed by charts).
+    const fetches = [
       fetch('/api/state').then(r=>r.json()),
-      fetch('/api/logs').then(r=>r.json()),
-      fetch('/api/filesync/folders').then(r=>r.json()),
-      fetch('/api/filesync/conflicts').then(r=>r.json()),
-      fetch('/api/clipsync/activity').then(r=>r.json()),
       fetch('/api/metrics').then(r=>r.text()),
-    ]);
-    state = sr; logs = lr; folders = fr; conflicts = cr; clipActivities = car; metricsText = mr;
+    ];
+    // Only fetch tab-specific APIs when that tab is active.
+    const needLogs = activeTab === 'dashboard' || activeTab === 'logs';
+    const needFilesync = activeTab === 'dashboard' || activeTab === 'filesync';
+    const needClipsync = activeTab === 'dashboard' || activeTab === 'clipsync';
+    if (needLogs) fetches.push(fetch('/api/logs').then(r=>r.json()));
+    if (needFilesync) {
+      fetches.push(fetch('/api/filesync/folders').then(r=>r.json()));
+      fetches.push(fetch('/api/filesync/conflicts').then(r=>r.json()));
+    }
+    if (needClipsync) fetches.push(fetch('/api/clipsync/activity').then(r=>r.json()));
+
+    const results = await Promise.all(fetches);
+    let i = 0;
+    state = results[i++]; metricsText = results[i++];
+    if (needLogs) logs = results[i++];
+    if (needFilesync) { folders = results[i++]; conflicts = results[i++]; }
+    if (needClipsync) clipActivities = results[i++];
 
     // Accumulate chart history from metrics
     const nowTx = sumMetric(metricsText, 'mesh_bytes_tx_total');
@@ -539,6 +552,7 @@ function stat(label, value, sub, color) {
   return '<div class="stat"><div class="stat-label">'+x(label)+'</div><div class="stat-value"'+c+'>'+x(String(value))+'</div>'+(sub?'<div class="stat-sub">'+x(sub)+'</div>':'')+'</div>';
 }
 
+const collapsedGroups = new Set();
 function renderComponents() {
   const filter = document.getElementById('comp-search').value.toLowerCase();
   let rows = Object.values(state).filter(c => {
@@ -551,10 +565,33 @@ function renderComponents() {
   });
   const el = document.getElementById('comp-body');
   if (!rows.length) { el.innerHTML = '<tr><td colspan="4" style="color:var(--text-muted);padding:20px">No components</td></tr>'; return; }
-  el.innerHTML = rows.map(c => {
-    const detail = c.message || c.peer_addr || c.bound_addr || '';
-    return '<tr><td>'+badge(c.status)+'</td><td>'+x(c.type)+'</td><td>'+x(c.id)+'</td><td style="color:var(--text-dim)">'+x(detail)+'</td></tr>';
-  }).join('');
+  // Group by type for tree-table display.
+  const groups = {};
+  for (const c of rows) { (groups[c.type] = groups[c.type] || []).push(c); }
+  const types = Object.keys(groups).sort();
+  let html = '';
+  for (const typ of types) {
+    const items = groups[typ];
+    const collapsed = collapsedGroups.has(typ);
+    const arrow = collapsed ? '&#9654;' : '&#9660;';
+    const count = items.length;
+    const okCount = items.filter(c => c.status === 'connected' || c.status === 'listening').length;
+    html += '<tr class="tree-group" onclick="toggleGroup(\''+typ+'\')" style="cursor:pointer;background:var(--bg-alt)">';
+    html += '<td colspan="2" style="font-weight:600">'+arrow+' '+x(typ)+' <span style="color:var(--text-muted);font-weight:400">('+okCount+'/'+count+')</span></td>';
+    html += '<td colspan="2"></td></tr>';
+    if (!collapsed) {
+      for (const c of items) {
+        const detail = c.message || c.peer_addr || c.bound_addr || '';
+        html += '<tr><td style="padding-left:24px">'+badge(c.status)+'</td><td>'+x(c.id)+'</td><td colspan="2" style="color:var(--text-dim)">'+x(detail)+'</td></tr>';
+      }
+    }
+  }
+  el.innerHTML = html;
+}
+function toggleGroup(typ) {
+  if (collapsedGroups.has(typ)) collapsedGroups.delete(typ);
+  else collapsedGroups.add(typ);
+  renderComponents();
 }
 
 function renderDashLogs() {
