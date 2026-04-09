@@ -1561,3 +1561,70 @@ func TestFileCopyInvalidSize(t *testing.T) {
 		t.Error("Start should fail with invalid max_file_copy_size")
 	}
 }
+
+// TestMaxReqBodySize_ScalesWithMaxFileSize is a regression test for bug B5:
+// maxRequestBodySize was a compile-time constant (based on 50MB default).
+// When max_file_copy_size was configured larger, the receiver's /sync endpoint
+// still used the 50MB-based limit, rejecting legal payloads from the sender.
+// After the fix, maxReqBodySize is computed from maxFileSize at startup.
+func TestMaxReqBodySize_ScalesWithMaxFileSize(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		maxFileCopySize string
+		wantFileSize    int64
+	}{
+		{"default", "", defaultMaxSyncFileSize},
+		{"100MB", "100MB", 100 * 1024 * 1024},
+		{"1GB", "1GB", 1024 * 1024 * 1024},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := config.ClipsyncCfg{
+				Bind:            "127.0.0.1:0",
+				MaxFileCopySize: tt.maxFileCopySize,
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			n, err := Start(ctx, cfg)
+			if err != nil {
+				t.Fatalf("Start failed: %v", err)
+			}
+			if n.maxFileSize != tt.wantFileSize {
+				t.Errorf("maxFileSize = %d, want %d", n.maxFileSize, tt.wantFileSize)
+			}
+			wantReqBody := tt.wantFileSize * 20 * 4 / 3
+			if n.maxReqBodySize != wantReqBody {
+				t.Errorf("maxReqBodySize = %d, want %d (should be maxFileSize * 20 * 4/3)", n.maxReqBodySize, wantReqBody)
+			}
+		})
+	}
+}
+
+// TestSyncEndpoint_RejectsOversizedBody verifies that the /sync endpoint
+// enforces the maxReqBodySize limit and rejects payloads that exceed it.
+func TestSyncEndpoint_RejectsOversizedBody(t *testing.T) {
+	t.Parallel()
+	n, url, cleanup := newTestNode(t, []string{"all"})
+	defer cleanup()
+
+	// Create a payload larger than the default maxReqBodySize.
+	// The default is defaultMaxSyncFileSize * 20 * 4/3 ≈ 1.3GB — too large to
+	// allocate in a test. Instead, temporarily shrink the limit and test with
+	// a small payload.
+	n.maxReqBodySize = 100 // 100 bytes
+
+	body := make([]byte, 200)
+	resp, err := http.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /sync failed: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d for oversized body", resp.StatusCode, http.StatusBadRequest)
+	}
+}
