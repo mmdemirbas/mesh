@@ -442,34 +442,35 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 			log.Info("Agent forwarding enabled", "socket", sockPath)
 
 			// Proxy connections from the socket to auth-agent channels.
+			var lnOnce sync.Once
+			closeLn := func() { lnOnce.Do(func() { _ = ln.Close() }) }
 			go func() {
 				defer func() {
-					_ = ln.Close()
+					closeLn()
 					_ = os.RemoveAll(tmpDir)
 				}()
-				// Close listener when session context ends.
-				go func() {
-					<-ctx.Done()
-					_ = ln.Close()
-				}()
+				stop := context.AfterFunc(ctx, closeLn)
+				defer stop()
 				for {
 					conn, err := ln.Accept()
 					if err != nil {
 						return
 					}
 					go func() {
-						defer conn.Close()
 						agentCh, reqs, err := sshConn.OpenChannel("auth-agent@openssh.com", nil)
 						if err != nil {
 							log.Debug("Failed to open agent channel", "error", err)
+							conn.Close()
 							return
 						}
-						defer agentCh.Close()
 						go ssh.DiscardRequests(reqs)
-						done := make(chan struct{}, 2)
-						go func() { _, _ = io.Copy(agentCh, conn); done <- struct{}{} }()
-						go func() { _, _ = io.Copy(conn, agentCh); done <- struct{}{} }()
-						<-done
+						var wg sync.WaitGroup
+						wg.Add(2)
+						go func() { defer wg.Done(); _, _ = io.Copy(agentCh, conn) }()
+						go func() { defer wg.Done(); _, _ = io.Copy(conn, agentCh) }()
+						wg.Wait()
+						_ = agentCh.Close()
+						_ = conn.Close()
 					}()
 				}
 			}()
@@ -489,15 +490,15 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 				}
 				continue
 			}
-			if req.WantReply {
-				_ = req.Reply(true, nil)
-			}
 			cmdStart.Do(func() {
 				root := sftpRoot
 				if root == "" {
 					home, err := os.UserHomeDir()
 					if err != nil {
 						log.Warn("Cannot determine home directory for SFTP", "error", err)
+						if req.WantReply {
+							_ = req.Reply(false, nil)
+						}
 						closeCh()
 						return
 					}
@@ -509,14 +510,24 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 				)
 				if err != nil {
 					log.Warn("SFTP server creation failed", "error", err)
+					if req.WantReply {
+						_ = req.Reply(false, nil)
+					}
 					closeCh()
 					return
 				}
-				log.Info("SFTP session started", "root", root)
-				if err := server.Serve(); err != nil && err != io.EOF {
-					log.Warn("SFTP session error", "error", err)
+				if req.WantReply {
+					_ = req.Reply(true, nil)
 				}
-				closeCh()
+				log.Info("SFTP session started", "root", root)
+				// Serve in a goroutine so the request drain loop continues
+				// processing window-change, signal, and other channel requests.
+				go func() {
+					if err := server.Serve(); err != nil && err != io.EOF {
+						log.Warn("SFTP session error", "error", err)
+					}
+					closeCh()
+				}()
 			})
 
 		default:

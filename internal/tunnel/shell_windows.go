@@ -255,15 +255,15 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					}
 					continue
 				}
-				if req.WantReply {
-					_ = req.Reply(true, nil)
-				}
 				cmdStart.Do(func() {
 					root := sftpRoot
 					if root == "" {
 						home, err := os.UserHomeDir()
 						if err != nil {
 							log.Warn("Cannot determine home directory for SFTP", "error", err)
+							if req.WantReply {
+								_ = req.Reply(false, nil)
+							}
 							closeCh()
 							return
 						}
@@ -275,14 +275,22 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					)
 					if err != nil {
 						log.Warn("SFTP server creation failed", "error", err)
+						if req.WantReply {
+							_ = req.Reply(false, nil)
+						}
 						closeCh()
 						return
 					}
-					log.Info("SFTP session started", "root", root)
-					if err := server.Serve(); err != nil && err != io.EOF {
-						log.Warn("SFTP session error", "error", err)
+					if req.WantReply {
+						_ = req.Reply(true, nil)
 					}
-					closeCh()
+					log.Info("SFTP session started", "root", root)
+					go func() {
+						if err := server.Serve(); err != nil && err != io.EOF {
+							log.Warn("SFTP session error", "error", err)
+						}
+						closeCh()
+					}()
 				})
 
 			default:
