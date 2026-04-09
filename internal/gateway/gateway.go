@@ -188,7 +188,12 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 		return
 	}
 
-	result, _ := json.Marshal(anthResp)
+	result, err := json.Marshal(anthResp)
+	if err != nil {
+		writeAnthropicError(w, 500, "response serialization error")
+		log.Error("Failed to marshal response", "error", err)
+		return
+	}
 	metrics.BytesTx.Add(int64(len(result)))
 
 	w.Header().Set("Content-Type", "application/json")
@@ -279,7 +284,12 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 		return
 	}
 
-	result, _ := json.Marshal(oaiResp)
+	result, err := json.Marshal(oaiResp)
+	if err != nil {
+		writeOpenAIError(w, 500, "response serialization error")
+		log.Error("Failed to marshal response", "error", err)
+		return
+	}
 	metrics.BytesTx.Add(int64(len(result)))
 
 	w.Header().Set("Content-Type", "application/json")
