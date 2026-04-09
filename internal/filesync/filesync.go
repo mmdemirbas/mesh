@@ -17,6 +17,7 @@ import (
 
 	"github.com/mmdemirbas/mesh/internal/config"
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
+	"github.com/mmdemirbas/mesh/internal/nodeutil"
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
@@ -25,27 +26,7 @@ const (
 )
 
 // activeNodes tracks running filesync nodes for admin API access.
-var (
-	activeNodes   []*Node
-	activeNodesMu sync.RWMutex
-)
-
-func registerNode(n *Node) {
-	activeNodesMu.Lock()
-	activeNodes = append(activeNodes, n)
-	activeNodesMu.Unlock()
-}
-
-func unregisterNode(n *Node) {
-	activeNodesMu.Lock()
-	for i, node := range activeNodes {
-		if node == n {
-			activeNodes = append(activeNodes[:i], activeNodes[i+1:]...)
-			break
-		}
-	}
-	activeNodesMu.Unlock()
-}
+var activeNodes nodeutil.Registry[Node]
 
 // FolderStatus is an exported summary of a folder's sync state for the admin API.
 type FolderStatus struct {
@@ -64,11 +45,8 @@ type ConflictInfo struct {
 
 // GetFolderStatuses returns status summaries for all active filesync folders.
 func GetFolderStatuses() []FolderStatus {
-	activeNodesMu.RLock()
-	defer activeNodesMu.RUnlock()
-
 	var result []FolderStatus
-	for _, n := range activeNodes {
+	activeNodes.ForEach(func(n *Node) {
 		for id, fs := range n.folders {
 			fs.indexMu.RLock()
 			count := fs.index.activeCount()
@@ -82,24 +60,21 @@ func GetFolderStatuses() []FolderStatus {
 				Peers:     fs.cfg.Peers,
 			})
 		}
-	}
+	})
 	return result
 }
 
 // GetConflicts returns all conflict files across all active filesync folders.
 func GetConflicts() []ConflictInfo {
-	activeNodesMu.RLock()
-	defer activeNodesMu.RUnlock()
-
 	var result []ConflictInfo
-	for _, n := range activeNodes {
+	activeNodes.ForEach(func(n *Node) {
 		for id, fs := range n.folders {
 			conflicts, _ := listConflicts(fs.cfg.Path)
 			for _, c := range conflicts {
 				result = append(result, ConflictInfo{FolderID: id, Path: c})
 			}
 		}
-	}
+	})
 	return result
 }
 
@@ -218,8 +193,8 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 
 	// Update global state.
 	state.Global.Update("filesync", cfg.Bind, state.Listening, "")
-	registerNode(n)
-	defer unregisterNode(n)
+	activeNodes.Register(n)
+	defer activeNodes.Unregister(n)
 
 	// Start HTTP server.
 	srv := &server{node: n}

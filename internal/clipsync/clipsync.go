@@ -26,6 +26,7 @@ import (
 	config "github.com/mmdemirbas/mesh/internal/config"
 	pb "github.com/mmdemirbas/mesh/internal/clipsync/proto"
 	"github.com/mmdemirbas/mesh/internal/gziputil"
+	"github.com/mmdemirbas/mesh/internal/nodeutil"
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
@@ -73,39 +74,16 @@ type ClipActivity struct {
 }
 
 // activeNodes tracks running clipsync nodes for admin API access.
-var (
-	activeNodes   []*Node
-	activeNodesMu sync.RWMutex
-)
-
-func registerNode(n *Node) {
-	activeNodesMu.Lock()
-	activeNodes = append(activeNodes, n)
-	activeNodesMu.Unlock()
-}
-
-func unregisterNode(n *Node) {
-	activeNodesMu.Lock()
-	for i, node := range activeNodes {
-		if node == n {
-			activeNodes = append(activeNodes[:i], activeNodes[i+1:]...)
-			break
-		}
-	}
-	activeNodesMu.Unlock()
-}
+var activeNodes nodeutil.Registry[Node]
 
 // GetActivities returns recent clipboard activities across all active nodes.
 func GetActivities() []ClipActivity {
-	activeNodesMu.RLock()
-	defer activeNodesMu.RUnlock()
-
 	var result []ClipActivity
-	for _, n := range activeNodes {
+	activeNodes.ForEach(func(n *Node) {
 		n.activityMu.RLock()
 		result = append(result, n.activities...)
 		n.activityMu.RUnlock()
-	}
+	})
 	// Sort by time descending (most recent first).
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].Time.After(result[j].Time)
@@ -202,8 +180,8 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 		state.Global.Update("clipsync-peer", cfg.Bind+"|"+addr, state.Connected, "static")
 	}
 
-	registerNode(n)
-	context.AfterFunc(ctx, func() { unregisterNode(n) })
+	activeNodes.Register(n)
+	context.AfterFunc(ctx, func() { activeNodes.Unregister(n) })
 
 	go n.pollClipboard(ctx, pollInterval)
 	return n, nil
