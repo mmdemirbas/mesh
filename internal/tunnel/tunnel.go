@@ -1285,7 +1285,15 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 		// all remote forwards bind to localhost only (ignore requested bind addr)
 		bindAddr = "127.0.0.1"
 	case "clientspecified":
-		// default OpenSSH behavior or what the user asked
+		// Honor client request, but reject wildcard binds (0.0.0.0, ::) to
+		// prevent accidental network exposure. Use GatewayPorts=yes to allow.
+		if ip := net.ParseIP(bindAddr); ip != nil && ip.IsUnspecified() {
+			log.Warn("tcpip-forward rejected: wildcard bind requires GatewayPorts=yes", "addr", bindAddr)
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+			return
+		}
 	default:
 		// Default to mesh's previous behavior: use what's requested, or localhost if it looks like loopback
 		if bindAddr == "" || bindAddr == "localhost" {
