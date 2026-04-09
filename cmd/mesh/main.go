@@ -61,6 +61,22 @@ func main() {
 		configPath = getDefaultConfigPath()
 	}
 
+	// Commands that need a config file: verify it exists early with a helpful error.
+	switch command {
+	case "up", "status", "config":
+		if _, err := os.Stat(configPath); err != nil {
+			fmt.Printf("%s⨯ Config file not found: %s%s\n", cRed, configPath, cReset)
+			fmt.Println()
+			fmt.Println("Search paths (in order):")
+			fmt.Println("  1. ./mesh.yaml or ./mesh.yml (current directory)")
+			fmt.Println("  2. ~/.mesh/conf/mesh.yaml or ~/.mesh/conf/mesh.yml")
+			fmt.Println("  3. Explicit path via -f flag")
+			fmt.Println()
+			fmt.Println("Create a config file or specify one with: mesh -f /path/to/config.yaml " + command)
+			os.Exit(1)
+		}
+	}
+
 	switch command {
 	case "up":
 		upCmd(resolveNodes(nodeArgs, configPath), configPath)
@@ -69,7 +85,7 @@ func main() {
 	case "config":
 		configCmd(resolveNodes(nodeArgs, configPath), configPath)
 	case "down":
-		downCmd(resolveNodes(nodeArgs, configPath))
+		downCmd(resolveNodesForDown(nodeArgs, configPath))
 	case "completion":
 		shell := ""
 		if len(nodeArgs) >= 1 {
@@ -106,6 +122,33 @@ func resolveNodes(args []string, configPath string) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// resolveNodesForDown returns node names for the down command.
+// If explicit names are given, use them. Otherwise, scan ~/.mesh/run/mesh-*.pid
+// so that down works without a config file.
+func resolveNodesForDown(args []string, configPath string) []string {
+	if len(args) > 0 {
+		return args
+	}
+	// Try pidfile scan first — down only needs pidfiles, not a valid config.
+	pattern := filepath.Join(runDir(), "mesh-*.pid")
+	matches, _ := filepath.Glob(pattern)
+	if len(matches) > 0 {
+		names := make([]string, 0, len(matches))
+		for _, m := range matches {
+			base := filepath.Base(m)
+			name := strings.TrimPrefix(base, "mesh-")
+			name = strings.TrimSuffix(name, ".pid")
+			if name != "" {
+				names = append(names, name)
+			}
+		}
+		sort.Strings(names)
+		return names
+	}
+	// Fall back to config-based resolution for backward compatibility.
+	return resolveNodes(nil, configPath)
 }
 
 func printUsage() {
@@ -148,12 +191,13 @@ func printHelp() {
 	fmt.Println(cBold + "Command Details:" + cReset)
 	fmt.Println()
 	fmt.Println(cBold + "  up" + cReset + " [node...]")
-	fmt.Println("    Starts all configured listeners, connections, and clipsync for the given nodes.")
+	fmt.Println("    Starts all configured components: listeners, connections, clipsync, filesync, gateway.")
 	fmt.Println("    Without node names, starts all nodes defined in the config file.")
 	fmt.Println("    Multiple nodes run within a single process.")
 	fmt.Println("    When running in a terminal, shows a live dashboard that auto-refreshes.")
 	fmt.Println("    Logs are written to " + cGray + "~/.mesh/log/<node>.log" + cReset + ".")
 	fmt.Println("    When stdout is not a terminal (piped or backgrounded), logs go to stderr.")
+	fmt.Println("    Starts the admin web UI on " + cGray + "http://127.0.0.1:7777/ui" + cReset + " (configurable).")
 	fmt.Println("    Press Ctrl+C to stop gracefully.")
 	fmt.Println()
 	fmt.Println(cBold + "  status" + cReset + " [node...] [" + cYellow + "-w" + cReset + "]")
@@ -167,6 +211,7 @@ func printHelp() {
 	fmt.Println()
 	fmt.Println(cBold + "  down" + cReset + " [node...]")
 	fmt.Println("    Sends SIGTERM to the running nodes and waits for graceful shutdown.")
+	fmt.Println("    Without node names, discovers running nodes from pidfiles in " + cGray + "~/.mesh/run/" + cReset + ".")
 	fmt.Println()
 	fmt.Println(cBold + "  help" + cReset)
 	fmt.Println("    Shows this detailed help.")

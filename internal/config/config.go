@@ -323,7 +323,7 @@ func unmarshalConfigs(data []byte) (map[string]*Config, error) {
 		}
 		var cfg Config
 		if err := root.Content[i+1].Decode(&cfg); err != nil {
-			return nil, fmt.Errorf("%s: %w", key, err)
+			return nil, fmt.Errorf("line %d: %s: %w", root.Content[i].Line, key, err)
 		}
 		cfgs[key] = &cfg
 	}
