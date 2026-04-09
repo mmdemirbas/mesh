@@ -54,7 +54,7 @@ brew install go go-task
 task build          # → build/mesh
 
 # Or cross-compile all platforms
-task dist           # → dist/mesh-{darwin,linux,windows}-{amd64,arm64}
+task dist           # → dist/mesh-{darwin-arm64,linux-arm64,linux-amd64,windows-amd64}
 ```
 
 ### Add to PATH
@@ -277,10 +277,14 @@ Every `mesh up` starts a local HTTP server on `127.0.0.1:7777` with a web dashbo
 ### API Endpoints
 
 ```bash
-curl http://127.0.0.1:7777/api/state       # component state (JSON)
-curl http://127.0.0.1:7777/api/logs         # recent log lines (JSON array)
-curl http://127.0.0.1:7777/api/logs/file    # full log file (text, supports ?offset=&limit=)
-curl http://127.0.0.1:7777/api/metrics      # Prometheus text format
+curl http://127.0.0.1:7777/healthz                # health check (200 ok)
+curl http://127.0.0.1:7777/api/state               # component state (JSON)
+curl http://127.0.0.1:7777/api/logs                # recent log lines (JSON array)
+curl http://127.0.0.1:7777/api/logs/file           # full log file (text, supports ?offset=&limit=)
+curl http://127.0.0.1:7777/api/metrics             # Prometheus text format
+curl http://127.0.0.1:7777/api/filesync/folders    # filesync folder status (JSON)
+curl http://127.0.0.1:7777/api/filesync/conflicts  # filesync conflict files (JSON)
+curl http://127.0.0.1:7777/api/clipsync/activity   # clipsync activity log (JSON)
 ```
 
 Configure with `admin_addr` in node config. Set to `"off"` to disable.

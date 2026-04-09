@@ -366,7 +366,7 @@
             "type": "string"
           },
           "type": "object",
-          "description": "Options overrides or adds to connection-level options.\nOnly a subset of OpenSSH config keys are parsed: Ciphers, MACs, KexAlgorithms, ConnectTimeout, IPQoS."
+          "description": "Options overrides or adds to connection-level options.\nSupported keys: Ciphers, MACs, KexAlgorithms, HostKeyAlgorithms, ConnectTimeout, IPQoS, TCPKeepAlive, ServerAliveInterval, ServerAliveCountMax, ClientAliveInterval, ClientAliveCountMax, ExitOnForwardFailure, GatewayPorts, PermitOpen, RekeyLimit, StrictHostKeyChecking."
         },
         "remote": {
           "items": {
@@ -422,6 +422,21 @@
           "type": "string",
           "description": "Path to the authorized_keys file. Required when type=\"sshd\"."
         },
+        "accept_env": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Environment variables accepted from SSH clients. Supports trailing wildcards (e.g., \"LC_*\")."
+        },
+        "banner": {
+          "type": "string",
+          "description": "Path to a text file shown to clients before authentication (SSH pre-auth banner)."
+        },
+        "motd": {
+          "type": "string",
+          "description": "Path to a text file shown to clients after authentication (message of the day)."
+        },
         "shell": {
           "items": {
             "type": "string"
@@ -434,7 +449,7 @@
             "type": "string"
           },
           "type": "object",
-          "description": "Additional overrides for the listener.\nOnly a subset of OpenSSH config keys are parsed: Ciphers, MACs, KexAlgorithms, ConnectTimeout, IPQoS."
+          "description": "Additional overrides for the listener.\nSupported keys: Ciphers, MACs, KexAlgorithms, HostKeyAlgorithms, ConnectTimeout, IPQoS, TCPKeepAlive, ServerAliveInterval, ServerAliveCountMax, ClientAliveInterval, ClientAliveCountMax, ExitOnForwardFailure, GatewayPorts, PermitOpen, RekeyLimit, StrictHostKeyChecking."
         }
       },
       "additionalProperties": false,
