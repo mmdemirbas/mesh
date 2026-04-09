@@ -1,6 +1,7 @@
 # PLAN.md
 
 Roadmap for mesh. Last updated 2026-04-09.
+Batch update: 27 items completed across Tier 2 and Tier 3.
 Organized by urgency. Tags in the Component column indicate the area.
 
 ---
@@ -36,18 +37,18 @@ Security hardening, correctness, data integrity, protocol compliance.
 | ~~S4~~ | ~~admin~~ | ~~Admin server allows non-loopback bind~~ | Done. Config validation rejects non-loopback `admin_addr`. |
 | ~~S5~~ | ~~sshd~~ | ~~No per-connection channel limit~~        | Done. `atomic.Int64` counter, reject above 1000 with `ssh.ResourceShortage`. |
 | ~~C2~~ | ~~sshd~~ | ~~Default SSH user hardcoded to `root`~~   | Done. Defaults to `os/user.Current().Username`, falls back to `root`. |
-| Q1   | core      | `gzipEncode`/`gzipDecode` duplicated        | Identical in clipsync and filesync. Extract to shared package. Prerequisite for consistent S3 fix. |
+| Q1   | core      | `gzipEncode`/`gzipDecode` duplicated        | Identical in clipsync and filesync. Extract to shared package. Prerequisite for consistent S3 fix and P5 pooling. |
 | ~~U1~~ | ~~config~~ | ~~`Forward.Type` default not applied~~   | Done. `validateForwards` defaults empty Type to `"forward"`. |
 | ~~P4~~ | ~~filesync~~ | ~~`io.ReadAll` up to 4 GB for delta response~~ | Done. Capped at 256 MB. |
 | ~~S9~~ | ~~gateway~~ | ~~Upstream error body logged verbatim (64 MB)~~ | Done. Truncated to 512 bytes via `truncateBody()`. |
 | ~~S6~~ | ~~filesync~~ | ~~`isLoopback` misses IPv4-mapped IPv6~~ | Done. Uses `net.ParseIP(ip).IsLoopback()`. |
-| S7   | sshd      | `GatewayPorts=clientspecified` allows `0.0.0.0` | Reject wildcard bind addresses for remote forwards unless explicitly allowed. |
+| ~~S7~~ | ~~sshd~~ | ~~`GatewayPorts=clientspecified` allows `0.0.0.0`~~ | Done. Wildcard bind (0.0.0.0, ::) rejected for `clientspecified`; use `GatewayPorts=yes` to allow. |
 | ~~E4~~ | ~~sshd~~ | ~~`ServerAliveInterval` Atoi error swallowed~~ | Done. Logs warning on invalid value. |
 | ~~E5~~ | ~~sshd~~ | ~~`loadSigner`/`loadAuthorizedKeys` bare errors~~ | Done. Errors wrapped with file path context. |
-| DOC1 | schema    | JSON Schema missing `accept_env`, `banner`, `motd` | `additionalProperties: false` rejects valid configs in IDEs. |
+| ~~DOC1~~ | ~~schema~~ | ~~JSON Schema missing `accept_env`, `banner`, `motd`~~ | Done. Added all three fields to Listener schema definition. |
 | ~~W6~~ | ~~sshd~~ | ~~`sessionEnv` panics on UNC home directories~~ | Done. Uses `filepath.VolumeName()` instead of `home[:2]`. |
-| C3   | gateway   | `thinking` blocks silently dropped           | Extended thinking content dropped in both translation directions. Increasingly used feature. |
-| C4   | gateway   | `response_format` silently dropped           | `json_object` mode parsed but dropped. Clients expecting guaranteed JSON get unstructured text. |
+| C3   | gateway   | `thinking` blocks silently dropped           | Extended thinking content dropped in both translation directions. Increasingly used feature. Needs design decision. |
+| C4   | gateway   | `response_format` silently dropped           | `json_object` mode parsed but dropped. Clients expecting guaranteed JSON get unstructured text. Needs design decision. |
 
 ---
 
@@ -59,13 +60,13 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
-| E6   | filesync  | `rateLimitedReader` discards `WaitN` error   | Burst < buffer size silently bypasses rate limiting. `ratelimit.go:30`. |
+| ~~E6~~ | ~~filesync~~ | ~~`rateLimitedReader` discards `WaitN` error~~ | Done. `WaitN` error propagated to callers. |
 | E7   | config    | Validation errors lack node name context     | Multi-node configs produce ambiguous errors. `config.go:533,538`. |
-| E8   | state     | `SnapshotFull` atomicity claim is false      | `sync.Map.Range` independent of `mu.RLock`. Fix comment or move metrics into mutex. |
+| ~~E8~~ | ~~state~~ | ~~`SnapshotFull` atomicity claim is false~~ | Done. Comment corrected to reflect that components and metrics snapshots are not strictly atomic. |
 | S8   | sshd      | `PermitOpen` bypass via alternate hostnames  | String comparison on unresolved `DestAddr`. Document limitation or restrict to IP-only. |
 | S10  | config    | Writable config enables `password_command` injection | `warnInsecurePermissions` only warns. Consider hard reject. |
 | S11  | clipsync  | UDP beacon port used for SSRF               | `msg.GetPort()` from unauthenticated beacon. Mitigated by fixing S2. |
-| D4   | ops       | Stale PID file detection                    | `upCmd` overwrites stale PID files from crashes. Check if running first. |
+| ~~D4~~ | ~~ops~~ | ~~Stale PID file detection~~               | Done. `upCmd` checks if PID is running; rejects if alive, removes if stale. |
 
 ### Performance
 
@@ -76,10 +77,10 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | P6   | clipsync  | `proto.Marshal` re-serialization for size   | Pass original body size from HTTP handler instead. |
 | P7   | filesync  | Maintain active file count                  | Four O(n) loops → maintain `activeCount` field. |
 | P8   | filesync  | Merge temp cleanup into scan walk           | Eliminate redundant full tree traversal. |
-| P9   | filesync  | `hashFile` uses `fmt.Sprintf("%x")`         | Replace with `hex.EncodeToString`. |
-| P10  | filesync  | `hashEqual` manual loop                     | Replace with `bytes.Equal` (compiler intrinsic). |
-| P11  | sshd      | Parse `PermitOpen` once at startup          | Pre-parse into `map[string]bool`. |
-| P12  | config    | Normalize `GetOption` keys at load          | Lowercase once, map lookup O(1). |
+| ~~P9~~ | ~~filesync~~ | ~~`hashFile` uses `fmt.Sprintf("%x")`~~ | Done. Replaced with `hex.EncodeToString`. |
+| ~~P10~~ | ~~filesync~~ | ~~`hashEqual` manual loop~~           | Done. Replaced with `bytes.Equal`. |
+| ~~P11~~ | ~~sshd~~ | ~~Parse `PermitOpen` once at startup~~    | Done. Pre-parsed into `permitOpenPolicy` struct with map lookups. |
+| ~~P12~~ | ~~config~~ | ~~Normalize `GetOption` keys at load~~  | Done. `normalizeOptions` lowercases keys at load; `GetOption` does O(1) map hit. |
 | P13  | cli       | Use `SnapshotFull()` in dashboard           | Two separate locks → one atomic call. |
 | P3   | filesync  | Adaptive watch/scan                         | Self-tuning heuristic. See [design](#adaptive-watchscan-design) below. |
 
@@ -91,8 +92,8 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | U3   | cli       | `mesh status -w` shows no metrics           | Always passes `nil` for `metricsMap`. Fetch from admin API. |
 | U6   | cli       | `mesh help` omits filesync, gateway, admin  | Major feature discoverability gap. |
 | U7   | cli       | Config not found gives raw OS error         | No guidance on search paths or examples. Poor first-run experience. |
-| U5   | cli       | `mesh status` exit code 3 undocumented      | Document exit codes in help text. |
-| U10  | cli       | `mesh down` exits 0 if nothing stopped      | Track whether any node was stopped. |
+| ~~U5~~ | ~~cli~~ | ~~`mesh status` exit code 3 undocumented~~ | Done. Exit codes documented in printUsage. |
+| ~~U10~~ | ~~cli~~ | ~~`mesh down` exits 0 if nothing stopped~~ | Done. Exits 3 when no nodes were stopped. |
 | U4   | cli       | Config errors lack YAML line numbers        | Array indices require manual counting in large files. |
 | U8   | cli       | Dashboard log tail hard-coded to 10 lines   | Compute dynamically from viewport height. |
 | U9   | admin     | Web UI fetches all 6 APIs every second      | Gate fetches by active tab. |
@@ -102,8 +103,8 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
-| W4   | config    | `warnInsecurePermissions` false positives on Windows | `Mode().Perm()` returns synthetic `0666`. Skip on Windows. |
-| W5   | config    | `expandHome` only handles `~/`, not `~\`    | Windows users write `~\`. Also check `~` + `os.PathSeparator`. |
+| ~~W4~~ | ~~config~~ | ~~`warnInsecurePermissions` false positives on Windows~~ | Done. Build-tagged no-op on Windows (`perm_windows.go`). |
+| ~~W5~~ | ~~config~~ | ~~`expandHome` only handles `~/`, not `~\`~~ | Done. Handles standalone `~`, `~/`, and `~\`. |
 | W7   | clipsync  | `runtime.GOOS` instead of build tags        | 6 switch blocks. CLAUDE.md convention violated. Refactor to build-tagged files. |
 | W8   | cli       | `checkPid`/`killPid` use `runtime.GOOS`    | Same violation. Move to build-tagged files. |
 
@@ -111,36 +112,36 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
-| C5   | gateway   | Static `msg_stream` as message ID           | Should generate unique IDs. Breaks dedup/logging. |
+| ~~C5~~ | ~~gateway~~ | ~~Static `msg_stream` as message ID~~ | Done. `generateMsgID()` produces unique `msg_<hex>` per stream. |
 | C6   | sshd      | Server keepalive uses non-standard type     | `keepalive@golang.org` — non-Go clients may not reply. |
 | C7   | sshd      | Public-key auth only on server side         | No password/keyboard-interactive server auth. Asymmetry may surprise users. |
-| C8   | gateway   | `n > 1` silently returns 1 choice           | No error returned to client. |
-| C9   | gateway   | Temperature silently clamped                | > 1.0 clamped to 1.0 without indication. |
+| ~~C8~~ | ~~gateway~~ | ~~`n > 1` silently returns 1 choice~~ | Done. Returns error to client when n > 1. |
+| ~~C9~~ | ~~gateway~~ | ~~Temperature silently clamped~~       | Done. Logs warning before clamping to 1.0. |
 
 ### Code Quality
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
-| Q2   | sshd      | Metrics reset duplicated 4 times            | Add `Metrics.Reset()` method. |
+| ~~Q2~~ | ~~sshd~~ | ~~Metrics reset duplicated 4 times~~      | Done. `Metrics.Reset()` replaces 4 identical blocks. |
 | Q3   | sshd      | `runForwardSet` duplication                 | ~60 lines retry/handshake boilerplate. Extract `runConnectLoop`. |
 | Q4   | gateway   | `handleA2O`/`handleO2A` duplication         | Extract shared `doUpstreamRequest`. |
-| Q5   | sshd      | Magic timing constants scattered            | Add `defaultTCPKeepAlive`, `defaultRetryInterval`. |
+| ~~Q5~~ | ~~sshd~~ | ~~Magic timing constants scattered~~      | Done. `defaultTCPKeepAlive`, `defaultHandshakeTimeout`, `defaultSSHClientTimeout`, `defaultServerAliveInterval`. |
 | Q6   | core      | `activeNodes` registry duplicated           | Identical pattern in filesync and clipsync. Extract generic registry. |
-| Q7   | sshd      | `"keepalive"` sentinel not a constant       | Invisible coupling. Use named constant. |
-| Q8   | gateway   | `mustMarshal` silently discards errors      | Remove wrapper, use explicit error handling. |
+| ~~Q7~~ | ~~sshd~~ | ~~`"keepalive"` sentinel not a constant~~ | Done. `keepaliveForwardSet` named constant. |
+| ~~Q8~~ | ~~gateway~~ | ~~`mustMarshal` silently discards errors~~ | Done. Removed wrapper; all sites use explicit `json.Marshal` with error handling. |
 
 ### Documentation
 
 | ID    | Component | Item                                         | Notes |
 |-------|-----------|----------------------------------------------|-------|
-| DOC2  | cli       | `printUsage()` omits `help` command         | |
-| DOC3  | cli       | `printUsage()` tagline omits new features   | Missing clipsync, filesync, gateway. |
-| DOC4  | cli       | `mesh help` SSH options list incomplete     | Omits `StrictHostKeyChecking`. |
-| DOC5  | readme    | API endpoints section incomplete            | 3 endpoints missing from README. |
-| DOC6  | readme    | `task dist` output claim inaccurate         | Says 6 binaries, builds 4. |
+| ~~DOC2~~ | ~~cli~~ | ~~`printUsage()` omits `help` command~~ | Done. Added to commands list. |
+| ~~DOC3~~ | ~~cli~~ | ~~`printUsage()` tagline omits new features~~ | Done. Updated to mention clipsync, filesync, gateway. |
+| ~~DOC4~~ | ~~cli~~ | ~~`mesh help` SSH options list incomplete~~ | Done. Added `StrictHostKeyChecking`. |
+| ~~DOC5~~ | ~~readme~~ | ~~API endpoints section incomplete~~     | Done. Added /healthz, /api/filesync/*, /api/clipsync/activity. |
+| ~~DOC6~~ | ~~readme~~ | ~~`task dist` output claim inaccurate~~  | Done. Fixed to show 4 actual binaries. |
 | DOC7  | claude    | CLAUDE.md claims `CGO_ENABLED=0` always     | Darwin build omits it. |
 | DOC8  | claude    | CLAUDE.md "never `runtime.GOOS`" violated   | 8 violations across clipsync and main. |
-| DOC9  | schema    | ForwardSet `options` description too narrow  | Says 5 options, 16 actually work. |
+| ~~DOC9~~ | ~~schema~~ | ~~ForwardSet `options` description too narrow~~ | Done. Updated to list all 16 supported keys. |
 
 ### DevOps
 
@@ -151,7 +152,7 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | D3   | testing   | Tunnel package coverage at 34%              | Core forwarding functions at 0%. |
 | D5   | testing   | Test parallelism                            | Zero `t.Parallel()` across 368 tests. |
 | D6   | release   | Binary signing                              | No cosign/Sigstore. |
-| D7   | admin     | Health check endpoint                       | Add `GET /healthz`. |
+| ~~D7~~ | ~~admin~~ | ~~Health check endpoint~~                 | Done. `GET /healthz` returns 200 "ok". |
 | D8   | ops       | `time.Sleep` in `downCmd` and tests         | Replace with channel-based sync. |
 | D9   | testing   | Benchmark coverage                          | Only 3 benchmarks. No data-path benchmarks. |
 | D10  | build     | darwin/arm64 dist allows CGO                | Align Taskfile with GoReleaser. |
@@ -214,6 +215,33 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | ~~E4~~ | Keepalive interval parse warning   | Logs warning on non-integer `ServerAliveInterval`. |
 | ~~E5~~ | SSH key error context              | `loadSigner`/`loadAuthorizedKeys` errors include file path. |
 | ~~W6~~ | UNC home directory safety          | `filepath.VolumeName()` instead of `home[:2]` in Windows session env. |
+| ~~P9~~ | `hashFile` hex encoding             | `hex.EncodeToString` instead of `fmt.Sprintf("%x")`. |
+| ~~P10~~ | `hashEqual` compiler intrinsic    | `bytes.Equal` instead of manual byte loop. |
+| ~~Q5~~ | Named timing constants              | `defaultTCPKeepAlive`, `defaultHandshakeTimeout`, `defaultSSHClientTimeout`, `defaultServerAliveInterval`. |
+| ~~Q7~~ | Keepalive sentinel constant         | `keepaliveForwardSet` named constant replaces magic string coupling. |
+| ~~Q8~~ | Gateway marshal error handling      | Removed `mustMarshal`; explicit `json.Marshal` with error propagation at all sites. |
+| ~~E6~~ | Rate limiter WaitN error            | `rateLimitedReader.Read` propagates `WaitN` error to callers. |
+| ~~E8~~ | SnapshotFull atomicity comment      | Corrected to reflect sync.Map.Range independence from mu.RLock. |
+| ~~P11~~ | Pre-parse PermitOpen               | `permitOpenPolicy` struct with map-based O(1) matching at server startup. |
+| ~~P12~~ | Normalize GetOption keys           | `normalizeOptions` lowercases at load; `GetOption` O(1) map lookup. |
+| ~~W4~~ | Windows permission check            | Build-tagged no-op in `perm_windows.go`. |
+| ~~W5~~ | expandHome backslash support        | Handles standalone `~`, `~/`, and `~\`. |
+| ~~C5~~ | Unique stream message IDs           | `generateMsgID()` with crypto/rand hex per stream response. |
+| ~~C8~~ | Reject n > 1                        | `translateOpenAIRequest` returns error for n > 1. |
+| ~~C9~~ | Temperature clamp warning           | Logs warning before clamping to Anthropic max 1.0. |
+| ~~S7~~ | Reject wildcard remote forward bind | `clientspecified` rejects 0.0.0.0 / ::; requires `GatewayPorts=yes`. |
+| ~~D7~~ | Health check endpoint               | `GET /healthz` returns 200 "ok" on admin server. |
+| ~~D4~~ | Stale PID file detection            | `upCmd` checks running PID, rejects if alive, removes if stale. |
+| ~~U5~~ | Exit code documentation             | Documented 0/1/3 in `printUsage` Exit Codes section. |
+| ~~U10~~ | `mesh down` exit code              | Exits 3 when no nodes were stopped. |
+| ~~Q2~~ | Metrics.Reset() method              | Deduplicated 4 identical reset blocks in tunnel.go. |
+| ~~DOC1~~ | JSON Schema completeness          | Added `accept_env`, `banner`, `motd` to Listener definition. |
+| ~~DOC2~~ | `printUsage` help command         | Added `help` to commands list. |
+| ~~DOC3~~ | `printUsage` tagline              | Updated to mention clipsync, filesync, gateway. |
+| ~~DOC4~~ | SSH options completeness          | Added `StrictHostKeyChecking` to help text. |
+| ~~DOC5~~ | README API endpoints              | Added /healthz, /api/filesync/*, /api/clipsync/activity. |
+| ~~DOC6~~ | README dist claim                 | Fixed to show 4 actual binaries. |
+| ~~DOC9~~ | Schema options description        | Updated to list all 16 supported SSH option keys. |
 
 ---
 
