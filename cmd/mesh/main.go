@@ -9,10 +9,8 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -857,37 +855,7 @@ func removePidFile(nodeName string) {
 	_ = os.Remove(pidFilePath(nodeName))
 }
 
-func checkPid(pid int) bool {
-	if runtime.GOOS == "windows" {
-		// FindProcess always succeeds on Windows. Instead, explicitly poll tasklist.
-		cmd := exec.Command("tasklist", "/NH", "/FI", fmt.Sprintf("PID eq %d", pid)) //nolint:gosec // G204: pid is int, format string is fixed
-		output, err := cmd.Output()
-		if err != nil {
-			return false
-		}
-		return strings.Contains(string(output), strconv.Itoa(pid))
-	}
-
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// On Unix, sending signal 0 checks if the process exists
-	err = process.Signal(syscall.Signal(0))
-	return err == nil
-}
-
-func killPid(pid int, sig syscall.Signal) error {
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	if err := process.Signal(sig); err != nil {
-		// Fallback to Kill if the OS (e.g. Windows) doesn't support the specific signal.
-		return process.Kill()
-	}
-	return nil
-}
+// checkPid and killPid are defined in pid_unix.go and pid_windows.go.
 
 func completionCmd(shell string) {
 	switch shell {
