@@ -85,6 +85,44 @@ func (r *logRing) PlainLines() []string {
 	return out
 }
 
+// renderDashboardFrame builds one complete frame of the dashboard output.
+// All line breaks use \r\n because the terminal is in raw mode where \n
+// alone only moves the cursor down without returning to column 1.
+func renderDashboardFrame(lines []string, start, end, vpHeight int, nodeNames []string, configPath, logFilePath, adminURL string, startTime time.Time) string {
+	const eol = "\033[K\r\n"
+
+	var buf strings.Builder
+	buf.WriteString("\033[H") // cursor home
+
+	uptime := time.Since(startTime).Truncate(time.Second)
+	nodesLabel := strings.Join(nodeNames, ", ")
+	fmt.Fprintf(&buf, "%s%smesh %s%s %s%s%s | pid %d | %s | up %s",
+		cBold, cCyan, nodesLabel, cReset, cGray, version, cReset, os.Getpid(), time.Now().Format("15:04:05"), uptime)
+	buf.WriteString(eol)
+	if configPath != "" {
+		fmt.Fprintf(&buf, "  %sconfig: %s%s", cGray, configPath, cReset)
+		buf.WriteString(eol)
+	}
+	if logFilePath != "" {
+		fmt.Fprintf(&buf, "  %slog:    %s%s", cGray, logFilePath, cReset)
+		buf.WriteString(eol)
+	}
+	if adminURL != "" {
+		fmt.Fprintf(&buf, "  %sui:     %s%s", cGray, adminURL, cReset)
+		buf.WriteString(eol)
+	}
+	buf.WriteString(eol) // blank line after header
+
+	for i := start; i < end; i++ {
+		buf.WriteString(lines[i])
+		buf.WriteString(eol)
+	}
+	for i := end - start; i < vpHeight; i++ {
+		buf.WriteString(eol)
+	}
+	return buf.String()
+}
+
 // runDashboard renders a live status screen using the terminal's alternate
 // screen buffer. Keyboard input (q/ctrl-c to quit, arrow keys and page
 // up/down to scroll) is handled via raw terminal mode. The dashboard
@@ -199,36 +237,8 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 			end = totalLines
 		}
 
-		var buf strings.Builder
-		buf.WriteString("\033[H") // cursor home
-
-		// Header
-		uptime := time.Since(startTime).Truncate(time.Second)
-		nodesLabel := strings.Join(nodeNames, ", ")
-		fmt.Fprintf(&buf, "%s%smesh %s%s %s%s%s | pid %d | %s | up %s\033[K\n",
-			cBold, cCyan, nodesLabel, cReset, cGray, version, cReset, os.Getpid(), time.Now().Format("15:04:05"), uptime)
-		if configPath != "" {
-			fmt.Fprintf(&buf, "  %sconfig: %s%s\033[K\n", cGray, configPath, cReset)
-		}
-		if logFilePath != "" {
-			fmt.Fprintf(&buf, "  %slog:    %s%s\033[K\n", cGray, logFilePath, cReset)
-		}
-		if adminURL != "" {
-			fmt.Fprintf(&buf, "  %sui:     %s%s\033[K\n", cGray, adminURL, cReset)
-		}
-		buf.WriteString("\033[K\n") // blank line after header
-
-		// Viewport lines
-		for i := start; i < end; i++ {
-			buf.WriteString(lines[i])
-			buf.WriteString("\033[K\n")
-		}
-		// Clear remaining terminal lines
-		for i := end - start; i < vpHeight; i++ {
-			buf.WriteString("\033[K\n")
-		}
-
-		os.Stdout.WriteString(buf.String())
+		frame := renderDashboardFrame(lines, start, end, vpHeight, nodeNames, configPath, logFilePath, adminURL, startTime)
+		os.Stdout.WriteString(frame)
 	}
 
 	// Input reader goroutine

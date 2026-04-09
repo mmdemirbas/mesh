@@ -1744,3 +1744,52 @@ func BenchmarkCompareAddrSort(b *testing.B) {
 		})
 	}
 }
+
+func TestRenderDashboardFrame_UsesRawNewlines(t *testing.T) {
+	t.Parallel()
+	lines := []string{"line1", "line2", "line3"}
+	frame := renderDashboardFrame(lines, 0, 3, 5, []string{"test-node"}, "/tmp/cfg.yaml", "/tmp/mesh.log", "http://127.0.0.1:7777", time.Now())
+
+	// In raw terminal mode, every newline must be \r\n, not bare \n.
+	// Strip all \r\n first, then check no bare \n remains.
+	stripped := strings.ReplaceAll(frame, "\r\n", "")
+	if strings.Contains(stripped, "\n") {
+		t.Errorf("dashboard frame contains bare \\n without \\r; raw mode requires \\r\\n for all line breaks")
+	}
+
+	// Must contain at least one \r\n (header + lines + blanks).
+	if !strings.Contains(frame, "\r\n") {
+		t.Error("dashboard frame contains no \\r\\n at all")
+	}
+}
+
+func TestRenderDashboardFrame_ContainsHeaderFields(t *testing.T) {
+	t.Parallel()
+	frame := renderDashboardFrame(nil, 0, 0, 5, []string{"my-node"}, "/etc/mesh.yaml", "/var/log/mesh.log", "http://localhost:7777", time.Now())
+
+	for _, want := range []string{"my-node", "/etc/mesh.yaml", "/var/log/mesh.log", "localhost:7777"} {
+		if !strings.Contains(frame, want) {
+			t.Errorf("frame missing expected header content %q", want)
+		}
+	}
+}
+
+func TestRenderDashboardFrame_ViewportLines(t *testing.T) {
+	t.Parallel()
+	lines := []string{"alpha", "bravo", "charlie", "delta"}
+	// Scroll: show lines[1:3] in a viewport of height 4
+	frame := renderDashboardFrame(lines, 1, 3, 4, []string{"n"}, "", "", "", time.Now())
+
+	if !strings.Contains(frame, "bravo") {
+		t.Error("frame should contain 'bravo' (lines[1])")
+	}
+	if !strings.Contains(frame, "charlie") {
+		t.Error("frame should contain 'charlie' (lines[2])")
+	}
+	if strings.Contains(frame, "alpha") {
+		t.Error("frame should NOT contain 'alpha' (scrolled past)")
+	}
+	if strings.Contains(frame, "delta") {
+		t.Error("frame should NOT contain 'delta' (not in viewport)")
+	}
+}
