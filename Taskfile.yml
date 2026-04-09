@@ -34,6 +34,11 @@ tasks:
       - mkdir -p build
       - cp dist/mesh-{{OS}}-{{ARCH}}{{exeExt}} build/mesh{{exeExt}}
 
+  schema:
+    desc: Regenerate JSON schema from config structs
+    cmds:
+      - cd cmd/schema-gen && go run . > ../../configs/mesh.schema.json
+
   proto:
     desc: Regenerate protobuf Go code
     cmds:
