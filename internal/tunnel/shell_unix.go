@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/creack/pty"
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -113,7 +114,7 @@ func sessionEnv(shell, termName string) []string {
 }
 
 // handleSession handles an SSH session channel, which includes PTY allocation and shell execution.
-func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, acceptEnv []string, motd []byte, log *slog.Logger) {
+func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []string, acceptEnv []string, motd []byte, sftpEnabled bool, sftpRoot string, log *slog.Logger) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("panic recovered in session handler", "panic", r)
@@ -404,6 +405,51 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					_ = req.Reply(false, nil)
 				}
 			}
+
+		case "subsystem":
+			var payload struct{ Name string }
+			if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+				if req.WantReply {
+					_ = req.Reply(false, nil)
+				}
+				continue
+			}
+			if payload.Name != "sftp" || !sftpEnabled {
+				log.Debug("Rejected subsystem request", "subsystem", payload.Name, "sftp_enabled", sftpEnabled)
+				if req.WantReply {
+					_ = req.Reply(false, nil)
+				}
+				continue
+			}
+			if req.WantReply {
+				_ = req.Reply(true, nil)
+			}
+			cmdStart.Do(func() {
+				root := sftpRoot
+				if root == "" {
+					home, err := os.UserHomeDir()
+					if err != nil {
+						log.Warn("Cannot determine home directory for SFTP", "error", err)
+						closeCh()
+						return
+					}
+					root = home
+				}
+				server, err := sftp.NewServer(ch,
+					sftp.WithServerWorkingDirectory(root),
+					sftp.ReadOnly(),
+				)
+				if err != nil {
+					log.Warn("SFTP server creation failed", "error", err)
+					closeCh()
+					return
+				}
+				log.Info("SFTP session started", "root", root)
+				if err := server.Serve(); err != nil && err != io.EOF {
+					log.Warn("SFTP session error", "error", err)
+				}
+				closeCh()
+			})
 
 		default:
 			if req.WantReply {

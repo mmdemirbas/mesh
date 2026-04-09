@@ -60,6 +60,13 @@ type Listener struct {
 	Banner string `yaml:"banner,omitempty"`
 	// Path to a text file displayed after successful authentication (message of the day).
 	MOTD string `yaml:"motd,omitempty"`
+	// Enable the SFTP subsystem for this sshd listener. When true, SSH clients
+	// can use scp/sftp/rsync over the connection. Files are served from the
+	// authenticated user's home directory or SFTPRoot if set.
+	SFTPEnabled bool `yaml:"sftp_enabled,omitempty"`
+	// Root directory for the SFTP subsystem. Defaults to the user's home directory.
+	// Paths outside this root are rejected.
+	SFTPRoot string `yaml:"sftp_root,omitempty"`
 	// Additional overrides for the listener.
 	// Only a subset of OpenSSH config keys are parsed: Ciphers, MACs, KexAlgorithms, ConnectTimeout, IPQoS.
 	Options map[string]string `yaml:"options,omitempty"`

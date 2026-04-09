@@ -438,7 +438,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 			activeChannels.Add(1)
 			go func() {
 				defer activeChannels.Add(-1)
-				handleSession(connCtx, newChan, s.cfg.Shell, s.cfg.AcceptEnv, motd, s.log)
+				handleSession(connCtx, newChan, s.cfg.Shell, s.cfg.AcceptEnv, motd, s.cfg.SFTPEnabled, s.cfg.SFTPRoot, s.log)
 			}()
 		default:
 			_ = newChan.Reject(ssh.UnknownChannelType, "unsupported")
