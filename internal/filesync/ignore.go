@@ -1,7 +1,7 @@
 package filesync
 
 import (
-	"path/filepath"
+	"path"
 	"strings"
 )
 
@@ -88,14 +88,16 @@ func (m *ignoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
 //   - Double-star (**) matches zero or more directories
 func matchPattern(pattern, relPath string) bool {
 	// Patterns without "/" match the basename at any depth.
+	// Use path.Match (forward-slash only) instead of filepath.Match so patterns
+	// work consistently across platforms — relPath is already slash-normalized.
 	if !strings.Contains(pattern, "/") {
 		// Match against each path component.
-		name := filepath.Base(relPath)
-		if matched, _ := filepath.Match(pattern, name); matched {
+		name := path.Base(relPath)
+		if matched, _ := path.Match(pattern, name); matched {
 			return true
 		}
 		// Also try matching against the full relative path for wildcard patterns.
-		if matched, _ := filepath.Match(pattern, relPath); matched {
+		if matched, _ := path.Match(pattern, relPath); matched {
 			return true
 		}
 		return false
@@ -107,16 +109,16 @@ func matchPattern(pattern, relPath string) bool {
 	}
 
 	// Pattern with "/" is anchored to the root.
-	matched, _ := filepath.Match(pattern, relPath)
+	matched, _ := path.Match(pattern, relPath)
 	return matched
 }
 
 // matchDoubleStar handles ** glob patterns.
-func matchDoubleStar(pattern, path string) bool {
+func matchDoubleStar(pattern, filePath string) bool {
 	// Split on ** and try to match prefix + suffix with any number of middle segments.
 	parts := strings.SplitN(pattern, "**", 2)
 	if len(parts) != 2 {
-		matched, _ := filepath.Match(pattern, path)
+		matched, _ := path.Match(pattern, filePath)
 		return matched
 	}
 
@@ -126,10 +128,10 @@ func matchDoubleStar(pattern, path string) bool {
 	// Prefix must match the start of the path.
 	if prefix != "" {
 		prefix = strings.TrimSuffix(prefix, "/")
-		if !strings.HasPrefix(path, prefix+"/") && path != prefix {
+		if !strings.HasPrefix(filePath, prefix+"/") && filePath != prefix {
 			return false
 		}
-		path = strings.TrimPrefix(path, prefix+"/")
+		filePath = strings.TrimPrefix(filePath, prefix+"/")
 	}
 
 	// Suffix must match the end (or some tail) of the remaining path.
@@ -139,14 +141,14 @@ func matchDoubleStar(pattern, path string) bool {
 
 	// Try matching suffix against the path and all sub-paths.
 	for {
-		if matched, _ := filepath.Match(suffix, path); matched {
+		if matched, _ := path.Match(suffix, filePath); matched {
 			return true
 		}
-		idx := strings.IndexByte(path, '/')
+		idx := strings.IndexByte(filePath, '/')
 		if idx < 0 {
 			return false
 		}
-		path = path[idx+1:]
+		filePath = filePath[idx+1:]
 	}
 }
 

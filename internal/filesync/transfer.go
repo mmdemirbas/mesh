@@ -110,7 +110,7 @@ func downloadFile(ctx context.Context, client *http.Client, peerAddr, folderID, 
 	}
 
 	// Atomic rename to final destination.
-	if err := os.Rename(tmpPath, destPath); err != nil {
+	if err := renameReplace(tmpPath, destPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return "", fmt.Errorf("rename to final path: %w", err)
 	}
@@ -234,7 +234,7 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 	}
 
 	// Atomic rename.
-	if err := os.Rename(tmpPath, destPath); err != nil {
+	if err := renameReplace(tmpPath, destPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return "", fmt.Errorf("rename delta result: %w", err)
 	}

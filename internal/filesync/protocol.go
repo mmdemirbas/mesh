@@ -33,13 +33,24 @@ func gzipEncode(data []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// maxDecompressedSize caps gzip decompression output to prevent zip bombs.
+// Set to 4x maxIndexPayload — generous for legitimate index data.
+const maxDecompressedSize = maxIndexPayload * 4
+
 func gzipDecode(data []byte) ([]byte, error) {
 	r, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = r.Close() }()
-	return io.ReadAll(r)
+	result, err := io.ReadAll(io.LimitReader(r, maxDecompressedSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(result)) > maxDecompressedSize {
+		return nil, fmt.Errorf("decompressed data exceeds limit (%d bytes)", maxDecompressedSize)
+	}
+	return result, nil
 }
 
 // writeProtoGzip marshals msg, gzip-compresses, and writes to w.

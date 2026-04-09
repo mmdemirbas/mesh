@@ -76,9 +76,22 @@ func (idx *FileIndex) save(path string) error {
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return fmt.Errorf("write index temp: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameReplace(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename index: %w", err)
+	}
+	return nil
+}
+
+// renameReplace atomically renames src to dst.
+// On Windows, os.Rename fails if dst exists. This helper removes the
+// destination first when needed.
+func renameReplace(src, dst string) error {
+	if err := os.Rename(src, dst); err != nil {
+		if os.Remove(dst) == nil {
+			return os.Rename(src, dst)
+		}
+		return err
 	}
 	return nil
 }
@@ -113,7 +126,7 @@ func savePeerStates(path string, peers map[string]PeerState) error {
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return fmt.Errorf("write peers temp: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameReplace(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename peers: %w", err)
 	}
