@@ -3,6 +3,7 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -16,6 +17,11 @@ func translateOpenAIRequest(req *ChatCompletionRequest, cfg *GatewayCfg) (*Messa
 		Stream: req.Stream,
 	}
 
+	// n > 1 is not supported — Anthropic always returns one completion.
+	if req.N != nil && *req.N > 1 {
+		return nil, fmt.Errorf("n=%d requested but Anthropic supports only n=1", *req.N)
+	}
+
 	// max_tokens: required in Anthropic.
 	if req.MaxTokens != nil && *req.MaxTokens > 0 {
 		out.MaxTokens = *req.MaxTokens
@@ -27,6 +33,7 @@ func translateOpenAIRequest(req *ChatCompletionRequest, cfg *GatewayCfg) (*Messa
 	if req.Temperature != nil {
 		t := *req.Temperature
 		if t > 1.0 {
+			slog.Warn("temperature clamped from requested value to Anthropic maximum", "requested", t, "clamped", 1.0)
 			t = 1.0
 		}
 		out.Temperature = &t

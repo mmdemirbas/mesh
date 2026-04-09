@@ -3,6 +3,8 @@ package gateway
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -12,6 +14,13 @@ import (
 
 	"github.com/mmdemirbas/mesh/internal/state"
 )
+
+// generateMsgID returns a unique Anthropic-style message ID ("msg_" + 24 hex chars).
+func generateMsgID() string {
+	var b [12]byte
+	_, _ = rand.Read(b[:])
+	return "msg_" + hex.EncodeToString(b[:])
+}
 
 // handleA2OStream handles Direction A streaming: client expects Anthropic SSE,
 // upstream returns OpenAI SSE. Reads OpenAI SSE chunks from upstream and
@@ -296,7 +305,7 @@ func (s *a2oStreamState) emitMessageStart() {
 	s.emit("message_start", a2oMsgStart{
 		Type: "message_start",
 		Message: a2oMsgDef{
-			ID:      "msg_stream",
+			ID:      generateMsgID(),
 			Type:    "message",
 			Role:    "assistant",
 			Model:   s.clientModel,

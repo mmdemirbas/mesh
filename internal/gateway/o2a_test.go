@@ -529,3 +529,31 @@ func TestTranslateOpenAIRequest_EmptyMessages(t *testing.T) {
 		t.Errorf("messages = %d, want 0", len(out.Messages))
 	}
 }
+
+func TestTranslateOpenAIRequest_NGreaterThan1Rejected(t *testing.T) {
+	cfg := &GatewayCfg{}
+	n := 3
+	req := &ChatCompletionRequest{
+		Model:    "gpt-4o",
+		N:        &n,
+		Messages: []OpenAIMsg{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+	}
+	_, err := translateOpenAIRequest(req, cfg)
+	if err == nil {
+		t.Fatal("expected error for n > 1")
+	}
+}
+
+func TestTranslateOpenAIRequest_N1Accepted(t *testing.T) {
+	cfg := &GatewayCfg{}
+	n := 1
+	req := &ChatCompletionRequest{
+		Model:    "gpt-4o",
+		N:        &n,
+		Messages: []OpenAIMsg{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+	}
+	_, err := translateOpenAIRequest(req, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error for n=1: %v", err)
+	}
+}
