@@ -14,6 +14,7 @@ import (
 )
 
 func TestGateway_A2O_NonStreaming(t *testing.T) {
+	t.Parallel()
 	// Mock OpenAI upstream.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
@@ -222,6 +223,7 @@ func TestGateway_O2A_NonStreaming(t *testing.T) {
 }
 
 func TestGateway_Health(t *testing.T) {
+	t.Parallel()
 	cfg := GatewayCfg{
 		Name:     "test-health",
 		Bind:     "127.0.0.1:0",
@@ -258,6 +260,7 @@ func TestGateway_Health(t *testing.T) {
 }
 
 func TestGateway_UpstreamError(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(429)
 		w.Write([]byte(`{"error":{"message":"rate limited","type":"rate_limit_error"}}`)) //nolint:errcheck
@@ -303,6 +306,7 @@ func TestGateway_UpstreamError(t *testing.T) {
 }
 
 func TestGateway_O2A_UpstreamError_529(t *testing.T) {
+	t.Parallel()
 	// Anthropic 529 (overloaded) -> OpenAI client sees 503.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(529)
@@ -348,6 +352,7 @@ func TestGateway_O2A_UpstreamError_529(t *testing.T) {
 }
 
 func TestGateway_UpstreamError_ResponseFormat(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(429)
 		w.Write([]byte(`rate limited`)) //nolint:errcheck
@@ -404,6 +409,7 @@ func TestGateway_UpstreamError_ResponseFormat(t *testing.T) {
 }
 
 func TestGateway_A2O_InvalidJSON(t *testing.T) {
+	t.Parallel()
 	cfg := GatewayCfg{
 		Name:     "test-bad-json",
 		Bind:     "127.0.0.1:0",
@@ -438,6 +444,7 @@ func TestGateway_A2O_InvalidJSON(t *testing.T) {
 }
 
 func TestGateway_O2A_InvalidJSON(t *testing.T) {
+	t.Parallel()
 	cfg := GatewayCfg{
 		Name:     "test-bad-json-o2a",
 		Bind:     "127.0.0.1:0",
@@ -472,6 +479,7 @@ func TestGateway_O2A_InvalidJSON(t *testing.T) {
 }
 
 func TestGateway_A2O_UpstreamConnectionFailure(t *testing.T) {
+	t.Parallel()
 	// Upstream on a port that refuses connections.
 	cfg := GatewayCfg{
 		Name:     "test-conn-fail",
@@ -508,6 +516,7 @@ func TestGateway_A2O_UpstreamConnectionFailure(t *testing.T) {
 }
 
 func TestGateway_A2O_StreamUpstreamError(t *testing.T) {
+	t.Parallel()
 	// Upstream returns 500 for a streaming request.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(500)
@@ -550,6 +559,7 @@ func TestGateway_A2O_StreamUpstreamError(t *testing.T) {
 }
 
 func TestGateway_O2A_StreamUpstreamError(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(429)
 		w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"too fast"}}`)) //nolint:errcheck

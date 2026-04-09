@@ -196,6 +196,7 @@ func TestAdminMetricsDownComponent(t *testing.T) {
 }
 
 func TestAdminUIEndpoint(t *testing.T) {
+	t.Parallel()
 	ring := newLogRing(4)
 	srv := httptest.NewServer(buildAdminMux(ring, ""))
 	defer srv.Close()
@@ -224,6 +225,7 @@ func TestAdminUIEndpoint(t *testing.T) {
 }
 
 func TestAdminRootRedirect(t *testing.T) {
+	t.Parallel()
 	ring := newLogRing(4)
 	srv := httptest.NewServer(buildAdminMux(ring, ""))
 	defer srv.Close()
@@ -247,6 +249,7 @@ func TestAdminRootRedirect(t *testing.T) {
 }
 
 func TestAdminLogsEmpty(t *testing.T) {
+	t.Parallel()
 	ring := newLogRing(8)
 	srv := httptest.NewServer(buildAdminMux(ring, ""))
 	defer srv.Close()
@@ -267,6 +270,7 @@ func TestAdminLogsEmpty(t *testing.T) {
 }
 
 func TestAdminServerRandomPortBind(t *testing.T) {
+	t.Parallel()
 	ring := newLogRing(4)
 	mux := buildAdminMux(ring, "")
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -295,6 +299,7 @@ func TestAdminServerRandomPortBind(t *testing.T) {
 }
 
 func TestPortFilePath(t *testing.T) {
+	t.Parallel()
 	path := portFilePath("testnode")
 	if path == "" {
 		t.Fatal("portFilePath returned empty")

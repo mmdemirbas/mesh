@@ -31,6 +31,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestContains(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		slice []string
 		item  string
@@ -53,6 +54,7 @@ func TestContains(t *testing.T) {
 }
 
 func TestContainsIP(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		slice []string
@@ -71,6 +73,7 @@ func TestContainsIP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			got := containsIP(tt.slice, tt.host)
 			if got != tt.want {
 				t.Errorf("containsIP(%v, %q) = %v, want %v", tt.slice, tt.host, got, tt.want)
@@ -80,6 +83,7 @@ func TestContainsIP(t *testing.T) {
 }
 
 func TestHashBytes(t *testing.T) {
+	t.Parallel()
 	input := []byte("hello world")
 	h := sha256.Sum256(input)
 	want := hex.EncodeToString(h[:])
@@ -91,6 +95,7 @@ func TestHashBytes(t *testing.T) {
 }
 
 func TestHashBytesEmpty(t *testing.T) {
+	t.Parallel()
 	got := hashBytes(nil)
 	h := sha256.Sum256(nil)
 	want := hex.EncodeToString(h[:])
@@ -100,6 +105,7 @@ func TestHashBytesEmpty(t *testing.T) {
 }
 
 func TestHashBytesDeterministic(t *testing.T) {
+	t.Parallel()
 	input := []byte("test data")
 	h1 := hashBytes(input)
 	h2 := hashBytes(input)
@@ -109,6 +115,7 @@ func TestHashBytesDeterministic(t *testing.T) {
 }
 
 func TestHashFilePaths(t *testing.T) {
+	t.Parallel()
 	// Order-independent
 	h1 := hashFilePaths([]string{"/a/b", "/c/d"})
 	h2 := hashFilePaths([]string{"/c/d", "/a/b"})
@@ -118,6 +125,7 @@ func TestHashFilePaths(t *testing.T) {
 }
 
 func TestHashFilePathsDifferentSets(t *testing.T) {
+	t.Parallel()
 	h1 := hashFilePaths([]string{"/a", "/b"})
 	h2 := hashFilePaths([]string{"/a", "/c"})
 	if h1 == h2 {
@@ -126,6 +134,7 @@ func TestHashFilePathsDifferentSets(t *testing.T) {
 }
 
 func TestHashFilePathsEmpty(t *testing.T) {
+	t.Parallel()
 	h := hashFilePaths([]string{})
 	if h == "" {
 		t.Error("hashFilePaths of empty slice should return a valid hash")
@@ -133,6 +142,7 @@ func TestHashFilePathsEmpty(t *testing.T) {
 }
 
 func TestHashFormats(t *testing.T) {
+	t.Parallel()
 	formats := []*pb.ClipFormat{
 		{MimeType: "text/plain", Data: []byte("hello")},
 		{MimeType: "text/html", Data: []byte("<b>hello</b>")},
@@ -148,6 +158,7 @@ func TestHashFormats(t *testing.T) {
 }
 
 func TestHashFormatsDifferentData(t *testing.T) {
+	t.Parallel()
 	f1 := []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("hello")}}
 	f2 := []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("world")}}
 	if hashFormats(f1) == hashFormats(f2) {
@@ -156,6 +167,7 @@ func TestHashFormatsDifferentData(t *testing.T) {
 }
 
 func TestHashFormatsEmpty(t *testing.T) {
+	t.Parallel()
 	h := hashFormats(nil)
 	if h == "" {
 		t.Error("hashFormats(nil) should return a valid hash")
@@ -163,6 +175,7 @@ func TestHashFormatsEmpty(t *testing.T) {
 }
 
 func TestExtractCFHTMLFragment(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -202,6 +215,7 @@ func TestExtractCFHTMLFragment(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			got := extractCFHTMLFragment(tt.input)
 			if got != tt.want {
 				t.Errorf("extractCFHTMLFragment() = %q, want %q", got, tt.want)
@@ -211,6 +225,7 @@ func TestExtractCFHTMLFragment(t *testing.T) {
 }
 
 func TestBuildCFHTML(t *testing.T) {
+	t.Parallel()
 	fragment := "<b>hello</b>"
 	result := buildCFHTML(fragment)
 
@@ -238,6 +253,7 @@ func TestBuildCFHTML(t *testing.T) {
 }
 
 func TestBuildCFHTMLRoundTrip(t *testing.T) {
+	t.Parallel()
 	fragment := "<p>test content</p>"
 	cfhtml := buildCFHTML(fragment)
 	extracted := extractCFHTMLFragment(cfhtml)
@@ -248,6 +264,7 @@ func TestBuildCFHTMLRoundTrip(t *testing.T) {
 }
 
 func TestParsePathList(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -263,6 +280,7 @@ func TestParsePathList(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			got := parsePathList(tt.input)
 			if len(got) != len(tt.want) {
 				t.Fatalf("len = %d, want %d; got %v", len(got), len(tt.want), got)
@@ -277,6 +295,7 @@ func TestParsePathList(t *testing.T) {
 }
 
 func TestParseURIList(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -293,6 +312,7 @@ func TestParseURIList(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			got := parseURIList(tt.input)
 			if len(got) != len(tt.want) {
 				t.Fatalf("len = %d, want %d; got %v", len(got), len(tt.want), got)
@@ -307,6 +327,7 @@ func TestParseURIList(t *testing.T) {
 }
 
 func TestCanSendTo_AlwaysTrue(t *testing.T) {
+	t.Parallel()
 	n := &Node{}
 	if !n.canSendTo("192.168.1.1:7755", false) {
 		t.Error("canSendTo should always return true")
@@ -317,6 +338,7 @@ func TestCanSendTo_AlwaysTrue(t *testing.T) {
 }
 
 func TestCanReceiveFrom(t *testing.T) {
+	t.Parallel()
 	n := &Node{
 		config: config.ClipsyncCfg{
 			StaticPeers: []string{"10.0.0.5:7755"},
@@ -344,6 +366,7 @@ func TestCanReceiveFrom(t *testing.T) {
 }
 
 func TestGroupOverlaps(t *testing.T) {
+	t.Parallel()
 	n := &Node{config: config.ClipsyncCfg{LANDiscoveryGroup: []string{"alpha", "beta"}}}
 
 	if !n.groupOverlaps("alpha") {
@@ -366,6 +389,7 @@ func TestGroupOverlaps(t *testing.T) {
 }
 
 func TestCheckHash(t *testing.T) {
+	t.Parallel()
 	n := &Node{}
 
 	// First call with a hash should return true (different from initial empty)
@@ -496,6 +520,7 @@ func newTestNode(t *testing.T, _ []string) (*Node, string, func()) {
 }
 
 func TestSyncEndpoint_PushFormats(t *testing.T) {
+	t.Parallel()
 	n, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
@@ -525,6 +550,7 @@ func TestSyncEndpoint_PushFormats(t *testing.T) {
 }
 
 func TestSyncEndpoint_PushFilesEmbedded(t *testing.T) {
+	t.Parallel()
 	// This tests the one-way connectivity case:
 	// the sender embeds file data directly in the POST payload
 	// so the receiver doesn't need to pull files back.
@@ -559,6 +585,7 @@ func TestSyncEndpoint_PushFilesEmbedded(t *testing.T) {
 }
 
 func TestSyncEndpoint_PushFilesEmbedded_MultipleFiles(t *testing.T) {
+	t.Parallel()
 	n, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
@@ -589,6 +616,7 @@ func TestSyncEndpoint_PushFilesEmbedded_MultipleFiles(t *testing.T) {
 }
 
 func TestSyncEndpoint_PushFilesWithoutData_PullBack(t *testing.T) {
+	t.Parallel()
 	// This tests the two-way case: receiver can reach the sender,
 	// so files are NOT embedded — the receiver pulls them via /files/.
 	n, url, cleanup := newTestNode(t, []string{"all"})
@@ -624,6 +652,7 @@ func TestSyncEndpoint_PushFilesWithoutData_PullBack(t *testing.T) {
 }
 
 func TestClipEndpoint_ReturnsLastPayload(t *testing.T) {
+	t.Parallel()
 	n, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
@@ -664,6 +693,7 @@ func TestClipEndpoint_ReturnsLastPayload(t *testing.T) {
 }
 
 func TestClipEndpoint_EmptyReturns404(t *testing.T) {
+	t.Parallel()
 	_, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
@@ -678,6 +708,7 @@ func TestClipEndpoint_EmptyReturns404(t *testing.T) {
 }
 
 func TestFilesEndpoint_ServesFiles(t *testing.T) {
+	t.Parallel()
 	n, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
@@ -699,6 +730,7 @@ func TestFilesEndpoint_ServesFiles(t *testing.T) {
 }
 
 func TestSyncEndpoint_RejectsPathTraversal(t *testing.T) {
+	t.Parallel()
 	n, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
@@ -726,6 +758,7 @@ func TestSyncEndpoint_RejectsPathTraversal(t *testing.T) {
 }
 
 func TestPostHTTP_UsesZeroCopyReader(t *testing.T) {
+	t.Parallel()
 	// Verify postHTTP sends the exact bytes without copying
 	var received []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -751,6 +784,7 @@ func TestPostHTTP_UsesZeroCopyReader(t *testing.T) {
 }
 
 func TestBroadcast_SetsLastPayload(t *testing.T) {
+	t.Parallel()
 	n := &Node{
 		ctx:        context.Background(),
 		config:     config.ClipsyncCfg{},
@@ -787,6 +821,7 @@ func TestBroadcast_SetsLastPayload(t *testing.T) {
 }
 
 func TestBroadcast_PushesToPeers(t *testing.T) {
+	t.Parallel()
 	receivedCh := make(chan []byte, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data, _ := io.ReadAll(r.Body)
@@ -833,6 +868,7 @@ func TestBroadcast_PushesToPeers(t *testing.T) {
 }
 
 func TestBroadcast_DoesNotEchoBackToOrigin(t *testing.T) {
+	t.Parallel()
 	// Broadcast sends to static peers via `go n.postHTTP(addr, data)`.
 	// When originAddr matches the peer, the peer should be skipped entirely —
 	// no goroutine is launched — so we can verify synchronously that no
@@ -879,6 +915,7 @@ func TestBroadcast_DoesNotEchoBackToOrigin(t *testing.T) {
 }
 
 func TestGenerateID(t *testing.T) {
+	t.Parallel()
 	id1 := generateID()
 	id2 := generateID()
 
@@ -891,6 +928,7 @@ func TestGenerateID(t *testing.T) {
 }
 
 func TestLoadFormatsFromDir(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// Write some format files matching clipFormatTable entries
@@ -922,6 +960,7 @@ func TestLoadFormatsFromDir(t *testing.T) {
 }
 
 func TestLoadFormatsFromDir_EmptyDir(t *testing.T) {
+	t.Parallel()
 	formats := loadFormatsFromDir(t.TempDir())
 	if len(formats) != 0 {
 		t.Errorf("expected 0 formats for empty dir, got %d", len(formats))
@@ -929,6 +968,7 @@ func TestLoadFormatsFromDir_EmptyDir(t *testing.T) {
 }
 
 func TestLoadFormatsFromDir_SkipsEmptyFiles(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "text_plain"), []byte{}, 0600)
 
@@ -939,6 +979,7 @@ func TestLoadFormatsFromDir_SkipsEmptyFiles(t *testing.T) {
 }
 
 func TestLoadFormatsFromDir_IgnoresUnknownFiles(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "unknown_format"), []byte("data"), 0600)
 	_ = os.WriteFile(filepath.Join(dir, "text_plain"), []byte("real"), 0600)
@@ -950,6 +991,7 @@ func TestLoadFormatsFromDir_IgnoresUnknownFiles(t *testing.T) {
 }
 
 func TestPullHTTP(t *testing.T) {
+	t.Parallel()
 	n, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
@@ -987,6 +1029,7 @@ func TestPullHTTP(t *testing.T) {
 }
 
 func TestPullHTTP_NoContent(t *testing.T) {
+	t.Parallel()
 	_, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 	// lastPayload is nil → /clip returns 404
@@ -1012,6 +1055,7 @@ func TestPullHTTP_NoContent(t *testing.T) {
 }
 
 func TestSetWrittenHash(t *testing.T) {
+	t.Parallel()
 	n := &Node{}
 	n.setWrittenHash("hash123", "192.168.1.1:7755")
 
@@ -1029,6 +1073,7 @@ func TestSetWrittenHash(t *testing.T) {
 }
 
 func TestPurgeFilesDir(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "old1.txt"), []byte("old"), 0600)
 	_ = os.WriteFile(filepath.Join(dir, "old2.txt"), []byte("old"), 0600)
@@ -1043,6 +1088,7 @@ func TestPurgeFilesDir(t *testing.T) {
 }
 
 func TestClearCurrentFiles(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	f1 := filepath.Join(dir, "a.txt")
 	f2 := filepath.Join(dir, "b.txt")
@@ -1064,11 +1110,13 @@ func TestClearCurrentFiles(t *testing.T) {
 }
 
 func TestClearCurrentFiles_NoFiles(t *testing.T) {
+	t.Parallel()
 	n := &Node{}
 	n.clearCurrentFiles() // should not panic
 }
 
 func TestPrimaryGroup(t *testing.T) {
+	t.Parallel()
 	n := &Node{config: config.ClipsyncCfg{LANDiscoveryGroup: []string{"alpha", "beta"}}}
 	if g := n.primaryGroup(); g != "alpha" {
 		t.Errorf("primaryGroup() = %q, want alpha", g)
@@ -1081,6 +1129,7 @@ func TestPrimaryGroup(t *testing.T) {
 }
 
 func TestRegisterPeer(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		setup     func(*Node)
@@ -1169,6 +1218,7 @@ func TestRegisterPeer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			n := &Node{
 				config:     config.ClipsyncCfg{Bind: "0.0.0.0:7755"},
 				id:         "test-self",
@@ -1194,6 +1244,7 @@ func TestRegisterPeer(t *testing.T) {
 }
 
 func TestPeerHashesEvictedWithPeers(t *testing.T) {
+	t.Parallel()
 	n := &Node{
 		config:     config.ClipsyncCfg{Bind: "0.0.0.0:7755"},
 		id:         "test-self",
@@ -1242,6 +1293,7 @@ func TestPeerHashesEvictedWithPeers(t *testing.T) {
 }
 
 func TestDiscoverEndpoint_RegistersPeer(t *testing.T) {
+	t.Parallel()
 	n, url, cleanup := newTestNode(t, nil)
 	defer cleanup()
 	n.config.LANDiscoveryGroup = []string{"default"}
@@ -1273,6 +1325,7 @@ func TestDiscoverEndpoint_RegistersPeer(t *testing.T) {
 }
 
 func TestDiscoverEndpoint_RejectsSelf(t *testing.T) {
+	t.Parallel()
 	n, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
@@ -1295,6 +1348,7 @@ func TestDiscoverEndpoint_RejectsSelf(t *testing.T) {
 }
 
 func TestDiscoverEndpoint_RejectsGET(t *testing.T) {
+	t.Parallel()
 	_, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
@@ -1309,6 +1363,7 @@ func TestDiscoverEndpoint_RejectsGET(t *testing.T) {
 }
 
 func TestDiscoverEndpoint_RejectsDifferentGroup(t *testing.T) {
+	t.Parallel()
 	n, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
@@ -1331,6 +1386,7 @@ func TestDiscoverEndpoint_RejectsDifferentGroup(t *testing.T) {
 }
 
 func TestDiscoverEndpoint_AcceptsSameGroup(t *testing.T) {
+	t.Parallel()
 	n, url, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 	n.config.LANDiscoveryGroup = []string{"team-alpha"}
@@ -1353,6 +1409,7 @@ func TestDiscoverEndpoint_AcceptsSameGroup(t *testing.T) {
 }
 
 func TestRegisterPeerHTTP_SendsDiscoverRequest(t *testing.T) {
+	t.Parallel()
 	var received atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/discover" || r.Method != http.MethodPost {

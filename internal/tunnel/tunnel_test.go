@@ -21,6 +21,7 @@ import (
 )
 
 func TestParseIPQoS(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		input        string
@@ -47,6 +48,7 @@ func TestParseIPQoS(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			inter, nonInter, err := ParseIPQoS(tt.input)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ParseIPQoS(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
@@ -64,6 +66,7 @@ func TestParseIPQoS(t *testing.T) {
 }
 
 func TestParseTarget(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		wantUser string
@@ -81,6 +84,7 @@ func TestParseTarget(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
+		t.Parallel()
 			user, host := parseTarget(tt.input)
 			if user != tt.wantUser {
 				t.Errorf("user = %q, want %q", user, tt.wantUser)
@@ -93,6 +97,7 @@ func TestParseTarget(t *testing.T) {
 }
 
 func TestMergeOptions(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		parent map[string]string
@@ -126,6 +131,7 @@ func TestMergeOptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			got := mergeOptions(tt.parent, tt.child)
 			if len(got) != len(tt.want) {
 				t.Fatalf("len = %d, want %d; got %v", len(got), len(tt.want), got)
@@ -140,6 +146,7 @@ func TestMergeOptions(t *testing.T) {
 }
 
 func TestMergeOptionsDoesNotMutateInputs(t *testing.T) {
+	t.Parallel()
 	parent := map[string]string{"a": "1"}
 	child := map[string]string{"b": "2"}
 	mergeOptions(parent, child)
@@ -153,6 +160,7 @@ func TestMergeOptionsDoesNotMutateInputs(t *testing.T) {
 }
 
 func TestApplySSHConfigOptions(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		options map[string]string
@@ -205,6 +213,7 @@ func TestApplySSHConfigOptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			cfg := &ssh.Config{}
 			applySSHConfigOptions(cfg, tt.options)
 			tt.check(t, cfg)
@@ -213,6 +222,7 @@ func TestApplySSHConfigOptions(t *testing.T) {
 }
 
 func TestIsHardConnError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		err  error
@@ -230,6 +240,7 @@ func TestIsHardConnError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			got := isHardConnError(tt.err)
 			if got != tt.want {
 				t.Errorf("isHardConnError(%v) = %v, want %v", tt.err, got, tt.want)
@@ -239,6 +250,7 @@ func TestIsHardConnError(t *testing.T) {
 }
 
 func TestRetryDelay(t *testing.T) {
+	t.Parallel()
 	base := 10 * time.Second
 	for range 100 {
 		d := retryDelay(base)
@@ -252,6 +264,7 @@ func TestRetryDelay(t *testing.T) {
 }
 
 func TestRetryDelayDistribution(t *testing.T) {
+	t.Parallel()
 	base := 4 * time.Second
 	var hasJitter bool
 	first := retryDelay(base)
@@ -267,6 +280,7 @@ func TestRetryDelayDistribution(t *testing.T) {
 }
 
 func TestParseByteSize(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input string
 		want  uint64
@@ -285,6 +299,7 @@ func TestParseByteSize(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
+		t.Parallel()
 			got := parseByteSize(tt.input)
 			if got != tt.want {
 				t.Errorf("parseByteSize(%q) = %d, want %d", tt.input, got, tt.want)
@@ -294,6 +309,7 @@ func TestParseByteSize(t *testing.T) {
 }
 
 func TestApplySSHConfigOptions_RekeyLimit(t *testing.T) {
+	t.Parallel()
 	cfg := &ssh.Config{}
 	applySSHConfigOptions(cfg, map[string]string{"rekeylimit": "1G"})
 	if cfg.RekeyThreshold != 1024*1024*1024 {
@@ -302,6 +318,7 @@ func TestApplySSHConfigOptions_RekeyLimit(t *testing.T) {
 }
 
 func TestRunPasswordCommand(t *testing.T) {
+	t.Parallel()
 	password, err := runPasswordCommand("echo hunter2")
 	if err != nil {
 		t.Fatalf("runPasswordCommand failed: %v", err)
@@ -312,6 +329,7 @@ func TestRunPasswordCommand(t *testing.T) {
 }
 
 func TestRunPasswordCommand_TrimsWhitespace(t *testing.T) {
+	t.Parallel()
 	password, err := runPasswordCommand("echo '  spaced  '")
 	if err != nil {
 		t.Fatalf("runPasswordCommand failed: %v", err)
@@ -322,6 +340,7 @@ func TestRunPasswordCommand_TrimsWhitespace(t *testing.T) {
 }
 
 func TestRunPasswordCommand_Failure(t *testing.T) {
+	t.Parallel()
 	_, err := runPasswordCommand("false")
 	if err == nil {
 		t.Error("expected error for failing command")
@@ -329,6 +348,7 @@ func TestRunPasswordCommand_Failure(t *testing.T) {
 }
 
 func TestBuildAuthMethods_KeyOnly(t *testing.T) {
+	t.Parallel()
 	// Create a temporary SSH key for testing
 	key := generateTestKey(t)
 	client := &SSHClient{
@@ -348,6 +368,7 @@ func TestBuildAuthMethods_KeyOnly(t *testing.T) {
 }
 
 func TestBuildAuthMethods_PasswordCommand(t *testing.T) {
+	t.Parallel()
 	client := &SSHClient{
 		cfg: config.Connection{
 			Auth: config.AuthCfg{PasswordCommand: "echo testpass"},
@@ -366,6 +387,7 @@ func TestBuildAuthMethods_PasswordCommand(t *testing.T) {
 }
 
 func TestBuildAuthMethods_NoAuth(t *testing.T) {
+	t.Parallel()
 	client := &SSHClient{
 		cfg: config.Connection{Auth: config.AuthCfg{}},
 		log: slog.Default(),
@@ -438,6 +460,7 @@ func newTestPublicKey(t *testing.T) ssh.PublicKey {
 // --- evictOldLimiters ---
 
 func TestEvictOldLimiters(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	maxAge := 10 * time.Minute
 
@@ -481,6 +504,7 @@ func TestEvictOldLimiters(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			lims := make(map[string]*limiterEntry)
 			for ip, age := range tt.ages {
 				lims[ip] = &limiterEntry{lastSeen: now.Add(-age)}
@@ -505,6 +529,7 @@ func TestEvictOldLimiters(t *testing.T) {
 }
 
 func TestEvictOldLimiters_DoesNotTouchFreshUnderPressure(t *testing.T) {
+	t.Parallel()
 	// Simulate the pressure-eviction scenario: map is over limiterMaxEntries.
 	// Only entries older than pressureAfter should be removed; fresh ones survive.
 	now := time.Now()
@@ -533,6 +558,7 @@ func marshalKeys(keys ...ssh.PublicKey) [][]byte {
 }
 
 func TestMatchesAnyAuthorizedKey(t *testing.T) {
+	t.Parallel()
 	keyA := newTestPublicKey(t)
 	keyB := newTestPublicKey(t)
 	keyC := newTestPublicKey(t)
@@ -554,6 +580,7 @@ func TestMatchesAnyAuthorizedKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			got := matchesAnyAuthorizedKey(tt.incoming, tt.authorized)
 			if got != tt.want {
 				t.Errorf("matchesAnyAuthorizedKey = %v, want %v", got, tt.want)
@@ -563,6 +590,7 @@ func TestMatchesAnyAuthorizedKey(t *testing.T) {
 }
 
 func TestMatchesAnyAuthorizedKey_DifferentKeyTypesDoNotMatch(t *testing.T) {
+	t.Parallel()
 	// Generate two independent ed25519 keys; their public bytes must differ.
 	keyA := newTestPublicKey(t)
 	keyB := newTestPublicKey(t)
@@ -574,6 +602,7 @@ func TestMatchesAnyAuthorizedKey_DifferentKeyTypesDoNotMatch(t *testing.T) {
 // --- recordAuthFailure ---
 
 func TestRecordAuthFailure(t *testing.T) {
+	t.Parallel()
 	var m sync.Map
 
 	if got := recordAuthFailure(&m, "10.0.0.1"); got != 1 {
@@ -588,6 +617,7 @@ func TestRecordAuthFailure(t *testing.T) {
 }
 
 func TestRecordAuthFailure_IndependentPerIP(t *testing.T) {
+	t.Parallel()
 	var m sync.Map
 
 	recordAuthFailure(&m, "10.0.0.1")
@@ -600,6 +630,7 @@ func TestRecordAuthFailure_IndependentPerIP(t *testing.T) {
 }
 
 func TestRecordAuthFailure_Concurrent(t *testing.T) {
+	t.Parallel()
 	var m sync.Map
 	const n = 100
 
@@ -655,6 +686,7 @@ func (s *stubSSHConn) Wait() error { return nil }
 // --- startKeepAlive (options parsing) ---
 
 func TestStartKeepAlive_ZeroIntervalReturnsImmediately(t *testing.T) {
+	t.Parallel()
 	conn := newStubConn(func(string, bool, []byte) (bool, []byte, error) {
 		t.Error("SendRequest must not be called when interval is 0")
 		return true, nil, nil
@@ -672,6 +704,7 @@ func TestStartKeepAlive_ZeroIntervalReturnsImmediately(t *testing.T) {
 }
 
 func TestStartKeepAlive_NegativeIntervalReturnsImmediately(t *testing.T) {
+	t.Parallel()
 	conn := newStubConn(func(string, bool, []byte) (bool, []byte, error) {
 		t.Error("SendRequest must not be called when interval is negative")
 		return true, nil, nil
@@ -692,6 +725,7 @@ func TestStartKeepAlive_NegativeIntervalReturnsImmediately(t *testing.T) {
 // --- keepAliveLoop ---
 
 func TestKeepAliveLoop_ContextCancellation(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	tick := make(chan time.Time)
 	conn := newStubConn(func(string, bool, []byte) (bool, []byte, error) {
@@ -716,6 +750,7 @@ func TestKeepAliveLoop_ContextCancellation(t *testing.T) {
 }
 
 func TestKeepAliveLoop_SendsRequestType(t *testing.T) {
+	t.Parallel()
 	tick := make(chan time.Time, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	var gotType string
@@ -732,6 +767,7 @@ func TestKeepAliveLoop_SendsRequestType(t *testing.T) {
 }
 
 func TestKeepAliveLoop_SoftErrorsCloseAfterCountMax(t *testing.T) {
+	t.Parallel()
 	// countMax=2: failures 1 and 2 are tolerated; failure 3 closes connection.
 	tick := make(chan time.Time, 10)
 	conn := newStubConn(func(string, bool, []byte) (bool, []byte, error) {
@@ -749,6 +785,7 @@ func TestKeepAliveLoop_SoftErrorsCloseAfterCountMax(t *testing.T) {
 }
 
 func TestKeepAliveLoop_HardErrorClosesImmediately(t *testing.T) {
+	t.Parallel()
 	tick := make(chan time.Time, 1)
 	conn := newStubConn(func(string, bool, []byte) (bool, []byte, error) {
 		return false, nil, io.EOF // io.EOF is a hard error
@@ -768,6 +805,7 @@ func TestKeepAliveLoop_HardErrorClosesImmediately(t *testing.T) {
 }
 
 func TestKeepAliveLoop_SuccessResetsfailCount(t *testing.T) {
+	t.Parallel()
 	// 2 soft failures, then 1 success, then 1 more soft failure.
 	// With countMax=2, the connection must NOT be closed: after the reset, only 1
 	// failure has accumulated, which is below the threshold.
@@ -807,6 +845,7 @@ func TestKeepAliveLoop_SuccessResetsfailCount(t *testing.T) {
 // --- loadSigner ---
 
 func TestLoadSigner_ValidKey(t *testing.T) {
+	t.Parallel()
 	path := generateTestKey(t)
 	signer, err := loadSigner(path)
 	if err != nil {
@@ -821,6 +860,7 @@ func TestLoadSigner_ValidKey(t *testing.T) {
 }
 
 func TestLoadSigner_FileNotFound(t *testing.T) {
+	t.Parallel()
 	_, err := loadSigner(t.TempDir() + "/nonexistent_key")
 	if err == nil {
 		t.Error("expected error for missing file, got nil")
@@ -828,6 +868,7 @@ func TestLoadSigner_FileNotFound(t *testing.T) {
 }
 
 func TestLoadSigner_InvalidData(t *testing.T) {
+	t.Parallel()
 	path := t.TempDir() + "/bad_key"
 	if err := os.WriteFile(path, []byte("this is not a private key"), 0600); err != nil {
 		t.Fatal(err)
@@ -854,6 +895,7 @@ func writeAuthorizedKeys(t *testing.T, keys ...ssh.PublicKey) string {
 }
 
 func TestLoadAuthorizedKeys_SingleKey(t *testing.T) {
+	t.Parallel()
 	key := newTestPublicKey(t)
 	path := writeAuthorizedKeys(t, key)
 	got, err := loadAuthorizedKeys(path)
@@ -866,6 +908,7 @@ func TestLoadAuthorizedKeys_SingleKey(t *testing.T) {
 }
 
 func TestLoadAuthorizedKeys_MultipleKeys(t *testing.T) {
+	t.Parallel()
 	keys := []ssh.PublicKey{newTestPublicKey(t), newTestPublicKey(t), newTestPublicKey(t)}
 	path := writeAuthorizedKeys(t, keys...)
 	got, err := loadAuthorizedKeys(path)
@@ -878,6 +921,7 @@ func TestLoadAuthorizedKeys_MultipleKeys(t *testing.T) {
 }
 
 func TestLoadAuthorizedKeys_SkipsBlankAndCommentLines(t *testing.T) {
+	t.Parallel()
 	key := newTestPublicKey(t)
 	content := "\n# this is a comment\n\n" + string(ssh.MarshalAuthorizedKey(key)) + "\n# another comment\n"
 	path := t.TempDir() + "/authorized_keys"
@@ -894,6 +938,7 @@ func TestLoadAuthorizedKeys_SkipsBlankAndCommentLines(t *testing.T) {
 }
 
 func TestLoadAuthorizedKeys_ContinuesPastInvalidLine(t *testing.T) {
+	t.Parallel()
 	key := newTestPublicKey(t)
 	content := string(ssh.MarshalAuthorizedKey(key)) + "not-a-valid-key\n" + string(ssh.MarshalAuthorizedKey(key))
 	path := t.TempDir() + "/authorized_keys"
@@ -911,6 +956,7 @@ func TestLoadAuthorizedKeys_ContinuesPastInvalidLine(t *testing.T) {
 }
 
 func TestLoadAuthorizedKeys_EmptyFile(t *testing.T) {
+	t.Parallel()
 	path := t.TempDir() + "/authorized_keys"
 	if err := os.WriteFile(path, []byte{}, 0600); err != nil {
 		t.Fatal(err)
@@ -922,6 +968,7 @@ func TestLoadAuthorizedKeys_EmptyFile(t *testing.T) {
 }
 
 func TestLoadAuthorizedKeys_OnlyComments(t *testing.T) {
+	t.Parallel()
 	path := t.TempDir() + "/authorized_keys"
 	if err := os.WriteFile(path, []byte("# comment only\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -933,6 +980,7 @@ func TestLoadAuthorizedKeys_OnlyComments(t *testing.T) {
 }
 
 func TestLoadAuthorizedKeys_FileNotFound(t *testing.T) {
+	t.Parallel()
 	_, err := loadAuthorizedKeys(t.TempDir() + "/nonexistent")
 	if err == nil {
 		t.Error("expected error for missing file, got nil")
@@ -956,6 +1004,7 @@ func cancelPayload(t *testing.T, addr string) []byte {
 }
 
 func TestHandleCancelTCPIPForward_ClosesAndRemovesListener(t *testing.T) {
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -978,6 +1027,7 @@ func TestHandleCancelTCPIPForward_ClosesAndRemovesListener(t *testing.T) {
 }
 
 func TestHandleCancelTCPIPForward_UnknownAddrNoOp(t *testing.T) {
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1004,6 +1054,7 @@ func TestHandleCancelTCPIPForward_UnknownAddrNoOp(t *testing.T) {
 }
 
 func TestHandleCancelTCPIPForward_BadPayload(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	listeners := map[string]net.Listener{}
 	// Malformed payload must not panic; WantReply=false avoids the nil-mux Reply call.
@@ -1017,6 +1068,7 @@ func TestHandleCancelTCPIPForward_BadPayload(t *testing.T) {
 // --- acceptAndForward ---
 
 func TestAcceptAndForward_DataForwarded(t *testing.T) {
+	t.Parallel()
 	fwdLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1048,6 +1100,7 @@ func TestAcceptAndForward_DataForwarded(t *testing.T) {
 }
 
 func TestAcceptAndForward_DialerErrorDropsConnection(t *testing.T) {
+	t.Parallel()
 	fwdLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1082,6 +1135,7 @@ func TestAcceptAndForward_DialerErrorDropsConnection(t *testing.T) {
 }
 
 func TestAcceptAndForward_StreamsMetric(t *testing.T) {
+	t.Parallel()
 	fwdLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1313,6 +1367,7 @@ ready:
 }
 
 func TestOnceCloseListener_DoubleClose(t *testing.T) {
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1332,6 +1387,7 @@ func TestOnceCloseListener_DoubleClose(t *testing.T) {
 }
 
 func TestOnceCloseListener_AcceptAfterClose(t *testing.T) {
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1348,6 +1404,7 @@ func TestOnceCloseListener_AcceptAfterClose(t *testing.T) {
 }
 
 func TestPermitOpenPolicy(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		options map[string]string
@@ -1372,6 +1429,7 @@ func TestPermitOpenPolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			pol := parsePermitOpen(tt.options)
 			got := pol.allows(tt.host, tt.port)
 			if got != tt.want {

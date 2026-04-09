@@ -6,6 +6,7 @@ import (
 )
 
 func TestTranslateOpenAIRequest_SimpleText(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{ModelMap: map[string]string{"gpt-4o": "claude-sonnet-4-6"}}
 	maxTok := 1024
 	req := &ChatCompletionRequest{
@@ -32,6 +33,7 @@ func TestTranslateOpenAIRequest_SimpleText(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_SystemExtraction(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	req := &ChatCompletionRequest{
 		Model: "gpt-4o",
@@ -58,6 +60,7 @@ func TestTranslateOpenAIRequest_SystemExtraction(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_DefaultMaxTokens(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{DefaultMaxTokens: 16384}
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
@@ -74,6 +77,7 @@ func TestTranslateOpenAIRequest_DefaultMaxTokens(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_TemperatureClamping(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	temp := 1.5
 	req := &ChatCompletionRequest{
@@ -92,6 +96,7 @@ func TestTranslateOpenAIRequest_TemperatureClamping(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_TemperaturePassthrough(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	temp := 0.7
 	req := &ChatCompletionRequest{
@@ -110,6 +115,7 @@ func TestTranslateOpenAIRequest_TemperaturePassthrough(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_ConsecutiveSameRole(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	req := &ChatCompletionRequest{
 		Model: "gpt-4o",
@@ -135,6 +141,7 @@ func TestTranslateOpenAIRequest_ConsecutiveSameRole(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_ToolMessages(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	req := &ChatCompletionRequest{
 		Model: "gpt-4o",
@@ -169,6 +176,7 @@ func TestTranslateOpenAIRequest_ToolMessages(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_ImageURL(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	content := `[{"type":"text","text":"What is this?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,abc123"}}]`
 	req := &ChatCompletionRequest{
@@ -198,6 +206,7 @@ func TestTranslateOpenAIRequest_ImageURL(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_ToolChoiceAll(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input string
 		want  string
@@ -222,6 +231,7 @@ func TestTranslateOpenAIRequest_ToolChoiceAll(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_StopString(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
@@ -239,6 +249,7 @@ func TestTranslateOpenAIRequest_StopString(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_StopArray(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
@@ -256,6 +267,7 @@ func TestTranslateOpenAIRequest_StopArray(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_Tools(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
@@ -285,6 +297,7 @@ func TestTranslateOpenAIRequest_Tools(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_User(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
@@ -304,6 +317,7 @@ func TestTranslateOpenAIRequest_User(t *testing.T) {
 // --- Response tests ---
 
 func TestTranslateAnthropicResponse_SimpleText(t *testing.T) {
+	t.Parallel()
 	resp := &MessagesResponse{
 		ID:         "msg_123",
 		Type:       "message",
@@ -350,6 +364,7 @@ func TestTranslateAnthropicResponse_SimpleText(t *testing.T) {
 }
 
 func TestTranslateAnthropicResponse_ToolUse(t *testing.T) {
+	t.Parallel()
 	resp := &MessagesResponse{
 		ID:         "msg_456",
 		Type:       "message",
@@ -382,6 +397,7 @@ func TestTranslateAnthropicResponse_ToolUse(t *testing.T) {
 }
 
 func TestTranslateAnthropicResponse_StopReasons(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		reason string
 		want   string
@@ -402,6 +418,7 @@ func TestTranslateAnthropicResponse_StopReasons(t *testing.T) {
 }
 
 func TestTranslateAnthropicResponse_IDPrefix(t *testing.T) {
+	t.Parallel()
 	resp := &MessagesResponse{
 		ID:      "msg_123",
 		Content: []ContentBlock{{Type: "text", Text: "Hi"}},
@@ -415,6 +432,7 @@ func TestTranslateAnthropicResponse_IDPrefix(t *testing.T) {
 }
 
 func TestTranslateAnthropicResponse_ThinkingDropped(t *testing.T) {
+	t.Parallel()
 	resp := &MessagesResponse{
 		ID:         "msg_789",
 		StopReason: "end_turn",
@@ -441,6 +459,7 @@ func TestTranslateAnthropicResponse_ThinkingDropped(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_DeveloperRole(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	req := &ChatCompletionRequest{
 		Model: "gpt-4o",
@@ -463,6 +482,7 @@ func TestTranslateOpenAIRequest_DeveloperRole(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_ImageURL_PlainURL(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	content := `[{"type":"image_url","image_url":{"url":"https://example.com/photo.jpg"}}]`
 	req := &ChatCompletionRequest{
@@ -489,6 +509,7 @@ func TestTranslateOpenAIRequest_ImageURL_PlainURL(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_ConsecutiveAssistantMerge(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	req := &ChatCompletionRequest{
 		Model: "gpt-4o",
@@ -515,6 +536,7 @@ func TestTranslateOpenAIRequest_ConsecutiveAssistantMerge(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_EmptyMessages(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
@@ -531,6 +553,7 @@ func TestTranslateOpenAIRequest_EmptyMessages(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_NGreaterThan1Rejected(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	n := 3
 	req := &ChatCompletionRequest{
@@ -545,6 +568,7 @@ func TestTranslateOpenAIRequest_NGreaterThan1Rejected(t *testing.T) {
 }
 
 func TestTranslateOpenAIRequest_N1Accepted(t *testing.T) {
+	t.Parallel()
 	cfg := &GatewayCfg{}
 	n := 1
 	req := &ChatCompletionRequest{

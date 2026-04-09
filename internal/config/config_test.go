@@ -10,6 +10,7 @@ import (
 )
 
 func TestGetOption(t *testing.T) {
+	t.Parallel()
 	// Simulate config load: keys are normalized to lowercase.
 	opts := map[string]string{
 		"Ciphers":        "aes256-ctr",
@@ -33,6 +34,7 @@ func TestGetOption(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.key, func(t *testing.T) {
+		t.Parallel()
 			got := GetOption(opts, tt.key)
 			if got != tt.want {
 				t.Errorf("GetOption(%q) = %q, want %q", tt.key, got, tt.want)
@@ -42,6 +44,7 @@ func TestGetOption(t *testing.T) {
 }
 
 func TestNormalizeOptions(t *testing.T) {
+	t.Parallel()
 	opts := map[string]string{
 		"Ciphers":     "aes256-ctr",
 		"IPQoS":       "lowdelay",
@@ -64,6 +67,7 @@ func TestNormalizeOptions(t *testing.T) {
 }
 
 func TestGetOptionNilMap(t *testing.T) {
+	t.Parallel()
 	got := GetOption(nil, "anything")
 	if got != "" {
 		t.Errorf("GetOption(nil, ...) = %q, want empty", got)
@@ -71,6 +75,7 @@ func TestGetOptionNilMap(t *testing.T) {
 }
 
 func TestNormalizeBind(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input, want string
 	}{
@@ -83,6 +88,7 @@ func TestNormalizeBind(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
+		t.Parallel()
 			got := normalizeBind(tt.input)
 			if got != tt.want {
 				t.Errorf("normalizeBind(%q) = %q, want %q", tt.input, got, tt.want)
@@ -92,6 +98,7 @@ func TestNormalizeBind(t *testing.T) {
 }
 
 func TestValidateForwards(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		fwds    []Forward
@@ -154,6 +161,7 @@ func TestValidateForwards(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			err := validateForwards(tt.fwds)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateForwards() error = %v, wantErr %v", err, tt.wantErr)
@@ -163,6 +171,7 @@ func TestValidateForwards(t *testing.T) {
 }
 
 func TestValidateIPQoS(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input   string
 		wantErr bool
@@ -189,6 +198,7 @@ func TestValidateIPQoS(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
+		t.Parallel()
 			err := validateIPQoS(tt.input)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateIPQoS(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
@@ -198,6 +208,7 @@ func TestValidateIPQoS(t *testing.T) {
 }
 
 func TestCheckDuplicateBinds(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		cfg     Config
@@ -264,6 +275,7 @@ func TestCheckDuplicateBinds(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			err := tt.cfg.checkDuplicateBinds()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("checkDuplicateBinds() error = %v, wantErr %v", err, tt.wantErr)
@@ -273,6 +285,7 @@ func TestCheckDuplicateBinds(t *testing.T) {
 }
 
 func TestClipsyncCfgUnmarshalYAML(t *testing.T) {
+	t.Parallel()
 	input := []byte(`bind: "0.0.0.0:7755"`)
 
 	var cfg ClipsyncCfg
@@ -289,6 +302,7 @@ func TestClipsyncCfgUnmarshalYAML(t *testing.T) {
 }
 
 func TestClipsyncCfgUnmarshalYAMLWithGroups(t *testing.T) {
+	t.Parallel()
 	input := []byte(`
 bind: "0.0.0.0:7755"
 lan_discovery_group: ["team-alpha", "team-beta"]
@@ -309,6 +323,7 @@ static_peers: ["10.0.0.1:7755"]
 }
 
 func TestUnmarshalConfigsSkipsExtensionKeys(t *testing.T) {
+	t.Parallel()
 	input := []byte(`
 x-ignore-global: &ignore_global
   - ".DS_Store"
@@ -343,6 +358,7 @@ func yamlUnmarshal(data []byte, v interface{}) error {
 }
 
 func TestExpandHome(t *testing.T) {
+	t.Parallel()
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Skip("cannot determine home dir")
@@ -363,6 +379,7 @@ func TestExpandHome(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
+		t.Parallel()
 			got := expandHome(tt.input)
 			if got != tt.want {
 				t.Errorf("expandHome(%q) = %q, want %q", tt.input, got, tt.want)
@@ -372,6 +389,7 @@ func TestExpandHome(t *testing.T) {
 }
 
 func TestRequireFile(t *testing.T) {
+	t.Parallel()
 	// Empty path
 	if err := requireFile("", "test_key"); err == nil {
 		t.Error("expected error for empty path")
@@ -391,6 +409,7 @@ func TestRequireFile(t *testing.T) {
 }
 
 func TestLoadUnvalidated(t *testing.T) {
+	t.Parallel()
 	cfgFile := filepath.Join(t.TempDir(), "mesh.yml")
 	content := `
 mynode:
@@ -446,6 +465,7 @@ mynode:
 }
 
 func TestLoadUnvalidated_NonExistentFile(t *testing.T) {
+	t.Parallel()
 	_, err := LoadUnvalidated("/nonexistent/mesh.yml")
 	if err == nil {
 		t.Error("expected error for non-existent file")
@@ -453,6 +473,7 @@ func TestLoadUnvalidated_NonExistentFile(t *testing.T) {
 }
 
 func TestLoadUnvalidated_InvalidYAML(t *testing.T) {
+	t.Parallel()
 	f := filepath.Join(t.TempDir(), "bad.yml")
 	_ = os.WriteFile(f, []byte("{{invalid yaml"), 0600)
 
@@ -486,6 +507,7 @@ test:
 }
 
 func TestLoad_ServiceNotFound(t *testing.T) {
+	t.Parallel()
 	f := filepath.Join(t.TempDir(), "mesh.yml")
 	_ = os.WriteFile(f, []byte("mynode:\n  listeners: []\n"), 0600)
 
@@ -496,6 +518,7 @@ func TestLoad_ServiceNotFound(t *testing.T) {
 }
 
 func TestValidate_ListenerMissingBind(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{
 		Listeners: []Listener{{Type: "socks"}},
 	}
@@ -505,6 +528,7 @@ func TestValidate_ListenerMissingBind(t *testing.T) {
 }
 
 func TestValidate_ListenerMissingType(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{
 		Listeners: []Listener{{Bind: "127.0.0.1:1080"}},
 	}
@@ -514,6 +538,7 @@ func TestValidate_ListenerMissingType(t *testing.T) {
 }
 
 func TestValidate_ListenerUnknownType(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{
 		Listeners: []Listener{{Bind: "127.0.0.1:1080", Type: "tcp"}},
 	}
@@ -523,6 +548,7 @@ func TestValidate_ListenerUnknownType(t *testing.T) {
 }
 
 func TestValidate_RelayMissingTarget(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{
 		Listeners: []Listener{{Bind: "127.0.0.1:1080", Type: "relay"}},
 	}
@@ -532,6 +558,7 @@ func TestValidate_RelayMissingTarget(t *testing.T) {
 }
 
 func TestValidate_ConnectionMissingTargets(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{
 		Connections: []Connection{{Name: "test"}},
 	}
@@ -541,6 +568,7 @@ func TestValidate_ConnectionMissingTargets(t *testing.T) {
 }
 
 func TestValidate_InvalidRetryDuration(t *testing.T) {
+	t.Parallel()
 	f := filepath.Join(t.TempDir(), "key")
 	_ = os.WriteFile(f, []byte("key"), 0600)
 	kh := filepath.Join(t.TempDir(), "known_hosts")
@@ -560,6 +588,7 @@ func TestValidate_InvalidRetryDuration(t *testing.T) {
 }
 
 func TestWarnUnsupportedOptions(t *testing.T) {
+	t.Parallel()
 	// Should not panic with supported and unsupported options
 	cfg := &Config{
 		Listeners: []Listener{{
@@ -582,6 +611,7 @@ func TestWarnUnsupportedOptions(t *testing.T) {
 }
 
 func TestValidate_ConnectionNoAuth(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{
 		Connections: []Connection{{
 			Name:    "test",
@@ -595,6 +625,7 @@ func TestValidate_ConnectionNoAuth(t *testing.T) {
 }
 
 func TestValidate_ConnectionAgentAuth(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{
 		Connections: []Connection{{
 			Name:    "test",
@@ -610,6 +641,7 @@ func TestValidate_ConnectionAgentAuth(t *testing.T) {
 }
 
 func TestValidate_ConnectionPasswordCommandAuth(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{
 		Connections: []Connection{{
 			Name:    "test",
@@ -624,6 +656,7 @@ func TestValidate_ConnectionPasswordCommandAuth(t *testing.T) {
 }
 
 func TestValidate_InvalidMode(t *testing.T) {
+	t.Parallel()
 	f := filepath.Join(t.TempDir(), "key")
 	_ = os.WriteFile(f, []byte("key"), 0600)
 
@@ -641,6 +674,7 @@ func TestValidate_InvalidMode(t *testing.T) {
 }
 
 func TestValidate_MultiplexMode(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{
 		Connections: []Connection{{
 			Name:    "test",
@@ -656,6 +690,7 @@ func TestValidate_MultiplexMode(t *testing.T) {
 }
 
 func TestValidate_FailoverModeExplicit(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{
 		Connections: []Connection{{
 			Name:    "test",
@@ -671,6 +706,7 @@ func TestValidate_FailoverModeExplicit(t *testing.T) {
 }
 
 func TestValidate_DuplicateNames(t *testing.T) {
+	t.Parallel()
 	validConn := func(name string) Connection {
 		return Connection{
 			Name:    name,
@@ -741,6 +777,7 @@ func TestValidate_DuplicateNames(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			err := tt.cfg.Validate()
 			if tt.wantErr == "" {
 				if err != nil {
@@ -758,6 +795,7 @@ func TestValidate_DuplicateNames(t *testing.T) {
 }
 
 func TestValidate_FilesyncMaxConcurrentZero(t *testing.T) {
+	t.Parallel()
 	fsCfg := FilesyncCfg{
 		Bind:          "0.0.0.0:7756",
 		MaxConcurrent: 0,
@@ -779,6 +817,7 @@ func TestValidate_FilesyncMaxConcurrentZero(t *testing.T) {
 }
 
 func TestValidate_FilesyncDisabledNoPeers(t *testing.T) {
+	t.Parallel()
 	fsCfg := FilesyncCfg{
 		Bind:          "0.0.0.0:7756",
 		MaxConcurrent: 4,
@@ -794,6 +833,7 @@ func TestValidate_FilesyncDisabledNoPeers(t *testing.T) {
 }
 
 func TestValidate_FilesyncDryRunRequiresPeers(t *testing.T) {
+	t.Parallel()
 	fsCfg := FilesyncCfg{
 		Bind:          "0.0.0.0:7756",
 		MaxConcurrent: 4,
@@ -813,6 +853,7 @@ func TestValidate_FilesyncDryRunRequiresPeers(t *testing.T) {
 }
 
 func TestFilesyncResolve(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		cfg     FilesyncCfg
@@ -1035,6 +1076,7 @@ func TestFilesyncResolve(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			err := tt.cfg.Resolve()
 			if tt.wantErr != "" {
 				if err == nil {
@@ -1056,6 +1098,7 @@ func TestFilesyncResolve(t *testing.T) {
 }
 
 func TestFilesyncYAMLParsing(t *testing.T) {
+	t.Parallel()
 	input := `
 bind: "0.0.0.0:7756"
 scan_interval: "3600s"
@@ -1133,6 +1176,7 @@ folders:
 }
 
 func TestParseBandwidth(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input   string
 		want    int64
@@ -1150,6 +1194,7 @@ func TestParseBandwidth(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
+		t.Parallel()
 			got, err := ParseBandwidth(tt.input)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ParseBandwidth(%q) error=%v, wantErr=%v", tt.input, err, tt.wantErr)

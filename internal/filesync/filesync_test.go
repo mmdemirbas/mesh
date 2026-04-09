@@ -23,6 +23,7 @@ import (
 // --- Ignore pattern tests ---
 
 func TestParseLine(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		line    string
 		wantOK  bool
@@ -43,6 +44,7 @@ func TestParseLine(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.line, func(t *testing.T) {
+		t.Parallel()
 			p, ok := parseLine(tt.line)
 			if ok != tt.wantOK {
 				t.Fatalf("parseLine(%q) ok=%v, want %v", tt.line, ok, tt.wantOK)
@@ -64,6 +66,7 @@ func TestParseLine(t *testing.T) {
 }
 
 func TestShouldIgnore(t *testing.T) {
+	t.Parallel()
 	m := &ignoreMatcher{
 		patterns: []ignorePattern{
 			{pattern: ".stfolder"},
@@ -92,6 +95,7 @@ func TestShouldIgnore(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
+		t.Parallel()
 			got := m.shouldIgnore(tt.path, tt.isDir)
 			if got != tt.ignore {
 				t.Errorf("shouldIgnore(%q, isDir=%v) = %v, want %v", tt.path, tt.isDir, got, tt.ignore)
@@ -101,6 +105,7 @@ func TestShouldIgnore(t *testing.T) {
 }
 
 func TestMatchPattern(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		pattern string
 		path    string
@@ -129,6 +134,7 @@ func TestMatchPattern(t *testing.T) {
 }
 
 func TestIsConflictFile(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		want bool
@@ -140,6 +146,7 @@ func TestIsConflictFile(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			if got := isConflictFile(tt.name); got != tt.want {
 				t.Errorf("isConflictFile(%q) = %v, want %v", tt.name, got, tt.want)
 			}
@@ -150,6 +157,7 @@ func TestIsConflictFile(t *testing.T) {
 // --- Index tests ---
 
 func TestScanAndPersist(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "a.txt", "hello")
 	writeFile(t, dir, "sub/b.txt", "world")
@@ -201,6 +209,7 @@ func TestScanAndPersist(t *testing.T) {
 }
 
 func TestScanDetectsDeletion(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "a.txt", "hello")
 	writeFile(t, dir, "b.txt", "world")
@@ -227,6 +236,7 @@ func TestScanDetectsDeletion(t *testing.T) {
 }
 
 func TestScanDeletion_TombstoneMtimeIsNow(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "old.txt", "data")
 
@@ -267,6 +277,7 @@ func TestScanDeletion_TombstoneMtimeIsNow(t *testing.T) {
 }
 
 func TestScanRespectsIgnore(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "keep.txt", "keep")
 	writeFile(t, dir, "skip.log", "skip")
@@ -287,6 +298,7 @@ func TestScanRespectsIgnore(t *testing.T) {
 }
 
 func TestDiff(t *testing.T) {
+	t.Parallel()
 	local := newFileIndex()
 	local.Sequence = 5
 	local.Files["a.txt"] = FileEntry{SHA256: "aaa", Sequence: 3}
@@ -322,6 +334,7 @@ func TestDiff(t *testing.T) {
 }
 
 func TestDiffReceiveOnly(t *testing.T) {
+	t.Parallel()
 	local := newFileIndex()
 	remote := newFileIndex()
 	remote.Files["a.txt"] = FileEntry{SHA256: "aaa", Sequence: 1}
@@ -333,6 +346,7 @@ func TestDiffReceiveOnly(t *testing.T) {
 }
 
 func TestDiffSendOnly(t *testing.T) {
+	t.Parallel()
 	local := newFileIndex()
 	remote := newFileIndex()
 	remote.Files["a.txt"] = FileEntry{SHA256: "aaa", Sequence: 1}
@@ -344,6 +358,7 @@ func TestDiffSendOnly(t *testing.T) {
 }
 
 func TestDiffDeleteTombstone(t *testing.T) {
+	t.Parallel()
 	local := newFileIndex()
 	local.Files["a.txt"] = FileEntry{SHA256: "aaa", Sequence: 1}
 
@@ -357,6 +372,7 @@ func TestDiffDeleteTombstone(t *testing.T) {
 }
 
 func TestPurgeTombstones(t *testing.T) {
+	t.Parallel()
 	idx := newFileIndex()
 	// Old tombstone (mtime = 0 means epoch, well past 30 days ago).
 	idx.Files["old.txt"] = FileEntry{Deleted: true, MtimeNS: 0}
@@ -374,6 +390,7 @@ func TestPurgeTombstones(t *testing.T) {
 }
 
 func TestCleanTempFiles(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// Create stale temp files: one at root, one nested.
@@ -411,6 +428,7 @@ func TestCleanTempFiles(t *testing.T) {
 // --- Conflict tests ---
 
 func TestConflictFileName(t *testing.T) {
+	t.Parallel()
 	result := conflictFileName("docs/report.docx", "abc123def")
 	if !isConflictFile(result) {
 		t.Errorf("expected conflict pattern, got %q", result)
@@ -421,6 +439,7 @@ func TestConflictFileName(t *testing.T) {
 }
 
 func TestResolveConflict_RemoteWins(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "file.txt", "local content")
 
@@ -454,6 +473,7 @@ func TestResolveConflict_RemoteWins(t *testing.T) {
 }
 
 func TestResolveConflict_LocalWins(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "file.txt", "local content")
 
@@ -477,6 +497,7 @@ func TestResolveConflict_LocalWins(t *testing.T) {
 // --- Transfer tests ---
 
 func TestDownloadFile_PathTraversal(t *testing.T) {
+	t.Parallel()
 	client := &http.Client{}
 	_, err := downloadFile(t.Context(), client, "127.0.0.1:9999", "test", "../../../etc/passwd", "abcdef0123456789abcdef0123456789", t.TempDir(), nil)
 	if err == nil {
@@ -485,6 +506,7 @@ func TestDownloadFile_PathTraversal(t *testing.T) {
 }
 
 func TestDownloadFile_ShortHash(t *testing.T) {
+	t.Parallel()
 	client := &http.Client{}
 	_, err := downloadFile(t.Context(), client, "127.0.0.1:9999", "test", "file.txt", "abc", t.TempDir(), nil)
 	if err == nil {
@@ -498,6 +520,7 @@ func TestDownloadFile_ShortHash(t *testing.T) {
 // --- Block-level delta tests ---
 
 func TestComputeBlockSignatures(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// Create a file with 2.5 blocks worth of data (block size = 4 bytes for testing).
 	writeFile(t, dir, "data.bin", "AAAABBBBcc")
@@ -516,6 +539,7 @@ func TestComputeBlockSignatures(t *testing.T) {
 }
 
 func TestComputeDeltaBlocks(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// Old file: "AAAABBBBcc"
 	writeFile(t, dir, "old.bin", "AAAABBBBcc")
@@ -540,6 +564,7 @@ func TestComputeDeltaBlocks(t *testing.T) {
 }
 
 func TestApplyDelta(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "old.bin", "AAAABBBBcc")
 
@@ -565,6 +590,7 @@ func TestApplyDelta(t *testing.T) {
 }
 
 func TestDeltaEndpoint_ReducesTransfer(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// Server has a file with a changed middle block.
 	writeFile(t, dir, "data.bin", "AAAAXXXXcc")
@@ -622,6 +648,7 @@ func TestDeltaEndpoint_ReducesTransfer(t *testing.T) {
 }
 
 func TestSafePath(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeFile(t, root, "valid.txt", "ok")
 	writeFile(t, root, "sub/nested.txt", "ok")
@@ -642,6 +669,7 @@ func TestSafePath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			_, err := safePath(root, tt.relPath)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("safePath(%q) error=%v, wantErr=%v", tt.relPath, err, tt.wantErr)
@@ -651,6 +679,7 @@ func TestSafePath(t *testing.T) {
 }
 
 func TestDeleteFile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "a.txt", "content")
 
@@ -663,6 +692,7 @@ func TestDeleteFile(t *testing.T) {
 }
 
 func TestDeleteFile_PathTraversal(t *testing.T) {
+	t.Parallel()
 	err := deleteFile(t.TempDir(), "../escape.txt")
 	if err == nil {
 		t.Error("expected error for path traversal")
@@ -672,6 +702,7 @@ func TestDeleteFile_PathTraversal(t *testing.T) {
 // --- Protocol tests ---
 
 func TestHandleFile_ServesContent(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "hello.txt", "hello world")
 
@@ -700,6 +731,7 @@ func TestHandleFile_ServesContent(t *testing.T) {
 }
 
 func TestHandleFile_RejectsTraversal(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	n := &Node{
@@ -727,6 +759,7 @@ func TestHandleFile_RejectsTraversal(t *testing.T) {
 }
 
 func TestHandleFile_WithOffset(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "data.txt", "abcdefghij")
 
@@ -761,6 +794,7 @@ func TestHandleFile_WithOffset(t *testing.T) {
 }
 
 func TestHandleIndex_ExchangeRoundtrip(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	n := &Node{
@@ -820,6 +854,7 @@ func TestHandleIndex_ExchangeRoundtrip(t *testing.T) {
 }
 
 func TestHandleIndex_DeltaMode(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	n := &Node{
@@ -889,6 +924,7 @@ func TestHandleIndex_DeltaMode(t *testing.T) {
 }
 
 func TestBuildIndexExchange_DeltaFiltering(t *testing.T) {
+	t.Parallel()
 	n := &Node{
 		deviceID: "test",
 		folders: map[string]*folderState{
@@ -925,6 +961,7 @@ func TestBuildIndexExchange_DeltaFiltering(t *testing.T) {
 }
 
 func TestHandleStatus(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	n := &Node{
@@ -957,6 +994,7 @@ func TestHandleStatus(t *testing.T) {
 }
 
 func TestHandleIndex_LoopbackTrusted(t *testing.T) {
+	t.Parallel()
 	// Loopback connections (via SSH tunnels) bypass peer IP validation.
 	dir := t.TempDir()
 
@@ -993,6 +1031,7 @@ func TestHandleIndex_LoopbackTrusted(t *testing.T) {
 }
 
 func TestPeerValidation_NonLoopbackRejected(t *testing.T) {
+	t.Parallel()
 	// Non-loopback peers that don't match any configured peer are rejected.
 	n := &Node{
 		folders: map[string]*folderState{
@@ -1031,6 +1070,7 @@ func TestPeerValidation_NonLoopbackRejected(t *testing.T) {
 }
 
 func TestPaginatedIndexExchange(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// Build a node with a large index that exceeds indexPageSize.
@@ -1090,6 +1130,7 @@ func TestPaginatedIndexExchange(t *testing.T) {
 }
 
 func TestPaginatedIndexExchange_SmallIndex(t *testing.T) {
+	t.Parallel()
 	// Small indices should still work (single-page path).
 	dir := t.TempDir()
 
@@ -1130,6 +1171,7 @@ func TestPaginatedIndexExchange_SmallIndex(t *testing.T) {
 }
 
 func TestPaginateResponse(t *testing.T) {
+	t.Parallel()
 	files := make([]*pb.FileInfo, indexPageSize*3+50)
 	for i := range files {
 		files[i] = &pb.FileInfo{Path: fmt.Sprintf("f%d", i)}
@@ -1162,6 +1204,7 @@ func TestPaginateResponse(t *testing.T) {
 // --- Watcher tests ---
 
 func TestFolderWatcher_SignalsDirty(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ignore := &ignoreMatcher{}
 
@@ -1190,6 +1233,7 @@ func TestFolderWatcher_SignalsDirty(t *testing.T) {
 // --- Peer matching tests ---
 
 func TestPeerMatchesAddr(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		peer    string
 		request string
@@ -1213,6 +1257,7 @@ func TestPeerMatchesAddr(t *testing.T) {
 // --- End-to-end sync test (FT1) ---
 
 func TestTwoNodeSync(t *testing.T) {
+	t.Parallel()
 	// Set up two folders with a file on each side.
 	dirA := t.TempDir()
 	dirB := t.TempDir()
@@ -1308,6 +1353,7 @@ func TestTwoNodeSync(t *testing.T) {
 // --- Resume test (FT2) ---
 
 func TestDownloadFile_Resume(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	content := "0123456789abcdef" // 16 bytes
 
@@ -1373,6 +1419,7 @@ func TestDownloadFile_Resume(t *testing.T) {
 // --- Direction enforcement test (FT3) ---
 
 func TestHandleFile_RejectsReceiveOnly(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "secret.txt", "data")
 
@@ -1406,6 +1453,7 @@ func TestHandleFile_RejectsReceiveOnly(t *testing.T) {
 }
 
 func TestHandleFile_RejectsDisabled(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "data.txt", "content")
 
@@ -1438,6 +1486,7 @@ func TestHandleFile_RejectsDisabled(t *testing.T) {
 }
 
 func TestDryRunComputesDiffWithoutExecution(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "local.txt", "local content")
 
@@ -1470,6 +1519,7 @@ func TestDryRunComputesDiffWithoutExecution(t *testing.T) {
 }
 
 func TestDisabledFolderSkippedInScan(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "file.txt", "content")
 
@@ -1502,6 +1552,7 @@ func TestDisabledFolderSkippedInScan(t *testing.T) {
 // --- Unknown folder test (FT4) ---
 
 func TestHandleIndex_UnknownFolder(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	n := &Node{
@@ -1537,6 +1588,7 @@ func TestHandleIndex_UnknownFolder(t *testing.T) {
 // --- listConflicts test (FT6) ---
 
 func TestListConflicts(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "normal.txt", "ok")
 	writeFile(t, dir, "report.sync-conflict-20260406-143022-abc123.docx", "conflict1")
@@ -1565,6 +1617,7 @@ func TestListConflicts(t *testing.T) {
 // --- persistFolder roundtrip test (FT8) ---
 
 func TestPersistFolder_Roundtrip(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 	folderDir := t.TempDir()
 	writeFile(t, folderDir, "a.txt", "hello")
@@ -1629,6 +1682,7 @@ func TestPersistFolder_Roundtrip(t *testing.T) {
 // --- Path tracking test (FT9a) ---
 
 func TestPathChangePreservesIndex(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 	oldDir := t.TempDir()
 	newDir := t.TempDir()
@@ -1672,6 +1726,7 @@ func TestPathChangePreservesIndex(t *testing.T) {
 }
 
 func TestIndexPersistsPath(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 	dir := t.TempDir()
 	writeFile(t, dir, "file.txt", "content")

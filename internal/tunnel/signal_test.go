@@ -8,6 +8,7 @@ import (
 )
 
 func TestSSHSignalNumber(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		want syscall.Signal
@@ -32,6 +33,7 @@ func TestSSHSignalNumber(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			got, ok := sshSignalNumber(tt.name)
 			if ok != tt.ok {
 				t.Errorf("sshSignalNumber(%q) ok = %v, want %v", tt.name, ok, tt.ok)
@@ -44,6 +46,7 @@ func TestSSHSignalNumber(t *testing.T) {
 }
 
 func TestSSHSignalRoundTrip(t *testing.T) {
+	t.Parallel()
 	signals := []syscall.Signal{
 		syscall.SIGABRT, syscall.SIGALRM, syscall.SIGFPE,
 		syscall.SIGHUP, syscall.SIGILL, syscall.SIGINT,

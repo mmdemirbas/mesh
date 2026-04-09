@@ -3,6 +3,7 @@ package tunnel
 import "testing"
 
 func TestEnvMatches(t *testing.T) {
+	t.Parallel()
 	allow := []string{"LANG", "LC_*", "TERM"}
 
 	tests := []struct {
@@ -21,6 +22,7 @@ func TestEnvMatches(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			if got := envMatches(tt.name, allow); got != tt.want {
 				t.Errorf("envMatches(%q) = %v, want %v", tt.name, got, tt.want)
 			}
@@ -29,6 +31,7 @@ func TestEnvMatches(t *testing.T) {
 }
 
 func TestEnvMatches_EmptyAllowlist(t *testing.T) {
+	t.Parallel()
 	if envMatches("LANG", nil) {
 		t.Error("empty allowlist should reject all")
 	}

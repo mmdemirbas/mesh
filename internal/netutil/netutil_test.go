@@ -12,6 +12,7 @@ import (
 )
 
 func TestBiCopy_BidirectionalData(t *testing.T) {
+	t.Parallel()
 	// Use real TCP connections — the way BiCopy is actually used in the tunnel.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -61,6 +62,7 @@ func TestBiCopy_BidirectionalData(t *testing.T) {
 }
 
 func TestBiCopy_RelayThroughProxy(t *testing.T) {
+	t.Parallel()
 	// Simulate the exact proxy relay pattern: client → proxy → target
 	// using BiCopy to connect the two sides.
 
@@ -131,6 +133,7 @@ func TestBiCopy_RelayThroughProxy(t *testing.T) {
 }
 
 func TestBiCopy_LargePayload(t *testing.T) {
+	t.Parallel()
 	// 1MB payload to verify the buffer pool works correctly under load
 	target, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -197,6 +200,7 @@ func TestBiCopy_LargePayload(t *testing.T) {
 }
 
 func TestCountedBiCopy_ByteCounting(t *testing.T) {
+	t.Parallel()
 	// Echo server
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -312,6 +316,7 @@ func TestCountedBiCopy_ByteCounting(t *testing.T) {
 }
 
 func TestCountedBiCopy_LargePayload(t *testing.T) {
+	t.Parallel()
 	target, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -381,6 +386,7 @@ func TestCountedBiCopy_LargePayload(t *testing.T) {
 }
 
 func TestCountingWriter(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	var counter atomic.Int64
 	cw := &countingWriter{w: &buf, counter: &counter}
@@ -409,6 +415,7 @@ func TestCountingWriter(t *testing.T) {
 // used in handleTCPIPForward: multiple concurrent connections through a shared
 // dynamic forward, each tracked on the same atomic counters via GetMetrics.
 func TestCountedBiCopy_DynamicForwardPattern(t *testing.T) {
+	t.Parallel()
 	// Echo target (like peer's syncthing)
 	target, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -509,6 +516,7 @@ func TestCountedBiCopy_DynamicForwardPattern(t *testing.T) {
 // TestCountedBiCopy_StreamsTrackedDuringTransfer verifies that stream counts
 // are visible while data is being transferred (not just after completion).
 func TestCountedBiCopy_StreamsTrackedDuringTransfer(t *testing.T) {
+	t.Parallel()
 	// Slow echo: holds connections open so we can observe active streams
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -594,6 +602,7 @@ func TestCountedBiCopy_StreamsTrackedDuringTransfer(t *testing.T) {
 }
 
 func TestApplyTCPKeepAlive_TCPConn(t *testing.T) {
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -620,6 +629,7 @@ func TestApplyTCPKeepAlive_TCPConn(t *testing.T) {
 }
 
 func TestApplyTCPKeepAlive_NonTCP(t *testing.T) {
+	t.Parallel()
 	// Should be a no-op for non-TCP connections, not panic
 	r, w := io.Pipe()
 	ApplyTCPKeepAlive(&fakeConn{r: r, w: w}, 0)

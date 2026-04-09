@@ -12,6 +12,7 @@ func newState() *State {
 }
 
 func TestUpdate(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	s.Update("proxy", "127.0.0.1:1080", Listening, "ready")
 
@@ -35,6 +36,7 @@ func TestUpdate(t *testing.T) {
 }
 
 func TestUpdatePreservesBoundAddr(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	s.Update("proxy", "id1", Starting, "")
 	s.UpdateBind("proxy", "id1", "127.0.0.1:9999")
@@ -51,6 +53,7 @@ func TestUpdatePreservesBoundAddr(t *testing.T) {
 }
 
 func TestUpdateBind(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	s.Update("relay", "r1", Starting, "")
 	s.UpdateBind("relay", "r1", "0.0.0.0:8080")
@@ -62,6 +65,7 @@ func TestUpdateBind(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	s.Update("server", "s1", Listening, "")
 	s.Delete("server", "s1")
@@ -73,11 +77,13 @@ func TestDelete(t *testing.T) {
 }
 
 func TestDeleteNonExistent(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	s.Delete("server", "nonexistent") // should not panic
 }
 
 func TestSnapshotIsACopy(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	s.Update("proxy", "p1", Listening, "")
 
@@ -91,6 +97,7 @@ func TestSnapshotIsACopy(t *testing.T) {
 }
 
 func TestSnapshotEmpty(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	snap := s.Snapshot()
 	if len(snap) != 0 {
@@ -99,6 +106,7 @@ func TestSnapshotEmpty(t *testing.T) {
 }
 
 func TestStatusConstants(t *testing.T) {
+	t.Parallel()
 	statuses := map[Status]string{
 		Starting:   "starting",
 		Listening:  "listening",
@@ -115,6 +123,7 @@ func TestStatusConstants(t *testing.T) {
 }
 
 func TestUpdatePeer(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	s.Update("connection", "c1", Connected, "target1")
 	s.UpdatePeer("connection", "c1", "10.0.0.1:22")
@@ -126,6 +135,7 @@ func TestUpdatePeer(t *testing.T) {
 }
 
 func TestUpdatePreservesPeerAddr(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	s.Update("connection", "c1", Connected, "target1")
 	s.UpdatePeer("connection", "c1", "10.0.0.1:22")
@@ -138,6 +148,7 @@ func TestUpdatePreservesPeerAddr(t *testing.T) {
 }
 
 func TestGetMetrics_CreatesNew(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	m := s.GetMetrics("connection", "c1")
 	if m == nil {
@@ -149,6 +160,7 @@ func TestGetMetrics_CreatesNew(t *testing.T) {
 }
 
 func TestGetMetrics_ReturnsSame(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	m1 := s.GetMetrics("connection", "c1")
 	m2 := s.GetMetrics("connection", "c1")
@@ -158,6 +170,7 @@ func TestGetMetrics_ReturnsSame(t *testing.T) {
 }
 
 func TestGetMetrics_DifferentKeys(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	m1 := s.GetMetrics("connection", "c1")
 	m2 := s.GetMetrics("connection", "c2")
@@ -167,6 +180,7 @@ func TestGetMetrics_DifferentKeys(t *testing.T) {
 }
 
 func TestMetrics_AtomicOperations(t *testing.T) {
+	t.Parallel()
 	m := &Metrics{}
 	m.BytesTx.Add(100)
 	m.BytesTx.Add(200)
@@ -190,6 +204,7 @@ func TestMetrics_AtomicOperations(t *testing.T) {
 }
 
 func TestSnapshotMetrics(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	m := s.GetMetrics("connection", "c1")
 	m.BytesTx.Store(999)
@@ -204,6 +219,7 @@ func TestSnapshotMetrics(t *testing.T) {
 }
 
 func TestSnapshotMetrics_Empty(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	snap := s.SnapshotMetrics()
 	if len(snap) != 0 {
@@ -212,6 +228,7 @@ func TestSnapshotMetrics_Empty(t *testing.T) {
 }
 
 func TestDeleteMetrics(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	s.GetMetrics("connection", "c1")
 	s.DeleteMetrics("connection", "c1")
@@ -223,6 +240,7 @@ func TestDeleteMetrics(t *testing.T) {
 }
 
 func TestMetrics_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	var wg sync.WaitGroup
 	for i := range 100 {
@@ -241,6 +259,7 @@ func TestMetrics_ConcurrentAccess(t *testing.T) {
 }
 
 func TestSizes_Empty(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	comps, mets := s.Sizes()
 	if comps != 0 {
@@ -252,6 +271,7 @@ func TestSizes_Empty(t *testing.T) {
 }
 
 func TestSizes_WithData(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	s.Update("proxy", "p1", Listening, "")
 	s.Update("connection", "c1", Connected, "")
@@ -267,6 +287,7 @@ func TestSizes_WithData(t *testing.T) {
 }
 
 func TestSizes_AfterDelete(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	s.Update("proxy", "p1", Listening, "")
 	s.GetMetrics("proxy", "p1")
@@ -284,6 +305,7 @@ func TestSizes_AfterDelete(t *testing.T) {
 }
 
 func TestEvictStale_RemovesOldEntries(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	s.Update("proxy", "old", Listening, "")
 	s.Update("proxy", "fresh", Listening, "")
@@ -319,6 +341,7 @@ func TestEvictStale_RemovesOldEntries(t *testing.T) {
 }
 
 func TestEvictStale_SkipsZeroLastUpdated(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	// Directly inject a component with zero LastUpdated (legacy).
 	s.mu.Lock()
@@ -334,6 +357,7 @@ func TestEvictStale_SkipsZeroLastUpdated(t *testing.T) {
 }
 
 func TestConcurrentAccess(t *testing.T) {
+	t.Parallel()
 	s := newState()
 	var wg sync.WaitGroup
 

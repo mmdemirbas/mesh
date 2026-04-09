@@ -6,6 +6,7 @@ import (
 )
 
 func TestGatewayCfg_Validate(t *testing.T) {
+	t.Parallel()
 	valid := GatewayCfg{
 		Name:     "test",
 		Bind:     "127.0.0.1:3457",
@@ -36,6 +37,7 @@ func TestGatewayCfg_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+		t.Parallel()
 			cfg := valid
 			tt.modify(&cfg)
 			err := cfg.Validate()
@@ -55,6 +57,7 @@ func TestGatewayCfg_Validate(t *testing.T) {
 }
 
 func TestGatewayCfg_MapModel(t *testing.T) {
+	t.Parallel()
 	cfg := GatewayCfg{ModelMap: map[string]string{"a": "b"}}
 	if got := cfg.MapModel("a"); got != "b" {
 		t.Errorf("MapModel(a) = %q, want b", got)
@@ -65,6 +68,7 @@ func TestGatewayCfg_MapModel(t *testing.T) {
 }
 
 func TestGatewayCfg_MaxTokens(t *testing.T) {
+	t.Parallel()
 	cfg := GatewayCfg{}
 	if got := cfg.MaxTokens(); got != 32768 {
 		t.Errorf("MaxTokens() = %d, want 32768 (default)", got)
@@ -76,6 +80,7 @@ func TestGatewayCfg_MaxTokens(t *testing.T) {
 }
 
 func TestGatewayCfg_TimeoutDuration(t *testing.T) {
+	t.Parallel()
 	cfg := GatewayCfg{}
 	if got := cfg.TimeoutDuration().Seconds(); got != 600 {
 		t.Errorf("TimeoutDuration() = %f, want 600", got)

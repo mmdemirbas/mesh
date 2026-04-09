@@ -17,6 +17,7 @@ import (
 // --- A2O Streaming Tests (client=Anthropic, upstream=OpenAI) ---
 
 func TestA2OStream_SimpleText(t *testing.T) {
+	t.Parallel()
 	// Mock OpenAI streaming upstream.
 	chunks := []string{
 		makeOpenAIChunk("chatcmpl-1", "gpt-4o", &OpenAIChunkChoice{
@@ -87,6 +88,7 @@ func TestA2OStream_SimpleText(t *testing.T) {
 }
 
 func TestA2OStream_ToolCall(t *testing.T) {
+	t.Parallel()
 	chunks := []string{
 		makeOpenAIChunk("chatcmpl-2", "gpt-4o", &OpenAIChunkChoice{
 			Index: 0,
@@ -149,6 +151,7 @@ func TestA2OStream_ToolCall(t *testing.T) {
 }
 
 func TestA2OStream_EmptyToolCallsArray(t *testing.T) {
+	t.Parallel()
 	// mlx_lm.server edge case: always sends tool_calls: [].
 	chunks := []string{
 		makeOpenAIChunk("chatcmpl-3", "gpt-4o", &OpenAIChunkChoice{
@@ -184,6 +187,7 @@ func TestA2OStream_EmptyToolCallsArray(t *testing.T) {
 // --- O2A Streaming Tests (client=OpenAI, upstream=Anthropic) ---
 
 func TestO2AStream_SimpleText(t *testing.T) {
+	t.Parallel()
 	anthropicEvents := []string{
 		`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}`,
 		`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
@@ -249,6 +253,7 @@ func TestO2AStream_SimpleText(t *testing.T) {
 }
 
 func TestO2AStream_ToolCall(t *testing.T) {
+	t.Parallel()
 	anthropicEvents := []string{
 		`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}`,
 		`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"read_file","input":{}}}`,
@@ -306,6 +311,7 @@ func TestO2AStream_ToolCall(t *testing.T) {
 }
 
 func TestO2AStream_ThinkingDropped(t *testing.T) {
+	t.Parallel()
 	anthropicEvents := []string{
 		`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_3","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":5,"output_tokens":0}}}`,
 		`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
@@ -345,6 +351,7 @@ func TestO2AStream_ThinkingDropped(t *testing.T) {
 }
 
 func TestA2OStream_ToolNameAndArgsInSameChunk(t *testing.T) {
+	t.Parallel()
 	// Edge case: tool name + arguments arrive in the same SSE chunk.
 	chunks := []string{
 		makeOpenAIChunk("chatcmpl-4", "gpt-4o", &OpenAIChunkChoice{
@@ -392,6 +399,7 @@ func TestA2OStream_ToolNameAndArgsInSameChunk(t *testing.T) {
 }
 
 func TestA2OStream_ParallelToolCalls(t *testing.T) {
+	t.Parallel()
 	chunks := []string{
 		makeOpenAIChunk("chatcmpl-5", "gpt-4o", &OpenAIChunkChoice{
 			Index: 0,
@@ -433,6 +441,7 @@ func TestA2OStream_ParallelToolCalls(t *testing.T) {
 }
 
 func TestO2AStream_ParallelToolCalls(t *testing.T) {
+	t.Parallel()
 	anthropicEvents := []string{
 		`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_p","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}`,
 		`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_a","name":"read","input":{}}}`,
@@ -484,6 +493,7 @@ func TestO2AStream_ParallelToolCalls(t *testing.T) {
 }
 
 func TestO2AStream_MidStreamError(t *testing.T) {
+	t.Parallel()
 	anthropicEvents := []string{
 		`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_e","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":5,"output_tokens":0}}}`,
 		`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
@@ -525,6 +535,7 @@ func TestO2AStream_MidStreamError(t *testing.T) {
 }
 
 func TestO2AStream_MixedTextAndTool(t *testing.T) {
+	t.Parallel()
 	// Text block followed by tool block — verifies toolIndex is correct.
 	anthropicEvents := []string{
 		`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_m","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":5,"output_tokens":0}}}`,

@@ -14,6 +14,7 @@ import (
 )
 
 func TestDialViaSocks5_Success(t *testing.T) {
+	t.Parallel()
 	// Start a mock SOCKS5 server
 	socksLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -67,6 +68,7 @@ func TestDialViaSocks5_Success(t *testing.T) {
 // server that returns an IPv6 bind address in its CONNECT response (atyp=0x04).
 // This exercises the 18-byte read path; a 10-byte buffer would panic here.
 func TestDialViaSocks5_IPv6BindResponse(t *testing.T) {
+	t.Parallel()
 	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -115,6 +117,7 @@ func TestDialViaSocks5_IPv6BindResponse(t *testing.T) {
 }
 
 func TestDialViaSocks5_ConnectionRefused(t *testing.T) {
+	t.Parallel()
 	socksLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +140,7 @@ func TestDialViaSocks5_ConnectionRefused(t *testing.T) {
 }
 
 func TestDialViaSocks5_DialFailure(t *testing.T) {
+	t.Parallel()
 	failDialer := func(network, addr string) (net.Conn, error) {
 		return nil, &net.OpError{Op: "dial", Err: io.EOF}
 	}
@@ -148,6 +152,7 @@ func TestDialViaSocks5_DialFailure(t *testing.T) {
 }
 
 func TestDialViaSocks5_InvalidTarget(t *testing.T) {
+	t.Parallel()
 	// No host:port → SplitHostPort fails
 	socksLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -176,6 +181,7 @@ func TestDialViaSocks5_InvalidTarget(t *testing.T) {
 }
 
 func TestServeSocks_EndToEnd(t *testing.T) {
+	t.Parallel()
 	// Echo target
 	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -223,6 +229,7 @@ func TestServeSocks_EndToEnd(t *testing.T) {
 }
 
 func TestServeHTTPProxy_CONNECT(t *testing.T) {
+	t.Parallel()
 	// Target server that sends a response
 	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -288,6 +295,7 @@ func TestServeHTTPProxy_CONNECT(t *testing.T) {
 }
 
 func TestServeHTTPProxy_NonCONNECT(t *testing.T) {
+	t.Parallel()
 	// Target HTTP server that echoes the request method and path.
 	targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Echo", r.Method+" "+r.URL.Path)
@@ -328,6 +336,7 @@ func TestServeHTTPProxy_NonCONNECT(t *testing.T) {
 }
 
 func TestServeHTTPProxy_NonCONNECT_DialFailure(t *testing.T) {
+	t.Parallel()
 	// Proxy with a dialer that always fails
 	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -421,6 +430,7 @@ func mockSocks5ServerReject(conn net.Conn) {
 }
 
 func TestHandleSocks5_MalformedGreeting(t *testing.T) {
+	t.Parallel()
 	// A non-SOCKS5 greeting should be rejected without hanging.
 	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -451,6 +461,7 @@ func TestHandleSocks5_MalformedGreeting(t *testing.T) {
 }
 
 func TestHandleHTTPProxy_MalformedRequest(t *testing.T) {
+	t.Parallel()
 	// Garbage input should be rejected without hanging.
 	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
