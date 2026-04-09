@@ -233,7 +233,7 @@ func printHelp() {
 		{"ClientAliveCountMax", "Max unanswered keepalives before disconnect"},
 		{"ExitOnForwardFailure", "Stop reconnection if a forward fails (yes/no)"},
 		{"GatewayPorts", "Remote forward bind policy (yes/no/clientspecified)"},
-		{"PermitOpen", "Restrict tunneled destinations (e.g., *:22, host:80, none)"},
+		{"PermitOpen", "Restrict tunneled destinations (e.g., *:22, host:80, none). String-based — use IPs for strict enforcement"},
 		{"RekeyLimit", "Bytes before SSH re-keying (e.g., 1G, 500M)"},
 		{"StrictHostKeyChecking", "Reject unknown host keys (yes/no, default yes)"},
 	} {
@@ -560,7 +560,7 @@ func upCmd(nodeNames []string, configPath string) {
 	wg.Wait()
 	log.Info("mesh gracefully stopped")
 
-	// Dashboard cleanup happens via bubbletea's deferred alternate-screen exit.
+	// Dashboard cleanup (alt screen exit, cursor restore) happens via defers in runDashboard.
 	// No final status print — it pollutes the console scrollback.
 }
 

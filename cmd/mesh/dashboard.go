@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"golang.org/x/term"
+
 	"github.com/mmdemirbas/mesh/internal/config"
 	"github.com/mmdemirbas/mesh/internal/state"
 )
@@ -85,152 +85,28 @@ func (r *logRing) PlainLines() []string {
 	return out
 }
 
-// dashboardModel implements tea.Model for the live TUI dashboard.
-// The header (node name, config/log paths) is rendered above the viewport.
-// The viewport contains the scrollable status body and log tail.
-type dashboardModel struct {
-	cfgs         map[string]*config.Config
-	nodeNames    []string
-	configPath   string
-	logFilePath  string
-	adminURL     string
-	ring         *logRing
-	startTime    time.Time
-	viewport     viewport.Model
-	headerHeight int
-	ready        bool
-	quitting     bool
-	lastContent  string
-}
-
-type tickMsg time.Time
-type shutdownMsg struct{}
-
-func tickCmd() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
-}
-
-func (m dashboardModel) Init() tea.Cmd {
-	return tickCmd()
-}
-
-func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-
-	switch msg := msg.(type) {
-	case shutdownMsg:
-		m.quitting = true
-		return m, tea.Quit
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
-			m.quitting = true
-			return m, tea.Quit
-		}
-	case tea.WindowSizeMsg:
-		vpHeight := msg.Height - m.headerHeight
-		if vpHeight < 1 {
-			vpHeight = 1
-		}
-		if !m.ready {
-			m.viewport = viewport.New(msg.Width, vpHeight)
-			m.viewport.SetHorizontalStep(1)
-			m.ready = true
-		} else {
-			m.viewport.Width = msg.Width
-			m.viewport.Height = vpHeight
-		}
-		content := m.buildContent()
-		m.lastContent = content
-		m.viewport.SetContent(content)
-	case tickMsg:
-		if m.ready {
-			content := m.buildContent()
-			if content != m.lastContent {
-				m.lastContent = content
-				atBottom := m.viewport.AtBottom()
-				m.viewport.SetContent(content)
-				if atBottom {
-					m.viewport.GotoBottom()
-				}
-			}
-		}
-		cmd = tickCmd()
-	}
-
-	var vpCmd tea.Cmd
-	m.viewport, vpCmd = m.viewport.Update(msg)
-	return m, tea.Batch(cmd, vpCmd)
-}
-
-func (m dashboardModel) View() string {
-	if !m.ready || m.quitting {
-		return ""
-	}
-	var buf strings.Builder
-	uptime := time.Since(m.startTime).Truncate(time.Second)
-	nodesLabel := strings.Join(m.nodeNames, ", ")
-	fmt.Fprintf(&buf, "%s%smesh %s%s %s%s%s | pid %d | %s | up %s\n",
-		cBold, cCyan, nodesLabel, cReset, cGray, version, cReset, os.Getpid(), time.Now().Format("15:04:05"), uptime)
-	if m.configPath != "" {
-		fmt.Fprintf(&buf, "  %sconfig: %s%s\n", cGray, m.configPath, cReset)
-	}
-	if m.logFilePath != "" {
-		fmt.Fprintf(&buf, "  %slog:    %s%s\n", cGray, m.logFilePath, cReset)
-	}
-	if m.adminURL != "" {
-		fmt.Fprintf(&buf, "  %sui:     %s%s\n", cGray, m.adminURL, cReset)
-	}
-	buf.WriteByte('\n')
-	buf.WriteString(m.viewport.View())
-	return buf.String()
-}
-
-func (m dashboardModel) buildContent() string {
-	// P13: Single SnapshotFull call instead of separate Snapshot + SnapshotMetrics.
-	full := state.Global.SnapshotFull()
-	var bodyLines []string
-	var maxWidth int
-	for _, name := range m.nodeNames {
-		statusOutput, statusWidth := renderStatus(m.cfgs[name], full.Components, full.Metrics, name)
-		bodyLines = append(bodyLines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
-		if statusWidth > maxWidth {
-			maxWidth = statusWidth
-		}
-	}
-
-	// U8: Compute log tail lines dynamically from viewport height.
-	// Reserve space for the separator line, then fill remaining height with logs.
-	statusLines := len(bodyLines)
-	tailLines := m.viewport.Height - statusLines - 1 // -1 for separator
-	if tailLines < 3 {
-		tailLines = 3
-	}
-	if tailLines > 50 {
-		tailLines = 50
-	}
-	logLines := m.ring.Lines()
-	if len(logLines) > tailLines {
-		logLines = logLines[len(logLines)-tailLines:]
-	}
-	if len(logLines) > 0 {
-		if maxWidth < 80 {
-			maxWidth = 80
-		}
-		bodyLines = append(bodyLines, cGray+strings.Repeat("─", maxWidth)+cReset)
-		bodyLines = append(bodyLines, logLines...)
-	}
-
-	return strings.Join(bodyLines, "\n")
-}
-
-// runDashboard renders a live status screen using a bubbletea TUI with a
-// scrollable viewport. It uses the terminal's alternate screen buffer so the
-// dashboard doesn't pollute scrollback. When the dashboard exits (via ctx
-// cancellation or user quit), cancel is called to unblock the main goroutine.
+// runDashboard renders a live status screen using the terminal's alternate
+// screen buffer. Keyboard input (q/ctrl-c to quit, arrow keys and page
+// up/down to scroll) is handled via raw terminal mode. The dashboard
+// refreshes every second and on input, overwriting in place to avoid
+// scrollback pollution. When the dashboard exits (via ctx cancellation or
+// user quit), cancel is called to unblock the main goroutine.
 func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[string]*config.Config, nodeNames []string, configPath string, logFilePath string, adminURL string, ring *logRing) {
+	fd := int(os.Stdin.Fd())
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		cancel()
+		return
+	}
+	defer term.Restore(fd, oldState)
+
+	os.Stdout.WriteString("\033[?1049h") // enter alt screen
+	os.Stdout.WriteString("\033[?25l")   // hide cursor
+	defer func() {
+		os.Stdout.WriteString("\033[?25h")   // show cursor
+		os.Stdout.WriteString("\033[?1049l") // leave alt screen
+	}()
+
 	headerHeight := 2 // header line + blank line
 	if configPath != "" {
 		headerHeight++
@@ -242,29 +118,225 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 		headerHeight++
 	}
 
-	m := dashboardModel{
-		cfgs:         cfgs,
-		nodeNames:    nodeNames,
-		configPath:   configPath,
-		logFilePath:  logFilePath,
-		adminURL:     adminURL,
-		ring:         ring,
-		startTime:    time.Now(),
-		headerHeight: headerHeight,
+	startTime := time.Now()
+	scrollOffset := 0
+	autoScroll := true // follow tail when at bottom
+	lastContent := ""
+
+	termSize := func() (int, int) {
+		w, h, err := term.GetSize(int(os.Stdout.Fd()))
+		if err != nil {
+			return 80, 24
+		}
+		return w, h
 	}
 
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	buildContent := func(vpHeight int) ([]string, int) {
+		full := state.Global.SnapshotFull()
+		var bodyLines []string
+		var maxWidth int
+		for _, name := range nodeNames {
+			out, w := renderStatus(cfgs[name], full.Components, full.Metrics, name)
+			bodyLines = append(bodyLines, strings.Split(strings.TrimRight(out, "\n"), "\n")...)
+			if w > maxWidth {
+				maxWidth = w
+			}
+		}
+		statusLines := len(bodyLines)
+		tailLines := vpHeight - statusLines - 1
+		if tailLines < 3 {
+			tailLines = 3
+		}
+		if tailLines > 50 {
+			tailLines = 50
+		}
+		logLines := ring.Lines()
+		if len(logLines) > tailLines {
+			logLines = logLines[len(logLines)-tailLines:]
+		}
+		if len(logLines) > 0 {
+			if maxWidth < 80 {
+				maxWidth = 80
+			}
+			bodyLines = append(bodyLines, cGray+strings.Repeat("─", maxWidth)+cReset)
+			bodyLines = append(bodyLines, logLines...)
+		}
+		return bodyLines, maxWidth
+	}
 
+	render := func() {
+		_, height := termSize()
+		vpHeight := height - headerHeight
+		if vpHeight < 1 {
+			vpHeight = 1
+		}
+
+		lines, _ := buildContent(vpHeight)
+		content := strings.Join(lines, "\n")
+		if content == lastContent {
+			// Only update the header (clock/uptime) when body is unchanged.
+		}
+		lastContent = content
+
+		totalLines := len(lines)
+		maxScroll := totalLines - vpHeight
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		if autoScroll {
+			scrollOffset = maxScroll
+		}
+		if scrollOffset > maxScroll {
+			scrollOffset = maxScroll
+		}
+		if scrollOffset < 0 {
+			scrollOffset = 0
+		}
+
+		start := scrollOffset
+		end := start + vpHeight
+		if end > totalLines {
+			end = totalLines
+		}
+
+		var buf strings.Builder
+		buf.WriteString("\033[H") // cursor home
+
+		// Header
+		uptime := time.Since(startTime).Truncate(time.Second)
+		nodesLabel := strings.Join(nodeNames, ", ")
+		fmt.Fprintf(&buf, "%s%smesh %s%s %s%s%s | pid %d | %s | up %s\033[K\n",
+			cBold, cCyan, nodesLabel, cReset, cGray, version, cReset, os.Getpid(), time.Now().Format("15:04:05"), uptime)
+		if configPath != "" {
+			fmt.Fprintf(&buf, "  %sconfig: %s%s\033[K\n", cGray, configPath, cReset)
+		}
+		if logFilePath != "" {
+			fmt.Fprintf(&buf, "  %slog:    %s%s\033[K\n", cGray, logFilePath, cReset)
+		}
+		if adminURL != "" {
+			fmt.Fprintf(&buf, "  %sui:     %s%s\033[K\n", cGray, adminURL, cReset)
+		}
+		buf.WriteString("\033[K\n") // blank line after header
+
+		// Viewport lines
+		for i := start; i < end; i++ {
+			buf.WriteString(lines[i])
+			buf.WriteString("\033[K\n")
+		}
+		// Clear remaining terminal lines
+		for i := end - start; i < vpHeight; i++ {
+			buf.WriteString("\033[K\n")
+		}
+
+		os.Stdout.WriteString(buf.String())
+	}
+
+	// Input reader goroutine
+	inputCh := make(chan []byte, 16)
 	go func() {
-		<-ctx.Done()
-		// Send a shutdown message so the model clears its view before quitting.
-		// This prevents bubbletea from dumping the last frame (including log lines)
-		// to the normal terminal when leaving the alternate screen.
-		p.Send(shutdownMsg{})
+		buf := make([]byte, 64)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if err != nil {
+				close(inputCh)
+				return
+			}
+			b := make([]byte, n)
+			copy(b, buf[:n])
+			select {
+			case inputCh <- b:
+			default:
+			}
+		}
 	}()
 
-	_, _ = p.Run()
-	cancel()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	render()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			render()
+		case input, ok := <-inputCh:
+			if !ok {
+				cancel()
+				return
+			}
+			changed := false
+			for i := 0; i < len(input); i++ {
+				if input[i] == 'q' || input[i] == 3 { // q or ctrl-c
+					cancel()
+					return
+				}
+				if input[i] == 27 && i+2 < len(input) && input[i+1] == '[' {
+					// CSI escape sequence
+					switch input[i+2] {
+					case 'A': // up
+						scrollOffset--
+						autoScroll = false
+						changed = true
+					case 'B': // down
+						scrollOffset++
+						changed = true
+					case '5': // page up (\033[5~)
+						_, h := termSize()
+						scrollOffset -= h - headerHeight
+						autoScroll = false
+						changed = true
+						if i+3 < len(input) && input[i+3] == '~' {
+							i++
+						}
+					case '6': // page down (\033[6~)
+						_, h := termSize()
+						scrollOffset += h - headerHeight
+						changed = true
+						if i+3 < len(input) && input[i+3] == '~' {
+							i++
+						}
+					}
+					i += 2
+					continue
+				}
+				switch input[i] {
+				case 'k': // vim up
+					scrollOffset--
+					autoScroll = false
+					changed = true
+				case 'j': // vim down
+					scrollOffset++
+					changed = true
+				case 'G': // vim end
+					autoScroll = true
+					changed = true
+				case 'g': // vim home
+					scrollOffset = 0
+					autoScroll = false
+					changed = true
+				}
+			}
+			// Re-enable auto-scroll when scrolled to bottom
+			if changed {
+				_, height := termSize()
+				vpHeight := height - headerHeight
+				if vpHeight < 1 {
+					vpHeight = 1
+				}
+				lines, _ := buildContent(vpHeight)
+				maxScroll := len(lines) - vpHeight
+				if maxScroll < 0 {
+					maxScroll = 0
+				}
+				if scrollOffset >= maxScroll {
+					autoScroll = true
+				}
+				render()
+			}
+		}
+	}
 }
 
 // renderStatus builds the status dashboard output as a string.
