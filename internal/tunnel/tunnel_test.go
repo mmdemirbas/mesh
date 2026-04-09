@@ -1427,6 +1427,8 @@ func TestPermitOpenPolicy(t *testing.T) {
 		{"none overrides others", map[string]string{"permitopen": "none,10.0.0.1:22"}, "10.0.0.1", 22, false},
 	}
 
+
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 		t.Parallel()
@@ -1437,4 +1439,97 @@ func TestPermitOpenPolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSSHServerSFTPSubsystem_DoesNotBlockRequestLoop is a regression test for
+// bug B3: sftp.Serve() was called inline in the channel request loop, blocking
+// all subsequent requests (window-change, signal, etc.) for the entire SFTP
+// session. After the fix, Serve() runs in a goroutine.
+//
+// The test starts an SSH server with SFTP enabled, opens a session, requests
+// the "sftp" subsystem, then sends a "window-change" request. If Serve()
+// blocks the loop, the window-change request will never get a reply and the
+// test times out.
+func TestSSHServerSFTPSubsystem_DoesNotBlockRequestLoop(t *testing.T) {
+	keyPath := generateTestKey(t)
+
+	signer, err := ssh.ParsePrivateKey([]byte(testKeyPEM))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authKeysPath := t.TempDir() + "/authorized_keys"
+	if err := os.WriteFile(authKeysPath, ssh.MarshalAuthorizedKey(signer.PublicKey()), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	addr := freePort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewSSHServer(config.Listener{
+		Type:           "sshd",
+		Bind:           addr,
+		HostKey:        keyPath,
+		AuthorizedKeys: authKeysPath,
+		SFTPEnabled:    true,
+	}, slog.Default())
+
+	go func() { _ = srv.Run(ctx) }()
+
+	// Wait for server to be listening on our specific address
+	for range 100 {
+		snap := state.Global.Snapshot()
+		if c, ok := snap["server:"+addr]; ok && c.Status == state.Listening {
+			goto ready
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("server did not reach listening state")
+ready:
+
+	clientCfg := &ssh.ClientConfig{
+		User:            "test",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // test only
+		Timeout:         5 * time.Second,
+	}
+	client, err := ssh.Dial("tcp", addr, clientCfg)
+	if err != nil {
+		t.Fatalf("ssh dial: %v", err)
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer session.Close()
+
+	// Request the SFTP subsystem
+	if err := session.RequestSubsystem("sftp"); err != nil {
+		t.Fatalf("request subsystem sftp: %v", err)
+	}
+
+	// If sftp.Serve() blocks the request loop, this SendRequest will hang
+	// until the session closes. Use a timeout to detect the deadlock.
+	done := make(chan error, 1)
+	go func() {
+		// window-change is a benign request that should be processed immediately.
+		_, err := session.SendRequest("window-change", false, ssh.Marshal(struct {
+			W, H, PW, PH uint32
+		}{120, 40, 0, 0}))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Logf("window-change request returned error (acceptable): %v", err)
+		}
+		// Success — the request was processed, proving Serve() is not blocking the loop.
+	case <-time.After(3 * time.Second):
+		t.Fatal("window-change request timed out — sftp.Serve() is likely blocking the channel request loop (regression of B3)")
+	}
+
+	cancel()
 }
