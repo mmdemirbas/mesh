@@ -8,14 +8,19 @@ import (
 	"syscall"
 )
 
-// ListenReusable creates a TCP listener that automatically asserts SO_REUSEADDR.
-// This eliminates OS-level TIME_WAIT collisions when rapidly re-binding local ports.
+// SO_EXCLUSIVEADDRUSE prevents another process from binding to the same port.
+// On Windows, SO_REUSEADDR allows port hijacking — any process can steal a
+// bound port. SO_EXCLUSIVEADDRUSE is the correct option for security.
+const soExclusiveAddrUse = ^int(4) // -5, 0xFFFFFFFB
+
+// ListenReusable creates a TCP listener with SO_EXCLUSIVEADDRUSE to prevent
+// port hijacking on Windows.
 func ListenReusable(ctx context.Context, network, address string) (net.Listener, error) {
 	lc := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			var sockErr error
 			err := c.Control(func(fd uintptr) {
-				sockErr = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+				sockErr = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, soExclusiveAddrUse, 1)
 			})
 			if err != nil {
 				return err
