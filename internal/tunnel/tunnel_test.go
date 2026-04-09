@@ -1346,3 +1346,37 @@ func TestOnceCloseListener_AcceptAfterClose(t *testing.T) {
 		t.Fatal("Accept on closed listener should return error")
 	}
 }
+
+func TestPermitOpenPolicy(t *testing.T) {
+	tests := []struct {
+		name    string
+		options map[string]string
+		host    string
+		port    uint32
+		want    bool
+	}{
+		{"empty allows all", nil, "example.com", 22, true},
+		{"any allows all", map[string]string{"PermitOpen": "any"}, "10.0.0.1", 80, true},
+		{"none denies all", map[string]string{"PermitOpen": "none"}, "localhost", 22, false},
+		{"exact match", map[string]string{"PermitOpen": "10.0.0.1:22"}, "10.0.0.1", 22, true},
+		{"exact mismatch host", map[string]string{"PermitOpen": "10.0.0.1:22"}, "10.0.0.2", 22, false},
+		{"exact mismatch port", map[string]string{"PermitOpen": "10.0.0.1:22"}, "10.0.0.1", 80, false},
+		{"wildcard host", map[string]string{"PermitOpen": "*:22"}, "anything.example.com", 22, true},
+		{"wildcard host wrong port", map[string]string{"PermitOpen": "*:22"}, "anything.example.com", 80, false},
+		{"wildcard port", map[string]string{"PermitOpen": "db.local:*"}, "db.local", 5432, true},
+		{"wildcard port wrong host", map[string]string{"PermitOpen": "db.local:*"}, "other.local", 5432, false},
+		{"multiple entries comma", map[string]string{"PermitOpen": "10.0.0.1:22,10.0.0.2:80"}, "10.0.0.2", 80, true},
+		{"multiple entries space", map[string]string{"PermitOpen": "10.0.0.1:22 10.0.0.2:80"}, "10.0.0.2", 80, true},
+		{"none overrides others", map[string]string{"PermitOpen": "none,10.0.0.1:22"}, "10.0.0.1", 22, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pol := parsePermitOpen(tt.options)
+			got := pol.allows(tt.host, tt.port)
+			if got != tt.want {
+				t.Errorf("allows(%q, %d) = %v, want %v", tt.host, tt.port, got, tt.want)
+			}
+		})
+	}
+}

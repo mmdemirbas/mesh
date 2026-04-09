@@ -129,13 +129,69 @@ func recordAuthFailure(m *sync.Map, ip string) int64 {
 // --- SSH Server (accepts incoming connections) ---
 
 // SSHServer listens for incoming SSH connections and handles forwarding requests.
+// permitOpenPolicy is the pre-parsed result of the PermitOpen SSH option.
+// Matching against a map is O(1) per request instead of re-parsing the
+// comma-separated string on every direct-tcpip channel open.
+type permitOpenPolicy struct {
+	allowAll bool              // "any" or empty
+	denyAll  bool              // "none"
+	exact    map[string]bool   // host:port exact matches
+	wildHost map[uint32]bool   // *:port — port is the key
+	wildPort map[string]bool   // host:* — host is the key
+}
+
+func parsePermitOpen(options map[string]string) permitOpenPolicy {
+	raw := config.GetOption(options, "PermitOpen")
+	if raw == "" || raw == "any" {
+		return permitOpenPolicy{allowAll: true}
+	}
+	pol := permitOpenPolicy{
+		exact:    make(map[string]bool),
+		wildHost: make(map[uint32]bool),
+		wildPort: make(map[string]bool),
+	}
+	for _, p := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if p == "none" {
+			return permitOpenPolicy{denyAll: true}
+		}
+		if strings.HasPrefix(p, "*:") {
+			if port, err := strconv.Atoi(p[2:]); err == nil {
+				pol.wildHost[uint32(port)] = true
+			}
+			continue
+		}
+		if strings.HasSuffix(p, ":*") {
+			pol.wildPort[p[:len(p)-2]] = true
+			continue
+		}
+		pol.exact[p] = true
+	}
+	return pol
+}
+
+func (p *permitOpenPolicy) allows(host string, port uint32) bool {
+	if p.allowAll {
+		return true
+	}
+	if p.denyAll {
+		return false
+	}
+	target := net.JoinHostPort(host, strconv.FormatUint(uint64(port), 10))
+	return p.exact[target] || p.wildHost[port] || p.wildPort[host]
+}
+
 type SSHServer struct {
-	cfg config.Listener
-	log *slog.Logger
+	cfg       config.Listener
+	log       *slog.Logger
+	permitOpen permitOpenPolicy
 }
 
 func NewSSHServer(cfg config.Listener, log *slog.Logger) *SSHServer {
-	return &SSHServer{cfg: cfg, log: log.With("component", "sshd", "listen", cfg.Bind)}
+	return &SSHServer{
+		cfg:        cfg,
+		log:        log.With("component", "sshd", "listen", cfg.Bind),
+		permitOpen: parsePermitOpen(cfg.Options),
+	}
 }
 
 func (s *SSHServer) Run(ctx context.Context) error {
@@ -371,7 +427,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 			activeChannels.Add(1)
 			go func() {
 				defer activeChannels.Add(-1)
-				handleDirectTCPIP(newChan, s.log, s.cfg.Options, serverMetrics)
+				handleDirectTCPIP(newChan, s.log, &s.permitOpen, serverMetrics)
 			}()
 		case "session":
 			activeChannels.Add(1)
@@ -1369,7 +1425,7 @@ func handleCancelTCPIPForward(req *ssh.Request, mu *sync.Mutex, listeners map[st
 	log.Info("tcpip-forward cancelled", "addr", addr)
 }
 
-func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[string]string, metrics *state.Metrics) {
+func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, policy *permitOpenPolicy, metrics *state.Metrics) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("panic recovered in direct-tcpip handler", "panic", r)
@@ -1388,39 +1444,10 @@ func handleDirectTCPIP(newChan ssh.NewChannel, log *slog.Logger, options map[str
 
 	target := net.JoinHostPort(req.DestAddr, strconv.FormatUint(uint64(req.DestPort), 10))
 
-	// PermitOpen implementation
-	permitOpen := config.GetOption(options, "PermitOpen")
-	if permitOpen != "" && permitOpen != "any" {
-		allowed := false
-		for _, p := range strings.FieldsFunc(permitOpen, func(r rune) bool { return r == ',' || r == ' ' }) {
-			if p == "none" {
-				break
-			}
-			if p == target {
-				// Exact host:port match
-				allowed = true
-				break
-			}
-			// Wildcard host with specific port: "*:22"
-			if strings.HasPrefix(p, "*:") {
-				if port, err := strconv.Atoi(strings.TrimPrefix(p, "*:")); err == nil && uint32(port) == req.DestPort {
-					allowed = true
-					break
-				}
-			}
-			// Specific host with wildcard port: "myhost:*"
-			if strings.HasSuffix(p, ":*") {
-				if strings.TrimSuffix(p, ":*") == req.DestAddr {
-					allowed = true
-					break
-				}
-			}
-		}
-		if !allowed {
-			log.Warn("direct-tcpip rejected by PermitOpen", "target", target)
-			_ = newChan.Reject(ssh.ConnectionFailed, "prohibited by PermitOpen")
-			return
-		}
+	if !policy.allows(req.DestAddr, req.DestPort) {
+		log.Warn("direct-tcpip rejected by PermitOpen", "target", target)
+		_ = newChan.Reject(ssh.ConnectionFailed, "prohibited by PermitOpen")
+		return
 	}
 
 	conn, err := net.DialTimeout("tcp", target, 10*time.Second)
