@@ -50,7 +50,7 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
-| S8   | sshd      | `PermitOpen` bypass via alternate hostnames  | String comparison on unresolved `DestAddr`. Document limitation or restrict to IP-only. |
+| ~~S8~~   | ~~sshd~~      | ~~`PermitOpen` bypass via alternate hostnames~~  | Done. Documented string-based matching limitation. |
 | S11  | clipsync  | UDP beacon port used for SSRF               | `msg.GetPort()` from unauthenticated beacon. Mitigated by fixing S2. |
 
 ### Performance
@@ -87,20 +87,14 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | D6   | release   | Binary signing                              | No cosign/Sigstore. |
 | D8   | ops       | `time.Sleep` in `downCmd` and tests         | Replace with channel-based sync. |
 | D10  | build     | darwin/arm64 dist allows CGO                | Align Taskfile with GoReleaser. |
-| DEP2 | build     | `cmd/schema-gen` pulls CVE-affected dep     | Move to separate module to isolate `buger/jsonparser`. |
-| DEP3 | build     | Charmbracelet TUI pulls 17 transitive modules | Consider raw terminal for viewport. |
+| ~~DEP2~~ | ~~build~~     | ~~`cmd/schema-gen` pulls CVE-affected dep~~     | Done. Extracted to separate Go module with replace directive. |
+| ~~DEP3~~ | ~~build~~     | ~~Charmbracelet TUI pulls 17 transitive modules~~ | Done. Replaced with raw terminal using golang.org/x/term. 21 modules removed. |
 
 ---
 
 ## Tier 4 — Features
 
-| ID   | Component | Item                                | Notes |
-|------|-----------|-------------------------------------|-------|
-| N3   | clipsync  | File/image copy support             | Copy a file or directory on one computer, paste on another. Image clipboard content also in scope. Small files: transfer immediately via existing push mechanism. Large files: needs lazy-copy design (transfer only when user pastes). Two-phase approach: ship eager copy for small files first, design lazy copy separately. |
-| N4   | admin     | Action history in web UI            | Clipboard activity, file sync activity, past metrics. Partially started. |
-| F2   | cli       | `mesh init` command                 | Interactive config generator. Scaffolds starter YAML. |
-| F5   | sshd      | SFTP subsystem                      | `subsystem` request handling. Requires `github.com/pkg/sftp`. Enables scp/sftp/rsync over mesh. |
-| F6   | sshd      | SSH agent forwarding                | `auth-agent-req@openssh.com`. Temp Unix socket, `SSH_AUTH_SOCK`. Unix-only. |
+(All items completed.)
 
 ---
 
@@ -197,6 +191,14 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | R5   | Demo tape for GIF generation        | VHS format demo.tape added; run `vhs demo.tape` to generate. |
 | W7   | Clipsync build-tagged platform code | 6 runtime.GOOS switches → clipboard_darwin.go, clipboard_linux.go, clipboard_windows.go, clipboard_other.go. |
 | D5   | Test parallelism                    | t.Parallel() added to 343 test functions and subtests across all packages. |
+| S8   | Document PermitOpen limitation      | Added code comment and help text: string-based matching, use IPs for strict enforcement. |
+| DEP2 | Isolate schema-gen module           | cmd/schema-gen has its own go.mod with replace directive. buger/jsonparser removed from main module. |
+| DEP3 | Remove Charmbracelet TUI            | Replaced bubbletea/bubbles with raw terminal + golang.org/x/term. 21 transitive modules removed. |
+| N3   | File/image copy for clipsync        | file_copy config flag, configurable max_file_copy_size, gated file poll in clipboard loop. |
+| N4   | Filesync activity history           | SyncActivity ring buffer, GET /api/filesync/activity, Recent Activity table in web UI. |
+| F2   | `mesh init` command                 | Interactive config generator: node name, role, SSH config. Writes minimal YAML. |
+| F5   | SFTP subsystem                      | subsystem "sftp" handler using github.com/pkg/sftp. Read-only, configurable root. |
+| F6   | SSH agent forwarding                | auth-agent-req@openssh.com handler. Temp Unix socket, SSH_AUTH_SOCK env injection, bidirectional proxy. |
 
 ---
 
