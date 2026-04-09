@@ -136,13 +136,17 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 		cancel()
 		return
 	}
-	defer term.Restore(fd, oldState)
 
 	os.Stdout.WriteString("\033[?1049h") // enter alt screen
 	os.Stdout.WriteString("\033[?25l")   // hide cursor
+
+	// Cleanup order (LIFO): restore raw→cooked FIRST, then leave alt screen.
+	// The alt-screen-leave escape must be written while still in raw mode,
+	// and raw mode must be restored before the shell resumes output.
 	defer func() {
 		os.Stdout.WriteString("\033[?25h")   // show cursor
 		os.Stdout.WriteString("\033[?1049l") // leave alt screen
+		term.Restore(fd, oldState)           // restore cooked mode last
 	}()
 
 	headerHeight := 2 // header line + blank line
@@ -230,6 +234,10 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 		if scrollOffset < 0 {
 			scrollOffset = 0
 		}
+		// Re-enable auto-scroll when user scrolls to the bottom.
+		if scrollOffset >= maxScroll {
+			autoScroll = true
+		}
 
 		start := scrollOffset
 		end := start + vpHeight
@@ -241,7 +249,10 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 		os.Stdout.WriteString(frame)
 	}
 
-	// Input reader goroutine
+	// Input reader goroutine. Cannot be cancelled (blocking Read on stdin),
+	// but exits via ctx.Done check on the send path. The goroutine will remain
+	// blocked on Read until the next keystroke or process exit — this is
+	// unavoidable without closing stdin.
 	inputCh := make(chan []byte, 16)
 	go func() {
 		buf := make([]byte, 64)
@@ -255,10 +266,14 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 			copy(b, buf[:n])
 			select {
 			case inputCh <- b:
-			default:
+			case <-ctx.Done():
+				return
 			}
 		}
 	}()
+
+	winchCh, stopWinch := winchSignal()
+	defer stopWinch()
 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -269,6 +284,8 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 		select {
 		case <-ctx.Done():
 			return
+		case <-winchCh:
+			render()
 		case <-ticker.C:
 			render()
 		case input, ok := <-inputCh:
@@ -328,21 +345,7 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 					changed = true
 				}
 			}
-			// Re-enable auto-scroll when scrolled to bottom
 			if changed {
-				_, height := termSize()
-				vpHeight := height - headerHeight
-				if vpHeight < 1 {
-					vpHeight = 1
-				}
-				lines, _ := buildContent(vpHeight)
-				maxScroll := len(lines) - vpHeight
-				if maxScroll < 0 {
-					maxScroll = 0
-				}
-				if scrollOffset >= maxScroll {
-					autoScroll = true
-				}
 				render()
 			}
 		}
