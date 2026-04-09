@@ -94,6 +94,33 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 				if req.WantReply {
 					_ = req.Reply(true, nil)
 				}
+			case "signal":
+				// RFC 4254 section 6.9 — Windows only supports hard kill.
+				var sigReq struct{ Signal string }
+				if err := ssh.Unmarshal(req.Payload, &sigReq); err != nil {
+					if req.WantReply {
+						_ = req.Reply(false, nil)
+					}
+					continue
+				}
+				switch sigReq.Signal {
+				case "KILL", "TERM", "INT", "HUP":
+					if cmd != nil && cmd.Process != nil {
+						err := cmd.Process.Kill()
+						if req.WantReply {
+							_ = req.Reply(err == nil, nil)
+						}
+					} else {
+						if req.WantReply {
+							_ = req.Reply(false, nil)
+						}
+					}
+				default:
+					if req.WantReply {
+						_ = req.Reply(false, nil)
+					}
+				}
+
 			case "shell", "exec":
 				cmdStart.Do(func() {
 					var name string

@@ -17,6 +17,40 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// sshSignalNumber maps an SSH signal name (RFC 4254 section 6.9) to a Unix signal.
+func sshSignalNumber(name string) (syscall.Signal, bool) {
+	switch name {
+	case "ABRT":
+		return syscall.SIGABRT, true
+	case "ALRM":
+		return syscall.SIGALRM, true
+	case "FPE":
+		return syscall.SIGFPE, true
+	case "HUP":
+		return syscall.SIGHUP, true
+	case "ILL":
+		return syscall.SIGILL, true
+	case "INT":
+		return syscall.SIGINT, true
+	case "KILL":
+		return syscall.SIGKILL, true
+	case "PIPE":
+		return syscall.SIGPIPE, true
+	case "QUIT":
+		return syscall.SIGQUIT, true
+	case "SEGV":
+		return syscall.SIGSEGV, true
+	case "TERM":
+		return syscall.SIGTERM, true
+	case "USR1":
+		return syscall.SIGUSR1, true
+	case "USR2":
+		return syscall.SIGUSR2, true
+	default:
+		return 0, false
+	}
+}
+
 // signalName maps a Unix signal to its SSH signal name per RFC 4254 section 6.10.
 func signalName(sig syscall.Signal) string {
 	switch sig {
@@ -186,6 +220,27 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 				X:    uint16(dim.WidthPx),
 				Y:    uint16(dim.HeightPx),
 			})
+
+		case "signal":
+			// RFC 4254 section 6.9 — deliver signal to the process group.
+			var sigReq struct{ Signal string }
+			if err := ssh.Unmarshal(req.Payload, &sigReq); err != nil {
+				if req.WantReply {
+					_ = req.Reply(false, nil)
+				}
+				continue
+			}
+			sig, ok := sshSignalNumber(sigReq.Signal)
+			if !ok || cmd == nil || cmd.Process == nil {
+				if req.WantReply {
+					_ = req.Reply(false, nil)
+				}
+				continue
+			}
+			err := syscall.Kill(-cmd.Process.Pid, sig)
+			if req.WantReply {
+				_ = req.Reply(err == nil, nil)
+			}
 
 		case "shell", "exec":
 			cmdStart.Do(func() {

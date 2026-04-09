@@ -31,7 +31,7 @@ Items ordered by priority within each tier.
 | N3  | clipsync  | File/image copy support             | Medium-High | Copy a file or directory on one computer, paste on another. Image clipboard content also in scope. Small files: transfer immediately via existing push mechanism. Large files: needs lazy-copy design (transfer only when user pastes). Lazy-copy feasibility on macOS and Windows is unknown — needs research. Two-phase approach: ship eager copy for small files first, design lazy copy separately. |
 | N4  | admin     | Action history in web UI            | Medium      | Clipboard activity, file sync activity, past metrics. Partially started (clipboard activity tracking exists). |
 | N6  | admin     | Tree-table layout for web dashboard | Medium      | Components listed in a flat table. A tree-table with collapsible nodes would better represent the hierarchy. |
-| F8  | sshd      | Signal forwarding                   | Medium      | `handleSession()` doesn't process `signal` request type (RFC 4254 section 6.9). Parse signal name, map to `syscall.Signal`, send to process group. `SysProcAttr.Setpgid = true` already set. Windows: no-op. |
+| ~~F8~~  | ~~sshd~~      | ~~Signal forwarding~~                   | ~~Medium~~      | Done. Unix: delivers signal to process group via `syscall.Kill(-pid, sig)`. Windows: handles KILL/TERM/INT/HUP via `Process.Kill()`. |
 | F2  | cli       | `mesh init` command                 | Medium      | Interactive config generator. Scaffolds starter YAML with common patterns. |
 | F5  | sshd      | SFTP subsystem                      | Medium      | Add `subsystem` request handling for `sftp` name. Requires `github.com/pkg/sftp` (new dependency). Enables `scp`, `sftp`, `rsync` over mesh tunnels. Consider chroot/home-dir restriction. |
 | F6  | sshd      | SSH agent forwarding                | Medium      | Handle `auth-agent-req@openssh.com`. Create temp Unix socket per session, forward over SSH, set `SSH_AUTH_SOCK`. Unix-only. Consider opt-in per listener. |
@@ -91,3 +91,9 @@ Goal: dynamically watch frequently-changing paths with fsnotify, poll the rest. 
 - *Directory deletion:* fsnotify fires a Remove event; watcher removes the watch immediately. Stale cleanup (5-min interval) is the safety net.
 - *Large initial scan:* First scan has no prior frequency data, so no promotions. Second scan begins adaptive behavior. Alternatively, seed hotness from initial change counts to prioritize large active subdirs immediately.
 - *Watch limit pressure:* When near the soft limit, promote only the hottest paths (sort by change frequency, take top N that fit).
+
+
+## Other Notes
+
+- Auto load .env file from the current directory to load environment variables securely.
+
