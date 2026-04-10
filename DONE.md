@@ -103,6 +103,7 @@ design notes that informed the change — kept for context.
 | B8   | Resolve filesync peer hostnames     | Hostnames were never resolved, so `server:7756` never matched a request from its DNS IP. `FilesyncCfg.Resolve` expands each peer host via `net.LookupHost` into `FolderCfg.AllowedPeerHosts`; `isPeerConfigured` compares against that. Test `ae922b6`, fix `a610184`. |
 | B9   | loadFormatsFromDir per-format cap   | Docstring promised `MaxFileCopySize` overrode the 50 MB constant, but the assembler hardcoded it. Threaded `maxFileSize int64` as parameter; `readClipboardFormats` forwards `n.maxFileSize`. Test `dff020e`, fix `8c945c5`. |
 | H1   | Address and host equality audit     | Filesync peers covered by B7/B8. Two additional findings in clipsync: `canReceiveFrom` used literal host string compare (test `51fa334`, fix `faf3155`), `Broadcast` echo-suppression did the same with sender origin (test `aef49e1`, fix `be3668a`). Both now route through `peerHostEqual`. Tunnel `PermitOpen` is string-based by design (see S8 in DONE.md); proxy has no address equality. |
+| H2   | Default constant vs runtime audit   | No findings beyond B9. All `const default*` in `internal/` and `cmd/` either are used as a one-shot fallback when no config is set (`defaultBlockSize`, `defaultHandshakeTimeout`, `defaultServerAliveInterval`, `defaultTCPKeepAlive`, `defaultSSHClientTimeout`), or are already threaded through from config (`defaultMaxSyncFileSize` after B9). Docstrings that claim configurability are backed by actual config lookups. |
 
 ## Historical Notes
 

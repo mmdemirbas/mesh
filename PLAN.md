@@ -354,7 +354,6 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 
 | ID   | Area                                                     | Skill § | Lens        |
 |------|----------------------------------------------------------|---------|-------------|
-| [H2](#h2-default-constant-vs-runtime-config-audit)       | "default" constants shadowing runtime config             | VII.4   | Grep + read |
 | [H27](#h27-typed-nil-audit)                              | Nil pointer wrapped in non-nil interface                 | VII.1   | Read        |
 | [H28](#h28-enum-switch-exhaustiveness-audit)             | Switches over `state.Status` and enums without default   | VII.3   | Grep + read |
 
@@ -390,23 +389,6 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 |------|----------------------------------------------------------|---------|-------------|
 | [H33](#h33-clock-monotonic-audit)                        | Wall-clock used where monotonic is required              | XII.1   | Grep        |
 | [H34](#h34-environment-variable-audit)                   | Missing env vars silently becoming empty defaults        | XII.2   | Grep        |
-
-#### H2: Default constant vs runtime config audit
-
-**Goal.** B9 showed that `defaultMaxSyncFileSize` is wired into the assembler as a literal constant despite a docstring saying it is overridable. Find every other `const default*` in `internal/` and `cmd/` where the docstring promises configurability and the code hardcodes the constant.
-
-**Methodology.**
-
-1. `Grep -nI 'default[A-Z][A-Za-z]* *=' internal/ cmd/`.
-2. For each constant, read its docstring. If it says "Overridden by" / "Default for" / "Configurable via", trace every usage with `Grep`.
-3. For each usage that references the constant by name instead of the equivalent runtime field, check whether the caller has access to config. If yes, it is a bug.
-4. Write a failing test that sets the runtime field to a value different from the default and asserts the different value is honored.
-
-**Test pattern.** Configure the runtime field to a non-default value, exercise the path, assert the runtime value took effect. If the runtime value is used transparently, the test passes.
-
-**Fix pattern.** Either thread the runtime field to the usage site (parameter or receiver), or document the constant as a non-overridable hard cap and fix the docstring. Prefer threading unless the docstring "override" was aspirational rather than a contract.
-
-**Acceptance.** Every `const default*` in the repo either (a) has no "overridable" claim in its docstring, or (b) is threaded through to every one of its usage sites. New tests pin the configurability for each one.
 
 #### H3: Concurrent Close audit
 
