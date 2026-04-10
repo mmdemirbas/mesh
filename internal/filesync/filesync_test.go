@@ -1036,7 +1036,10 @@ func TestPeerValidation_NonLoopbackRejected(t *testing.T) {
 	// Non-loopback peers that don't match any configured peer are rejected.
 	n := &Node{
 		folders: map[string]*folderState{
-			"docs": {cfg: config.FolderCfg{Peers: []string{"10.1.1.1:7756"}}},
+			"docs": {cfg: config.FolderCfg{
+				Peers:            []string{"10.1.1.1:7756"},
+				AllowedPeerHosts: []string{"10.1.1.1"},
+			}},
 		},
 	}
 
@@ -1301,16 +1304,21 @@ func TestPeerMatchesAddr_IPv6Canonical(t *testing.T) {
 }
 
 // TestPeerMatchesAddr_HostnameResolution pins a bug surfaced during the
-// D11 e2e work: peerMatchesAddr does not resolve configured hostnames
-// with DNS, so a peer listed as "server:7756" in the config never matches
-// a request whose remote address is the IP that hostname resolves to. The
-// scenario suite works around this with an sh wrapper that rewrites the
+// D11 e2e work: configured peer hostnames were never resolved via DNS, so
+// a peer listed as "server:7756" in the config never matched a request
+// whose remote address was the IP that hostname resolved to. The
+// scenario suite worked around this with an sh wrapper that rewrote the
 // YAML at container start; real users configuring a docker compose
 // service name, a Tailscale magicdns name, or any LAN hostname hit a
-// silent 403 "unknown peer". This test uses os.Hostname() as a
-// deterministic source of a non-"localhost" name that usually resolves to
-// a loopback address in typical dev and CI environments, and skips if
-// neither 127.0.0.1 nor ::1 is among the resolved addresses.
+// silent 403 "unknown peer". The fix moved resolution into
+// config.FilesyncCfg.Resolve, which populates FolderCfg.AllowedPeerHosts
+// once at startup, so this test drives that path end-to-end: build a
+// FilesyncCfg with a hostname peer, call Resolve, build a filesync Node
+// around the resolved folder, and confirm isPeerConfigured accepts the
+// resolved IP. Uses os.Hostname() as a deterministic source of a
+// non-"localhost" name that usually resolves to a loopback address in
+// typical dev and CI environments, and skips if neither 127.0.0.1 nor ::1
+// is among the resolved addresses.
 func TestPeerMatchesAddr_HostnameResolution(t *testing.T) {
 	t.Parallel()
 	hostname, err := os.Hostname()
@@ -1332,9 +1340,36 @@ func TestPeerMatchesAddr_HostnameResolution(t *testing.T) {
 		t.Skipf("hostname %q does not resolve to loopback (resolved to %v)", hostname, addrs)
 	}
 
-	peer := hostname + ":7756"
-	if !peerMatchesAddr(peer, want) {
-		t.Fatalf("peerMatchesAddr(%q, %q) = false; hostname resolves to request IP and should match", peer, want)
+	cfg := config.FilesyncCfg{
+		Peers: map[string][]string{
+			"server": {hostname + ":7756"},
+		},
+		Folders: map[string]config.FolderCfgRaw{
+			"docs": {
+				Path:  t.TempDir(),
+				Peers: []string{"server"},
+			},
+		},
+	}
+	if err := cfg.Resolve(); err != nil {
+		t.Fatalf("cfg.Resolve: %v", err)
+	}
+	if len(cfg.ResolvedFolders) != 1 {
+		t.Fatalf("ResolvedFolders = %d, want 1", len(cfg.ResolvedFolders))
+	}
+	folder := cfg.ResolvedFolders[0]
+	if len(folder.AllowedPeerHosts) == 0 {
+		t.Fatalf("AllowedPeerHosts is empty after Resolve; hostname %q should expand", hostname)
+	}
+
+	n := &Node{
+		folders: map[string]*folderState{
+			folder.ID: {cfg: folder},
+		},
+	}
+	if !n.isPeerConfigured(want) {
+		t.Fatalf("isPeerConfigured(%q) = false; hostname %q resolved to %v, expected match via AllowedPeerHosts=%v",
+			want, hostname, addrs, folder.AllowedPeerHosts)
 	}
 }
 

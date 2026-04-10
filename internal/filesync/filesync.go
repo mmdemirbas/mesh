@@ -707,10 +707,13 @@ func (n *Node) findFolder(folderID string) *folderState {
 }
 
 // isPeerConfigured checks if the given IP is a configured peer for any folder.
+// AllowedPeerHosts is resolved at config load time so hostnames have already
+// been expanded via DNS; the request IP is compared against each entry via
+// peerMatchesAddr which handles IPv6 canonicalization and loopback variants.
 func (n *Node) isPeerConfigured(requestIP string) bool {
 	for _, fs := range n.folders {
-		for _, peer := range fs.cfg.Peers {
-			if peerMatchesAddr(peer, requestIP) {
+		for _, host := range fs.cfg.AllowedPeerHosts {
+			if peerMatchesAddr(host, requestIP) {
 				return true
 			}
 		}

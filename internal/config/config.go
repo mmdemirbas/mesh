@@ -177,8 +177,16 @@ type FolderCfg struct {
 	ID string
 	// Local filesystem path to sync.
 	Path string
-	// Resolved peer addresses (host:port).
+	// Resolved peer addresses (host:port). Used for outgoing sync; DNS
+	// resolution for outgoing connections is left to the http client.
 	Peers []string
+	// AllowedPeerHosts is the IP set (one entry per resolved address) used
+	// by filesync.isPeerConfigured to validate incoming HTTP requests.
+	// Populated from Peers at Resolve() time: hostnames are expanded via
+	// net.LookupHost so that a peer configured as "server:7756" accepts a
+	// request whose remote address is the IP that "server" resolves to.
+	// IP literals pass through canonicalized via net.ParseIP.String().
+	AllowedPeerHosts []string
 	// Sync direction: "send-receive", "send-only", or "receive-only".
 	Direction string
 	// Merged ignore patterns (defaults + folder-specific).
@@ -221,11 +229,12 @@ func (c *FilesyncCfg) Resolve() error {
 		patterns = append(patterns, raw.IgnorePatterns...)
 
 		c.ResolvedFolders = append(c.ResolvedFolders, FolderCfg{
-			ID:             id,
-			Path:           expandHome(raw.Path),
-			Peers:          resolvedPeers,
-			Direction:      direction,
-			IgnorePatterns: patterns,
+			ID:               id,
+			Path:             expandHome(raw.Path),
+			Peers:            resolvedPeers,
+			AllowedPeerHosts: resolveAllowedPeerHosts(id, resolvedPeers),
+			Direction:        direction,
+			IgnorePatterns:   patterns,
 		})
 	}
 
@@ -235,6 +244,55 @@ func (c *FilesyncCfg) Resolve() error {
 	})
 
 	return nil
+}
+
+// resolveAllowedPeerHosts expands the host portion of each peer address to
+// the IP strings that should be accepted on the incoming HTTP path.
+// Hostnames are resolved via net.LookupHost. IP literals pass through
+// canonicalized via net.ParseIP.String() so that differently formatted but
+// numerically identical addresses compare equal downstream. On DNS failure
+// the literal host is kept and a warning is logged: a misconfigured hostname
+// should not silently drop an otherwise-working peer, and outgoing sends
+// will surface the DNS error on the first connection attempt anyway.
+func resolveAllowedPeerHosts(folderID string, peers []string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	add := func(h string) {
+		if h == "" || seen[h] {
+			return
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	for _, addr := range peers {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			host = addr
+		}
+		if strings.EqualFold(host, "localhost") {
+			add("127.0.0.1")
+			add("::1")
+			continue
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			add(ip.String())
+			continue
+		}
+		addrs, err := net.LookupHost(host)
+		if err != nil || len(addrs) == 0 {
+			slog.Warn("filesync peer host did not resolve", "folder", folderID, "host", host, "err", err)
+			add(host)
+			continue
+		}
+		for _, a := range addrs {
+			if ip := net.ParseIP(a); ip != nil {
+				add(ip.String())
+			} else {
+				add(a)
+			}
+		}
+	}
+	return out
 }
 
 // ForwardSet represents a distinct SSH connection for a group of port forwards and proxies.
