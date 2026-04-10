@@ -1,4 +1,4 @@
-//go:build e2e
+//go:build e2e || e2e_churn
 
 // Package harness provides the primitives scenarios use to stand up mesh
 // containers on isolated docker networks, drive them, and collect artefacts
