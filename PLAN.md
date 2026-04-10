@@ -297,24 +297,7 @@ For anything else — code reads, additional test cases, refactors that preserve
 
 ### Tier 5 Known Bugs
 
-| ID | Item | Failing test | Fix landed |
-|----|------|--------------|------------|
-| [B9](#b9-loadformatsfromdir-per-format-cap)      | clipsync loadFormatsFromDir ignores MaxFileCopySize  | `TestLoadFormatsFromDir_PerFormatCapIgnoresConfig` | — |
-
-#### B9: loadFormatsFromDir per-format cap
-
-**Failing test:** `internal/clipsync/clipsync_test.go` `TestLoadFormatsFromDir_PerFormatCapIgnoresConfig`.
-
-**Symptom:** `defaultMaxSyncFileSize` in `internal/clipsync/clipsync.go` has a docstring saying "Overridden by `ClipsyncCfg.MaxFileCopySize`", but `loadFormatsFromDir` at line 1034 uses the literal constant instead of `n.maxFileSize`. The function has no receiver and no cap parameter, so it physically cannot see the config. A user raising `max_file_copy_size` to 200 MB still loses any clipboard text format over 50 MB silently, with a `WARN Skipping clipboard format: exceeds per-file size limit` line in the log.
-
-**Fix approach:** Thread the effective cap through to the assembler. Two options:
-
-1. **Parameter:** change the signature to `loadFormatsFromDir(dir string, maxFileSize int64) []*pb.ClipFormat` and pass `n.maxFileSize` from the one caller in `readClipboardFormats`. Same for `maxClipboardPayload` if the plan is for both caps to be configurable (the latter is separate — do not bundle).
-2. **Receiver:** promote `loadFormatsFromDir` to a method on `*Node`. Lighter diff than adding a parameter, and consistent with other private helpers that already reference `n.maxFileSize`.
-
-Option 2 is preferred unless there is a test that calls `loadFormatsFromDir` without a Node — check before deciding.
-
-**Acceptance:** `TestLoadFormatsFromDir_PerFormatCapIgnoresConfig` passes. `TestLoadFormatsFromDir`, `TestLoadFormatsFromDir_EmptyDir`, `TestLoadFormatsFromDir_SkipsEmptyFiles`, `TestLoadFormatsFromDir_IgnoresUnknownFiles` continue to pass. Add a second subtest that asserts a 60 MB format IS still rejected when `MaxFileCopySize` is left at its default of 50 MB — that pins the default behavior.
+All B7–B9 fixed. See DONE.md.
 
 ### Tier 5 Hunt Tasks
 
