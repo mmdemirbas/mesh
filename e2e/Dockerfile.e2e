@@ -26,6 +26,12 @@ RUN chmod +x /usr/local/bin/xclip
 COPY build/mesh-linux-amd64 /usr/local/bin/mesh
 RUN chmod +x /usr/local/bin/mesh
 
+# Stub LLM used by the gateway scenario. Lives in the same image so the
+# e2e tests do not need a second image build; containers select it by
+# overriding the entrypoint in the scenario code.
+COPY build/stub-linux-amd64 /usr/local/bin/stub-llm
+RUN chmod +x /usr/local/bin/stub-llm
+
 RUN mkdir -p /root/.mesh/conf /root/.mesh/log /root/.mesh/run /tmp/mesh-clip
 
 WORKDIR /root
