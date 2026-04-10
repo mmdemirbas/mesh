@@ -915,7 +915,7 @@ func TestLoadFormatsFromDir(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "text_html"), []byte("<b>hi</b>"), 0600)
 	_ = os.WriteFile(filepath.Join(dir, "image_png"), []byte("PNG-DATA"), 0600)
 
-	formats := loadFormatsFromDir(dir)
+	formats := loadFormatsFromDir(dir, defaultMaxSyncFileSize)
 
 	// Should find the 3 formats we wrote
 	if len(formats) != 3 {
@@ -940,7 +940,7 @@ func TestLoadFormatsFromDir(t *testing.T) {
 
 func TestLoadFormatsFromDir_EmptyDir(t *testing.T) {
 	t.Parallel()
-	formats := loadFormatsFromDir(t.TempDir())
+	formats := loadFormatsFromDir(t.TempDir(), defaultMaxSyncFileSize)
 	if len(formats) != 0 {
 		t.Errorf("expected 0 formats for empty dir, got %d", len(formats))
 	}
@@ -951,7 +951,7 @@ func TestLoadFormatsFromDir_SkipsEmptyFiles(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "text_plain"), []byte{}, 0600)
 
-	formats := loadFormatsFromDir(dir)
+	formats := loadFormatsFromDir(dir, defaultMaxSyncFileSize)
 	if len(formats) != 0 {
 		t.Errorf("expected 0 formats for empty file, got %d", len(formats))
 	}
@@ -963,7 +963,7 @@ func TestLoadFormatsFromDir_IgnoresUnknownFiles(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "unknown_format"), []byte("data"), 0600)
 	_ = os.WriteFile(filepath.Join(dir, "text_plain"), []byte("real"), 0600)
 
-	formats := loadFormatsFromDir(dir)
+	formats := loadFormatsFromDir(dir, defaultMaxSyncFileSize)
 	if len(formats) != 1 {
 		t.Errorf("expected 1 format, got %d", len(formats))
 	}
@@ -1524,37 +1524,51 @@ func TestFileCopyCustomSize(t *testing.T) {
 	}
 }
 
-// TestLoadFormatsFromDir_PerFormatCapIgnoresConfig pins a bug surfaced
-// during the D11 end-to-end work: the docstring on defaultMaxSyncFileSize
-// says the 50 MB constant is "Overridden by ClipsyncCfg.MaxFileCopySize",
-// but loadFormatsFromDir uses the literal constant instead of the
-// configured value — the function cannot even see the config because it
-// has no receiver and no cap parameter. A user who raises
-// max_file_copy_size to 200MB expecting their 60 MB clipboard text to
-// sync still sees it silently skipped at the 50 MB mark.
+// TestLoadFormatsFromDir_PerFormatCap pins a bug surfaced during the D11
+// end-to-end work: the docstring on defaultMaxSyncFileSize said the 50 MB
+// constant is "Overridden by ClipsyncCfg.MaxFileCopySize", but
+// loadFormatsFromDir used the literal constant instead of the configured
+// value. A user who raised max_file_copy_size to 200MB expecting their
+// 60 MB clipboard text to sync still saw it silently skipped at 50 MB.
 //
-// Either the docstring is wrong (and should state "applies to file copy
-// only; clipboard formats use a separate hardcoded cap") or the code is
-// wrong (and should thread the configured cap through to the assembler).
-// This test asserts the less-surprising behavior — that a 60 MB text
-// format is retained — so the fix resolves the disagreement by making
-// the code match the docs. Currently failing.
-func TestLoadFormatsFromDir_PerFormatCapIgnoresConfig(t *testing.T) {
+// The fix threads the effective cap through loadFormatsFromDir as a
+// parameter. This test pins both directions — the raised cap accepts
+// 60 MB, and the default 50 MB cap still rejects it — so neither drifts
+// in a future refactor.
+func TestLoadFormatsFromDir_PerFormatCap(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	const size = 60 * 1024 * 1024 // 60 MB — over the 50 MB per-format cap, under the 100 MB total cap.
-	payload := bytes.Repeat([]byte{'x'}, size)
-	if err := os.WriteFile(filepath.Join(dir, "text_plain"), payload, 0o600); err != nil {
-		t.Fatal(err)
+	const size = 60 * 1024 * 1024 // 60 MB — over the 50 MB default cap, under the 100 MB total cap.
+
+	writeBlob := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		payload := bytes.Repeat([]byte{'x'}, size)
+		if err := os.WriteFile(filepath.Join(dir, "text_plain"), payload, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return dir
 	}
 
-	formats := loadFormatsFromDir(dir)
-	if len(formats) == 0 {
-		t.Fatalf("loadFormatsFromDir dropped a 60 MB text format — defaultMaxSyncFileSize doc claims MaxFileCopySize overrides it, but line 1034 uses the literal constant")
-	}
-	if got := len(formats[0].GetData()); got != size {
-		t.Fatalf("loadFormatsFromDir returned %d bytes, want %d", got, size)
-	}
+	t.Run("raised cap accepts 60 MB", func(t *testing.T) {
+		t.Parallel()
+		dir := writeBlob(t)
+		formats := loadFormatsFromDir(dir, 200*1024*1024)
+		if len(formats) == 0 {
+			t.Fatalf("loadFormatsFromDir dropped a 60 MB text format under a 200 MB cap")
+		}
+		if got := len(formats[0].GetData()); got != size {
+			t.Fatalf("loadFormatsFromDir returned %d bytes, want %d", got, size)
+		}
+	})
+
+	t.Run("default cap rejects 60 MB", func(t *testing.T) {
+		t.Parallel()
+		dir := writeBlob(t)
+		formats := loadFormatsFromDir(dir, defaultMaxSyncFileSize)
+		if len(formats) != 0 {
+			t.Fatalf("loadFormatsFromDir kept a 60 MB text format under the 50 MB default cap, got %d formats", len(formats))
+		}
+	})
 }
 
 func TestFileCopyInvalidSize(t *testing.T) {

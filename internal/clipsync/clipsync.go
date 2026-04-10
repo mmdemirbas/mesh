@@ -718,7 +718,7 @@ func (n *Node) pollClipboard(ctx context.Context, pollInterval time.Duration) {
 		n.clearCurrentFiles()
 
 		// 2. Read all clipboard formats (text, html, rtf, image) in one call.
-		formats := readClipboardFormats()
+		formats := readClipboardFormats(n.maxFileSize)
 		n.clipMu.Unlock()
 		if len(formats) > 0 {
 			h := hashFormats(formats)
@@ -1004,7 +1004,9 @@ var clipFormatTable = []clipFormatEntry{
 // readClipboardFormats reads all known non-file formats from the OS clipboard.
 // The function recovers from panics (e.g. Go runtime crashes during subprocess
 // creation on Windows) so that a transient OS failure cannot kill the process.
-func readClipboardFormats() (formats []*pb.ClipFormat) {
+// maxFileSize is the per-format byte cap sourced from the node's runtime
+// config (n.maxFileSize); values over the cap are dropped with a warning.
+func readClipboardFormats(maxFileSize int64) (formats []*pb.ClipFormat) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("Recovered panic in readClipboardFormats", "panic", r)
@@ -1020,10 +1022,16 @@ func readClipboardFormats() (formats []*pb.ClipFormat) {
 
 	readClipboardPlatform(ctx, dir)
 
-	return loadFormatsFromDir(dir)
+	return loadFormatsFromDir(dir, maxFileSize)
 }
 
-func loadFormatsFromDir(dir string) []*pb.ClipFormat {
+// loadFormatsFromDir assembles the clipboard format list from the staging
+// directory. maxFileSize caps the per-format byte count; formats exceeding
+// it are dropped with a warning. Callers inside a running Node should pass
+// n.maxFileSize; standalone tests that construct a directory without a
+// Node can pass defaultMaxSyncFileSize to assert default-cap behavior or a
+// custom value to exercise raised-cap paths.
+func loadFormatsFromDir(dir string, maxFileSize int64) []*pb.ClipFormat {
 	var formats []*pb.ClipFormat
 	var totalSize int
 	for _, entry := range clipFormatTable {
@@ -1031,9 +1039,9 @@ func loadFormatsFromDir(dir string) []*pb.ClipFormat {
 		if err != nil || len(data) == 0 {
 			continue
 		}
-		if len(data) > defaultMaxSyncFileSize {
+		if int64(len(data)) > maxFileSize {
 			slog.Warn("Skipping clipboard format: exceeds per-file size limit",
-				"format", entry.mimeType, "size_mb", len(data)>>20, "limit_mb", defaultMaxSyncFileSize>>20)
+				"format", entry.mimeType, "size_mb", len(data)>>20, "limit_mb", maxFileSize>>20)
 			continue
 		}
 		if totalSize+len(data) > maxClipboardPayload {
