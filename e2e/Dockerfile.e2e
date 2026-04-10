@@ -32,7 +32,7 @@ RUN chmod +x /usr/local/bin/mesh
 COPY build/stub-linux-amd64 /usr/local/bin/stub-llm
 RUN chmod +x /usr/local/bin/stub-llm
 
-RUN mkdir -p /root/.mesh/conf /root/.mesh/log /root/.mesh/run /tmp/mesh-clip
+RUN mkdir -p /root/.mesh/conf /root/.mesh/log /root/.mesh/run /tmp/mesh-clip /root/sync
 
 WORKDIR /root
 ENTRYPOINT ["/usr/local/bin/mesh"]

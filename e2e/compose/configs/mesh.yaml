@@ -1,0 +1,109 @@
+# mesh playground config — exercises every feature in a single topology.
+#
+# This file is mounted read-only into every mesh container; each container
+# runs `mesh up <its-alias>` so only its own service block is active.
+#
+# Static IPs on the playground docker network (172.30.0.0/24) let the
+# filesync peer IP matcher resolve cleanly. See e2e/compose/docker-compose.yaml.
+
+# ============================================================================
+# server — runs sshd on :22 and is the filesync peer for client.
+# ============================================================================
+server:
+  log_level: info
+  admin_addr: "127.0.0.1:7777"
+
+  listeners:
+    - type: sshd
+      bind: "0.0.0.0:22"
+      host_key: /etc/mesh/keys/server_host_key
+      authorized_keys: /etc/mesh/keys/authorized_keys
+      shell: [bash, -l]
+
+  clipsync:
+    - bind: "0.0.0.0:7755"
+      lan_discovery_group: ["playground"]
+      poll_interval: "2s"
+
+  filesync:
+    - bind: "0.0.0.0:7756"
+      scan_interval: "5s"
+      max_concurrent: 4
+      peers:
+        client: ["172.30.0.10:7756"]
+      defaults:
+        peers: ["client"]
+        direction: send-receive
+      folders:
+        shared:
+          path: /root/sync
+
+# ============================================================================
+# bastion — runs sshd on :22 restricted to forwards to server:22.
+# ============================================================================
+bastion:
+  log_level: info
+  admin_addr: "127.0.0.1:7777"
+
+  listeners:
+    - type: sshd
+      bind: "0.0.0.0:22"
+      host_key: /etc/mesh/keys/bastion_host_key
+      authorized_keys: /etc/mesh/keys/authorized_keys
+      shell: [bash, -l]
+      options:
+        PermitOpen: "server:22"
+
+  clipsync:
+    - bind: "0.0.0.0:7755"
+      lan_discovery_group: ["playground"]
+      poll_interval: "2s"
+
+# ============================================================================
+# client — dials the bastion, publishes a local forward to server, runs the
+# LLM gateway against the stub, and participates in clipsync + filesync.
+# ============================================================================
+client:
+  log_level: info
+  admin_addr: "127.0.0.1:7777"
+
+  connections:
+    - name: bastion
+      targets: ["root@bastion:22"]
+      retry: "5s"
+      auth:
+        key: /etc/mesh/keys/client_key
+      options:
+        StrictHostKeyChecking: "no"
+      forwards:
+        - name: ssh-to-server
+          local:
+            - type: forward
+              bind: "0.0.0.0:2222"
+              target: "server:22"
+
+  clipsync:
+    - bind: "0.0.0.0:7755"
+      lan_discovery_group: ["playground"]
+      poll_interval: "2s"
+
+  filesync:
+    - bind: "0.0.0.0:7756"
+      scan_interval: "5s"
+      max_concurrent: 4
+      peers:
+        server: ["172.30.0.30:7756"]
+      defaults:
+        peers: ["server"]
+        direction: send-receive
+      folders:
+        shared:
+          path: /root/sync
+
+  gateway:
+    - name: playground-gw
+      bind: "127.0.0.1:3100"
+      mode: anthropic-to-openai
+      upstream: http://172.30.0.50:8080/openai/happy
+      api_key_env: STUB_KEY
+      default_max_tokens: 128

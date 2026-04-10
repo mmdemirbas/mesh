@@ -1,0 +1,94 @@
+# mesh end-to-end playground.
+#
+# Wires four containers into a single static-IP topology so every feature is
+# active at once — bastion tunnel, filesync, clipsync, and the LLM gateway
+# against a canned-response stub. Intended as a staging environment for
+# manual experimentation and reproducing reported bugs. The automated test
+# suite does not use this file; see e2e/scenarios/ for that.
+#
+# Usage:
+#
+#   task build:e2e-image          # builds mesh-e2e:local (baked mesh + stub)
+#   task e2e:compose:up           # or: docker compose -f docker-compose.yaml up -d
+#   task e2e:compose:down         # or: docker compose -f docker-compose.yaml down -v
+#
+# Once up:
+#
+#   docker exec -it mesh-client bash
+#   ssh -p 2222 -i /etc/mesh/keys/client_key \
+#       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+#       root@127.0.0.1 whoami                       # tunnel via bastion
+#   echo hello > /root/sync/greeting.txt            # filesync to server
+#   printf 'clip me' > /tmp/mesh-clip/UTF8_STRING   # clipsync to the group
+#   curl -sS http://127.0.0.1:3100/v1/messages \
+#       -H 'Content-Type: application/json' \
+#       --data '{"model":"claude","messages":[{"role":"user","content":"hi"}]}'
+#
+# The mesh admin UI lives at http://127.0.0.1:7777/ui inside each container.
+
+services:
+  server:
+    image: mesh-e2e:local
+    container_name: mesh-server
+    hostname: server
+    networks:
+      playground:
+        ipv4_address: 172.30.0.30
+    volumes:
+      - ./configs/mesh.yaml:/etc/mesh/mesh.yaml:ro
+      - ./keys:/etc/mesh/keys:ro
+    command: ["-f", "/etc/mesh/mesh.yaml", "up", "server"]
+    restart: unless-stopped
+
+  bastion:
+    image: mesh-e2e:local
+    container_name: mesh-bastion
+    hostname: bastion
+    networks:
+      playground:
+        ipv4_address: 172.30.0.20
+    volumes:
+      - ./configs/mesh.yaml:/etc/mesh/mesh.yaml:ro
+      - ./keys:/etc/mesh/keys:ro
+    command: ["-f", "/etc/mesh/mesh.yaml", "up", "bastion"]
+    restart: unless-stopped
+
+  client:
+    image: mesh-e2e:local
+    container_name: mesh-client
+    hostname: client
+    networks:
+      playground:
+        ipv4_address: 172.30.0.10
+    volumes:
+      - ./configs/mesh.yaml:/etc/mesh/mesh.yaml:ro
+      - ./keys:/etc/mesh/keys:ro
+    environment:
+      STUB_KEY: "sk-stub-ignored"
+    command: ["-f", "/etc/mesh/mesh.yaml", "up", "client"]
+    depends_on:
+      - server
+      - bastion
+      - stub-llm
+    restart: unless-stopped
+
+  stub-llm:
+    image: mesh-e2e:local
+    container_name: mesh-stub-llm
+    hostname: stub
+    networks:
+      playground:
+        ipv4_address: 172.30.0.50
+    entrypoint: ["/usr/local/bin/stub-llm"]
+    environment:
+      STUB_ADDR: ":8080"
+    restart: unless-stopped
+
+networks:
+  playground:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.30.0.0/24
+          gateway: 172.30.0.1
