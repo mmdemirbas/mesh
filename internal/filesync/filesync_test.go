@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1252,6 +1253,106 @@ func TestPeerMatchesAddr(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPeerMatchesAddr_IPv6Canonical pins a bug surfaced during the D11 e2e
+// work: peerMatchesAddr compares IP strings literally and never parses them
+// with net.ParseIP, so two equal IPv6 addresses written in different
+// canonical forms (e.g. "2001:db8::1" vs. "2001:db8:0:0:0:0:0:1") fail to
+// match and the request is rejected with 403 "unknown peer". Running
+// mesh on an IPv6-first network would surface this as silent filesync
+// failures for any host whose remote address arrives in the long form.
+func TestPeerMatchesAddr_IPv6Canonical(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		peer    string
+		request string
+	}{
+		{
+			name:    "short form peer vs expanded request",
+			peer:    "[2001:db8::1]:7756",
+			request: "2001:db8:0:0:0:0:0:1",
+		},
+		{
+			name:    "zero-run collapsed differently on each side",
+			peer:    "[2001:db8:0:0::1]:7756",
+			request: "2001:db8::1",
+		},
+		{
+			name:    "lowercase vs uppercase hex",
+			peer:    "[2001:db8::abcd]:7756",
+			request: "2001:DB8::ABCD",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Sanity: confirm the two forms parse to the same IP.
+			p1 := net.ParseIP(stripBrackets(extractHost(tt.peer)))
+			p2 := net.ParseIP(tt.request)
+			if p1 == nil || p2 == nil || !p1.Equal(p2) {
+				t.Fatalf("test setup: %q and %q are not the same IP (p1=%v p2=%v)", tt.peer, tt.request, p1, p2)
+			}
+			if !peerMatchesAddr(tt.peer, tt.request) {
+				t.Fatalf("peerMatchesAddr(%q, %q) = false; both sides are the same IP, should match", tt.peer, tt.request)
+			}
+		})
+	}
+}
+
+// TestPeerMatchesAddr_HostnameResolution pins a bug surfaced during the
+// D11 e2e work: peerMatchesAddr does not resolve configured hostnames
+// with DNS, so a peer listed as "server:7756" in the config never matches
+// a request whose remote address is the IP that hostname resolves to. The
+// scenario suite works around this with an sh wrapper that rewrites the
+// YAML at container start; real users configuring a docker compose
+// service name, a Tailscale magicdns name, or any LAN hostname hit a
+// silent 403 "unknown peer". This test uses os.Hostname() as a
+// deterministic source of a non-"localhost" name that usually resolves to
+// a loopback address in typical dev and CI environments, and skips if
+// neither 127.0.0.1 nor ::1 is among the resolved addresses.
+func TestPeerMatchesAddr_HostnameResolution(t *testing.T) {
+	t.Parallel()
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		t.Skipf("cannot determine hostname: %v", err)
+	}
+	addrs, err := net.LookupHost(hostname)
+	if err != nil {
+		t.Skipf("cannot resolve %q: %v", hostname, err)
+	}
+	var want string
+	for _, a := range addrs {
+		if ip := net.ParseIP(a); ip != nil && ip.IsLoopback() {
+			want = a
+			break
+		}
+	}
+	if want == "" {
+		t.Skipf("hostname %q does not resolve to loopback (resolved to %v)", hostname, addrs)
+	}
+
+	peer := hostname + ":7756"
+	if !peerMatchesAddr(peer, want) {
+		t.Fatalf("peerMatchesAddr(%q, %q) = false; hostname resolves to request IP and should match", peer, want)
+	}
+}
+
+// extractHost and stripBrackets are tiny helpers kept local to the IPv6
+// test so it does not depend on test order or package-level state.
+func extractHost(hp string) string {
+	h, _, err := net.SplitHostPort(hp)
+	if err != nil {
+		return hp
+	}
+	return h
+}
+
+func stripBrackets(s string) string {
+	if len(s) >= 2 && s[0] == '[' && s[len(s)-1] == ']' {
+		return s[1 : len(s)-1]
+	}
+	return s
 }
 
 // --- End-to-end sync test (FT1) ---
