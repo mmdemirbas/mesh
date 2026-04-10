@@ -3,6 +3,8 @@
 /build/
 /dist/
 /out/
+/e2e/build/
+/.task/
 
 # Go
 /vendor/
@@ -39,3 +41,5 @@ desktop.ini
 /mesh
 *.yaml
 !configs/example.yaml
+!e2e/**/*.yaml
+!e2e/**/*.yml

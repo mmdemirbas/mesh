@@ -14,6 +14,36 @@ tasks:
     cmds:
       - go build -o build/mesh{{exeExt}} -ldflags '{{.LDFLAGS}}' -buildvcs=false ./cmd/mesh/
 
+  build:linux:
+    desc: Build mesh for linux/amd64 into e2e/build (consumed by the e2e image)
+    vars:
+      VERSION:
+        sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+      LDFLAGS: -s -w -X main.version={{.VERSION}}
+    sources:
+      - cmd/mesh/**/*.go
+      - internal/**/*.go
+      - go.mod
+      - go.sum
+    generates:
+      - e2e/build/mesh-linux-amd64
+    cmds:
+      - mkdir -p e2e/build
+      - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags '{{.LDFLAGS}}' -buildvcs=false -o e2e/build/mesh-linux-amd64 ./cmd/mesh/
+
+  build:e2e-image:
+    desc: Build the mesh-e2e:local image used by the scenario suite (rebuilds only when content changes)
+    deps: [build:linux]
+    sources:
+      - e2e/build/mesh-linux-amd64
+      - e2e/Dockerfile.e2e
+      - e2e/fixtures/fake-xclip
+    generates:
+      - e2e/build/.image-hash
+    cmds:
+      - docker build -f e2e/Dockerfile.e2e -t mesh-e2e:local e2e
+      - sh -c 'cat e2e/build/mesh-linux-amd64 e2e/Dockerfile.e2e e2e/fixtures/fake-xclip | shasum -a 256 | cut -d" " -f1 > e2e/build/.image-hash'
+
   dist:
     desc: Build cross-platform release binaries (outputs to dist/)
     vars:

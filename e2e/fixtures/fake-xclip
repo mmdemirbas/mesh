@@ -1,0 +1,70 @@
+#!/bin/sh
+# Fake xclip shim used by the mesh e2e suite.
+#
+# clipsync/clipboard_linux.go selects the real xclip via exec.LookPath and
+# shells out with the flag patterns below. This script accepts the same flags
+# and reads/writes files under /tmp/mesh-clip so tests can drive the
+# "clipboard" by writing to /tmp/mesh-clip/<target> on one container and
+# reading the same path on peer containers via `docker exec`.
+#
+# Supported invocations:
+#   xclip -selection clipboard -t TARGETS -o      list currently-set targets
+#   xclip -selection clipboard -t <target> -o     read stored data for target
+#   xclip -selection clipboard -t <target> -i     write stdin to target
+#
+# Targets that contain '/' (e.g. text/html) are stored as nested paths under
+# the base directory so no escaping is needed.
+
+set -eu
+
+DIR=/tmp/mesh-clip
+mkdir -p "$DIR"
+
+target=""
+action=o
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -selection)
+            shift 2 || exit 0
+            ;;
+        -t)
+            target="$2"
+            shift 2
+            ;;
+        -o)
+            action=o
+            shift
+            ;;
+        -i)
+            action=i
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+if [ "$target" = "TARGETS" ]; then
+    if [ -d "$DIR" ]; then
+        find "$DIR" -type f 2>/dev/null | while IFS= read -r f; do
+            rel=${f#"$DIR"/}
+            [ "$rel" = "TARGETS" ] && continue
+            printf '%s\n' "$rel"
+        done
+    fi
+    exit 0
+fi
+
+[ -n "$target" ] || exit 0
+
+file="$DIR/$target"
+mkdir -p "$(dirname "$file")"
+
+if [ "$action" = o ]; then
+    if [ -f "$file" ]; then
+        cat "$file"
+    fi
+else
+    cat > "$file"
+fi

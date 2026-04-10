@@ -1,0 +1,33 @@
+# Image used by the mesh e2e scenario suite.
+#
+# Context: this Dockerfile is built with `e2e/` as the build context, so the
+# binary and fake xclip paths are relative to that directory. See the
+# `build:e2e-image` task in Taskfile.yml.
+FROM alpine:3.20
+
+RUN apk add --no-cache \
+        ca-certificates \
+        tcpdump \
+        openssh-client \
+        iproute2 \
+        coreutils \
+        curl \
+        bash \
+        jq
+
+# Fake xclip shim: clipsync_linux.go shells out to xclip; the shim reads and
+# writes files under /tmp/mesh-clip so tests can drive the clipboard from the
+# host via `docker exec`. See fixtures/fake-xclip for the supported flags.
+COPY fixtures/fake-xclip /usr/local/bin/xclip
+RUN chmod +x /usr/local/bin/xclip
+
+# Mesh binary is baked in rather than volume-mounted to remove host I/O as a
+# flake source and to keep the image self-contained.
+COPY build/mesh-linux-amd64 /usr/local/bin/mesh
+RUN chmod +x /usr/local/bin/mesh
+
+RUN mkdir -p /root/.mesh/conf /root/.mesh/log /root/.mesh/run /tmp/mesh-clip
+
+WORKDIR /root
+ENTRYPOINT ["/usr/local/bin/mesh"]
+CMD ["--help"]
