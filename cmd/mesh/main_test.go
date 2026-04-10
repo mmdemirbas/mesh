@@ -1793,3 +1793,116 @@ func TestRenderDashboardFrame_ViewportLines(t *testing.T) {
 		t.Error("frame should NOT contain 'delta' (not in viewport)")
 	}
 }
+
+// TestBuildDashboardBody_Deterministic pins the stability contract: two
+// calls with the same config and state snapshot must return byte-identical
+// output. The render loop relies on this to skip redraws between ticks; if
+// buildDashboardBody ever becomes non-deterministic (e.g. iterates a map
+// without sorting), the body-diff cache breaks and the dashboard starts
+// glitching on every frame.
+func TestBuildDashboardBody_Deterministic(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "socks", Bind: "127.0.0.1:1080"},
+			{Type: "http", Bind: "127.0.0.1:3128"},
+		},
+		Connections: []config.Connection{
+			{
+				Name:    "bastion",
+				Targets: []string{"root@10.0.0.1:22"},
+			},
+		},
+	}
+	full := state.FullSnapshot{
+		Components: map[string]state.Component{
+			"proxy:127.0.0.1:1080":    {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
+			"proxy:127.0.0.1:3128":    {Type: "proxy", ID: "127.0.0.1:3128", Status: state.Listening},
+			"connection:bastion":      {Type: "connection", ID: "bastion", Status: state.Connected},
+			"target:bastion|10.0.0.1": {Type: "target", ID: "bastion|10.0.0.1", Status: state.Connected},
+		},
+		Metrics: map[string]*state.Metrics{},
+	}
+	cfgs := map[string]*config.Config{"node1": cfg}
+	nodeNames := []string{"node1"}
+
+	first, _ := buildDashboardBody(cfgs, nodeNames, full)
+	firstJoined := strings.Join(first, "\n")
+	for i := 0; i < 10; i++ {
+		next, _ := buildDashboardBody(cfgs, nodeNames, full)
+		if got := strings.Join(next, "\n"); got != firstJoined {
+			t.Fatalf("iteration %d diverged from first call\nfirst: %q\n  got: %q", i, firstJoined, got)
+		}
+	}
+}
+
+// TestBuildDashboardBody_NoLogs verifies the log tail was removed from the
+// CLI dashboard body. Logs remain available via the admin UI / log file;
+// the dashboard body must be exactly the status output, nothing appended.
+func TestBuildDashboardBody_NoLogs(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "socks", Bind: "127.0.0.1:1080"},
+		},
+	}
+	full := state.FullSnapshot{
+		Components: map[string]state.Component{
+			"proxy:127.0.0.1:1080": {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
+		},
+		Metrics: map[string]*state.Metrics{},
+	}
+	lines, _ := buildDashboardBody(map[string]*config.Config{"node": cfg}, []string{"node"}, full)
+	got := strings.Join(lines, "\n")
+
+	statusOut, _ := renderStatus(cfg, full.Components, full.Metrics, "node")
+	want := strings.TrimRight(statusOut, "\n")
+
+	if got != want {
+		t.Errorf("buildDashboardBody should return only renderStatus output — anything extra is a log-tail regression\nwant: %q\n got: %q", stripANSI(want), stripANSI(got))
+	}
+}
+
+// TestRenderDashboardHeaderOnly_HeaderFieldsPresent locks in the header
+// refresh path. When the body is unchanged between ticks, runDashboard
+// writes only this string — so it must carry node name, clock/uptime,
+// and the configured paths.
+func TestRenderDashboardHeaderOnly_HeaderFieldsPresent(t *testing.T) {
+	t.Parallel()
+	start := time.Now().Add(-42 * time.Second)
+	out := renderDashboardHeaderOnly([]string{"node1"}, "/tmp/cfg.yaml", "/tmp/mesh.log", "http://127.0.0.1:7777", start)
+
+	for _, want := range []string{"node1", "/tmp/cfg.yaml", "/tmp/mesh.log", "127.0.0.1:7777", "up 42s"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("header-only output missing %q\ngot: %q", want, stripANSI(out))
+		}
+	}
+	// Must start with cursor-home so it overwrites the existing header
+	// in place rather than scrolling new content onto the screen.
+	if !strings.HasPrefix(out, "\033[H") {
+		t.Error("header-only output must start with cursor-home escape")
+	}
+}
+
+// TestRenderDashboardHeaderOnly_NoBodyRegion guards the flicker-free
+// property: the header-only refresh must never reach into the body
+// region. It writes at most one line per header field and nothing else.
+func TestRenderDashboardHeaderOnly_NoBodyRegion(t *testing.T) {
+	t.Parallel()
+	start := time.Now()
+	out := renderDashboardHeaderOnly([]string{"n"}, "cfg", "log", "ui", start)
+
+	// Full frame has the header + blank separator + body + trailing fill.
+	// Header-only must be strictly shorter for the same inputs, proving
+	// no body is emitted.
+	full := renderDashboardFrame([]string{"row1", "row2", "row3"}, 0, 3, 10, []string{"n"}, "cfg", "log", "ui", start)
+	if len(out) >= len(full) {
+		t.Errorf("header-only output (%d bytes) should be strictly shorter than full frame (%d bytes)", len(out), len(full))
+	}
+
+	// Four CRLFs: mesh line, cfg, log, ui. No trailing blank line (that
+	// belongs to the body region).
+	if got := strings.Count(out, "\r\n"); got != 4 {
+		t.Errorf("header-only output should contain exactly 4 \\r\\n, got %d\noutput: %q", got, stripANSI(out))
+	}
+}

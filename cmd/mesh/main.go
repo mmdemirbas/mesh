@@ -555,7 +555,7 @@ func upCmd(nodeNames []string, configPath string) {
 
 	// 5. Live dashboard or block until signal
 	if useDashboard {
-		go runDashboard(ctx, cancel, cfgs, nodeNames, configPath, logFilePath, adminURL, ring)
+		go runDashboard(ctx, cancel, cfgs, nodeNames, configPath, logFilePath, adminURL)
 	}
 
 	<-ctx.Done()

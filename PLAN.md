@@ -67,7 +67,7 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
 | U3   | cli       | `mesh status -w` shows no metrics           | Always passes `nil` for `metricsMap`. Fetch from admin API. |
-| P2   | cli       | Simplify CLI dashboard                      | See [design](#cli-dashboard-simplification) below. |
+| P2   | cli       | Simplify CLI dashboard                      | See [design](#cli-dashboard-simplification) below. Log tail removed + body dirty-check landed. |
 
 ### Cross-Platform
 
@@ -221,7 +221,7 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | Connections (targets + forwards) | KEEP | Essential "what's connected to where" view. |
 | Unmapped dynamic ports | REMOVE | Debug-only noise → web UI diagnostics. |
 | Per-row metrics | SIMPLIFY | tx/rx only on "producer" rows (listeners, active forwards). |
-| Log tail | KEEP | Limit to last ~20 lines. Full log in web UI. |
+| Log tail | REMOVED | Caused layout shifts and flicker as new lines arrived. Full log stays in the admin UI and on disk. |
 
 ---
 

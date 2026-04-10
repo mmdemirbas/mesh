@@ -16,9 +16,10 @@ import (
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
-// logRing is a fixed-size ring buffer that captures recent log lines for the dashboard.
-// Both raw (ANSI-colored) and pre-stripped plain lines are stored to avoid repeated
-// regex/scan work when the admin API serves plain text.
+// logRing is a fixed-size ring buffer that captures recent log lines for
+// the admin API's /api/logs endpoint. Both raw (ANSI-colored) and
+// pre-stripped plain lines are stored to avoid repeated regex/scan work
+// when the endpoint serves plain text.
 type logRing struct {
 	mu    sync.Mutex
 	raw   []string
@@ -93,24 +94,7 @@ func renderDashboardFrame(lines []string, start, end, vpHeight int, nodeNames []
 
 	var buf strings.Builder
 	buf.WriteString("\033[H") // cursor home
-
-	uptime := time.Since(startTime).Truncate(time.Second)
-	nodesLabel := strings.Join(nodeNames, ", ")
-	fmt.Fprintf(&buf, "%s%smesh %s%s %s%s%s | pid %d | %s | up %s",
-		cBold, cCyan, nodesLabel, cReset, cGray, version, cReset, os.Getpid(), time.Now().Format("15:04:05"), uptime)
-	buf.WriteString(eol)
-	if configPath != "" {
-		fmt.Fprintf(&buf, "  %sconfig: %s%s", cGray, configPath, cReset)
-		buf.WriteString(eol)
-	}
-	if logFilePath != "" {
-		fmt.Fprintf(&buf, "  %slog:    %s%s", cGray, logFilePath, cReset)
-		buf.WriteString(eol)
-	}
-	if adminURL != "" {
-		fmt.Fprintf(&buf, "  %sui:     %s%s", cGray, adminURL, cReset)
-		buf.WriteString(eol)
-	}
+	writeDashboardHeader(&buf, nodeNames, configPath, logFilePath, adminURL, startTime)
 	buf.WriteString(eol) // blank line after header
 
 	for i := start; i < end; i++ {
@@ -123,13 +107,66 @@ func renderDashboardFrame(lines []string, start, end, vpHeight int, nodeNames []
 	return buf.String()
 }
 
+// writeDashboardHeader emits the header lines (node label, clock, uptime,
+// paths) without a leading cursor-home escape. Shared between the full
+// frame renderer and the header-only refresh path.
+func writeDashboardHeader(buf *strings.Builder, nodeNames []string, configPath, logFilePath, adminURL string, startTime time.Time) {
+	const eol = "\033[K\r\n"
+
+	uptime := time.Since(startTime).Truncate(time.Second)
+	nodesLabel := strings.Join(nodeNames, ", ")
+	fmt.Fprintf(buf, "%s%smesh %s%s %s%s%s | pid %d | %s | up %s",
+		cBold, cCyan, nodesLabel, cReset, cGray, version, cReset, os.Getpid(), time.Now().Format("15:04:05"), uptime)
+	buf.WriteString(eol)
+	if configPath != "" {
+		fmt.Fprintf(buf, "  %sconfig: %s%s", cGray, configPath, cReset)
+		buf.WriteString(eol)
+	}
+	if logFilePath != "" {
+		fmt.Fprintf(buf, "  %slog:    %s%s", cGray, logFilePath, cReset)
+		buf.WriteString(eol)
+	}
+	if adminURL != "" {
+		fmt.Fprintf(buf, "  %sui:     %s%s", cGray, adminURL, cReset)
+		buf.WriteString(eol)
+	}
+}
+
+// renderDashboardHeaderOnly refreshes just the header region (cursor home
+// + header lines). The dashboard uses this on every tick while the body
+// is unchanged so the clock and uptime advance without rewriting — and
+// thus without touching — the rest of the screen.
+func renderDashboardHeaderOnly(nodeNames []string, configPath, logFilePath, adminURL string, startTime time.Time) string {
+	var buf strings.Builder
+	buf.WriteString("\033[H")
+	writeDashboardHeader(&buf, nodeNames, configPath, logFilePath, adminURL, startTime)
+	return buf.String()
+}
+
+// buildDashboardBody renders the status lines for every node from a state
+// snapshot. Output is deterministic given identical inputs so the render
+// loop can compare consecutive frames and skip redraws when nothing
+// changed. The log tail lives in the admin UI, not the CLI dashboard.
+func buildDashboardBody(cfgs map[string]*config.Config, nodeNames []string, full state.FullSnapshot) ([]string, int) {
+	var bodyLines []string
+	var maxWidth int
+	for _, name := range nodeNames {
+		out, w := renderStatus(cfgs[name], full.Components, full.Metrics, name)
+		bodyLines = append(bodyLines, strings.Split(strings.TrimRight(out, "\n"), "\n")...)
+		if w > maxWidth {
+			maxWidth = w
+		}
+	}
+	return bodyLines, maxWidth
+}
+
 // runDashboard renders a live status screen using the terminal's alternate
 // screen buffer. Keyboard input (q/ctrl-c to quit, arrow keys and page
 // up/down to scroll) is handled via raw terminal mode. The dashboard
 // refreshes every second and on input, overwriting in place to avoid
 // scrollback pollution. When the dashboard exits (via ctx cancellation or
 // user quit), cancel is called to unblock the main goroutine.
-func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[string]*config.Config, nodeNames []string, configPath string, logFilePath string, adminURL string, ring *logRing) {
+func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[string]*config.Config, nodeNames []string, configPath string, logFilePath string, adminURL string) {
 	fd := int(os.Stdin.Fd())
 	oldState, err := term.MakeRaw(fd)
 	if err != nil {
@@ -163,7 +200,7 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 	startTime := time.Now()
 	scrollOffset := 0
 	autoScroll := true // follow tail when at bottom
-	lastContent := ""
+	lastBody := ""
 
 	termSize := func() (int, int) {
 		w, h, err := term.GetSize(int(os.Stdout.Fd()))
@@ -173,52 +210,14 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 		return w, h
 	}
 
-	buildContent := func(vpHeight int) ([]string, int) {
-		full := state.Global.SnapshotFull()
-		var bodyLines []string
-		var maxWidth int
-		for _, name := range nodeNames {
-			out, w := renderStatus(cfgs[name], full.Components, full.Metrics, name)
-			bodyLines = append(bodyLines, strings.Split(strings.TrimRight(out, "\n"), "\n")...)
-			if w > maxWidth {
-				maxWidth = w
-			}
-		}
-		statusLines := len(bodyLines)
-		tailLines := vpHeight - statusLines - 1
-		if tailLines < 3 {
-			tailLines = 3
-		}
-		if tailLines > 50 {
-			tailLines = 50
-		}
-		logLines := ring.Lines()
-		if len(logLines) > tailLines {
-			logLines = logLines[len(logLines)-tailLines:]
-		}
-		if len(logLines) > 0 {
-			if maxWidth < 80 {
-				maxWidth = 80
-			}
-			bodyLines = append(bodyLines, cGray+strings.Repeat("─", maxWidth)+cReset)
-			bodyLines = append(bodyLines, logLines...)
-		}
-		return bodyLines, maxWidth
-	}
-
-	render := func() {
+	render := func(force bool) {
 		_, height := termSize()
 		vpHeight := height - headerHeight
 		if vpHeight < 1 {
 			vpHeight = 1
 		}
 
-		lines, _ := buildContent(vpHeight)
-		content := strings.Join(lines, "\n")
-		if content == lastContent {
-			// Only update the header (clock/uptime) when body is unchanged.
-		}
-		lastContent = content
+		lines, _ := buildDashboardBody(cfgs, nodeNames, state.Global.SnapshotFull())
 
 		totalLines := len(lines)
 		maxScroll := totalLines - vpHeight
@@ -244,6 +243,26 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 		if end > totalLines {
 			end = totalLines
 		}
+
+		// Capture the exact byte sequence that will fill the body region.
+		// Including vpHeight and start in the key means terminal resizes and
+		// scroll shifts naturally invalidate the cache.
+		var sig strings.Builder
+		fmt.Fprintf(&sig, "%d|%d|", vpHeight, start)
+		for i := start; i < end; i++ {
+			sig.WriteString(lines[i])
+			sig.WriteByte('\n')
+		}
+		body := sig.String()
+
+		if !force && body == lastBody {
+			// Body is unchanged — redraw only the header region so the clock
+			// and uptime advance without rewriting the rest of the screen.
+			// This is what keeps the dashboard flicker-free between ticks.
+			os.Stdout.WriteString(renderDashboardHeaderOnly(nodeNames, configPath, logFilePath, adminURL, startTime))
+			return
+		}
+		lastBody = body
 
 		frame := renderDashboardFrame(lines, start, end, vpHeight, nodeNames, configPath, logFilePath, adminURL, startTime)
 		os.Stdout.WriteString(frame)
@@ -278,16 +297,16 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
-	render()
+	render(true)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-winchCh:
-			render()
+			render(true)
 		case <-ticker.C:
-			render()
+			render(false)
 		case input, ok := <-inputCh:
 			if !ok {
 				cancel()
@@ -346,7 +365,7 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 				}
 			}
 			if changed {
-				render()
+				render(true)
 			}
 		}
 	}
