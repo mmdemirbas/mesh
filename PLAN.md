@@ -325,7 +325,6 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 
 | ID   | Area                                                     | Skill § | Lens        |
 |------|----------------------------------------------------------|---------|-------------|
-| [H3](#h3-concurrent-close-audit)                         | `Close()` / `cancel()` from multiple goroutines          | IV.1    | Race + read |
 | [H4](#h4-goroutine-leak-audit)                           | `go func(){...}()` with no context exit path            | IV.2    | Read + race |
 | [H5](#h5-timer-and-ticker-audit)                         | `time.NewTimer` / `NewTicker` without `Stop`            | IV.3    | Grep        |
 | [H6](#h6-signal-handler-audit)                           | `signal.Notify` without matching `signal.Stop`          | IV.4    | Grep        |
@@ -389,23 +388,6 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 |------|----------------------------------------------------------|---------|-------------|
 | [H33](#h33-clock-monotonic-audit)                        | Wall-clock used where monotonic is required              | XII.1   | Grep        |
 | [H34](#h34-environment-variable-audit)                   | Missing env vars silently becoming empty defaults        | XII.2   | Grep        |
-
-#### H3: Concurrent Close audit
-
-**Goal.** CLAUDE.md already has a "don't call `Close()` from multiple goroutines without `sync.Once`" rule, and B4 (agent fwd double close) was a prior incident. Audit every `Close()` / `cancel()` call that may be reachable from more than one goroutine.
-
-**Methodology.**
-
-1. `Grep -nI '\.Close\(\)\|cancel *()' internal/ cmd/`.
-2. For each hit, identify the owning goroutine. If the target resource is shared with another goroutine (channel, listener, connection, process), confirm there is a `sync.Once`-guarded wrapper.
-3. Pay special attention to patterns like `defer <thing>.Close(); go func() { ... <thing>.Close() ... }()` — the classic double-close.
-4. Reproduce any finding with a `-race` test that starts two goroutines racing on the close.
-
-**Test pattern.** Use `sync.WaitGroup` and two goroutines that both reach the close path concurrently, run with `-race` to catch the double-close panic or the racy write.
-
-**Fix pattern.** Wrap the close in a local closure guarded by `sync.Once` (see `onceCloseListener` in `tunnel.go` for the idiom).
-
-**Acceptance.** Every closeable shared resource has a single-entry close path or an explicit `sync.Once`. Any finding lands as test+fix commits.
 
 #### H4: Goroutine leak audit
 
