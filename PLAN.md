@@ -307,7 +307,6 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 
 | ID   | Area                                                     | Skill § | Lens        |
 |------|----------------------------------------------------------|---------|-------------|
-| [H1](#h1-address-and-host-equality-audit)                | Address / host / URL equality across packages            | I.1     | Grep + read |
 | [H7](#h7-path-traversal-audit)                           | File paths derived from peer / user input                | I.2     | Grep + read |
 | [H8](#h8-integer-overflow-audit)                         | Size arithmetic near int64 bounds                        | I.3     | Read        |
 | [H10](#h10-unbounded-io-audit)                           | Network-derived reads without `io.LimitReader`           | I.4     | Grep        |
@@ -391,24 +390,6 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 |------|----------------------------------------------------------|---------|-------------|
 | [H33](#h33-clock-monotonic-audit)                        | Wall-clock used where monotonic is required              | XII.1   | Grep        |
 | [H34](#h34-environment-variable-audit)                   | Missing env vars silently becoming empty defaults        | XII.2   | Grep        |
-
-#### H1: Address and host equality audit
-
-**Goal.** B7 and B8 are both in `internal/filesync/protocol.go`. The same bug class likely exists in `internal/tunnel` (SSH target matching, `PermitOpen` check), `internal/clipsync` (trusted peers, beacon source filtering), and `internal/proxy` (ACLs if any). Find every function that compares IP or host strings and ensure it parses through `net.ParseIP` / `netip.Addr` and optionally resolves hostnames.
-
-**Methodology.**
-
-1. `Grep -nI '== *req\|== *host\|== *addr\|== *remote\|strings.EqualFold.*[Aa]ddr' internal/`.
-2. For each hit, read the function. Confirm whether it is comparing a user-configured value to a runtime peer address. If so, construct a test case with two equivalent-but-different forms (see B7 for IPv6; add an IPv4 bracketed form like `::ffff:127.0.0.1`; add a mixed-case hostname).
-3. Write a failing test per finding in the neighbouring `_test.go` file, using the B7 `t.Run` pattern.
-4. Fix by replacing string compare with `ParseIP`+`.Equal` (for IP) or a shared helper like `addrEqual(a, b string) bool` (for host-or-IP).
-5. Landing order inside the hunt: filesync first (already partially covered by B7/B8), then tunnel, then clipsync, then proxy.
-
-**Test pattern.** Table-driven, same shape as `TestPeerMatchesAddr_IPv6Canonical`. Each table row names a canonicalization the function should normalize through.
-
-**Fix pattern.** Add a package-local helper `hostEqual(a, b string) bool` that ParseIPs both sides; fall through to a `net.LookupHost`-backed fallback if either side is a hostname. Reuse across packages via an `internal/netutil` export if the shape is identical.
-
-**Acceptance.** Zero remaining string-compare-of-addresses hits in the Grep. All new tests passing. `FAST=1 task check` green.
 
 #### H2: Default constant vs runtime config audit
 

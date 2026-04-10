@@ -102,6 +102,7 @@ design notes that informed the change — kept for context.
 | B7   | Fix peerMatchesAddr IPv6 canon      | `peerMatchesAddr` did literal string compare; equal IPv6 addresses in different canonical forms (short vs. expanded, mixed case) silently rejected with 403. Parse via `net.ParseIP` and compare with `net.IP.Equal`. Test `ae922b6`, fix `1c3954c`. |
 | B8   | Resolve filesync peer hostnames     | Hostnames were never resolved, so `server:7756` never matched a request from its DNS IP. `FilesyncCfg.Resolve` expands each peer host via `net.LookupHost` into `FolderCfg.AllowedPeerHosts`; `isPeerConfigured` compares against that. Test `ae922b6`, fix `a610184`. |
 | B9   | loadFormatsFromDir per-format cap   | Docstring promised `MaxFileCopySize` overrode the 50 MB constant, but the assembler hardcoded it. Threaded `maxFileSize int64` as parameter; `readClipboardFormats` forwards `n.maxFileSize`. Test `dff020e`, fix `8c945c5`. |
+| H1   | Address and host equality audit     | Filesync peers covered by B7/B8. Two additional findings in clipsync: `canReceiveFrom` used literal host string compare (test `51fa334`, fix `faf3155`), `Broadcast` echo-suppression did the same with sender origin (test `aef49e1`, fix `be3668a`). Both now route through `peerHostEqual`. Tunnel `PermitOpen` is string-based by design (see S8 in DONE.md); proxy has no address equality. |
 
 ## Historical Notes
 
