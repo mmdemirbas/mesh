@@ -26,6 +26,14 @@ internal/
   gateway/          LLM API gateway (Anthropic <-> OpenAI format translation)
   state/            Thread-safe component state (Global singleton with Snapshot())
 configs/            Example YAML, production config (mesh.yaml), JSON schema
+e2e/                End-to-end scenario suite — real containers, never linked into the release binary.
+  harness/          testcontainers-go helpers: Network, Node, Eventually, WaitForComponent, KeyPair, artifact dump. Build tag: e2e || e2e_churn.
+  scenarios/        S1-S4 scenarios (SSH bastion, filesync, clipsync, gateway). Build tag: e2e.
+  churn/            Heavy stress tests (10k-file propagation, rename storm, concurrent edits). Build tag: e2e_churn. Not in `task check`.
+  stub/             In-repo canned-response HTTP server used as the gateway upstream. Build tag: e2e.
+  fixtures/         Fake xclip shim, per-scenario YAML configs. Never tagged so go build ./... still parses the module.
+  compose/          Manual full-topology playground (docker-compose.yaml + configs + playground keys + README).
+  Dockerfile.e2e    Alpine image that bakes the mesh binary, the stub-llm binary, and the fake xclip shim.
 ```
 
 ## Key Design Decisions
@@ -145,9 +153,30 @@ task build              # → build/mesh (version from git)
 task test               # go test -count=1 ./...
 task bench              # go test -bench=. -benchmem ./...
 task dist               # cross-compile darwin/linux/windows
+task check              # full gate: vet, staticcheck, fmt, tidy, race tests, build, e2e
+FAST=1 task check       # same gate, minus the e2e lane (inner-loop iteration)
+task e2e                # scenario suite against real containers (requires docker)
+task e2e:churn          # heavy filesync stress suite (nightly-grade, e2e_churn tag)
+task e2e:full           # e2e + e2e:churn
+task e2e:compose:up     # bring up the full-topology manual playground
+task e2e:compose:down   # tear it down
 ```
 
 Version injected via `-ldflags -X main.version=...` from git tags. `CGO_ENABLED=0` for Linux and Windows static binaries. Darwin omits `CGO_ENABLED` to auto-detect (1 when native toolchain is available).
+
+## End-to-End Test Harness
+
+`task check` runs the unit suite and the e2e scenario suite by default. Release cannot ship without both gates green. `FAST=1 task check` is the inner-loop escape hatch — it still runs vet, staticcheck, fmt, tidy, the unit lane, and build, but skips the e2e lane. Docker is a hard prerequisite when the e2e lane runs.
+
+**Layout** (see [Project Structure](#project-structure)): harness primitives in `e2e/harness/`, four scenarios in `e2e/scenarios/` (S1 SSH bastion, S2 filesync two-peer, S3 clipsync discovery, S4 gateway with stub upstream), heavy stress in `e2e/churn/`, a canned-response upstream in `e2e/stub/`, a full-topology compose playground in `e2e/compose/`.
+
+**Build tags.** Harness files carry `//go:build e2e || e2e_churn` so both scenario tags can import them. Scenario files are `//go:build e2e`. Churn files are `//go:build e2e_churn`. The stub is `//go:build e2e`. `go build ./...` and the release binary never link any of them; testcontainers-go appears in `go.mod` but only because `go mod tidy` considers tagged files.
+
+**Image.** `task build:e2e-image` produces `mesh-e2e:local` from `e2e/Dockerfile.e2e`: Alpine base + baked mesh binary + baked stub-llm + a fake `xclip` shim that reads and writes `/tmp/mesh-clip/<target>`. Image rebuild is content-hash-gated so repeat invocations are no-ops when nothing changed. The fake xclip lets scenarios drive clipsync through `docker exec` without any production code change.
+
+**Networking.** Scenarios create a per-test testcontainers bridge network. Admin APIs are only bound to `127.0.0.1` inside each container (per mesh's config validator) so the harness reaches them via `docker exec curl`, not a host port mapping. Filesync's peer validator is IP-based with no DNS resolution — automated scenarios work around this with an sh wrapper that polls `getent hosts` at container start and rewrites a placeholder in the YAML before exec'ing mesh. The compose playground sidesteps it by assigning static IPs.
+
+**Artifacts.** On test failure, `harness.DumpOnFailure` writes the container's docker log, mesh log, `/api/state`, and `/api/metrics` into `e2e/build/artifacts/<test>/<timestamp>/`. On success the test leaves nothing behind.
 
 ## What NOT to Do
 

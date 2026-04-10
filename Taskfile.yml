@@ -101,7 +101,7 @@ tasks:
       - golangci-lint run 2>/dev/null || echo "golangci-lint not installed, skipping (go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest)"
 
   check:
-    desc: "Pre-release quality gate: vet, staticcheck, fmt, tidy, race tests, build"
+    desc: "Pre-release quality gate: vet, staticcheck, fmt, tidy, race tests, build, e2e (FAST=1 skips e2e)"
     cmds:
       - go vet ./...
       - staticcheck ./...
@@ -110,6 +110,41 @@ tasks:
       - go mod tidy -diff
       - go test -race -count=1 ./...
       - task: build
+      - cmd: |
+          if [ "${FAST:-}" = "1" ]; then
+            echo "FAST=1: skipping e2e gate (run task e2e to exercise it)"
+          else
+            task e2e
+          fi
+
+  e2e:
+    desc: "Run the end-to-end scenario suite against real containers (requires docker)"
+    deps: [build:e2e-image]
+    cmds:
+      - go test -race -count=1 -tags e2e -timeout 15m ./e2e/...
+
+  e2e:churn:
+    desc: "Run the heavy filesync churn suite (tag e2e_churn, nightly-grade)"
+    deps: [build:e2e-image]
+    cmds:
+      - go test -count=1 -tags e2e_churn -timeout 20m ./e2e/churn/...
+
+  e2e:full:
+    desc: "Run both the scenario suite and the churn suite"
+    cmds:
+      - task: e2e
+      - task: e2e:churn
+
+  e2e:compose:up:
+    desc: "Start the e2e compose playground (all four features in one topology)"
+    deps: [build:e2e-image]
+    cmds:
+      - docker compose -f e2e/compose/docker-compose.yaml --project-directory e2e/compose up -d
+
+  e2e:compose:down:
+    desc: "Tear down the e2e compose playground"
+    cmds:
+      - docker compose -f e2e/compose/docker-compose.yaml --project-directory e2e/compose down -v
 
   release:
     desc: "Run quality gate, then tag and push a release (usage: task release [-- major|minor|patch])"

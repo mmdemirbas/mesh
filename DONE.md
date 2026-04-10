@@ -98,6 +98,7 @@ design notes that informed the change — kept for context.
 | B4   | Fix agent fwd double close + leak   | `ln.Close()` called from two goroutines without sync.Once. `io.Copy` used receive-one pattern instead of WaitGroup. |
 | B5   | Fix maxRequestBodySize scaling      | Compile-time constant did not scale with configured `max_file_copy_size`. Now computed from `maxFileSize` at startup. |
 | B6   | Fix schema-gen AddGoComments path   | Relative path `./internal/config` was wrong when running from `cmd/schema-gen/`. Fixed to `../../internal/config`. |
+| D11  | End-to-end Linux test harness       | `e2e/harness/` primitives, four scenarios (S1 SSH bastion, S2 filesync, S3 clipsync, S4 gateway + stub-llm), `e2e/churn/` stress suite, `e2e/compose/` manual playground. Wired into `task check` with `FAST=1` escape hatch. Details below. |
 
 ## Historical Notes
 
@@ -241,3 +242,67 @@ Pre-implementation design notes kept for context after the work landed.
 **Risks/dependencies:** The `auth-agent@openssh.com` channel type must be opened on the *existing* SSH connection, not a new one. The client must also support agent forwarding on their end. Unix socket support on macOS and Linux is consistent; not applicable to Windows.
 
 **Effort:** M — the Unix socket proxy loop is the core complexity. Session lifecycle integration (env injection, cleanup) adds another half-day.
+
+### D11: End-to-end Linux test harness
+
+**Goal:** Exercise real mesh binaries across multiple containers to catch integration bugs that unit tests cannot reach. Cover SSH tunneling, filesync, clipsync, and gateway flows with deterministic, automated scenarios. Integrate as the final gate of `task check` so no release can ship with a broken end-to-end path.
+
+**Layout as shipped:**
+
+```
+e2e/
+  Dockerfile.e2e           alpine + mesh binary + stub-llm + fake xclip
+  fixtures/
+    fake-xclip             shell script — reads/writes /tmp/mesh-clip/<target>
+    configs/               per-scenario YAML templates
+  harness/                 testcontainers-go helpers, build tag: e2e || e2e_churn
+    network.go             per-test bridge network
+    node.go                Node: Start, Exec, WriteFile, ReadFile, Admin*, metrics
+    artifacts.go           on-failure dump rooted at e2e/build/artifacts/
+    fixtures.go            config template loader (runtime.Caller-anchored path)
+    sshkeys.go             ed25519 KeyPair helper
+    wait.go                Eventually + WaitForComponent admin-state polling
+  scenarios/               build tag: e2e
+    ssh_bastion_test.go    S1
+    filesync_test.go       S2
+    clipsync_test.go       S3
+    gateway_test.go        S4
+  churn/                   build tag: e2e_churn (nightly only)
+    filesync_churn_test.go
+  stub/                    canned-response HTTP server for the gateway (e2e tag)
+  compose/                 manual playground (docker-compose.yaml + keys + README)
+```
+
+**Image & build.** Single image `mesh-e2e:local` based on `alpine:3.20` with `ca-certificates tcpdump openssh-client iproute2 coreutils curl bash jq`. The mesh binary, the stub-llm binary, and the fake xclip shim are baked in at build time — the automated scenarios never volume-mount them. `task build:linux`, `task build:stub-linux`, and `task build:e2e-image` are content-hash gated so repeat runs are no-ops.
+
+**Scenario mechanism.** Admin APIs bind to `127.0.0.1` per config validation, so the harness reaches them through `docker exec curl` rather than host port mappings. Mesh's filesync peer validator is IP-based with no DNS resolution, so the automated filesync / churn scenarios override the entrypoint with a sh wrapper that polls `getent hosts` at startup, substitutes the resolved IP into a placeholder in the YAML, and then execs mesh. The fake xclip lets clipsync be driven by writing and reading `/tmp/mesh-clip/<target>` — **no production code change**, no debug endpoint. `peer1` starts with a no-op wait strategy in scenarios where bidirectional DNS resolution would otherwise deadlock testcontainers' sequential `Started` hook.
+
+**Scenarios as shipped:**
+
+- **S1 SSH bastion tunnel.** `client → bastion → server` with `PermitOpen server:22`. Asserts `connection:bastion` → `connected`, `forward:ssh-to-server` → `listening`, `ssh -p 2222 root@127.0.0.1 whoami` → `root`, non-zero `mesh_bytes_{tx,rx}_total`, bastion stop/restart drives the connection through `retrying` back to `connected`.
+- **S2 filesync two-peer.** `send-receive` folder with five phases: 10-file initial propagation; reverse edit + no leftover `.mesh-tmp-*`; delete propagation; conflict file on simultaneous edits; restart convergence.
+- **S3 clipsync discovery + push.** Three peers in group `test`, a fourth in group `other`. Bidirectional text propagation through the fake xclip, group isolation, and a 40 MB payload round trip (chosen under the strict 50 MB `defaultMaxSyncFileSize` per-format cap — tighter than the 100 MB `maxClipboardPayload` total).
+- **S4 LLM gateway.** Five gateway instances against a single stub container. Non-streaming A→O and O→A happy paths, upstream 529 → client 503, malformed upstream body → client 502 (the implementation returns `BadGateway` rather than the plan's 500), and an SSE streaming round trip.
+
+**Churn suite.** Three tests, all under the 2-minute per-test budget: 1000-file propagation, 30-file rename storm (hard assertion on add-side convergence; rename-side delete backlog is logged as a soft signal — a real but out-of-scope filesync limitation), and bidirectional concurrent edits under fsnotify pressure. Full suite runs in ~140s.
+
+**Compose playground.** Static-IP topology (172.30.0.0/24) with `client`, `bastion`, `server`, `stub-llm`. All four features active at once. Pre-generated ed25519 playground keys live in `e2e/compose/keys/` — explicitly documented as playground-only, not for production. Manual-only; not invoked by any automated test.
+
+**Task integration.** `task check` runs the gates in order: `go vet` → `staticcheck` → `gofmt -l` → `go mod tidy -diff` → `go test -race -count=1 ./...` → `go build ./...` → `task e2e`. `FAST=1 task check` skips only the final e2e step. `task e2e`, `task e2e:churn`, and `task e2e:full` run the e2e, churn, and combined lanes directly; `task e2e:compose:up` / `down` manage the playground.
+
+**Dependencies.** `github.com/testcontainers/testcontainers-go` is the only new dependency. Every file that imports it carries `//go:build e2e` or `//go:build e2e || e2e_churn`, so `go build ./...` and the release binary never link it even though it appears in `go.mod`. Docker is a hard prerequisite for the e2e lane; machines without Docker must use `FAST=1 task check`.
+
+**Key decisions (locked as shipped):**
+
+- Fake `xclip` over a debug endpoint — keeps production code clean.
+- Baked-in binary over volume mount — determinism over rebuild speed.
+- `task check` runs everything by default; `FAST=1` is the opt-out.
+- Compose is a full-topology playground, not a scenario mirror.
+- Per-test bridge network, no host port mapping for the admin API.
+
+**Findings surfaced while implementing.** None of these were fixed as part of D11; they are flagged here for follow-up:
+
+1. Filesync peer validation is exact-string IP matching with no DNS. Breaks container-name configs; worked around with an sh wrapper in the scenarios and with static IPs in the compose playground.
+2. Clipsync has two size caps — `maxClipboardPayload` (100 MB total) and `defaultMaxSyncFileSize` (50 MB per format, strictly enforced at read time). The stricter per-format cap is used even for `text/plain`. The 50 MB figure from the plan had to become 40 MB in the test to fit the actual cap.
+3. Gateway reports upstream parse failures as HTTP 502 with an Anthropic-shaped error body, not 500 as the plan stated. S4 was updated to match reality.
+4. Under the churn workload, rename-delete propagation lags add propagation by a wide margin — a 30-file rename leaves ~20 old names on the peer after a minute of polling. The churn test documents and tolerates this without papering over it.
