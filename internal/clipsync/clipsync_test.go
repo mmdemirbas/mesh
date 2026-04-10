@@ -1524,6 +1524,39 @@ func TestFileCopyCustomSize(t *testing.T) {
 	}
 }
 
+// TestLoadFormatsFromDir_PerFormatCapIgnoresConfig pins a bug surfaced
+// during the D11 end-to-end work: the docstring on defaultMaxSyncFileSize
+// says the 50 MB constant is "Overridden by ClipsyncCfg.MaxFileCopySize",
+// but loadFormatsFromDir uses the literal constant instead of the
+// configured value — the function cannot even see the config because it
+// has no receiver and no cap parameter. A user who raises
+// max_file_copy_size to 200MB expecting their 60 MB clipboard text to
+// sync still sees it silently skipped at the 50 MB mark.
+//
+// Either the docstring is wrong (and should state "applies to file copy
+// only; clipboard formats use a separate hardcoded cap") or the code is
+// wrong (and should thread the configured cap through to the assembler).
+// This test asserts the less-surprising behavior — that a 60 MB text
+// format is retained — so the fix resolves the disagreement by making
+// the code match the docs. Currently failing.
+func TestLoadFormatsFromDir_PerFormatCapIgnoresConfig(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	const size = 60 * 1024 * 1024 // 60 MB — over the 50 MB per-format cap, under the 100 MB total cap.
+	payload := bytes.Repeat([]byte{'x'}, size)
+	if err := os.WriteFile(filepath.Join(dir, "text_plain"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	formats := loadFormatsFromDir(dir)
+	if len(formats) == 0 {
+		t.Fatalf("loadFormatsFromDir dropped a 60 MB text format — defaultMaxSyncFileSize doc claims MaxFileCopySize overrides it, but line 1034 uses the literal constant")
+	}
+	if got := len(formats[0].GetData()); got != size {
+		t.Fatalf("loadFormatsFromDir returned %d bytes, want %d", got, size)
+	}
+}
+
 func TestFileCopyInvalidSize(t *testing.T) {
 	t.Parallel()
 	cfg := config.ClipsyncCfg{
