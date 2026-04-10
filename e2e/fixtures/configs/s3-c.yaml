@@ -1,0 +1,7 @@
+c:
+  log_level: info
+  admin_addr: "127.0.0.1:7777"
+  clipsync:
+    - bind: "0.0.0.0:7755"
+      lan_discovery_group: ["test"]
+      poll_interval: "1s"
