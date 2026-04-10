@@ -1191,6 +1191,11 @@ func TestParseBandwidth(t *testing.T) {
 		{"-5MB", 0, true},
 		{"abc", 0, true},
 		{"", 0, true},
+		// H8: ParseBandwidth had the same unchecked int64 multiplication
+		// overflow as clipsync.parseByteSize. A user setting "20000000000GB"
+		// silently wrapped to a negative bytes/sec value, which the rate
+		// limiter then treated as a degenerate bound.
+		{"20000000000GB", 0, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
