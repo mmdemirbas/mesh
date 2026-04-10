@@ -260,6 +260,10 @@ func (n *Node) canSendTo(_ string, _ bool) bool { return true }
 
 // canReceiveFrom returns whether the node should accept clipboard data from addr.
 // Trusted sources: loopback (SSH tunnels), configured static peers, UDP-discovered peers.
+// Peer comparisons parse both sides with net.ParseIP and compare via
+// net.IP.Equal so that IPv6 addresses written in different canonical forms
+// (short vs. expanded, mixed case) match correctly. Same bug class as
+// filesync B7.
 func (n *Node) canReceiveFrom(remoteAddr string) bool {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
@@ -270,11 +274,7 @@ func (n *Node) canReceiveFrom(remoteAddr string) bool {
 	}
 	// Check static peers.
 	for _, peer := range n.config.StaticPeers {
-		peerHost, _, err := net.SplitHostPort(peer)
-		if err != nil {
-			peerHost = peer
-		}
-		if peerHost == host {
+		if peerHostEqual(peer, host) {
 			return true
 		}
 	}
@@ -282,15 +282,26 @@ func (n *Node) canReceiveFrom(remoteAddr string) bool {
 	n.peersMu.RLock()
 	defer n.peersMu.RUnlock()
 	for peer := range n.peers {
-		peerHost, _, err := net.SplitHostPort(peer)
-		if err != nil {
-			peerHost = peer
-		}
-		if peerHost == host {
+		if peerHostEqual(peer, host) {
 			return true
 		}
 	}
 	return false
+}
+
+// peerHostEqual reports whether the host portion of peer (which may carry a
+// :port suffix) refers to the same address as host. When both sides parse as
+// IPs, comparison is numeric so IPv6 canonical forms match; otherwise it
+// falls back to case-insensitive string compare on the host portion.
+func peerHostEqual(peer, host string) bool {
+	peerHost, _, err := net.SplitHostPort(peer)
+	if err != nil {
+		peerHost = peer
+	}
+	if ipA, ipB := net.ParseIP(peerHost), net.ParseIP(host); ipA != nil && ipB != nil {
+		return ipA.Equal(ipB)
+	}
+	return strings.EqualFold(peerHost, host)
 }
 
 // groupOverlaps returns true if the remote group matches any of our configured groups.
