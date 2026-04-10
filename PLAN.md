@@ -299,23 +299,7 @@ For anything else — code reads, additional test cases, refactors that preserve
 
 | ID | Item | Failing test | Fix landed |
 |----|------|--------------|------------|
-| [B8](#b8-peermatchesaddr-hostname-resolution)    | filesync peerMatchesAddr hostname DNS resolution     | `TestPeerMatchesAddr_HostnameResolution`       | — |
 | [B9](#b9-loadformatsfromdir-per-format-cap)      | clipsync loadFormatsFromDir ignores MaxFileCopySize  | `TestLoadFormatsFromDir_PerFormatCapIgnoresConfig` | — |
-
-#### B8: peerMatchesAddr hostname resolution
-
-**Failing test:** `internal/filesync/filesync_test.go` `TestPeerMatchesAddr_HostnameResolution`. Skips on machines where `os.Hostname()` is not resolvable to a loopback IP; fails on machines where it is (Linux CI typically).
-
-**Symptom:** `peerMatchesAddr` never calls `net.LookupHost`, so a peer configured as `server:7756` (hostname) never matches a request from `172.20.0.3` (the resolved IP). The S2 filesync scenario works around this with a sh wrapper that resolves peer aliases at container start and rewrites a placeholder in the YAML. Users configuring docker compose service names, Tailscale magicdns, `.local` mDNS, or any LAN hostname hit a silent 403.
-
-**Fix approach:** Two reasonable options — decide between them based on how much latency is acceptable on the hot path.
-
-1. **Resolve at config load time.** When `FilesyncCfg.Resolve` runs, expand each configured peer's hostname to the full set of IPs via `net.LookupHost` and store the IP set. `peerMatchesAddr` becomes a pure membership check. Cost: stale entries on DNS changes; startup blocks on DNS.
-2. **Resolve on demand with cache.** `peerMatchesAddr` runs DNS only when the literal compare fails, caches results for N minutes. Cost: per-request latency on first miss; cache invalidation.
-
-Option 1 is simpler and matches mesh's "validate at load" style. Prefer it unless there is a concrete reason users need hot-reload DNS behavior — in which case pause and ask.
-
-**Acceptance:** The test fails cleanly on a machine where `os.Hostname()` resolves to loopback (reproduce by adding a line to `/etc/hosts` locally or running on Linux CI), then passes after the fix. All existing filesync tests continue to pass.
 
 #### B9: loadFormatsFromDir per-format cap
 

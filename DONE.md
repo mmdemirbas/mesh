@@ -100,6 +100,7 @@ design notes that informed the change — kept for context.
 | B6   | Fix schema-gen AddGoComments path   | Relative path `./internal/config` was wrong when running from `cmd/schema-gen/`. Fixed to `../../internal/config`. |
 | D11  | End-to-end Linux test harness       | `e2e/harness/` primitives, four scenarios (S1 SSH bastion, S2 filesync, S3 clipsync, S4 gateway + stub-llm), `e2e/churn/` stress suite, `e2e/compose/` manual playground. Wired into `task check` with `FAST=1` escape hatch. Details below. |
 | B7   | Fix peerMatchesAddr IPv6 canon      | `peerMatchesAddr` did literal string compare; equal IPv6 addresses in different canonical forms (short vs. expanded, mixed case) silently rejected with 403. Parse via `net.ParseIP` and compare with `net.IP.Equal`. Test `ae922b6`, fix `1c3954c`. |
+| B8   | Resolve filesync peer hostnames     | Hostnames were never resolved, so `server:7756` never matched a request from its DNS IP. `FilesyncCfg.Resolve` expands each peer host via `net.LookupHost` into `FolderCfg.AllowedPeerHosts`; `isPeerConfigured` compares against that. Test `ae922b6`, fix `a610184`. |
 
 ## Historical Notes
 
