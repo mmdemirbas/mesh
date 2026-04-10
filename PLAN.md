@@ -253,6 +253,359 @@ Goal: dynamically watch frequently-changing paths with fsnotify, poll the rest. 
 
 ---
 
+## Tier 5 — Bug Hunting
+
+Autonomous deep audit. The first three items (B7–B9) already have failing tests committed on `main` in TDD style; fixes land as separate commits per bug. H1–H14 are hunt tasks — directed audits of the codebase that a Claude session can work through sequentially, writing a failing test for every finding and fixing it in a follow-up commit.
+
+**Entry point.** The user invokes this tier by task ID in a clean context. The Claude reads this entire section, starts at [Autonomous Run Protocol](#tier-5-autonomous-run-protocol), then works through [Known Bugs](#tier-5-known-bugs) first and [Hunt Tasks](#tier-5-hunt-tasks) second. Progress is recorded by moving items to DONE.md as each is completed. The session stops only for the exit conditions in the protocol.
+
+### Tier 5 Autonomous Run Protocol
+
+Read this before starting any work in Tier 5.
+
+**Commit cadence (TDD):**
+
+1. For every bug, the first commit introduces a failing test that reproduces the exact failure. Use the existing tests for B7–B9 as the template — one `Test<Bug>_<Scenario>` function or subtest per failure mode, with a comment naming the bug ID and the one-line reason the test fails today.
+2. The second commit is the minimal fix that makes the test pass. No drive-by cleanup, no adjacent refactors.
+3. An optional third commit refactors for clarity only if the minimal fix left the code ugly. Tests must still pass after the refactor.
+4. Never squash (a) and (b) into one commit — the point is that `git bisect` can confirm (a) reproduces and (b) fixes.
+5. Every commit runs `task check` (or `FAST=1 task check` while iterating). Do not present commits that fail the gate.
+6. When a hunt turns up zero findings after the methodology has been applied in full, land a short `docs: <Hn> audit — no findings` commit with a one-paragraph note in the hunt's detail section below. Don't skip silently.
+
+**Move-to-DONE cadence:**
+
+- The moment a bug is fixed and committed, move its row from Tier 5 to DONE.md (per the implementation guideline). The hunt ID stays in Tier 5 until every follow-up bug from that hunt is fixed AND the "no more findings" commit is landed.
+- DONE.md entries for B7–B9 should reference the commit hash of the failing-test commit and the fix commit.
+
+**Stop conditions.** Pause and ask the user only when:
+
+1. A fix would change a public-facing config field or YAML schema (needs human review).
+2. A bug requires >30 minutes of test runtime to reproduce (batch it for the nightly churn lane).
+3. A hunt turns up a genuine design question — not "which of three equivalent refactors" but "the current contract is ambiguous between A and B, and the choice changes user-visible behavior".
+4. An autonomous action would be irreversible (force push, dependency upgrade, deleting files the human may still want).
+
+For anything else — code reads, additional test cases, refactors that preserve behavior, straightforward fixes — continue working without asking.
+
+**Out of scope for Tier 5:**
+
+- Performance optimization (separate tier).
+- API redesigns or feature additions.
+- Changes to production-deployment tooling.
+- Anything that requires coordinating with an external service.
+
+**Tooling.** Each hunt nominates its primary lens (Grep, fuzz, race detector, manual read). The autonomous Claude should use the suggested lens first, then widen only if the lens misses the finding the hunt is targeting.
+
+### Tier 5 Known Bugs
+
+| ID | Item | Failing test | Fix landed |
+|----|------|--------------|------------|
+| [B7](#b7-peermatchesaddr-ipv6-canonicalization)  | filesync peerMatchesAddr IPv6 canonicalization       | `TestPeerMatchesAddr_IPv6Canonical`            | — |
+| [B8](#b8-peermatchesaddr-hostname-resolution)    | filesync peerMatchesAddr hostname DNS resolution     | `TestPeerMatchesAddr_HostnameResolution`       | — |
+| [B9](#b9-loadformatsfromdir-per-format-cap)      | clipsync loadFormatsFromDir ignores MaxFileCopySize  | `TestLoadFormatsFromDir_PerFormatCapIgnoresConfig` | — |
+
+#### B7: peerMatchesAddr IPv6 canonicalization
+
+**Failing test:** `internal/filesync/filesync_test.go` `TestPeerMatchesAddr_IPv6Canonical`, three subtests.
+
+**Symptom:** `peerMatchesAddr` in `internal/filesync/protocol.go` does a literal string compare on the host portion. Two IPv6 addresses that are numerically identical but written in different canonical forms (`2001:db8::1` vs. `2001:db8:0:0:0:0:0:1`, short vs. long zero runs, lowercase vs. uppercase hex) fail to match and the incoming request is rejected with 403 `unknown peer`. Silent filesync failure on any IPv6-first network.
+
+**Fix approach:** Parse both sides with `net.ParseIP` and compare via `netip.Addr` (or `net.IP.Equal`). Fall back to string compare when either side does not parse (keeps the hostname case working). See also B8 — the fix should be designed alongside it so the function's overall shape is coherent.
+
+**Acceptance:** All three subtests pass. The existing `TestPeerMatchesAddr` table-driven cases still pass. No new allocations in the common IPv4 path (benchmark-adjacent, so eyeball).
+
+#### B8: peerMatchesAddr hostname resolution
+
+**Failing test:** `internal/filesync/filesync_test.go` `TestPeerMatchesAddr_HostnameResolution`. Skips on machines where `os.Hostname()` is not resolvable to a loopback IP; fails on machines where it is (Linux CI typically).
+
+**Symptom:** `peerMatchesAddr` never calls `net.LookupHost`, so a peer configured as `server:7756` (hostname) never matches a request from `172.20.0.3` (the resolved IP). The S2 filesync scenario works around this with a sh wrapper that resolves peer aliases at container start and rewrites a placeholder in the YAML. Users configuring docker compose service names, Tailscale magicdns, `.local` mDNS, or any LAN hostname hit a silent 403.
+
+**Fix approach:** Two reasonable options — decide between them based on how much latency is acceptable on the hot path.
+
+1. **Resolve at config load time.** When `FilesyncCfg.Resolve` runs, expand each configured peer's hostname to the full set of IPs via `net.LookupHost` and store the IP set. `peerMatchesAddr` becomes a pure membership check. Cost: stale entries on DNS changes; startup blocks on DNS.
+2. **Resolve on demand with cache.** `peerMatchesAddr` runs DNS only when the literal compare fails, caches results for N minutes. Cost: per-request latency on first miss; cache invalidation.
+
+Option 1 is simpler and matches mesh's "validate at load" style. Prefer it unless there is a concrete reason users need hot-reload DNS behavior — in which case pause and ask.
+
+**Acceptance:** The test fails cleanly on a machine where `os.Hostname()` resolves to loopback (reproduce by adding a line to `/etc/hosts` locally or running on Linux CI), then passes after the fix. All existing filesync tests continue to pass.
+
+#### B9: loadFormatsFromDir per-format cap
+
+**Failing test:** `internal/clipsync/clipsync_test.go` `TestLoadFormatsFromDir_PerFormatCapIgnoresConfig`.
+
+**Symptom:** `defaultMaxSyncFileSize` in `internal/clipsync/clipsync.go` has a docstring saying "Overridden by `ClipsyncCfg.MaxFileCopySize`", but `loadFormatsFromDir` at line 1034 uses the literal constant instead of `n.maxFileSize`. The function has no receiver and no cap parameter, so it physically cannot see the config. A user raising `max_file_copy_size` to 200 MB still loses any clipboard text format over 50 MB silently, with a `WARN Skipping clipboard format: exceeds per-file size limit` line in the log.
+
+**Fix approach:** Thread the effective cap through to the assembler. Two options:
+
+1. **Parameter:** change the signature to `loadFormatsFromDir(dir string, maxFileSize int64) []*pb.ClipFormat` and pass `n.maxFileSize` from the one caller in `readClipboardFormats`. Same for `maxClipboardPayload` if the plan is for both caps to be configurable (the latter is separate — do not bundle).
+2. **Receiver:** promote `loadFormatsFromDir` to a method on `*Node`. Lighter diff than adding a parameter, and consistent with other private helpers that already reference `n.maxFileSize`.
+
+Option 2 is preferred unless there is a test that calls `loadFormatsFromDir` without a Node — check before deciding.
+
+**Acceptance:** `TestLoadFormatsFromDir_PerFormatCapIgnoresConfig` passes. `TestLoadFormatsFromDir`, `TestLoadFormatsFromDir_EmptyDir`, `TestLoadFormatsFromDir_SkipsEmptyFiles`, `TestLoadFormatsFromDir_IgnoresUnknownFiles` continue to pass. Add a second subtest that asserts a 60 MB format IS still rejected when `MaxFileCopySize` is left at its default of 50 MB — that pins the default behavior.
+
+### Tier 5 Hunt Tasks
+
+| ID   | Area                                                   | Lens        |
+|------|--------------------------------------------------------|-------------|
+| [H1](#h1-address-and-host-equality-audit)              | Address / host equality across packages          | Grep + read |
+| [H2](#h2-default-constant-vs-runtime-config-audit)     | "default" constants shadowing runtime config     | Grep + read |
+| [H3](#h3-concurrent-close-audit)                       | `Close()` / `cancel()` from multiple goroutines  | Race + read |
+| [H4](#h4-goroutine-leak-audit)                         | `go func(){...}()` with no context exit path    | Read + race |
+| [H5](#h5-timer-and-ticker-audit)                       | `time.NewTimer` / `NewTicker` without `Stop`    | Grep        |
+| [H6](#h6-signal-handler-audit)                         | `signal.Notify` without matching `signal.Stop`  | Grep        |
+| [H7](#h7-path-traversal-audit)                         | File paths derived from peer / user input      | Grep + read |
+| [H8](#h8-integer-overflow-audit)                       | Size arithmetic near int64 bounds               | Read        |
+| [H9](#h9-error-handling-audit)                         | Silent error swallowing (`_ = err`, empty catch) | Grep + read |
+| [H10](#h10-unbounded-io-audit)                         | Network-derived reads without `io.LimitReader`  | Grep        |
+| [H11](#h11-map-iteration-safety-audit)                 | Iteration over shared maps without mutex        | Race + read |
+| [H12](#h12-http-server-hygiene-audit)                  | `http.Server` missing timeouts / size caps      | Grep        |
+| [H13](#h13-sse-parser-edge-cases)                      | Gateway SSE parser with split / malformed frames | Fuzz       |
+| [H14](#h14-config-parser-adversarial-inputs)           | YAML loader with adversarial inputs             | Fuzz        |
+
+#### H1: Address and host equality audit
+
+**Goal.** B7 and B8 are both in `internal/filesync/protocol.go`. The same bug class likely exists in `internal/tunnel` (SSH target matching, `PermitOpen` check), `internal/clipsync` (trusted peers, beacon source filtering), and `internal/proxy` (ACLs if any). Find every function that compares IP or host strings and ensure it parses through `net.ParseIP` / `netip.Addr` and optionally resolves hostnames.
+
+**Methodology.**
+
+1. `Grep -nI '== *req\|== *host\|== *addr\|== *remote\|strings.EqualFold.*[Aa]ddr' internal/`.
+2. For each hit, read the function. Confirm whether it is comparing a user-configured value to a runtime peer address. If so, construct a test case with two equivalent-but-different forms (see B7 for IPv6; add an IPv4 bracketed form like `::ffff:127.0.0.1`; add a mixed-case hostname).
+3. Write a failing test per finding in the neighbouring `_test.go` file, using the B7 `t.Run` pattern.
+4. Fix by replacing string compare with `ParseIP`+`.Equal` (for IP) or a shared helper like `addrEqual(a, b string) bool` (for host-or-IP).
+5. Landing order inside the hunt: filesync first (already partially covered by B7/B8), then tunnel, then clipsync, then proxy.
+
+**Test pattern.** Table-driven, same shape as `TestPeerMatchesAddr_IPv6Canonical`. Each table row names a canonicalization the function should normalize through.
+
+**Fix pattern.** Add a package-local helper `hostEqual(a, b string) bool` that ParseIPs both sides; fall through to a `net.LookupHost`-backed fallback if either side is a hostname. Reuse across packages via an `internal/netutil` export if the shape is identical.
+
+**Acceptance.** Zero remaining string-compare-of-addresses hits in the Grep. All new tests passing. `FAST=1 task check` green.
+
+#### H2: Default constant vs runtime config audit
+
+**Goal.** B9 showed that `defaultMaxSyncFileSize` is wired into the assembler as a literal constant despite a docstring saying it is overridable. Find every other `const default*` in `internal/` and `cmd/` where the docstring promises configurability and the code hardcodes the constant.
+
+**Methodology.**
+
+1. `Grep -nI 'default[A-Z][A-Za-z]* *=' internal/ cmd/`.
+2. For each constant, read its docstring. If it says "Overridden by" / "Default for" / "Configurable via", trace every usage with `Grep`.
+3. For each usage that references the constant by name instead of the equivalent runtime field, check whether the caller has access to config. If yes, it is a bug.
+4. Write a failing test that sets the runtime field to a value different from the default and asserts the different value is honored.
+
+**Test pattern.** Configure the runtime field to a non-default value, exercise the path, assert the runtime value took effect. If the runtime value is used transparently, the test passes.
+
+**Fix pattern.** Either thread the runtime field to the usage site (parameter or receiver), or document the constant as a non-overridable hard cap and fix the docstring. Prefer threading unless the docstring "override" was aspirational rather than a contract.
+
+**Acceptance.** Every `const default*` in the repo either (a) has no "overridable" claim in its docstring, or (b) is threaded through to every one of its usage sites. New tests pin the configurability for each one.
+
+#### H3: Concurrent Close audit
+
+**Goal.** CLAUDE.md already has a "don't call `Close()` from multiple goroutines without `sync.Once`" rule, and B4 (agent fwd double close) was a prior incident. Audit every `Close()` / `cancel()` call that may be reachable from more than one goroutine.
+
+**Methodology.**
+
+1. `Grep -nI '\.Close\(\)\|cancel *()' internal/ cmd/`.
+2. For each hit, identify the owning goroutine. If the target resource is shared with another goroutine (channel, listener, connection, process), confirm there is a `sync.Once`-guarded wrapper.
+3. Pay special attention to patterns like `defer <thing>.Close(); go func() { ... <thing>.Close() ... }()` — the classic double-close.
+4. Reproduce any finding with a `-race` test that starts two goroutines racing on the close.
+
+**Test pattern.** Use `sync.WaitGroup` and two goroutines that both reach the close path concurrently, run with `-race` to catch the double-close panic or the racy write.
+
+**Fix pattern.** Wrap the close in a local closure guarded by `sync.Once` (see `onceCloseListener` in `tunnel.go` for the idiom).
+
+**Acceptance.** Every closeable shared resource has a single-entry close path or an explicit `sync.Once`. Any finding lands as test+fix commits.
+
+#### H4: Goroutine leak audit
+
+**Goal.** Long-running daemons leak goroutines when one of the "go func(){}" statements has no context-tied termination path. Find any goroutine that does not exit cleanly on process shutdown.
+
+**Methodology.**
+
+1. `Grep -nI 'go func\b\|go [a-zA-Z_]*(' internal/ cmd/`.
+2. For each launch site, identify the goroutine's exit condition. Acceptable exits: `<-ctx.Done()` in a select, `for msg := range ch` where `ch` is closed by a controlled writer, `return` after finishing a bounded task.
+3. Unacceptable: infinite `for {}` with no exit, `time.Sleep` without context, blocking on a channel nothing closes.
+4. For each leak, write a test using `runtime.NumGoroutine()` to assert that `Start(ctx)` followed by `cancel()` + a short wait returns to baseline.
+
+**Test pattern.**
+
+```go
+base := runtime.NumGoroutine()
+ctx, cancel := context.WithCancel(context.Background())
+// start component
+cancel()
+// brief settle
+for i := 0; i < 10 && runtime.NumGoroutine() > base; i++ { time.Sleep(50 * time.Millisecond) }
+if runtime.NumGoroutine() > base+1 { t.Fatalf(...) }
+```
+
+**Fix pattern.** Add `select { case <-ctx.Done(): return; case x := <-ch: ... }` or wire `context.AfterFunc` to trigger a clean exit.
+
+**Acceptance.** Every `go func` in the main runtime has a documented exit path. Tests pin the cleanup for each Start/Stop pair.
+
+#### H5: Timer and ticker audit
+
+**Goal.** CLAUDE.md says "Don't use `time.After` in select with `ctx.Done()`" and "use `time.NewTimer` with explicit `Stop()`". Audit.
+
+**Methodology.**
+
+1. `Grep -nI 'time\.After\|time\.NewTimer\|time\.NewTicker' internal/ cmd/`.
+2. For `time.After`: any hit inside a select that also has `ctx.Done()` is a leak on cancellation (the timer's goroutine sticks around until the deadline). Replace with `time.NewTimer` + `Stop` in the ctx branch.
+3. For `time.NewTimer` / `NewTicker`: every creation must have a matching `Stop` on every exit path.
+
+**Test pattern.** `runtime.NumGoroutine()` delta across a Start/cancel cycle, same as H4.
+
+**Fix pattern.** Standard `t := time.NewTimer(d); defer t.Stop()` + select on `t.C` and `ctx.Done`.
+
+**Acceptance.** Zero `time.After` hits in hot paths. Every `NewTimer` / `NewTicker` has an explicit Stop.
+
+#### H6: Signal handler audit
+
+**Goal.** CLAUDE.md: "Don't call `signal.Notify` without a matching `defer signal.Stop`". Audit.
+
+**Methodology.**
+
+1. `Grep -nI 'signal\.Notify' cmd/ internal/`.
+2. For each hit, confirm there is a `signal.Stop(ch)` on every exit path (including panic recovery). A missing `Stop` leaks the signal handler across the process's lifetime — benign in `main` but a real leak anywhere else.
+3. Write a test that calls the helper twice in a row and asserts no duplicate delivery.
+
+**Test pattern.** Call setup + teardown twice; send a signal; assert the handler count matches expectation.
+
+**Fix pattern.** `defer signal.Stop(ch)` adjacent to the `Notify` call.
+
+**Acceptance.** Every `signal.Notify` is paired.
+
+#### H7: Path traversal audit
+
+**Goal.** Filesync accepts file names from remote peers. SFTP serves files from a configured root. Clipsync file_copy accepts file names. All three are attack surfaces for `../../etc/passwd`-style escapes. Audit.
+
+**Methodology.**
+
+1. `Grep -nI 'filepath\.Join\|os\.Open\|os\.Create\|os\.WriteFile\|os\.MkdirAll' internal/filesync/ internal/clipsync/ internal/tunnel/`.
+2. For each hit, identify whether any component of the path came from peer input (request body, protobuf field, URL).
+3. If so, confirm the code calls `filepath.Clean` **and** checks that the result is still inside the configured root (prefix check against an absolute-cleaned root).
+4. Attack vectors to exercise in tests: `../escape`, `..\escape` (Windows), absolute paths (`/etc/passwd`), symlinks (create one in the sync dir pointing outside), long path names, names with NUL bytes.
+
+**Test pattern.** Send a peer payload with a malicious filename; assert the write is rejected or clamped inside the root.
+
+**Fix pattern.** Common helper: `func safeJoin(root, name string) (string, error)` that cleans, rejects absolute, rejects `..` segments, rejects anything whose cleaned absolute path does not begin with the cleaned absolute root.
+
+**Acceptance.** No peer-derived path flows into `os.*` or `filepath.Join` without passing through `safeJoin` or an equivalent.
+
+#### H8: Integer overflow audit
+
+**Goal.** File sizes, offsets, delta block counts, and buffer lengths are all `int64` or `int`. A malicious peer or a 10 PB folder could overflow if the arithmetic is careless.
+
+**Methodology.**
+
+1. `Grep -nI 'int64\|\.Size()\|len\(' internal/filesync/ internal/clipsync/ internal/gateway/`.
+2. Focus on: `a + b` where both are large, `a * n` where `n` is user-supplied, slice allocations with `make([]byte, n)` where `n` is peer-derived.
+3. Write fuzz tests that feed the parsers with values near `math.MaxInt64`.
+4. For each overflow, guard with `if a > math.MaxInt64 - b { return error }` or use `math/big` on the ingest side.
+
+**Test pattern.** Table-driven arithmetic test with boundary inputs.
+
+**Fix pattern.** Explicit overflow check before the arithmetic, or use a saturating helper.
+
+**Acceptance.** Every `int64` arithmetic op on peer input either checks bounds or is provably safe (e.g., bounded by a prior size cap).
+
+#### H9: Error handling audit
+
+**Goal.** `_ = err` and empty catch blocks hide real failures. Find every swallowed error in non-cleanup paths.
+
+**Methodology.**
+
+1. `Grep -nI '_ = err\|_ = .*\.Close\(\)' internal/ cmd/`.
+2. `Grep -nI 'if err != nil {\s*}' internal/ cmd/` (ripgrep multiline).
+3. For each hit, judge whether the error is genuinely safe to ignore (cleanup path, already-reported error, best-effort) or whether a real failure could be lost.
+4. For borderline cases, log at `slog.Warn` with context rather than swallowing silently.
+
+**Test pattern.** Inject an error from a mock and assert it is either returned, logged, or has a documented reason for being ignored.
+
+**Fix pattern.** Wrap with `slog.Warn("context", "err", err)` or return.
+
+**Acceptance.** Every swallowed error has either a test asserting it is OK, or a one-line comment explaining why (a trailing `// cleanup: best-effort` style).
+
+#### H10: Unbounded io audit
+
+**Goal.** Any `io.ReadAll` / `io.Copy` / `json.NewDecoder(r).Decode` on network-derived input without an `io.LimitReader` is a DoS.
+
+**Methodology.**
+
+1. `Grep -nI 'io\.ReadAll\|io\.Copy\|json\.NewDecoder\|proto\.Unmarshal' internal/`.
+2. For each, trace the reader backwards. If it comes from `http.Request.Body`, `net.Conn`, or a protobuf field whose size is not pre-validated, the call is unbounded.
+3. Wrap with `io.LimitReader(r, cap)` or use `http.MaxBytesReader`. The caps should match existing package conventions (`maxRequestBodySize`, `maxUpstreamResponseSize`, etc.).
+
+**Test pattern.** Feed a 1 GB reader and assert the handler returns a 413 / appropriate error without OOMing.
+
+**Fix pattern.** `body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodySize))`.
+
+**Acceptance.** Zero unbounded reads on peer-derived streams.
+
+#### H11: Map iteration safety audit
+
+**Goal.** Iterating a shared map without the owning mutex is a race. Audit.
+
+**Methodology.**
+
+1. `Grep -nI 'for .* := range [a-zA-Z_][a-zA-Z0-9_]*$\|for .* := range .*\.[a-zA-Z_][a-zA-Z0-9_]*$' internal/`.
+2. For each, check whether the map is concurrently written elsewhere. `state.Global.Snapshot` is the correct pattern — copy under the lock, then iterate the copy.
+3. Build race tests by spawning a writer goroutine and an iterator goroutine, then run with `go test -race`.
+
+**Test pattern.** Start a writer + an iterator in goroutines; assert the `-race` detector stays quiet.
+
+**Fix pattern.** Snapshot under mutex, iterate the snapshot; or hold the read lock for the entire iteration.
+
+**Acceptance.** `go test -race -count=1 ./...` stays green after the hunt, and any finding is pinned by a new race test.
+
+#### H12: HTTP server hygiene audit
+
+**Goal.** Every `http.Server` in mesh should have `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`, `IdleTimeout`, and `MaxHeaderBytes`. Missing any of these is a slowloris / slow-header vector.
+
+**Methodology.**
+
+1. `Grep -nI '&http.Server{\|http\.Server{' internal/ cmd/`.
+2. For each, list which timeouts are set. Anything with only `ReadHeaderTimeout` is incomplete.
+3. The gateway package already has `ReadHeaderTimeout` on its client; audit whether the server side is as careful.
+
+**Test pattern.** Use a slow client that dribbles bytes over a long window; assert the server disconnects within the expected window.
+
+**Fix pattern.** Set all five fields explicitly with project-wide constants (introduce `netutil.DefaultHTTPTimeouts()` if duplication becomes annoying).
+
+**Acceptance.** Every `http.Server` has all five fields set.
+
+#### H13: SSE parser edge cases
+
+**Goal.** The gateway reads SSE from upstream and re-emits it. Parsers that assume frames arrive aligned on `\n\n` boundaries are fragile; malformed upstreams (missing terminator, embedded `\n` in data, giant fields) can crash or deadlock the parser.
+
+**Methodology.**
+
+1. Read the SSE parse path in `internal/gateway/a2o_stream.go` and `o2a_stream.go`.
+2. Write a fuzz target that feeds arbitrary byte sequences to the parser and asserts no panic and no unbounded memory growth.
+3. Write unit tests for specific edge cases: frame spans multiple reads, empty `data:` line, multi-line `data:` fields, `event:` without `data:`, huge single field.
+
+**Test pattern.** `FuzzSSEParser` target using `testing.F`; seeded with the stub-llm's canned streams.
+
+**Fix pattern.** Use a size cap on the internal buffer (already documented: 4 MB for SSE lines). Verify it is enforced on every read.
+
+**Acceptance.** Fuzz runs 10^6 inputs without panic or OOM. New unit tests pin each edge case.
+
+#### H14: Config parser adversarial inputs
+
+**Goal.** `internal/config` already has `fuzz_test.go`. Extend it with adversarial inputs that target the attack surface: YAML anchor bombs, deep nesting, duplicate keys, huge strings, unknown environment variables, `os.ExpandEnv` with `${...}` expressions that leak host env.
+
+**Methodology.**
+
+1. Read the existing fuzz target. Add seeds for: anchor-bomb YAML (alias chains), duplicate-key YAML (both accepted and rejected paths), `admin_addr` with IPv6 zone IDs, `env` vars set to `${PWD}`, `peers:` with self-reference.
+2. Run `go test -fuzz=FuzzConfigLoad -fuzztime 2m ./internal/config/...` periodically during the hunt.
+3. Every crash or non-clean failure becomes a failing test seeded from the fuzz corpus.
+
+**Test pattern.** Promote the fuzz crash input to a regression test; the fuzz target stays.
+
+**Fix pattern.** Validate shape at load time; reject malformed inputs with a clear error.
+
+**Acceptance.** 2 minutes of `go test -fuzz=FuzzConfigLoad` produces zero new crashes. Every prior crash is pinned by a regression test.
+
+---
+
 ## Parked
 
 | ID   | Component | Item                         | Notes |
