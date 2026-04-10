@@ -41,8 +41,8 @@ Security hardening, correctness, data integrity, protocol compliance.
 |------|-----------|----------------------------------------------|-------|
 | S1   | clipsync  | No TLS for clipsync HTTP                     | HTTPS only, auto-TLS with self-signed certs if none provided. Zero-config. |
 | FS4  | filesync  | No TLS / auth for filesync HTTP              | Same auto-TLS approach as S1 — share the implementation. |
-| C3   | gateway   | `thinking` blocks silently dropped           | Extended thinking content dropped in both translation directions. Increasingly used feature. Needs design decision. |
-| C4   | gateway   | `response_format` silently dropped           | `json_object` mode parsed but dropped. Clients expecting guaranteed JSON get unstructured text. Needs design decision. |
+| [C3](#c3-thinking-blocks-silently-dropped-in-gateway-translation) | gateway | `thinking` blocks silently dropped | Extended thinking content dropped in both translation directions. Increasingly used feature. Needs design decision. |
+| [C4](#c4-response_format-silently-dropped-in-gateway-translation) | gateway | `response_format` silently dropped | `json_object` mode parsed but dropped. Clients expecting guaranteed JSON get unstructured text. Needs design decision. |
 
 ### C3: `thinking` blocks silently dropped in gateway translation
 
@@ -96,7 +96,7 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
-| P3   | filesync  | Adaptive watch/scan                         | Self-tuning heuristic. Design below. |
+| [P3](#p3-adaptive-watchscan) | filesync | Adaptive watch/scan | Self-tuning heuristic. Design below. |
 
 #### P3: Adaptive Watch/Scan
 
@@ -119,7 +119,7 @@ Goal: dynamically watch frequently-changing paths with fsnotify, poll the rest. 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
 | U3   | cli       | `mesh status -w` shows no metrics           | Always passes `nil` for `metricsMap`. Fetch from admin API. |
-| P2   | cli       | Simplify CLI dashboard                      | Log tail removed + body dirty-check landed. Design below. |
+| [P2](#p2-cli-dashboard-simplification) | cli | Simplify CLI dashboard | Log tail removed + body dirty-check landed. Design below. |
 
 #### P2: CLI Dashboard Simplification
 
@@ -150,12 +150,13 @@ Goal: dynamically watch frequently-changing paths with fsnotify, poll the rest. 
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
-| D1   | ops       | Log rotation                                | Unbounded growth. SIGHUP + size-based rotation or external logrotate. |
-| D2   | ops       | systemd / launchd service units             | No service management. Ship templates. |
-| D3   | testing   | Tunnel package coverage at 34%              | Core forwarding functions at 0%. |
-| D6   | release   | Binary signing                              | No cosign/Sigstore. |
+| [D1](#d1-log-rotation) | ops | Log rotation | Unbounded growth. SIGHUP + size-based rotation or external logrotate. |
+| [D2](#d2-systemd--launchd-service-units) | ops | systemd / launchd service units | No service management. Ship templates. |
+| [D3](#d3-tunnel-package-test-coverage-at-34) | testing | Tunnel package coverage at 34% | Core forwarding functions at 0%. |
+| [D6](#d6-binary-signing-cosignsigstore) | release | Binary signing | No cosign/Sigstore. |
 | D8   | ops       | `time.Sleep` in `downCmd` and tests         | Replace with channel-based sync. |
-| D10  | build     | darwin/arm64 dist allows CGO                | Align Taskfile with GoReleaser. |
+| [D10](#d10-darwinarm64-dist-allows-cgo) | build | darwin/arm64 dist allows CGO | Align Taskfile with GoReleaser. |
+| [D11](#d11-end-to-end-linux-test-harness) | testing | End-to-end Linux test harness | Container-based suite covering SSH, filesync, clipsync, gateway. Integrated into `task check`. Design below. |
 
 #### D1: Log rotation
 
@@ -243,6 +244,137 @@ Goal: dynamically watch frequently-changing paths with fsnotify, poll the rest. 
 
 **Effort:** XS — a one-word change in `Taskfile.yml` plus a comment update.
 
+#### D11: End-to-end Linux test harness
+
+**Goal:** Exercise real mesh binaries across multiple containers to catch integration bugs that unit tests cannot reach. Cover SSH tunneling, filesync, clipsync, and gateway flows with deterministic, automated scenarios. Integrate as the final gate of `task check` so no release can ship with a broken end-to-end path.
+
+**Scope principle:** Automate every observable signal. On failure, the harness dumps container logs, mesh logs, `/api/state`, `/api/metrics`, and a packet capture per node. On success, everything is discarded. No manual steps in the automated suite; a separate Docker Compose topology exists as a human-driven playground.
+
+**Layout:**
+
+```
+e2e/
+  Dockerfile.test          alpine + mesh binary + tooling + fake xclip
+  fixtures/
+    fake-xclip             shell script — reads/writes /tmp/mesh-clip/<target>
+    configs/               per-scenario YAML templates
+  harness/                 testcontainers-go helpers, build tag: e2e
+    network.go             custom bridge network + aliases
+    node.go                MeshContainer: Start, Exec, Logs, WriteConfig, AdminAPI
+    artifacts.go           on-failure dump: logs, state, metrics, pcap
+    fixtures.go            config template loader
+  scenarios/               build tag: e2e
+    ssh_bastion_test.go    S1
+    filesync_test.go       S2
+    clipsync_test.go       S3
+    gateway_test.go        S4
+  churn/                   build tag: e2e_churn (nightly only)
+    filesync_churn_test.go
+  compose/                 manual playground, not invoked by tests
+    docker-compose.yaml
+    configs/
+    README.md
+```
+
+**Image & build:**
+
+- Single image `mesh-e2e:local` based on `alpine:3.20` with `ca-certificates tcpdump openssh-client iproute2 coreutils` plus a fake `xclip` script installed at `/usr/local/bin/xclip`.
+- Mesh binary is **baked into the image at build time**, not volume-mounted. Removes volume I/O as a flake source and keeps the container image self-contained.
+- New Taskfile target `task build:linux` produces `e2e/build/mesh-linux-amd64`. Image build is gated on a content hash of the binary + Dockerfile so rebuilds happen only when either changes.
+
+**Network:**
+
+- Each scenario creates its own testcontainers-go bridge network with named aliases (`client`, `bastion`, `server`, `stub`). Bridge networks support UDP broadcast, which clipsync discovery needs.
+- No cross-test contamination.
+
+**Clipsync test mechanism (fake `xclip`):**
+
+- `clipboard_linux.go` selects `xclip` via `exec.LookPath` and shells out with fixed flag patterns (`-selection clipboard -t <target> -o|-i`).
+- The fake script accepts the same flags and reads/writes `/tmp/mesh-clip/<target>` files inside the container.
+- Tests drive the "clipboard" by writing to `/tmp/mesh-clip/<target>` on one node and assert by reading the same file on peer nodes via `docker exec`.
+- **Zero production code changes.** No debug endpoint, no test-only config field, no conditional compilation in prod paths.
+- The `wl-copy` code path remains uncovered by e2e — a unit test asserts flag formatting separately.
+
+**Scenarios (first pass):**
+
+- **S1 — SSH bastion tunnel** (`ssh_bastion_test.go`). Three containers: `server` (sshd listener), `bastion` (sshd with `PermitOpen server:22`), `client` (connection → bastion → local forward `:2222 → server:22`). Assertions: `ssh -p 2222 root@client whoami` returns `root`; state shows `connection:bastion` Connected and `forward:2222` Listening; killing bastion transitions state to `retrying` then `connected` on restart; metrics show non-zero tx/rx on the forward row.
+
+- **S2 — Filesync two-peer** (`filesync_test.go`). Two containers with a send-receive folder. Assertions: 10 files on peer1 appear on peer2 within 10s (poll `/api/filesync/folders`); editing on peer2 produces a delta on peer1 and cleans `.mesh-tmp-*`; delete propagates; simultaneous edits on both peers create a `.sync-conflict-*` file; crash mid-sync resumes from the temp-file offset.
+
+- **S3 — Clipsync discovery + push** (`clipsync_test.go`). Three containers in the same `lan_discovery_group`. Assertions: each peer's `/api/clipsync/activity` shows the other two within 15s; pushing text on `a` propagates to `b` and `c`; a fourth container in a different group does not receive; a 50 MB payload transfers under the `maxClipboardPayload` cap.
+
+- **S4 — Gateway A↔O** (`gateway_test.go`). One `mesh` container (gateway on loopback) and one `stub-llm` container running a tiny Go HTTP server that canned-responds in both Anthropic and OpenAI formats. Assertions: non-streaming Anthropic → gateway → stub returns correctly translated structure; SSE streaming preserves event ordering, tool_use, and thinking handling; tool-call round trip with tool_result works; stub 529 translates to OpenAI 503; malformed upstream returns 500 with truncated body.
+
+**Churn suite (`e2e/churn/`, tag `e2e_churn`):**
+
+- 10,000 files, sizes 1 KB to 10 MB, realistic directory depth.
+- Rename storm: rename 30% of files in one burst, assert convergence within budget.
+- Concurrent edits on both peers under fsnotify pressure.
+- Budget: 2 minutes per test, 10 minutes total suite. Revisit if a test consistently approaches the cap.
+- Runs in `task e2e:full` and nightly only. **Not in `task check`.**
+
+**Compose playground (`e2e/compose/`):**
+
+- Single `docker-compose.yaml` wiring `client`, `bastion`, `server`, and `stub-llm` into one topology. All four features active simultaneously: bastion tunnel, filesync folder between client/server, clipsync group across all three, gateway on client pointing at stub.
+- Intended as a staging environment for manual experimentation and reproducing reported bugs. `README.md` documents how to drive each feature by hand.
+- Not invoked by automated tests.
+
+**Task integration:**
+
+```
+check:
+  1. gofmt -l
+  2. go vet ./...
+  3. staticcheck ./...
+  4. go mod tidy -diff
+  5. go test -race -count=1 ./...                    (unit — fast lane)
+  6. go build ./...
+  7. go test -race -count=1 -tags e2e ./e2e/...      (e2e — slow lane, gate)
+```
+
+- `task check` runs everything by default. Release cannot ship without all gates green.
+- `FAST=1 task check` skips step 7 for inner-loop iteration.
+- `task test` → step 5 only.
+- `task e2e` → step 7 only.
+- `task e2e:churn` → `-tags e2e_churn ./e2e/churn/...`.
+- `task e2e:full` → `e2e` + `e2e:churn`.
+- `task e2e:compose:up` / `task e2e:compose:down` → manual playground.
+
+**Dependencies:**
+
+- Adds `github.com/testcontainers/testcontainers-go` as a test-only dependency. Every file importing it carries `//go:build e2e` or `//go:build e2e_churn`, so `go build ./...` and the release binary never link it. It appears in `go.mod` because Go has no separate test-deps section, but it is not in the production binary.
+- Requires Docker on any machine running the e2e lane of `task check`. Documented as a prerequisite.
+
+**Commit boundaries:**
+
+1. Add `testcontainers-go` dep (under `//go:build e2e`), empty `e2e/` package skeleton.
+2. `Dockerfile.test`, `fake-xclip`, `task build:linux`, `task build:e2e-image` with content-hash rebuild.
+3. Harness primitives: `network.go`, `node.go`, `artifacts.go`, `fixtures.go`.
+4. S1 SSH bastion tunnel scenario.
+5. S2 Filesync two-peer scenario.
+6. S3 Clipsync discovery + push scenario (drives the fake xclip).
+7. S4 Gateway scenario + `stub-llm` container image.
+8. Churn suite (`e2e/churn/filesync_churn_test.go`).
+9. Compose playground (`e2e/compose/` + `README.md`).
+10. Wire into `task check` with `FAST=1` escape hatch, update `CLAUDE.md` with the new layout and conventions.
+
+**Key decisions (locked):**
+
+- Fake `xclip` over debug endpoint — keeps production code clean, no test-only surface in prod binaries.
+- Baked-in binary over volume mount — determinism over rebuild speed.
+- `task check` runs everything by default; `FAST=1` is the opt-out, not the other way around.
+- Compose is full-topology playground, not scenario-mirror.
+- testcontainers-go is acceptable as a build-tagged test dependency.
+
+**Risks:**
+
+- Docker is now a hard prerequisite for `task check`. A machine without Docker must use `FAST=1`.
+- `wl-copy` branch of `clipboard_linux.go` is not covered by e2e; rely on a unit test for flag formatting.
+- Container image rebuild time adds to the first `task check` run after a mesh source change (~20s). Subsequent runs reuse the cached image.
+- Per-test bridge network + always-on tcpdump adds CI cost; mitigated by per-test cleanup.
+
+**Effort:** L — harness + four scenarios + churn suite + compose topology is multi-week work. Each scenario is its own commit with its own tests and fixtures.
+
 ---
 
 ## Tier 4 — Features
@@ -255,12 +387,12 @@ Goal: dynamically watch frequently-changing paths with fsnotify, poll the rest. 
 
 | ID   | Component | Item                         | Notes |
 |------|-----------|------------------------------|-------|
-| F3   | cli       | SSH client subcommands       | Ad-hoc `mesh ssh user@host`. Needs terminal raw mode, SIGWINCH. |
-| F4   | sshd      | User switching               | `setuid`/`setgid` (Unix), `CreateProcessAsUser` (Windows). Root required. |
-| F1   | core      | Config hot-reload            | File watcher, config diff, per-component context cancellation. |
-| F11  | sshd      | X11 forwarding               | Xauth, Unix socket, channel multiplex. Low demand. |
-| R6   | release   | Homebrew formula             | |
-| R7   | release   | Dockerfile                   | Multi-stage build, scratch runtime. |
+| [F3](#f3-ssh-client-subcommands) | cli | SSH client subcommands | Ad-hoc `mesh ssh user@host`. Needs terminal raw mode, SIGWINCH. |
+| [F4](#f4-user-switching-setuidsetgid) | sshd | User switching | `setuid`/`setgid` (Unix), `CreateProcessAsUser` (Windows). Root required. |
+| [F1](#f1-config-hot-reload) | core | Config hot-reload | File watcher, config diff, per-component context cancellation. |
+| [F11](#f11-x11-forwarding) | sshd | X11 forwarding | Xauth, Unix socket, channel multiplex. Low demand. |
+| [R6](#r6-homebrew-formula) | release | Homebrew formula | |
+| [R7](#r7-dockerfile) | release | Dockerfile | Multi-stage build, scratch runtime. |
 
 ### F3: SSH client subcommands
 
