@@ -1,0 +1,11 @@
+bastion:
+  log_level: info
+  admin_addr: "127.0.0.1:7777"
+  listeners:
+    - type: sshd
+      bind: "0.0.0.0:22"
+      host_key: /root/.mesh/keys/host_key
+      authorized_keys: /root/.mesh/keys/authorized_keys
+      shell: [sh]
+      options:
+        PermitOpen: "server:22"

@@ -1,0 +1,17 @@
+client:
+  log_level: info
+  admin_addr: "127.0.0.1:7777"
+  connections:
+    - name: bastion
+      targets: ["root@bastion:22"]
+      retry: "2s"
+      auth:
+        key: /root/.mesh/keys/client_key
+      options:
+        StrictHostKeyChecking: "no"
+      forwards:
+        - name: ssh-to-server
+          local:
+            - type: forward
+              bind: "0.0.0.0:2222"
+              target: "server:22"

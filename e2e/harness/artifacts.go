@@ -7,17 +7,25 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
 
 // ArtifactDir is the directory where Dump writes failure artefacts. It is
-// overridable via MESH_E2E_ARTIFACTS; the default is ./e2e/build/artifacts.
+// overridable via MESH_E2E_ARTIFACTS. The default resolves to
+// <repo>/e2e/build/artifacts via runtime.Caller so the location is stable
+// regardless of which package the scenario test runs from.
 func ArtifactDir() string {
 	if v := os.Getenv("MESH_E2E_ARTIFACTS"); v != "" {
 		return v
 	}
-	return filepath.Join("build", "artifacts")
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		return filepath.Join("build", "artifacts")
+	}
+	// artifacts.go lives at <repo>/e2e/harness/artifacts.go.
+	return filepath.Join(filepath.Dir(file), "..", "build", "artifacts")
 }
 
 // Dump writes diagnostic artefacts for a single node into a per-test
