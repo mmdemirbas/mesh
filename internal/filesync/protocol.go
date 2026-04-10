@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -731,25 +732,45 @@ func downloadFromPeer(ctx context.Context, client *http.Client, peerAddr, folder
 }
 
 // peerMatchesAddr checks if a configured peer address matches a request IP.
+// Both sides are parsed with net.ParseIP and compared via net.IP.Equal so that
+// differently formatted but numerically identical IPv6 addresses (e.g.
+// "2001:db8::1" vs. "2001:db8:0:0:0:0:0:1") match correctly. When either side
+// does not parse as an IP (hostname, literal mismatch), falls back to a case-
+// insensitive string compare so the existing hostname path keeps working until
+// B8 introduces real DNS resolution.
 func peerMatchesAddr(peerAddr, requestIP string) bool {
 	host, _, err := net.SplitHostPort(peerAddr)
 	if err != nil {
 		host = peerAddr
 	}
-	// Normalize localhost variants.
-	if host == "localhost" {
-		host = "127.0.0.1"
+	host = canonicalizeLocalhost(host)
+	req := canonicalizeLocalhost(requestIP)
+	if peerIPsEqual(host, req) {
+		return true
 	}
-	reqHost := requestIP
-	if reqHost == "localhost" {
-		reqHost = "127.0.0.1"
+	return strings.EqualFold(host, req)
+}
+
+// canonicalizeLocalhost rewrites the literal "localhost" to 127.0.0.1 so the
+// downstream IP comparison treats it consistently regardless of /etc/hosts.
+func canonicalizeLocalhost(s string) string {
+	if strings.EqualFold(s, "localhost") {
+		return "127.0.0.1"
 	}
-	// Handle IPv6 loopback.
-	if host == "::1" {
-		host = "127.0.0.1"
+	return s
+}
+
+// peerIPsEqual parses both sides as IPs and returns true when they are the
+// same address. Loopback is canonicalized so 127.0.0.1, ::1, and ::ffff:127.0.0.1
+// all compare equal.
+func peerIPsEqual(a, b string) bool {
+	ipA := net.ParseIP(a)
+	ipB := net.ParseIP(b)
+	if ipA == nil || ipB == nil {
+		return false
 	}
-	if reqHost == "::1" {
-		reqHost = "127.0.0.1"
+	if ipA.IsLoopback() && ipB.IsLoopback() {
+		return true
 	}
-	return host == reqHost
+	return ipA.Equal(ipB)
 }
