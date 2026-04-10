@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -867,6 +868,9 @@ func (n *Node) setWrittenHash(h, origin string) {
 
 // parseByteSize parses a human-readable byte size string like "50MB", "100MB", "1GB".
 // Supports suffixes: B, KB, MB, GB (case-insensitive). No suffix means bytes.
+// Returns an error if the resulting byte count overflows int64 — otherwise a
+// config value like "9000000000GB" silently wraps to a negative or tiny number
+// and the receiver's body limits become nonsense.
 func parseByteSize(s string) (int64, error) {
 	s = strings.TrimSpace(s)
 	s = strings.ToUpper(s)
@@ -891,6 +895,9 @@ func parseByteSize(s string) (int64, error) {
 	}
 	if n <= 0 {
 		return 0, fmt.Errorf("byte size must be positive")
+	}
+	if n > math.MaxInt64/multiplier {
+		return 0, fmt.Errorf("byte size overflows int64")
 	}
 	return n * multiplier, nil
 }

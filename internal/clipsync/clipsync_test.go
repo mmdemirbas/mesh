@@ -1565,8 +1565,8 @@ func TestParseByteSize(t *testing.T) {
 		// wrap to nonsense numbers (negative or a small positive) rather than
 		// being rejected at config load. The fix returns an error for anything
 		// whose byte count does not fit in int64.
-		{"9000000000GB", 0, true},  // 9e9 GB → 9.66e18 (> 9.22e18 int64 max) wraps
-		{"20000000000MB", 0, true}, // 2e10 MB → 2.1e19 wraps
+		{"9000000000GB", 0, true},    // 9e9 GB → 9.66e18 (> 9.22e18 int64 max) wraps
+		{"9000000000000MB", 0, true}, // 9e12 MB → 9.44e18 wraps
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
