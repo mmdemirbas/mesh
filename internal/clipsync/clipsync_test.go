@@ -342,6 +342,38 @@ func TestCanReceiveFrom(t *testing.T) {
 	}
 }
 
+// TestCanReceiveFrom_IPv6Canonical pins an H1 finding: canReceiveFrom compared
+// peer host strings literally, so the same IPv6 address in two canonical forms
+// (short vs. expanded, lowercase vs. uppercase hex) did not match and the
+// request was silently rejected. Same bug class as B7 for filesync.
+func TestCanReceiveFrom_IPv6Canonical(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		staticPeer string
+		remoteAddr string
+	}{
+		{"short peer vs expanded request", "[2001:db8::1]:7755", "[2001:db8:0:0:0:0:0:1]:7755"},
+		{"uppercase vs lowercase hex", "[2001:db8::abcd]:7755", "[2001:DB8::ABCD]:7755"},
+		{"dynamic peer expanded form", "", "[2001:db8::2]:7755"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			n := &Node{peers: make(map[string]time.Time)}
+			if tt.staticPeer != "" {
+				n.config = config.ClipsyncCfg{StaticPeers: []string{tt.staticPeer}}
+			} else {
+				// dynamic peer seeded in expanded form; request arrives short.
+				n.peers["[2001:db8:0:0:0:0:0:2]:7755"] = time.Now()
+			}
+			if !n.canReceiveFrom(tt.remoteAddr) {
+				t.Fatalf("canReceiveFrom(%q) = false; the peer address is the same IP in a different canonical form, should match", tt.remoteAddr)
+			}
+		})
+	}
+}
+
 func TestGroupOverlaps(t *testing.T) {
 	t.Parallel()
 	n := &Node{config: config.ClipsyncCfg{LANDiscoveryGroup: []string{"alpha", "beta"}}}
