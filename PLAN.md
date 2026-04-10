@@ -299,19 +299,8 @@ For anything else — code reads, additional test cases, refactors that preserve
 
 | ID | Item | Failing test | Fix landed |
 |----|------|--------------|------------|
-| [B7](#b7-peermatchesaddr-ipv6-canonicalization)  | filesync peerMatchesAddr IPv6 canonicalization       | `TestPeerMatchesAddr_IPv6Canonical`            | — |
 | [B8](#b8-peermatchesaddr-hostname-resolution)    | filesync peerMatchesAddr hostname DNS resolution     | `TestPeerMatchesAddr_HostnameResolution`       | — |
 | [B9](#b9-loadformatsfromdir-per-format-cap)      | clipsync loadFormatsFromDir ignores MaxFileCopySize  | `TestLoadFormatsFromDir_PerFormatCapIgnoresConfig` | — |
-
-#### B7: peerMatchesAddr IPv6 canonicalization
-
-**Failing test:** `internal/filesync/filesync_test.go` `TestPeerMatchesAddr_IPv6Canonical`, three subtests.
-
-**Symptom:** `peerMatchesAddr` in `internal/filesync/protocol.go` does a literal string compare on the host portion. Two IPv6 addresses that are numerically identical but written in different canonical forms (`2001:db8::1` vs. `2001:db8:0:0:0:0:0:1`, short vs. long zero runs, lowercase vs. uppercase hex) fail to match and the incoming request is rejected with 403 `unknown peer`. Silent filesync failure on any IPv6-first network.
-
-**Fix approach:** Parse both sides with `net.ParseIP` and compare via `netip.Addr` (or `net.IP.Equal`). Fall back to string compare when either side does not parse (keeps the hostname case working). See also B8 — the fix should be designed alongside it so the function's overall shape is coherent.
-
-**Acceptance:** All three subtests pass. The existing `TestPeerMatchesAddr` table-driven cases still pass. No new allocations in the common IPv4 path (benchmark-adjacent, so eyeball).
 
 #### B8: peerMatchesAddr hostname resolution
 
