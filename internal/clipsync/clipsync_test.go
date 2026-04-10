@@ -925,6 +925,76 @@ func TestBroadcast_DoesNotEchoBackToOrigin(t *testing.T) {
 	}
 }
 
+// TestBroadcast_EchoSuppressionIPv6Canonical pins an H1 follow-on from the
+// canReceiveFrom fix: Broadcast's `addr == origin` echo-suppression check was
+// also a literal string compare, so a payload received from [2001:db8::1]:7755
+// would be echoed back to a static peer configured as [2001:DB8::1]:7755,
+// producing potential loops with any peer that used a non-canonical form.
+func TestBroadcast_EchoSuppressionIPv6Canonical(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	n := &Node{
+		ctx: context.Background(),
+		config: config.ClipsyncCfg{
+			StaticPeers: []string{"[2001:DB8::1]:7755"}, // mixed case
+		},
+		peers:      make(map[string]time.Time),
+		peerHashes: make(map[string]string),
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls.Add(1)
+				return &http.Response{
+					StatusCode: 200,
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+					Header:     make(http.Header),
+				}, nil
+			}),
+			Timeout: 2 * time.Second,
+		},
+		notifyCh: make(chan struct{}, 1),
+	}
+	// Seed a dynamic peer in short/lowercase form.
+	n.peers["[2001:db8::2]:7755"] = time.Now()
+
+	// Receive (setWrittenHash marks both peers as origin in different canonical forms).
+	n.stateMu.Lock()
+	n.originAddr = "[2001:db8::1]:7755" // canonical short lowercase; static is mixed case
+	n.stateMu.Unlock()
+	n.Broadcast(&pb.SyncPayload{Formats: []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("static")}}})
+
+	// Wait briefly for any launched goroutine to finish.
+	for i := 0; i < 20 && calls.Load() < 1; i++ {
+		time.Sleep(25 * time.Millisecond)
+	}
+	// The dynamic peer [2001:db8::2]:7755 is not the origin and should still receive.
+	// The static peer [2001:DB8::1]:7755 IS the origin in a different canonical form
+	// and must be suppressed. Expect exactly 1 call (dynamic peer only).
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("Broadcast made %d HTTP calls, want 1 (dynamic peer only; static echo must be suppressed)", got)
+	}
+
+	// Second phase: origin matches the dynamic peer in a different canonical form.
+	calls.Store(0)
+	n.stateMu.Lock()
+	n.originAddr = "[2001:db8:0:0:0:0:0:2]:7755" // expanded form of the dynamic peer
+	n.stateMu.Unlock()
+	n.Broadcast(&pb.SyncPayload{Formats: []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("dynamic")}}})
+	for i := 0; i < 20 && calls.Load() < 1; i++ {
+		time.Sleep(25 * time.Millisecond)
+	}
+	// Now the static peer (mixed-case IPv6) should receive; the dynamic peer
+	// (expanded form origin) must be suppressed. Expect exactly 1 call.
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("Broadcast made %d HTTP calls on phase 2, want 1 (static peer only; dynamic echo must be suppressed)", got)
+	}
+}
+
+// roundTripFunc is a tiny http.RoundTripper adapter for tests that need to
+// observe outgoing requests without binding a real server.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 func TestGenerateID(t *testing.T) {
 	t.Parallel()
 	id1 := generateID()
