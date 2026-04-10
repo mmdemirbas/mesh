@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -842,6 +843,9 @@ func ParseBandwidth(s string) (int64, error) {
 	}
 	if n <= 0 {
 		return 0, fmt.Errorf("bandwidth must be positive")
+	}
+	if n > math.MaxInt64/multiplier {
+		return 0, fmt.Errorf("bandwidth overflows int64")
 	}
 	return n * multiplier, nil
 }
