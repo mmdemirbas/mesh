@@ -134,7 +134,7 @@ Goal: dynamically watch frequently-changing paths with fsnotify, poll the rest. 
 | Listeners + active reverse tunnels | KEEP | Core network topology. |
 | Connections (targets + forwards) | KEEP | Essential "what's connected to where" view. |
 | Unmapped dynamic ports | REMOVE | Debug-only noise → web UI diagnostics. |
-| Per-row metrics | SIMPLIFY | tx/rx only on "producer" rows (listeners, active forwards). |
+| Per-row metrics | SIMPLIFIED | tx/rx shown only on producer rows (listeners and individual forwards). Connection-name, forward-set, and dynamic sub-rows are clean. Bytes still roll up into the sshd listener row and the grand total. |
 | Log tail | REMOVED | Caused layout shifts and flicker as new lines arrived. Full log stays in the admin UI and on disk. |
 
 ### Cross-Platform

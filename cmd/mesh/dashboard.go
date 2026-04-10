@@ -735,7 +735,9 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 					if comp.PeerAddr != "" {
 						annotation = formatPeerIdentity(comp.PeerAddr)
 					}
-					addRow("   ", "~", colorAddr(parts[0]), arrowRight, colorAddr(cleanIPv6(comp.Message)), "", annotation, readMetrics(metricsMap["dynamic:"+comp.ID]))
+					// Dynamic sub-rows show identity only — bytes are rolled up into
+					// the parent sshd listener row, so per-row metrics would duplicate them.
+					addRow("   ", "~", colorAddr(parts[0]), arrowRight, colorAddr(cleanIPv6(comp.Message)), "", annotation, metricsSnapshot{})
 				}
 			}
 		}
@@ -744,19 +746,9 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 
 	if len(cfg.Connections) > 0 {
 		for _, c := range cfg.Connections {
-			// Pre-compute connection-level aggregate metrics
-			var connAgg metricsSnapshot
-			for _, fset := range c.Forwards {
-				for _, fwd := range fset.Local {
-					compID := c.Name + " [" + fset.Name + "] " + fwd.Bind
-					connAgg.add(readMetrics(metricsMap["forward:"+compID]))
-				}
-				for _, fwd := range fset.Remote {
-					compID := c.Name + " [" + fset.Name + "] " + fwd.Bind
-					connAgg.add(readMetrics(metricsMap["forward:"+compID]))
-				}
-			}
-			addRow("", "", sectionTitle(c.Name), "", "", "", "", connAgg)
+			// Connection name is a grouping header; metrics live on the
+			// individual forward rows below.
+			addRow("", "", sectionTitle(c.Name), "", "", "", "", metricsSnapshot{})
 
 			type targetInfo struct {
 				status   state.Status
@@ -794,17 +786,9 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			for _, fset := range c.Forwards {
 				id := c.Name + " [" + fset.Name + "]"
 				indicator, st, comp := getComponentInfo("connection", id)
-				// Aggregate forward-set metrics from child forwards
-				var fsetAgg metricsSnapshot
-				for _, fwd := range fset.Local {
-					compID := c.Name + " [" + fset.Name + "] " + fwd.Bind
-					fsetAgg.add(readMetrics(metricsMap["forward:"+compID]))
-				}
-				for _, fwd := range fset.Remote {
-					compID := c.Name + " [" + fset.Name + "] " + fwd.Bind
-					fsetAgg.add(readMetrics(metricsMap["forward:"+compID]))
-				}
-				addRow("", indicator, sectionTitle(fset.Name), "", "", st, "", fsetAgg)
+				// Forward-set name is a grouping header; metrics live on the
+				// individual forward rows below.
+				addRow("", indicator, sectionTitle(fset.Name), "", "", st, "", metricsSnapshot{})
 
 				// Always show a target line under each forward set
 				{

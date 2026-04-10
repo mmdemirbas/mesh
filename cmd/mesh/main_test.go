@@ -872,9 +872,12 @@ func TestRenderStatus_SshdAggregatesDynamicMetrics(t *testing.T) {
 	}
 }
 
-// TestRenderStatus_DynamicMetricsShownIndividually verifies each dynamic reverse
-// forward row shows its own metrics, not the aggregated parent total.
-func TestRenderStatus_DynamicMetricsShownIndividually(t *testing.T) {
+// TestRenderStatus_DynamicPortRowsHaveNoMetrics verifies that dynamic reverse
+// forward sub-rows under an sshd listener do not show per-row metrics. Their
+// bytes roll up into the parent sshd listener row, so showing them again on
+// each sub-row would duplicate the numbers and add noise. The sshd aggregation
+// itself is covered by TestRenderStatus_SshdAggregatesDynamicMetrics.
+func TestRenderStatus_DynamicPortRowsHaveNoMetrics(t *testing.T) {
 	cfg := &config.Config{
 		Listeners: []config.Listener{
 			{Type: "sshd", Bind: "0.0.0.0:2222"},
@@ -929,20 +932,18 @@ func TestRenderStatus_DynamicMetricsShownIndividually(t *testing.T) {
 		t.Fatal("dynamic 18384 line not found")
 	}
 
-	// Dynamic forward 1 should show its own metrics: ↑9K ↓6.0M 1↔
-	if !strings.Contains(dyn11111Line, "9K") {
-		t.Errorf("dynamic 11111 should show ↑9K, got: %s", dyn11111Line)
-	}
-	if !strings.Contains(dyn11111Line, "6.0M") {
-		t.Errorf("dynamic 11111 should show ↓6.0M, got: %s", dyn11111Line)
-	}
-	if !strings.Contains(dyn11111Line, "1↔") {
-		t.Errorf("dynamic 11111 should show 1↔, got: %s", dyn11111Line)
-	}
-
-	// Dynamic forward 2 should show its own (zero) metrics — just uptime, no byte counters
-	if strings.Contains(dyn18384Line, "↑") && !strings.Contains(dyn18384Line, "↑0") {
-		t.Errorf("dynamic 18384 should show ↑0, got: %s", dyn18384Line)
+	// Neither dynamic sub-row should carry per-row metrics markers (↑/↓/↔).
+	for _, tc := range []struct {
+		name, line string
+	}{
+		{"dyn11111", dyn11111Line},
+		{"dyn18384", dyn18384Line},
+	} {
+		for _, marker := range []string{"↑", "↓", "↔"} {
+			if strings.Contains(tc.line, marker) {
+				t.Errorf("%s sub-row should not contain %q, got: %s", tc.name, marker, tc.line)
+			}
+		}
 	}
 }
 
@@ -1062,10 +1063,13 @@ func TestRenderStatus_GrandTotalNoDoubleCounting(t *testing.T) {
 	}
 }
 
-// TestRenderStatus_ConnectionVsSshdAggregation verifies that connection-level
-// and sshd-level aggregation follow the same pattern: parent row shows sum of
-// child metrics.
-func TestRenderStatus_ConnectionVsSshdAggregation(t *testing.T) {
+// TestRenderStatus_OnlyProducerRowsShowMetrics pins the contract that per-row
+// metrics (↑/↓/↔) are rendered only on rows that directly produce traffic —
+// listeners (including sshd, which rolls up its dynamic reverse forwards) and
+// individual forward rows. Grouping headers (connection name, forward-set
+// name) and dynamic sub-rows must stay clean so that bytes are not duplicated
+// on the dashboard.
+func TestRenderStatus_OnlyProducerRowsShowMetrics(t *testing.T) {
 	cfg := &config.Config{
 		Listeners: []config.Listener{
 			{Type: "sshd", Bind: "0.0.0.0:2222"},
@@ -1098,21 +1102,21 @@ func TestRenderStatus_ConnectionVsSshdAggregation(t *testing.T) {
 		},
 	}
 
-	// Dynamic forward: 5K tx, 10K rx
+	// Dynamic reverse forward under sshd: 5K tx, 10K rx, 1 stream.
 	dynM := &state.Metrics{}
 	dynM.StartTime.Store(time.Now().Add(-20 * time.Minute).UnixNano())
 	dynM.BytesTx.Store(5120)
 	dynM.BytesRx.Store(10240)
 	dynM.Streams.Store(1)
 
-	// Connection forward 1: 3K tx, 7K rx
+	// Local forward 8080: 3K tx, 7K rx, 2 streams.
 	fwd1M := &state.Metrics{}
 	fwd1M.StartTime.Store(time.Now().Add(-20 * time.Minute).UnixNano())
 	fwd1M.BytesTx.Store(3072)
 	fwd1M.BytesRx.Store(7168)
 	fwd1M.Streams.Store(2)
 
-	// Connection forward 2: 2K tx, 3K rx
+	// Local forward 8081: 2K tx, 3K rx, 1 stream.
 	fwd2M := &state.Metrics{}
 	fwd2M.StartTime.Store(time.Now().Add(-20 * time.Minute).UnixNano())
 	fwd2M.BytesTx.Store(2048)
@@ -1128,43 +1132,72 @@ func TestRenderStatus_ConnectionVsSshdAggregation(t *testing.T) {
 	rawOutput, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
 	lines := extractLines(rawOutput)
 
-	// Find sshd and connection lines
-	var sshdLine, connLine string
+	var (
+		sshdLine     string
+		dynLine      string
+		connNameLine string
+		fsetNameLine string
+		fwd8080Line  string
+		fwd8081Line  string
+	)
 	for _, line := range lines {
-		if strings.Contains(line, "sshd") {
+		switch {
+		case strings.Contains(line, "sshd"):
 			sshdLine = line
-		}
-		if strings.Contains(line, "tunnel") && !strings.Contains(line, "fwd") && !strings.Contains(line, "10.0.0.1") {
-			connLine = line
+		case strings.Contains(line, "11111") && strings.Contains(line, "~"):
+			dynLine = line
+		case strings.Contains(line, "tunnel") && !strings.Contains(line, "fwd") && !strings.Contains(line, "10.0.0.1"):
+			connNameLine = line
+		case strings.Contains(line, "fwd") && !strings.Contains(line, "127.0.0.1") && !strings.Contains(line, "10.0.0.1"):
+			fsetNameLine = line
+		case strings.Contains(line, "127.0.0.1:8080"):
+			fwd8080Line = line
+		case strings.Contains(line, "127.0.0.1:8081"):
+			fwd8081Line = line
 		}
 	}
 
-	// sshd should aggregate: ↑5K ↓10K 1↔
-	if sshdLine == "" {
-		t.Fatal("sshd line not found")
+	// Producer rows must carry metrics. formatBytes uses %.0fK for KiB, so
+	// 3072 → "3K", 10240 → "10K".
+	producers := []struct {
+		name, line string
+		wantTx     string
+		wantRx     string
+		wantStream string
+	}{
+		// sshd listener aggregates the dynamic reverse forward under it.
+		{"sshd listener", sshdLine, "↑5K", "↓10K", "1↔"},
+		{"forward 8080", fwd8080Line, "↑3K", "↓7K", "2↔"},
+		{"forward 8081", fwd8081Line, "↑2K", "↓3K", "1↔"},
 	}
-	if !strings.Contains(sshdLine, "5K") {
-		t.Errorf("sshd should show ↑5K from dynamic, got: %s", sshdLine)
-	}
-	if !strings.Contains(sshdLine, "10K") {
-		t.Errorf("sshd should show ↓10K from dynamic, got: %s", sshdLine)
-	}
-	if !strings.Contains(sshdLine, "1↔") {
-		t.Errorf("sshd should show 1↔ from dynamic, got: %s", sshdLine)
+	for _, p := range producers {
+		if p.line == "" {
+			t.Fatalf("%s line not found in output", p.name)
+		}
+		for _, want := range []string{p.wantTx, p.wantRx, p.wantStream} {
+			if !strings.Contains(p.line, want) {
+				t.Errorf("%s should contain %q, got: %s", p.name, want, p.line)
+			}
+		}
 	}
 
-	// Connection should aggregate: tx = 3072 + 2048 = 5120 → ↑5K, rx = 7168 + 3072 = 10240 → ↑10K
-	if connLine == "" {
-		t.Fatal("connection line not found")
+	// Non-producer (grouping / rolled-up) rows must NOT carry per-row metrics.
+	nonProducers := []struct {
+		name, line string
+	}{
+		{"connection name", connNameLine},
+		{"forward-set name", fsetNameLine},
+		{"dynamic sub-row", dynLine},
 	}
-	if !strings.Contains(connLine, "5K") {
-		t.Errorf("connection should show aggregated ↑5K, got: %s", connLine)
-	}
-	if !strings.Contains(connLine, "10K") {
-		t.Errorf("connection should show aggregated ↓10K, got: %s", connLine)
-	}
-	if !strings.Contains(connLine, "3↔") {
-		t.Errorf("connection should show aggregated 3↔, got: %s", connLine)
+	for _, np := range nonProducers {
+		if np.line == "" {
+			t.Fatalf("%s line not found in output", np.name)
+		}
+		for _, marker := range []string{"↑", "↓", "↔"} {
+			if strings.Contains(np.line, marker) {
+				t.Errorf("%s should not contain %q, got: %s", np.name, marker, np.line)
+			}
+		}
 	}
 }
 
@@ -1531,16 +1564,22 @@ func TestAlignment_MixedDirectionMetrics(t *testing.T) {
 	output, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
 	lines := extractLines(output)
 
-	// Both forward lines (──▶ and ◀──) should have ↑ at the same column
-	wantCol := 55
+	// Both forward lines (──▶ and ◀──) should have ↑ at the same column.
+	var upCols []int
 	for _, line := range lines {
 		if !strings.Contains(line, "──▶") && !strings.Contains(line, "◀──") {
 			continue
 		}
 		col := findColumn(line, "↑")
-		if col >= 0 && col != wantCol {
-			t.Errorf("↑ at col %d, want %d in: %s", col, wantCol, line)
+		if col >= 0 {
+			upCols = append(upCols, col)
 		}
+	}
+	if len(upCols) < 2 {
+		t.Fatalf("expected 2 forward lines with ↑, got %d", len(upCols))
+	}
+	if upCols[0] != upCols[1] {
+		t.Errorf("↑ columns not aligned across directions: %d vs %d", upCols[0], upCols[1])
 	}
 }
 
