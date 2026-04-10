@@ -363,7 +363,7 @@ func (n *Node) Broadcast(payload *pb.SyncPayload) {
 	// Send to Dynamic UDP Peers
 	n.peersMu.RLock()
 	for addr := range n.peers {
-		if addr == origin {
+		if isEchoOrigin(addr, origin) {
 			continue // don't echo back to the peer we received from
 		}
 		if n.canSendTo(addr, true) {
@@ -375,7 +375,7 @@ func (n *Node) Broadcast(payload *pb.SyncPayload) {
 
 	// Send to Static Peers (SSH Tunnels or explicit IP)
 	for _, addr := range n.config.StaticPeers {
-		if addr == origin {
+		if isEchoOrigin(addr, origin) {
 			continue // don't echo back to the peer we received from
 		}
 		if n.canSendTo(addr, false) {
@@ -383,6 +383,24 @@ func (n *Node) Broadcast(payload *pb.SyncPayload) {
 			go n.postHTTP(addr, data)
 		}
 	}
+}
+
+// isEchoOrigin reports whether addr refers to the same peer as origin,
+// taking IPv6 canonical forms into account. A literal string compare here
+// would miss short vs. expanded zero runs and mixed-case hex, letting a
+// mis-configured static peer loop payloads back to its sender.
+func isEchoOrigin(addr, origin string) bool {
+	if origin == "" {
+		return false
+	}
+	if addr == origin {
+		return true
+	}
+	originHost, _, err := net.SplitHostPort(origin)
+	if err != nil {
+		originHost = origin
+	}
+	return peerHostEqual(addr, originHost)
 }
 
 func (n *Node) postHTTP(addr string, data []byte) {
