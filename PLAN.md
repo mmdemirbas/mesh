@@ -325,7 +325,6 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 
 | ID   | Area                                                     | Skill § | Lens        |
 |------|----------------------------------------------------------|---------|-------------|
-| [H5](#h5-timer-and-ticker-audit)                         | `time.NewTimer` / `NewTicker` without `Stop`            | IV.3    | Grep        |
 | [H6](#h6-signal-handler-audit)                           | `signal.Notify` without matching `signal.Stop`          | IV.4    | Grep        |
 | [H20](#h20-context-propagation-audit)                    | `ctx` accepted but not forwarded to inner IO calls       | IV.5    | Grep + read |
 | [H21](#h21-channel-send-close-correctness-audit)         | Send to closed channel, double close, nil channel       | IV.6    | Read + race |
@@ -387,22 +386,6 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 |------|----------------------------------------------------------|---------|-------------|
 | [H33](#h33-clock-monotonic-audit)                        | Wall-clock used where monotonic is required              | XII.1   | Grep        |
 | [H34](#h34-environment-variable-audit)                   | Missing env vars silently becoming empty defaults        | XII.2   | Grep        |
-
-#### H5: Timer and ticker audit
-
-**Goal.** CLAUDE.md says "Don't use `time.After` in select with `ctx.Done()`" and "use `time.NewTimer` with explicit `Stop()`". Audit.
-
-**Methodology.**
-
-1. `Grep -nI 'time\.After\|time\.NewTimer\|time\.NewTicker' internal/ cmd/`.
-2. For `time.After`: any hit inside a select that also has `ctx.Done()` is a leak on cancellation (the timer's goroutine sticks around until the deadline). Replace with `time.NewTimer` + `Stop` in the ctx branch.
-3. For `time.NewTimer` / `NewTicker`: every creation must have a matching `Stop` on every exit path.
-
-**Test pattern.** `runtime.NumGoroutine()` delta across a Start/cancel cycle, same as H4.
-
-**Fix pattern.** Standard `t := time.NewTimer(d); defer t.Stop()` + select on `t.C` and `ctx.Done`.
-
-**Acceptance.** Zero `time.After` hits in hot paths. Every `NewTimer` / `NewTicker` has an explicit Stop.
 
 #### H6: Signal handler audit
 
