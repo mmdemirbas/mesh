@@ -307,8 +307,6 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 
 | ID   | Area                                                     | Skill § | Lens        |
 |------|----------------------------------------------------------|---------|-------------|
-| [H7](#h7-path-traversal-audit)                           | File paths derived from peer / user input                | I.2     | Grep + read |
-| [H8](#h8-integer-overflow-audit)                         | Size arithmetic near int64 bounds                        | I.3     | Read        |
 | [H10](#h10-unbounded-io-audit)                           | Network-derived reads without `io.LimitReader`           | I.4     | Grep        |
 | [H15](#h15-subprocess-and-command-injection-audit)       | Subprocess / command injection (password_command, exec) | I.5     | Read        |
 | [H16](#h16-redos-audit)                                  | Regex catastrophic backtracking on peer input            | I.8     | Read        |
@@ -325,7 +323,6 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 
 | ID   | Area                                                     | Skill § | Lens        |
 |------|----------------------------------------------------------|---------|-------------|
-| [H6](#h6-signal-handler-audit)                           | `signal.Notify` without matching `signal.Stop`          | IV.4    | Grep        |
 | [H20](#h20-context-propagation-audit)                    | `ctx` accepted but not forwarded to inner IO calls       | IV.5    | Grep + read |
 | [H21](#h21-channel-send-close-correctness-audit)         | Send to closed channel, double close, nil channel       | IV.6    | Read + race |
 | [H22](#h22-atomic-read-modify-write-audit)               | Shared counters / flags updated non-atomically           | IV.7    | Read + race |
@@ -386,56 +383,6 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 |------|----------------------------------------------------------|---------|-------------|
 | [H33](#h33-clock-monotonic-audit)                        | Wall-clock used where monotonic is required              | XII.1   | Grep        |
 | [H34](#h34-environment-variable-audit)                   | Missing env vars silently becoming empty defaults        | XII.2   | Grep        |
-
-#### H6: Signal handler audit
-
-**Goal.** CLAUDE.md: "Don't call `signal.Notify` without a matching `defer signal.Stop`". Audit.
-
-**Methodology.**
-
-1. `Grep -nI 'signal\.Notify' cmd/ internal/`.
-2. For each hit, confirm there is a `signal.Stop(ch)` on every exit path (including panic recovery). A missing `Stop` leaks the signal handler across the process's lifetime — benign in `main` but a real leak anywhere else.
-3. Write a test that calls the helper twice in a row and asserts no duplicate delivery.
-
-**Test pattern.** Call setup + teardown twice; send a signal; assert the handler count matches expectation.
-
-**Fix pattern.** `defer signal.Stop(ch)` adjacent to the `Notify` call.
-
-**Acceptance.** Every `signal.Notify` is paired.
-
-#### H7: Path traversal audit
-
-**Goal.** Filesync accepts file names from remote peers. SFTP serves files from a configured root. Clipsync file_copy accepts file names. All three are attack surfaces for `../../etc/passwd`-style escapes. Audit.
-
-**Methodology.**
-
-1. `Grep -nI 'filepath\.Join\|os\.Open\|os\.Create\|os\.WriteFile\|os\.MkdirAll' internal/filesync/ internal/clipsync/ internal/tunnel/`.
-2. For each hit, identify whether any component of the path came from peer input (request body, protobuf field, URL).
-3. If so, confirm the code calls `filepath.Clean` **and** checks that the result is still inside the configured root (prefix check against an absolute-cleaned root).
-4. Attack vectors to exercise in tests: `../escape`, `..\escape` (Windows), absolute paths (`/etc/passwd`), symlinks (create one in the sync dir pointing outside), long path names, names with NUL bytes.
-
-**Test pattern.** Send a peer payload with a malicious filename; assert the write is rejected or clamped inside the root.
-
-**Fix pattern.** Common helper: `func safeJoin(root, name string) (string, error)` that cleans, rejects absolute, rejects `..` segments, rejects anything whose cleaned absolute path does not begin with the cleaned absolute root.
-
-**Acceptance.** No peer-derived path flows into `os.*` or `filepath.Join` without passing through `safeJoin` or an equivalent.
-
-#### H8: Integer overflow audit
-
-**Goal.** File sizes, offsets, delta block counts, and buffer lengths are all `int64` or `int`. A malicious peer or a 10 PB folder could overflow if the arithmetic is careless.
-
-**Methodology.**
-
-1. `Grep -nI 'int64\|\.Size()\|len\(' internal/filesync/ internal/clipsync/ internal/gateway/`.
-2. Focus on: `a + b` where both are large, `a * n` where `n` is user-supplied, slice allocations with `make([]byte, n)` where `n` is peer-derived.
-3. Write fuzz tests that feed the parsers with values near `math.MaxInt64`.
-4. For each overflow, guard with `if a > math.MaxInt64 - b { return error }` or use `math/big` on the ingest side.
-
-**Test pattern.** Table-driven arithmetic test with boundary inputs.
-
-**Fix pattern.** Explicit overflow check before the arithmetic, or use a saturating helper.
-
-**Acceptance.** Every `int64` arithmetic op on peer input either checks bounds or is provably safe (e.g., bounded by a prior size cap).
 
 #### H9: Error handling audit
 
