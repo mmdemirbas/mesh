@@ -93,6 +93,15 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		// ReadTimeout caps the time a slow client can spend uploading the
+		// 32 MB request body — without it a slowloris-style client can hold
+		// a goroutine indefinitely after the headers complete.
+		ReadTimeout: 2 * time.Minute,
+		// WriteTimeout deliberately omitted: SSE streaming responses can run
+		// for the duration of the upstream LLM call (minutes for long
+		// generations) and the per-stream context cancels on client
+		// disconnect.
+		IdleTimeout: 60 * time.Second,
 	}
 
 	go func() {

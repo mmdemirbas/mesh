@@ -241,7 +241,15 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	srv := &server{node: n}
 	httpSrv := &http.Server{
 		ReadHeaderTimeout: 5 * time.Second,
-		Handler:           srv.handler(),
+		// ReadTimeout caps the time a slow client can take uploading an
+		// index page (capped at maxIndexPayload, 10 MB) or block-signature
+		// request — without it a slowloris peer holds a goroutine open
+		// after the headers complete. WriteTimeout is deliberately omitted
+		// so file downloads (capped at maxSyncFileSize, 4 GB) can stream
+		// over slow links without being killed mid-transfer.
+		ReadTimeout: 2 * time.Minute,
+		IdleTimeout: 60 * time.Second,
+		Handler:     srv.handler(),
 	}
 
 	ln, err := net.Listen("tcp", cfg.Bind)
