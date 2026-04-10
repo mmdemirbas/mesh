@@ -307,7 +307,6 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 
 | ID   | Area                                                     | Skill § | Lens        |
 |------|----------------------------------------------------------|---------|-------------|
-| [H10](#h10-unbounded-io-audit)                           | Network-derived reads without `io.LimitReader`           | I.4     | Grep        |
 | [H15](#h15-subprocess-and-command-injection-audit)       | Subprocess / command injection (password_command, exec) | I.5     | Read        |
 | [H16](#h16-redos-audit)                                  | Regex catastrophic backtracking on peer input            | I.8     | Read        |
 | [H17](#h17-log-injection-audit)                          | CRLF / ANSI / control chars in logged peer fields        | I.9     | Grep + read |
@@ -327,20 +326,17 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 | [H21](#h21-channel-send-close-correctness-audit)         | Send to closed channel, double close, nil channel       | IV.6    | Read + race |
 | [H22](#h22-atomic-read-modify-write-audit)               | Shared counters / flags updated non-atomically           | IV.7    | Read + race |
 | [H23](#h23-lock-ordering-audit)                          | Two locks acquired in different orders on different paths | IV.8  | Read        |
-| [H11](#h11-map-iteration-safety-audit)                   | Iteration over shared maps without mutex                 | IV.9    | Race + read |
 
 **Resource management**
 
 | ID   | Area                                                     | Skill § | Lens        |
 |------|----------------------------------------------------------|---------|-------------|
 | [H24](#h24-http-client-hygiene-audit)                    | HTTP clients missing timeouts / body close / pool caps   | V.3     | Grep + read |
-| [H12](#h12-http-server-hygiene-audit)                    | `http.Server` missing timeouts / size caps               | V.4     | Grep        |
 
 **Error handling**
 
 | ID   | Area                                                     | Skill § | Lens        |
 |------|----------------------------------------------------------|---------|-------------|
-| [H9](#h9-error-handling-audit)                           | Silent error swallowing (`_ = err`, empty catch)         | VI.1    | Grep + read |
 | [H25](#h25-error-wrapping-audit)                         | `fmt.Errorf` without `%w`; broken `errors.Is`/`As` chains | VI.2   | Grep + read |
 | [H26](#h26-retry-backoff-audit)                          | Retry loops without bounded backoff or attempt budget    | VI.3    | Read        |
 
@@ -362,13 +358,11 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 
 | ID   | Area                                                     | Skill § | Lens        |
 |------|----------------------------------------------------------|---------|-------------|
-| [H13](#h13-sse-parser-edge-cases)                        | Gateway SSE parser with split / malformed frames         | IX.1    | Fuzz        |
 
 **Data and serialization**
 
 | ID   | Area                                                     | Skill § | Lens        |
 |------|----------------------------------------------------------|---------|-------------|
-| [H14](#h14-config-parser-adversarial-inputs)             | YAML loader with adversarial inputs                      | X.1     | Fuzz        |
 
 **State and lifecycle**
 
@@ -383,103 +377,6 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 |------|----------------------------------------------------------|---------|-------------|
 | [H33](#h33-clock-monotonic-audit)                        | Wall-clock used where monotonic is required              | XII.1   | Grep        |
 | [H34](#h34-environment-variable-audit)                   | Missing env vars silently becoming empty defaults        | XII.2   | Grep        |
-
-#### H9: Error handling audit
-
-**Goal.** `_ = err` and empty catch blocks hide real failures. Find every swallowed error in non-cleanup paths.
-
-**Methodology.**
-
-1. `Grep -nI '_ = err\|_ = .*\.Close\(\)' internal/ cmd/`.
-2. `Grep -nI 'if err != nil {\s*}' internal/ cmd/` (ripgrep multiline).
-3. For each hit, judge whether the error is genuinely safe to ignore (cleanup path, already-reported error, best-effort) or whether a real failure could be lost.
-4. For borderline cases, log at `slog.Warn` with context rather than swallowing silently.
-
-**Test pattern.** Inject an error from a mock and assert it is either returned, logged, or has a documented reason for being ignored.
-
-**Fix pattern.** Wrap with `slog.Warn("context", "err", err)` or return.
-
-**Acceptance.** Every swallowed error has either a test asserting it is OK, or a one-line comment explaining why (a trailing `// cleanup: best-effort` style).
-
-#### H10: Unbounded io audit
-
-**Goal.** Any `io.ReadAll` / `io.Copy` / `json.NewDecoder(r).Decode` on network-derived input without an `io.LimitReader` is a DoS.
-
-**Methodology.**
-
-1. `Grep -nI 'io\.ReadAll\|io\.Copy\|json\.NewDecoder\|proto\.Unmarshal' internal/`.
-2. For each, trace the reader backwards. If it comes from `http.Request.Body`, `net.Conn`, or a protobuf field whose size is not pre-validated, the call is unbounded.
-3. Wrap with `io.LimitReader(r, cap)` or use `http.MaxBytesReader`. The caps should match existing package conventions (`maxRequestBodySize`, `maxUpstreamResponseSize`, etc.).
-
-**Test pattern.** Feed a 1 GB reader and assert the handler returns a 413 / appropriate error without OOMing.
-
-**Fix pattern.** `body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodySize))`.
-
-**Acceptance.** Zero unbounded reads on peer-derived streams.
-
-#### H11: Map iteration safety audit
-
-**Goal.** Iterating a shared map without the owning mutex is a race. Audit.
-
-**Methodology.**
-
-1. `Grep -nI 'for .* := range [a-zA-Z_][a-zA-Z0-9_]*$\|for .* := range .*\.[a-zA-Z_][a-zA-Z0-9_]*$' internal/`.
-2. For each, check whether the map is concurrently written elsewhere. `state.Global.Snapshot` is the correct pattern — copy under the lock, then iterate the copy.
-3. Build race tests by spawning a writer goroutine and an iterator goroutine, then run with `go test -race`.
-
-**Test pattern.** Start a writer + an iterator in goroutines; assert the `-race` detector stays quiet.
-
-**Fix pattern.** Snapshot under mutex, iterate the snapshot; or hold the read lock for the entire iteration.
-
-**Acceptance.** `go test -race -count=1 ./...` stays green after the hunt, and any finding is pinned by a new race test.
-
-#### H12: HTTP server hygiene audit
-
-**Goal.** Every `http.Server` in mesh should have `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`, `IdleTimeout`, and `MaxHeaderBytes`. Missing any of these is a slowloris / slow-header vector.
-
-**Methodology.**
-
-1. `Grep -nI '&http.Server{\|http\.Server{' internal/ cmd/`.
-2. For each, list which timeouts are set. Anything with only `ReadHeaderTimeout` is incomplete.
-3. The gateway package already has `ReadHeaderTimeout` on its client; audit whether the server side is as careful.
-
-**Test pattern.** Use a slow client that dribbles bytes over a long window; assert the server disconnects within the expected window.
-
-**Fix pattern.** Set all five fields explicitly with project-wide constants (introduce `netutil.DefaultHTTPTimeouts()` if duplication becomes annoying).
-
-**Acceptance.** Every `http.Server` has all five fields set.
-
-#### H13: SSE parser edge cases
-
-**Goal.** The gateway reads SSE from upstream and re-emits it. Parsers that assume frames arrive aligned on `\n\n` boundaries are fragile; malformed upstreams (missing terminator, embedded `\n` in data, giant fields) can crash or deadlock the parser.
-
-**Methodology.**
-
-1. Read the SSE parse path in `internal/gateway/a2o_stream.go` and `o2a_stream.go`.
-2. Write a fuzz target that feeds arbitrary byte sequences to the parser and asserts no panic and no unbounded memory growth.
-3. Write unit tests for specific edge cases: frame spans multiple reads, empty `data:` line, multi-line `data:` fields, `event:` without `data:`, huge single field.
-
-**Test pattern.** `FuzzSSEParser` target using `testing.F`; seeded with the stub-llm's canned streams.
-
-**Fix pattern.** Use a size cap on the internal buffer (already documented: 4 MB for SSE lines). Verify it is enforced on every read.
-
-**Acceptance.** Fuzz runs 10^6 inputs without panic or OOM. New unit tests pin each edge case.
-
-#### H14: Config parser adversarial inputs
-
-**Goal.** `internal/config` already has `fuzz_test.go`. Extend it with adversarial inputs that target the attack surface: YAML anchor bombs, deep nesting, duplicate keys, huge strings, unknown environment variables, `os.ExpandEnv` with `${...}` expressions that leak host env.
-
-**Methodology.**
-
-1. Read the existing fuzz target. Add seeds for: anchor-bomb YAML (alias chains), duplicate-key YAML (both accepted and rejected paths), `admin_addr` with IPv6 zone IDs, `env` vars set to `${PWD}`, `peers:` with self-reference.
-2. Run `go test -fuzz=FuzzConfigLoad -fuzztime 2m ./internal/config/...` periodically during the hunt.
-3. Every crash or non-clean failure becomes a failing test seeded from the fuzz corpus.
-
-**Test pattern.** Promote the fuzz crash input to a regression test; the fuzz target stays.
-
-**Fix pattern.** Validate shape at load time; reject malformed inputs with a clear error.
-
-**Acceptance.** 2 minutes of `go test -fuzz=FuzzConfigLoad` produces zero new crashes. Every prior crash is pinned by a regression test.
 
 #### H15: Subprocess and command injection audit
 
