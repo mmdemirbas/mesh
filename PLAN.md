@@ -325,7 +325,6 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 
 | ID   | Area                                                     | Skill § | Lens        |
 |------|----------------------------------------------------------|---------|-------------|
-| [H4](#h4-goroutine-leak-audit)                           | `go func(){...}()` with no context exit path            | IV.2    | Read + race |
 | [H5](#h5-timer-and-ticker-audit)                         | `time.NewTimer` / `NewTicker` without `Stop`            | IV.3    | Grep        |
 | [H6](#h6-signal-handler-audit)                           | `signal.Notify` without matching `signal.Stop`          | IV.4    | Grep        |
 | [H20](#h20-context-propagation-audit)                    | `ctx` accepted but not forwarded to inner IO calls       | IV.5    | Grep + read |
@@ -388,33 +387,6 @@ H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 co
 |------|----------------------------------------------------------|---------|-------------|
 | [H33](#h33-clock-monotonic-audit)                        | Wall-clock used where monotonic is required              | XII.1   | Grep        |
 | [H34](#h34-environment-variable-audit)                   | Missing env vars silently becoming empty defaults        | XII.2   | Grep        |
-
-#### H4: Goroutine leak audit
-
-**Goal.** Long-running daemons leak goroutines when one of the "go func(){}" statements has no context-tied termination path. Find any goroutine that does not exit cleanly on process shutdown.
-
-**Methodology.**
-
-1. `Grep -nI 'go func\b\|go [a-zA-Z_]*(' internal/ cmd/`.
-2. For each launch site, identify the goroutine's exit condition. Acceptable exits: `<-ctx.Done()` in a select, `for msg := range ch` where `ch` is closed by a controlled writer, `return` after finishing a bounded task.
-3. Unacceptable: infinite `for {}` with no exit, `time.Sleep` without context, blocking on a channel nothing closes.
-4. For each leak, write a test using `runtime.NumGoroutine()` to assert that `Start(ctx)` followed by `cancel()` + a short wait returns to baseline.
-
-**Test pattern.**
-
-```go
-base := runtime.NumGoroutine()
-ctx, cancel := context.WithCancel(context.Background())
-// start component
-cancel()
-// brief settle
-for i := 0; i < 10 && runtime.NumGoroutine() > base; i++ { time.Sleep(50 * time.Millisecond) }
-if runtime.NumGoroutine() > base+1 { t.Fatalf(...) }
-```
-
-**Fix pattern.** Add `select { case <-ctx.Done(): return; case x := <-ch: ... }` or wire `context.AfterFunc` to trigger a clean exit.
-
-**Acceptance.** Every `go func` in the main runtime has a documented exit path. Tests pin the cleanup for each Start/Stop pair.
 
 #### H5: Timer and ticker audit
 
