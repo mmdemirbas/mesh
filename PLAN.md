@@ -260,16 +260,44 @@ When `cacheableIP` returns `""`, skip both the cache write and any existing entr
 
 **Revised effort:** S — ~70 lines of cache + `cacheableIP` + integration, ~80 lines of tests. No new dependencies. No config changes. All changes in `internal/tunnel`.
 
-**Final plan summary:**
+**Final plan summary (revised — DNS-first, cache-as-fallback):**
 
-Add a package-level DNS result cache to `internal/tunnel` that stores hostname→IP mappings from successful TCP connections. On reconnect, the cached IP is dialed directly (zero DNS), turning multi-second mDNS delays into sub-millisecond TCP handshakes.
+The original design used cache-first (skip DNS entirely). After adversarial review and production log analysis, the design is changed to **DNS-first with cache as fallback**.
+
+*Revised problem statement:* The real outage is not a 6s per-probe DNS delay — it is minutes-long total loss of connectivity. Production logs show a repeating 30s dead cycle: mDNS fails (~5s) → fallback target resolves but SSH handshake times out (15s) → retry delay (10s) → repeat. The cache breaks this cycle by providing a known-good IP when DNS fails.
+
+*Revised strategy:* DNS always goes first. The cache is tried only after DNS (and the mDNS retry for `.local`) both fail. This is simpler, more secure (never dials an IP that DNS didn't endorse except when DNS is unavailable), and still provides the main benefit: restoring connectivity during prolonged mDNS outages.
+
+*Impact of the change on findings:* F1 is eliminated — the retry path always uses the hostname because the cache is never tried before DNS. R1 (separate `dialAddr` for first dial) is no longer needed. F2, F3, F4, F5 still apply. R2, R3, R4 still apply.
 
 New code:
 
 - `dnsCache` type: `sync.RWMutex`-protected `map[string]dnsCacheEntry` with `get(host) (ip string, ok bool)`, `put(host, ip string)`, `delete(host)` methods. TTL: 5 min, checked on read.
 - `cacheableIP(conn) string`: extracts remote IP from a connection, returns `""` for link-local addresses and IP literals, normalizes IPv4-mapped IPv6 to plain IPv4.
-- Integration in `probeTarget`: `dialAddr` holds cached IP (or falls back to `hostPort`). First dial uses `dialAddr`. If it fails and target is `.local`, mDNS retry uses original `hostPort`. On success, `cacheableIP` populates the cache. On cached-IP failure, `dnsCache.delete(host)` evicts the entry.
-- Integration in `runForwardSetForTarget`: same `dialAddr`/evict pattern. No mDNS retry exists here — the cache is the only fast path, and eviction ensures a stale entry doesn't loop.
+- Integration in `probeTarget`: after the normal dial and the `.local` mDNS retry both fail, try the cached IP as a third attempt. On success, the cache is confirmed still valid. On failure, `dnsCache.delete(host)` evicts the stale entry, and the target is skipped (next target in the list). On any successful connection (DNS or cache), `cacheableIP` populates/refreshes the cache.
+- Integration in `runForwardSetForTarget`: after the normal dial fails, try the cached IP as a second attempt. On failure, evict. This path has no mDNS retry — the cache is its only fallback before the retry wait.
+
+```go
+// probeTarget integration sketch (per target):
+conn, err = dialer.DialContext(ctx, "tcp", hostPort)       // 1. DNS
+if err != nil && strings.HasSuffix(host, ".local") {
+    // 150ms wait
+    conn, err = dialer.DialContext(ctx, "tcp", hostPort)    // 2. mDNS retry
+}
+if err != nil {
+    if ip, ok := dnsCache.get(host); ok {                   // 3. cache fallback
+        conn, err = dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip, port))
+        if err != nil {
+            dnsCache.delete(host)                           // stale → evict
+        }
+    }
+}
+if err == nil {
+    if ip := cacheableIP(conn); ip != "" {
+        dnsCache.put(host, ip)                              // refresh cache
+    }
+}
+```
 
 What does NOT change: SSH host-key verification (always uses original hostname), retry intervals, target ordering, config schema, wire protocol.
 
