@@ -181,6 +181,85 @@ F5 (low) — **IPv4-mapped IPv6 normalization.** On dual-stack platforms, `conn.
 
 F6 (low) — **"At most one extra timeout" claim is imprecise.** In failover mode: 3s + 150ms (one timeout + mDNS wait). In multiplex mode without the F2 fix: up to 5 min of repeated failures. With the F2 fix: one timeout (3s) + one retry interval (10s) before DNS takes over.
 
+**Resolution plan:**
+
+All six findings are addressed by four concrete changes to the implementation, none of which alter the cache's external interface or add config fields.
+
+*R1 — Separate dial variable (addresses F1):*
+
+In `probeTarget`, introduce `dialAddr` for the first attempt. `hostPort` stays untouched.
+
+```go
+dialAddr := hostPort
+if ip, ok := dnsCache.get(host); ok {
+    _, port, _ := net.SplitHostPort(hostPort)
+    dialAddr = net.JoinHostPort(ip, port)
+}
+conn, err = dialer.DialContext(ctx, "tcp", dialAddr)
+if err != nil && strings.HasSuffix(host, ".local") {
+    // mDNS retry uses hostPort — always fresh DNS
+    conn, err = dialer.DialContext(ctx, "tcp", hostPort)
+}
+```
+
+Same pattern in `runForwardSetForTarget`: `dialAddr` for the attempt, `hostPort` for logging and SSH host-key verification.
+
+*R2 — Invalidate on cached-IP failure (addresses F2, F6):*
+
+When a dial that used a cached IP fails, delete the entry before proceeding.
+
+```go
+if dialAddr != hostPort {
+    // Cached IP was tried and failed — evict so the next
+    // loop iteration falls through to DNS.
+    dnsCache.delete(host)
+}
+```
+
+In `probeTarget` (failover), this runs before `continue` to the next target. In `runForwardSetForTarget` (multiplex), this runs before `time.NewTimer(retryDelay(...))` so the next iteration uses DNS immediately.
+
+This caps the stale-IP penalty at one timeout (3s) + one retry interval (10s) in multiplex mode — a single wasted cycle, not 5 min.
+
+*R3 — Skip link-local and normalize IPv4-mapped (addresses F3, F4, F5):*
+
+Cache population guard:
+
+```go
+func cacheableIP(conn net.Conn) string {
+    host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+    if err != nil {
+        return ""
+    }
+    ip := net.ParseIP(host)
+    if ip == nil {
+        return ""
+    }
+    if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+        return "" // F3+F4: link-local is unstable, skip
+    }
+    if v4 := ip.To4(); v4 != nil {
+        return v4.String() // F5: normalize ::ffff:x.x.x.x → x.x.x.x
+    }
+    return ip.String()
+}
+```
+
+When `cacheableIP` returns `""`, skip both the cache write and any existing entry for that host (don't evict — a previous good IPv4 entry may still be valid).
+
+*R4 — Tests (pinning all behaviours):*
+
+| Test | What it pins |
+|---|---|
+| `TestDNSCache_HitSkipsDNS` | Cached IP used for dial, hostname preserved for retry |
+| `TestDNSCache_MissPassthrough` | No entry → normal dial path unchanged |
+| `TestDNSCache_StaleEvicted` | Failed cached-IP dial deletes entry; next attempt uses DNS |
+| `TestDNSCache_TTLExpiry` | Entry older than 5 min is ignored |
+| `TestDNSCache_LinkLocalSkipped` | `fe80::...%Wi-Fi` not cached; `192.168.68.x` is |
+| `TestDNSCache_IPv4MappedNormalized` | `::ffff:192.168.68.134` stored as `192.168.68.134` |
+| `TestDNSCache_IPLiteralSkipped` | Targets that are already IPs skip the cache entirely |
+
+**Revised effort:** S — ~70 lines of cache + `cacheableIP` + integration, ~80 lines of tests. No new dependencies. No config changes. All changes in `internal/tunnel`.
+
 ### UX & CLI
 
 | ID   | Component | Item                                         | Notes |
