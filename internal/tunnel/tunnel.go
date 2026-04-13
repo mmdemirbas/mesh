@@ -693,12 +693,29 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 		if user != "" {
 			sshCfg.User = user
 		}
+		host, port, _ := net.SplitHostPort(hostPort)
+		isIPLiteral := net.ParseIP(host) != nil
 
 		log.Info("Connecting")
 
 		dialer := net.Dialer{Timeout: sshCfg.Timeout, Control: dialerControlIPQoS(interactiveTos)}
 		t0 := time.Now()
+
+		// 1. DNS (always first).
 		conn, err := dialer.DialContext(ctx, "tcp", hostPort) //nolint:gosec // G704: host is user-configured SSH target, not untrusted input
+
+		// 2. Cache fallback — tried only when DNS failed.
+		if err != nil && !isIPLiteral {
+			if cachedIP, ok := resolvedAddrCache.get(host); ok {
+				log.Debug("DNS failed, trying cached IP", "cached_ip", cachedIP)
+				conn, err = dialer.DialContext(ctx, "tcp", net.JoinHostPort(cachedIP, port))
+				if err != nil {
+					resolvedAddrCache.delete(host)
+					log.Debug("Cached IP also failed, evicted", "cached_ip", cachedIP)
+				}
+			}
+		}
+
 		if err != nil {
 			state.Global.Update("connection", id, state.Retrying, err.Error())
 			log.Warn("Target unreachable", "error", err)
@@ -709,6 +726,13 @@ func (c *SSHClient) runForwardSetForTarget(ctx context.Context, fset *config.For
 				return
 			case <-t.C:
 				continue
+			}
+		}
+
+		// Populate/refresh cache from the successful connection.
+		if !isIPLiteral {
+			if ip := cacheableIP(conn); ip != "" {
+				resolvedAddrCache.put(host, ip)
 			}
 		}
 
@@ -1199,16 +1223,21 @@ func (c *SSHClient) probeTarget(ctx context.Context, handshakeTimeout time.Durat
 
 	for _, t := range c.cfg.Targets {
 		_, hostPort := parseTarget(t)
-		host, _, err := net.SplitHostPort(hostPort)
+		host, port, err := net.SplitHostPort(hostPort)
 		if err != nil {
 			host = hostPort
 		}
+		isIPLiteral := net.ParseIP(host) != nil
 
 		dialer := net.Dialer{Timeout: probeTimeout, Control: dialerControlIPQoS(ipQoS)}
 		t0 := time.Now()
+
+		// 1. DNS (always first).
 		conn, err = dialer.DialContext(ctx, "tcp", hostPort)
+
+		// 2. mDNS retry for .local hostnames.
 		if err != nil && strings.HasSuffix(host, ".local") {
-			mdnsRetry := time.NewTimer(150 * time.Millisecond) // mDNS usually resolves within 50-100ms
+			mdnsRetry := time.NewTimer(150 * time.Millisecond)
 			select {
 			case <-ctx.Done():
 				mdnsRetry.Stop()
@@ -1218,11 +1247,31 @@ func (c *SSHClient) probeTarget(ctx context.Context, handshakeTimeout time.Durat
 			conn, err = dialer.DialContext(ctx, "tcp", hostPort)
 		}
 
+		// 3. Cache fallback — tried only when DNS failed entirely.
+		if err != nil && !isIPLiteral {
+			if cachedIP, ok := resolvedAddrCache.get(host); ok {
+				c.log.Debug("DNS failed, trying cached IP", "target", t, "cached_ip", cachedIP)
+				conn, err = dialer.DialContext(ctx, "tcp", net.JoinHostPort(cachedIP, port))
+				if err != nil {
+					resolvedAddrCache.delete(host)
+					c.log.Debug("Cached IP also failed, evicted", "target", t, "cached_ip", cachedIP)
+				}
+			}
+		}
+
 		elapsed := time.Since(t0).Round(time.Millisecond)
 		if err != nil {
 			c.log.Debug("Target unreachable", "target", t, "elapsed", elapsed, "error", err)
 			continue
 		}
+
+		// Populate/refresh cache from the successful connection.
+		if !isIPLiteral {
+			if ip := cacheableIP(conn); ip != "" {
+				resolvedAddrCache.put(host, ip)
+			}
+		}
+
 		c.log.Debug("Target reachable", "target", t, "elapsed", elapsed)
 		return t, conn
 	}
