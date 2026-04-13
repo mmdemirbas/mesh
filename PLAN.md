@@ -260,6 +260,19 @@ When `cacheableIP` returns `""`, skip both the cache write and any existing entr
 
 **Revised effort:** S — ~70 lines of cache + `cacheableIP` + integration, ~80 lines of tests. No new dependencies. No config changes. All changes in `internal/tunnel`.
 
+**Final plan summary:**
+
+Add a package-level DNS result cache to `internal/tunnel` that stores hostname→IP mappings from successful TCP connections. On reconnect, the cached IP is dialed directly (zero DNS), turning multi-second mDNS delays into sub-millisecond TCP handshakes.
+
+New code:
+
+- `dnsCache` type: `sync.RWMutex`-protected `map[string]dnsCacheEntry` with `get(host) (ip string, ok bool)`, `put(host, ip string)`, `delete(host)` methods. TTL: 5 min, checked on read.
+- `cacheableIP(conn) string`: extracts remote IP from a connection, returns `""` for link-local addresses and IP literals, normalizes IPv4-mapped IPv6 to plain IPv4.
+- Integration in `probeTarget`: `dialAddr` holds cached IP (or falls back to `hostPort`). First dial uses `dialAddr`. If it fails and target is `.local`, mDNS retry uses original `hostPort`. On success, `cacheableIP` populates the cache. On cached-IP failure, `dnsCache.delete(host)` evicts the entry.
+- Integration in `runForwardSetForTarget`: same `dialAddr`/evict pattern. No mDNS retry exists here — the cache is the only fast path, and eviction ensures a stale entry doesn't loop.
+
+What does NOT change: SSH host-key verification (always uses original hostname), retry intervals, target ordering, config schema, wire protocol.
+
 ### UX & CLI
 
 | ID   | Component | Item                                         | Notes |
