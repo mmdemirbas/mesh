@@ -99,6 +99,8 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
 | [P3](#p3-adaptive-watchscan) | filesync | Adaptive watch/scan | Self-tuning heuristic. Design below. |
+| P14  | tunnel | Parallel target probing (Happy Eyeballs) | Stagger-start all targets concurrently in `probeTarget` instead of sequential. First to connect wins, respecting target order preference within a short tie-break window. Reduces worst-case probe time from sum(timeouts) to max(stagger, fastest_target). Nice-to-have. |
+| [P15](#p15-dns-result-caching-for-target-probes) | tunnel | DNS result caching for target probes | Cache hostname→IP from successful connections. Eliminates slow mDNS re-resolution on reconnect. Design below. |
 
 #### P3: Adaptive Watch/Scan
 
@@ -115,6 +117,53 @@ Goal: dynamically watch frequently-changing paths with fsnotify, poll the rest. 
 - *Directory deletion:* fsnotify Remove event; stale cleanup (5-min interval) as safety net.
 - *Large initial scan:* No promotions on first scan. Second scan begins adaptive behavior.
 - *Watch limit pressure:* Sort by frequency, promote top N that fit.
+
+#### P15: DNS result caching for target probes
+
+**Goal:** Eliminate DNS resolution delay on reconnect by reusing the IP address from the previous successful connection. Primary motivation: Windows mDNS is slow to resolve `.local` hostnames after a network disruption — each target probe blocks for ~6s (3s dial + 150ms mDNS retry + 3s retry) before falling through.
+
+**Approach:**
+
+Package-level `dnsCache` in `internal/tunnel` — a `sync.RWMutex`-protected `map[string]dnsCacheEntry`.
+
+```go
+type dnsCacheEntry struct {
+    ip         string
+    resolvedAt time.Time
+}
+```
+
+**Population:** After a successful TCP connection in `probeTarget` (failover mode) or `runForwardSetForTarget` (multiplex mode), extract the remote IP from `conn.RemoteAddr()` and store `hostname → IP`. Skip when the hostname is already an IP literal (`net.ParseIP(host) != nil`).
+
+**Lookup:** At the start of each target dial, if the hostname has a cache entry younger than the TTL (5 min), replace the hostname with the cached IP in the dial address. The original hostname is preserved for SSH host-key verification and logging — only the TCP dial uses the cached IP.
+
+**Retry path unchanged:** If the cached IP fails (DHCP reassigned, host unreachable), the existing `.local` retry logic fires using the original hostname, triggering fresh DNS. On success, the cache is updated with the new IP.
+
+**Integration points:**
+
+1. `probeTarget` (tunnel.go:1194) — failover mode. Before each `dialer.DialContext`, check cache. After successful dial, populate cache.
+2. `runForwardSetForTarget` (tunnel.go:701) — multiplex mode. Same pattern. This path currently has no mDNS retry at all, so the cache is especially valuable here.
+
+**TTL:** 5 minutes. No config knob — DHCP leases are typically 1h+ so 5 min is conservative. Entries older than TTL are ignored during lookup but not actively evicted (lazy cleanup during write).
+
+**Performance characteristics:**
+
+| Scenario | Latency | vs. today |
+|---|---|---|
+| Cache hit, IP valid | ~1ms (TCP SYN-ACK, zero DNS) | Down from 1-6s |
+| Cache hit, IP stale, old host sends RST | ~50ms, then normal retry | Same |
+| Cache hit, IP stale, old host unreachable | 3s timeout, then normal retry | Same |
+| Cache miss (first connection, TTL expired) | Unchanged | Same |
+
+**Key decisions:**
+
+- Global (package-level) cache, not per-SSHClient. Hostname→IP is host-level truth, shared across connections.
+- No eviction on connection failure. The IP is usually still correct when an SSH session dies — the network route is intact, just the SSH layer disconnected. TTL handles genuine IP changes.
+- 5 min TTL balances freshness (DHCP churn) vs. cache effectiveness (most reconnects happen within seconds of a drop).
+
+**Risks/dependencies:** None. The cache is a transparent optimization with no protocol or config changes. Stale entries cost at most one extra timeout (3s) before the retry path resolves correctly.
+
+**Effort:** S — ~50 lines of new code (cache type + two integration points), table-driven tests for hit/miss/stale/IP-literal-skip scenarios.
 
 ### UX & CLI
 
