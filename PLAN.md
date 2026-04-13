@@ -165,6 +165,22 @@ type dnsCacheEntry struct {
 
 **Effort:** S — ~50 lines of new code (cache type + two integration points), table-driven tests for hit/miss/stale/IP-literal-skip scenarios.
 
+**Adversarial review findings:**
+
+F1 (high) — **Retry path must preserve the original hostname.** The design says "replace the hostname with the cached IP in the dial address" but doesn't specify which dial. `probeTarget` has two dials per `.local` target: the primary and the mDNS retry after 150ms. If the implementation replaces `hostPort` in place, BOTH dials use the cached IP and the retry is useless. Fix: introduce a separate `dialAddr` variable for the first attempt; keep `hostPort` unchanged for the mDNS retry path.
+
+F2 (high) — **Stale cache causes 5-minute retry loops in multiplex mode.** `runForwardSetForTarget` has no per-attempt hostname fallback — no mDNS retry, no target list to iterate. If the cached IP is stale, it dials the wrong IP, waits `retryInterval` (10s), loops, reads the same cache entry (TTL not expired), dials the wrong IP again. This repeats for up to TTL (5 min). Fix: when a dial using a cached IP fails, delete that cache entry immediately so the next iteration falls through to DNS.
+
+F3 (medium) — **IPv6 link-local zone IDs are unstable.** Production logs show `muhammed-mbp.local` resolving to `[fe80::421:bbe7:c5bd:2ec1%Wi-Fi]:2222`. The zone ID `%Wi-Fi` is a Windows adapter name — it becomes invalid if the adapter is renamed, disabled, or if the OS picks a different interface. Caching a link-local address with a stale zone ID produces guaranteed dial failures until TTL expires.
+
+F4 (medium) — **Single-family IP locking.** mDNS returns both IPv4 (`192.168.68.134`) and IPv6 link-local (`fe80::...%Wi-Fi`). The cache stores whichever was used last. If the IPv6 route breaks (common: Wi-Fi adapter reset, network switch), the cache keeps trying it for up to TTL while IPv4 would connect instantly. This is the opposite of the design intent.
+
+F3+F4 fix: skip caching when `conn.RemoteAddr()` is a link-local address (`ip.IsLinkLocalUnicast()`). Only cache IPv4 or global-scope IPv6. This avoids the zone-ID and single-family problems for the most common failure mode. If the only working route is link-local, the cache simply doesn't help and the existing DNS path handles it — no regression.
+
+F5 (low) — **IPv4-mapped IPv6 normalization.** On dual-stack platforms, `conn.RemoteAddr()` may return `::ffff:192.168.68.134`. Normalize with `net.IP.To4()` before caching to store the canonical IPv4 form.
+
+F6 (low) — **"At most one extra timeout" claim is imprecise.** In failover mode: 3s + 150ms (one timeout + mDNS wait). In multiplex mode without the F2 fix: up to 5 min of repeated failures. With the F2 fix: one timeout (3s) + one retry interval (10s) before DNS takes over.
+
 ### UX & CLI
 
 | ID   | Component | Item                                         | Notes |
