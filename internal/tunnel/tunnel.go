@@ -370,7 +370,8 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
 
-	s.log.Info("Client connected", "remote", sshConn.RemoteAddr(), "user", sshConn.User())
+	connectedAt := time.Now()
+	s.log.Info("Client connected", "remote", sshConn.RemoteAddr(), "local", conn.LocalAddr(), "user", sshConn.User())
 
 	// Per-connection identity announced by mesh peers via a standard SSH
 	// global request. Non-mesh clients simply won't send it — the fallback
@@ -416,7 +417,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 	}()
 
 	// Handle keep-alives (server-side) -- must start before blocking on chans
-	go startKeepAlive(connCtx, sshConn, s.cfg.Options, true, s.log)
+	go startKeepAlive(connCtx, sshConn, s.cfg.Options, true, s.log, connectedAt)
 
 	// Handle channel requests with per-connection limit to prevent goroutine exhaustion.
 	const maxChannelsPerConn = 1000
@@ -445,7 +446,8 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 		}
 	}
 
-	s.log.Info("Client disconnected", "remote", sshConn.RemoteAddr())
+	s.log.Info("Client disconnected", "remote", sshConn.RemoteAddr(),
+		"duration", time.Since(connectedAt).Round(time.Second))
 }
 
 // --- SSH Client (connects to a peer) ---
@@ -842,9 +844,11 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		state.Global.UpdatePeer("connection", id, conn.RemoteAddr().String())
 
 		log.Info("Connected", "target", target,
+			"local", conn.LocalAddr(), "remote", conn.RemoteAddr(),
 			"tcp", t1.Sub(t0).Round(time.Millisecond),
 			"ssh", time.Since(t1).Round(time.Millisecond))
 
+		sessionStart := time.Now()
 		err = c.runSession(ctx, client, fset, opts, log)
 
 		if err != nil && config.GetOption(opts, "ExitOnForwardFailure") == "yes" {
@@ -854,7 +858,8 @@ func (c *SSHClient) runForwardSet(ctx context.Context, fset *config.ForwardSet) 
 		}
 
 		state.Global.Update("connection", id, state.Retrying, "session ended")
-		log.Warn("Session ended, reconnecting", "retry_in", retryInterval)
+		log.Warn("Session ended, reconnecting", "retry_in", retryInterval,
+			"remote", conn.RemoteAddr(), "duration", time.Since(sessionStart).Round(time.Second))
 		t := time.NewTimer(retryDelay(retryInterval))
 		select {
 		case <-ctx.Done():
@@ -932,6 +937,8 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 			aliveCountMax = n
 		}
 	}
+	sessionStart := time.Now()
+	remoteAddr := client.Conn.RemoteAddr()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -946,7 +953,10 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 				if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
 					failCount++
 					if failCount > aliveCountMax || isHardConnError(err) {
-						log.Warn("Keep-alive failed, closing connection", "error", err)
+						log.Warn("Keep-alive failed, closing connection",
+							"remote", remoteAddr, "error", err,
+							"fail_count", failCount,
+							"session_uptime", time.Since(sessionStart).Round(time.Second))
 						closeClient()
 						return
 					}
@@ -1233,6 +1243,7 @@ func (c *SSHClient) probeTarget(ctx context.Context, handshakeTimeout time.Durat
 		t0 := time.Now()
 
 		// 1. DNS (always first).
+		resolvedVia := "dns"
 		conn, err = dialer.DialContext(ctx, "tcp", hostPort)
 
 		// 2. mDNS retry for .local hostnames.
@@ -1245,6 +1256,9 @@ func (c *SSHClient) probeTarget(ctx context.Context, handshakeTimeout time.Durat
 			case <-mdnsRetry.C:
 			}
 			conn, err = dialer.DialContext(ctx, "tcp", hostPort)
+			if err == nil {
+				resolvedVia = "mdns-retry"
+			}
 		}
 
 		// 3. Cache fallback — tried only when DNS failed entirely.
@@ -1255,6 +1269,8 @@ func (c *SSHClient) probeTarget(ctx context.Context, handshakeTimeout time.Durat
 				if err != nil {
 					resolvedAddrCache.delete(host)
 					c.log.Debug("Cached IP also failed, evicted", "target", t, "cached_ip", cachedIP)
+				} else {
+					resolvedVia = "cache"
 				}
 			}
 		}
@@ -1272,7 +1288,8 @@ func (c *SSHClient) probeTarget(ctx context.Context, handshakeTimeout time.Durat
 			}
 		}
 
-		c.log.Debug("Target reachable", "target", t, "elapsed", elapsed)
+		c.log.Debug("Target reachable", "target", t, "elapsed", elapsed,
+			"resolved_via", resolvedVia, "local", conn.LocalAddr(), "remote", conn.RemoteAddr())
 		return t, conn
 	}
 	return "", nil
@@ -1392,10 +1409,10 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 	defer func() {
 		state.Global.Delete("dynamic", compID)
 		state.Global.DeleteMetrics("dynamic", compID)
-		log.Info("tcpip-forward closed", "addr", addr)
+		log.Info("tcpip-forward closed", "addr", addr, "peer", peerAddr)
 	}()
 
-	log.Info("tcpip-forward active", "addr", addr)
+	log.Info("tcpip-forward active", "addr", addr, "peer", peerAddr)
 	if req.WantReply {
 		_ = req.Reply(true, ssh.Marshal(struct{ Port uint32 }{actualPort}))
 	}
@@ -1686,7 +1703,8 @@ func parseByteSize(s string) uint64 {
 }
 
 // startKeepAlive handles both ClientAlive* (server-side) and ServerAlive* (client-side) options.
-func startKeepAlive(ctx context.Context, conn ssh.Conn, options map[string]string, isServer bool, log *slog.Logger) {
+// connectedAt is optional; when provided it is forwarded to keepAliveLoop for uptime reporting.
+func startKeepAlive(ctx context.Context, conn ssh.Conn, options map[string]string, isServer bool, log *slog.Logger, connectedAt ...time.Time) {
 	intervalKey := "ServerAliveInterval"
 	countMaxKey := "ServerAliveCountMax"
 	reqType := "keepalive@openssh.com" // Client-to-Server
@@ -1718,14 +1736,16 @@ func startKeepAlive(ctx context.Context, conn ssh.Conn, options map[string]strin
 
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
-	keepAliveLoop(ctx, ticker.C, conn, reqType, countMax, log)
+	keepAliveLoop(ctx, ticker.C, conn, reqType, countMax, log, connectedAt...)
 }
 
 // keepAliveLoop sends periodic heartbeat requests on conn until ctx is cancelled,
 // the connection is closed, or consecutive failures exceed countMax.
 // Extracted for testability: callers inject the tick channel so tests run without real timers.
-func keepAliveLoop(ctx context.Context, tick <-chan time.Time, conn ssh.Conn, reqType string, countMax int, log *slog.Logger) {
+// connectedAt is the time the connection was established (used for uptime in failure logs).
+func keepAliveLoop(ctx context.Context, tick <-chan time.Time, conn ssh.Conn, reqType string, countMax int, log *slog.Logger, connectedAt ...time.Time) {
 	failCount := 0
+	var uptime string
 	for {
 		select {
 		case <-ctx.Done():
@@ -1734,8 +1754,13 @@ func keepAliveLoop(ctx context.Context, tick <-chan time.Time, conn ssh.Conn, re
 			_, _, err := conn.SendRequest(reqType, true, nil)
 			if err != nil {
 				failCount++
+				if len(connectedAt) > 0 {
+					uptime = time.Since(connectedAt[0]).Round(time.Second).String()
+				}
 				if failCount > countMax || isHardConnError(err) {
-					log.Warn("Keep-alive failed, closing connection", "remote", conn.RemoteAddr(), "error", err, "fail_count", failCount)
+					log.Warn("Keep-alive failed, closing connection",
+						"remote", conn.RemoteAddr(), "error", err,
+						"fail_count", failCount, "session_uptime", uptime)
 					_ = conn.Close()
 					return
 				}

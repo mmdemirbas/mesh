@@ -1368,6 +1368,12 @@ func (n *Node) runUDPBeacon(ctx context.Context, magicHeader string, port int) {
 				addrs = append(addrs, &net.UDPAddr{IP: bcast, Port: port})
 			}
 		}
+		// Log when broadcast address list changes (interface added/removed, WiFi roam).
+		if len(cachedBcastAddrs) > 0 && len(addrs) != len(cachedBcastAddrs) {
+			slog.Debug("Broadcast address list changed",
+				"old_count", len(cachedBcastAddrs), "new_count", len(addrs),
+				"addrs", fmt.Sprintf("%v", addrs))
+		}
 		cachedBcastAddrs = addrs
 		return addrs
 	}
@@ -1487,6 +1493,9 @@ func (n *Node) registerPeerHTTP(peerAddr string) {
 		return
 	}
 	_ = resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		slog.Debug("HTTP peer registration rejected", "peer", peerAddr, "status", resp.StatusCode)
+	}
 }
 
 // refreshHTTPRegistration periodically re-registers this node with all
