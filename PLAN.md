@@ -92,7 +92,21 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
-| S11  | clipsync  | UDP beacon port used for SSRF               | `msg.GetPort()` from unauthenticated beacon. Mitigated by fixing S2. |
+| [S11](#s11-udp-beacon-port-used-for-ssrf) | clipsync | UDP beacon port used for SSRF | `msg.GetPort()` from unauthenticated beacon. Largely mitigated by S2. |
+
+### S11: UDP beacon port used for SSRF
+
+**Problem:** Clipsync UDP beacons carry a `port` field (`msg.GetPort()`) that tells the receiver which HTTP port the sender listens on. This field is taken from an unauthenticated UDP broadcast — any device on the LAN can send a forged beacon with an arbitrary port.
+
+When a node receives a beacon, it uses `msg.GetPort()` to construct the peer's HTTP address (`{sender_ip}:{untrusted_port}`), then makes HTTP requests to that address (`/discover`, `/clip`). An attacker can set `port` to an internal service port (e.g., 80, 8080, 9090), causing the mesh node to make HTTP requests to arbitrary ports on the sender's IP — a classic SSRF vector.
+
+**Current mitigation (S2):** The `canReceiveFrom` function validates that incoming HTTP requests come from known, trusted peers (loopback, static peers, or previously discovered peers). This means the attacker's forged beacon creates outbound requests from the victim node, but the victim's own HTTP server rejects requests from unknown sources. The SSRF risk is that the victim node acts as an HTTP client toward the attacker-controlled port, not that the attacker accesses the victim's data.
+
+**Residual risk:** A LAN attacker can still cause the mesh node to probe arbitrary ports on the attacker's own IP (or any spoofed source IP in the beacon). This leaks connection success/failure information and could interact with services that trigger actions on incoming HTTP requests.
+
+**Fix:** Validate `msg.GetPort()` against a reasonable range (e.g., 1024-65535) and optionally reject beacons whose `port` differs from the UDP source port by more than a configured threshold. Or: ignore the beacon `port` field entirely and always use the configured clipsync port.
+
+**Effort:** S — a single validation check on `msg.GetPort()` in the beacon handler.
 
 ### Performance
 

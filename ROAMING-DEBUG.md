@@ -22,6 +22,24 @@ Bastion connection also drops. Recovery is slow and unreliable.
 
 ---
 
+## Action Items
+
+| ID | Priority | Status | Item | Section |
+|----|----------|--------|------|---------|
+| RD1 | immediate | IGNORED | Add static IP fallbacks to `.local` targets | See [IGNORED.md](IGNORED.md#rd1-static-ip-fallbacks-for-local-targets). DNS cache (P15) handles this dynamically. |
+| RD2 | immediate | open | Configure bastion sshd `ClientAliveInterval 15` | [Recommended Actions](#immediate-config-changes-no-code) |
+| RD3 | immediate | open | Prevent Windows sleep | [Recommended Actions](#immediate-config-changes-no-code) |
+| RD4 | medium | open | Filter IPv6 link-local from `probeTarget` | [Code improvements](#code-improvements-mesh) |
+| RD5 | medium | done | Log resolved addresses and session context | [Code improvements](#code-improvements-mesh). Commit `977d35d`. |
+| RD6 | low | open | Deduplicate parallel ForwardSet probes | [Code improvements](#code-improvements-mesh) |
+| RC1 | — | finding | mDNS resolution failure on Windows | [Root Causes](#rc1-mdns-resolution-failure-on-windows-confirmed--primary-cause) |
+| RC2 | — | finding | IPv6 link-local connections don't survive roaming | [Root Causes](#rc2-ipv6-link-local-connections-dont-survive-roaming-confirmed) |
+| RC3 | — | finding | Windows machine going offline | [Root Causes](#rc3-windows-machine-going-to-sleepoffline-confirmed--current-outage) |
+| RC4 | — | finding | Stale server connections linger on MBP sshd | [Root Causes](#rc4-stale-server-connections-linger-on-mbps-sshd-observed) |
+| RC5 | — | finding | Bastion keepalive drop (self-healing) | [Root Causes](#rc5-bastion-keepalive-minor--observed-but-self-healing) |
+
+---
+
 ## Live Debugging Session (2026-04-13, 20:00-20:45 local)
 
 ### Current state (at time of debugging)
@@ -218,13 +236,9 @@ keepalives to MBP, and any idle period exceeding the bastion's
 
 ### Immediate (config changes, no code)
 
-1. **Add static IP fallbacks to all `.local` targets in mesh.yaml.**
-   ```yaml
-   targets:
-     - root@muhammed-mbp.local:2222
-     - root@192.168.68.134:2222
-   ```
-   This cuts recovery time from 3+ minutes to ~15 seconds.
+1. ~~**Add static IP fallbacks to `.local` targets.**~~ **IGNORED** — the
+   DNS cache (P15) already provides this dynamically. See
+   [IGNORED.md](IGNORED.md#rd1-static-ip-fallbacks-for-local-targets).
 
 2. **Configure bastion sshd for keepalive.** Add to `/etc/ssh/sshd_config`:
    ```
