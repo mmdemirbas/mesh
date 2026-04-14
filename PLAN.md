@@ -302,63 +302,7 @@ All B7–B9 fixed. See DONE.md.
 
 ### Tier 5 Hunt Tasks
 
-H1–H14 were the first pass surfaced directly by the D11 e2e work. H15–H30 come from a second-pass review and align with the generic bug-hunt skill (`~/.claude/skills/bug-hunt/SKILL.md`). For each hunt below, the skill entry in brackets points at the full methodology; this PLAN.md row names the mesh-specific files, functions, and attack inputs to audit.
-
-**Input boundaries**
-
-| ID   | Area                                                     | Skill § | Lens        |
-|------|----------------------------------------------------------|---------|-------------|
-
-**Cryptography and transport**
-
-| ID   | Area                                                     | Skill § | Lens        |
-|------|----------------------------------------------------------|---------|-------------|
-
-**Concurrency**
-
-| ID   | Area                                                     | Skill § | Lens        |
-|------|----------------------------------------------------------|---------|-------------|
-
-**Resource management**
-
-| ID   | Area                                                     | Skill § | Lens        |
-|------|----------------------------------------------------------|---------|-------------|
-
-**Error handling**
-
-| ID   | Area                                                     | Skill § | Lens        |
-|------|----------------------------------------------------------|---------|-------------|
-
-**Type and logic correctness**
-
-| ID   | Area                                                     | Skill § | Lens        |
-|------|----------------------------------------------------------|---------|-------------|
-
-**Filesystem**
-
-| ID   | Area                                                     | Skill § | Lens        |
-|------|----------------------------------------------------------|---------|-------------|
-
-**Network parsers**
-
-| ID   | Area                                                     | Skill § | Lens        |
-|------|----------------------------------------------------------|---------|-------------|
-
-**Data and serialization**
-
-| ID   | Area                                                     | Skill § | Lens        |
-|------|----------------------------------------------------------|---------|-------------|
-
-**State and lifecycle**
-
-| ID   | Area                                                     | Skill § | Lens        |
-|------|----------------------------------------------------------|---------|-------------|
-
-**Environment and platform**
-
-| ID   | Area                                                     | Skill § | Lens        |
-|------|----------------------------------------------------------|---------|-------------|
-| [H33](#h33-clock-monotonic-audit)                        | Wall-clock used where monotonic is required              | XII.1   | Grep        |
+All hunt tasks (H1–H34) completed. See DONE.md.
 
 ### F3: SSH client subcommands
 
