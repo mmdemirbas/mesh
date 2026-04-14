@@ -574,11 +574,16 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			indicator, st, _ := getComponentInfo("filesync", fs.Bind)
 			addRow("", indicator, colorAddr(fs.Bind), "", "", st, "", readMetrics(metricsMap["filesync:"+fs.Bind]))
 
-			// Folders — direction symbol, aligned paths, file count, last sync time.
-			// Per-peer detail is available in the web UI (/ui/filesync).
-			if len(fs.ResolvedFolders) > 0 {
-				addHeader("  " + cGray + "folders" + cReset)
+			// Build reverse map: peer address → peer name for display.
+			addrToName := make(map[string]string)
+			for name, addrs := range fs.Peers {
+				for _, addr := range addrs {
+					addrToName[addr] = name
+				}
+			}
 
+			// Folders with inline peer status.
+			if len(fs.ResolvedFolders) > 0 {
 				maxIDLen := 0
 				for _, folder := range fs.ResolvedFolders {
 					if len(folder.ID) > maxIDLen {
@@ -612,18 +617,47 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 						fSt = cGray + "[starting]" + cReset
 					}
 
-					// Build a combined status string: "[idle] 1234 files  synced 5m ago"
 					if comp.FileCount > 0 {
-						fSt += " " + cGray + fmt.Sprintf("%d files", comp.FileCount) + cReset
+						fSt += "  " + cGray + fmt.Sprintf("%d files", comp.FileCount) + cReset
 					}
 					if !comp.LastSync.IsZero() {
 						ago := time.Since(comp.LastSync).Truncate(time.Second)
 						fSt += "  " + cGray + "synced " + formatDuration(ago) + " ago" + cReset
 					}
 
-					paddedID := folder.ID + strings.Repeat(" ", maxIDLen-len(folder.ID))
+					paddedID := cBold + folder.ID + cReset + strings.Repeat(" ", maxIDLen-len(folder.ID))
 					left := paddedID + "  " + cGray + folder.Path + cReset
-					addRow("    ", dirSym, left, "", "", fSt, "", metricsSnapshot{})
+					addRow("  ", dirSym, left, "", "", fSt, "", metricsSnapshot{})
+
+					// Per-peer status under each folder (one line per peer).
+					if folder.Direction != "disabled" {
+						for _, peerAddr := range folder.Peers {
+							_, _, pComp := getComponentInfo("filesync-peer", folder.ID+"|"+peerAddr)
+							name := addrToName[peerAddr]
+
+							var pInd, pSt string
+							switch pComp.Status {
+							case state.Connected:
+								pInd = cGreen + "●" + cReset
+								pSt = cGreen + "synced" + cReset
+							case state.Retrying:
+								pInd = cYellow + "●" + cReset
+								pSt = cYellow + "retrying" + cReset
+							case state.Connecting:
+								pInd = cBlink + cYellow + "●" + cReset
+								pSt = cYellow + "syncing" + cReset
+							default:
+								pInd = "○"
+								pSt = cGray + "waiting" + cReset
+							}
+
+							peerLabel := peerAddr
+							if name != "" {
+								peerLabel = name + " " + cGray + peerAddr + cReset
+							}
+							addRow("      ", pInd, peerLabel, "", "", pSt, "", metricsSnapshot{})
+						}
+					}
 				}
 			}
 		}
