@@ -574,56 +574,8 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			indicator, st, _ := getComponentInfo("filesync", fs.Bind)
 			addRow("", indicator, colorAddr(fs.Bind), "", "", st, "", readMetrics(metricsMap["filesync:"+fs.Bind]))
 
-			// Peers — show each named peer once with aggregated state across all folders.
-			if len(fs.Peers) > 0 {
-				addHeader("  " + cGray + "peers" + cReset)
-				var peerNames []string
-				for name := range fs.Peers {
-					peerNames = append(peerNames, name)
-				}
-				sort.Strings(peerNames)
-
-				maxNameLen := 0
-				for _, name := range peerNames {
-					if len(name) > maxNameLen {
-						maxNameLen = len(name)
-					}
-				}
-
-				for _, name := range peerNames {
-					addrs := fs.Peers[name]
-					bestInd, bestSt := "⚪️", cGray+"[starting]"+cReset
-					bestPrio := 0
-					if activeState != nil {
-						for _, addr := range addrs {
-							for _, folder := range fs.ResolvedFolders {
-								if folder.Direction == "disabled" {
-									continue
-								}
-								ind, pst, comp := getComponentInfo("filesync-peer", folder.ID+"|"+addr)
-								prio := 0
-								switch comp.Status {
-								case state.Connected, state.Listening:
-									prio = 3
-								case state.Connecting:
-									prio = 2
-								case state.Retrying, state.Failed:
-									prio = 1
-								}
-								if prio > bestPrio {
-									bestPrio = prio
-									bestInd = ind
-									bestSt = pst
-								}
-							}
-						}
-					}
-					paddedName := cBold + name + cReset + strings.Repeat(" ", maxNameLen-len(name))
-					addRow("    ", bestInd, paddedName+"  "+colorAddr(addrs[0]), "", "", bestSt, "", metricsSnapshot{})
-				}
-			}
-
 			// Folders — direction symbol, aligned paths, file count, last sync time.
+			// Per-peer detail is available in the web UI (/ui/filesync).
 			if len(fs.ResolvedFolders) > 0 {
 				addHeader("  " + cGray + "folders" + cReset)
 
