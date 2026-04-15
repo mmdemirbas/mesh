@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/mmdemirbas/mesh/internal/gateway"
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
@@ -169,6 +172,91 @@ func TestAdminMetricsEndpoint(t *testing.T) {
 	// Verify uptime line is present for the test component (StartTime != 0).
 	if !strings.Contains(text, `mesh_uptime_seconds{type="server",id="admintest:22"}`) {
 		t.Error("uptime line missing for test component with non-zero StartTime")
+	}
+}
+
+func TestAdminGatewayAuditEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	cfg := gateway.GatewayCfg{
+		Name:        "audit-endpoint-test",
+		Bind:        "127.0.0.1:0",
+		Upstream:    "https://api.anthropic.com",
+		ClientAPI:   gateway.APIAnthropic,
+		UpstreamAPI: gateway.APIAnthropic,
+		Log:         gateway.LogCfg{Level: gateway.LogLevelFull, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
+	}
+	rec, err := gateway.NewRecorder(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil || rec == nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+
+	id := rec.Request(gateway.RequestMeta{
+		Gateway: "audit-endpoint-test", Direction: "a2a",
+		Model: "claude-opus-4-6", Stream: false,
+		Method: "POST", Path: "/v1/messages",
+		StartTime: time.Now(),
+	}, []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"hi"}]}`))
+	rec.Response(id, gateway.ResponseMeta{
+		Status: 200, Outcome: gateway.OutcomeOK,
+		Usage:     &gateway.Usage{InputTokens: 5, OutputTokens: 11},
+		StartTime: time.Now(), EndTime: time.Now(),
+	}, []byte(`{"content":[{"type":"text","text":"hi back"}]}`))
+
+	ring := newLogRing(4)
+	srv := httptest.NewServer(buildAdminMux(ring, ""))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/gateway/audit")
+	if err != nil {
+		t.Fatalf("GET /api/gateway/audit: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+	}
+
+	var got []struct {
+		Gateway string            `json:"gateway"`
+		Dir     string            `json:"dir"`
+		File    string            `json:"file"`
+		Rows    []json.RawMessage `json:"rows"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("parse response: %v body=%s", err, body)
+	}
+
+	var entry *struct {
+		Gateway string            `json:"gateway"`
+		Dir     string            `json:"dir"`
+		File    string            `json:"file"`
+		Rows    []json.RawMessage `json:"rows"`
+	}
+	for i := range got {
+		if got[i].Gateway == "audit-endpoint-test" {
+			entry = &got[i]
+			break
+		}
+	}
+	if entry == nil {
+		t.Fatalf("audit-endpoint-test not found in response: %s", body)
+	}
+	if !strings.HasSuffix(entry.File, ".jsonl") {
+		t.Errorf("file = %q, want *.jsonl", entry.File)
+	}
+	if len(entry.Rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(entry.Rows))
+	}
+	var first map[string]any
+	if err := json.Unmarshal(entry.Rows[0], &first); err != nil {
+		t.Fatalf("row[0] not JSON: %v", err)
+	}
+	if first["t"] != "req" {
+		t.Errorf("row[0].t = %v, want req", first["t"])
+	}
+	if first["model"] != "claude-opus-4-6" {
+		t.Errorf("row[0].model = %v", first["model"])
 	}
 }
 

@@ -125,7 +125,40 @@ func NewRecorder(cfg GatewayCfg, log *slog.Logger) (*Recorder, error) {
 	}
 	r.cleanupOldFiles()
 	go r.cleanupLoop()
+	registerAuditDir(cfg.Name, gwDir)
 	return r, nil
+}
+
+// auditDirRegistry maps gateway name → audit directory for the lifetime of
+// the mesh process. Populated by NewRecorder; the admin UI reads it to find
+// the right directory even when the user overrode log.dir.
+var (
+	auditDirMu sync.RWMutex
+	auditDirs  = map[string]string{}
+)
+
+func registerAuditDir(name, dir string) {
+	auditDirMu.Lock()
+	auditDirs[name] = dir
+	auditDirMu.Unlock()
+}
+
+func unregisterAuditDir(name string) {
+	auditDirMu.Lock()
+	delete(auditDirs, name)
+	auditDirMu.Unlock()
+}
+
+// AuditDirs returns a snapshot of the gateway-name → audit-dir registry.
+// Empty when no gateway has audit logging enabled.
+func AuditDirs() map[string]string {
+	auditDirMu.RLock()
+	defer auditDirMu.RUnlock()
+	out := make(map[string]string, len(auditDirs))
+	for k, v := range auditDirs {
+		out[k] = v
+	}
+	return out
 }
 
 // Request writes a "req" row and returns the correlation ID. A zero body is
@@ -208,6 +241,7 @@ func (r *Recorder) Close() error {
 	}
 	r.mu.Unlock()
 	<-r.cleanupDone
+	unregisterAuditDir(r.gateway)
 	return err
 }
 

@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,9 +18,80 @@ import (
 
 	"github.com/mmdemirbas/mesh/internal/clipsync"
 	"github.com/mmdemirbas/mesh/internal/filesync"
+	"github.com/mmdemirbas/mesh/internal/gateway"
 	"github.com/mmdemirbas/mesh/internal/state"
 	"github.com/mmdemirbas/mesh/internal/tunnel"
 )
+
+// gatewayAuditResponse is the JSON shape returned by GET /api/gateway/audit.
+type gatewayAuditResponse struct {
+	Gateway  string            `json:"gateway"`
+	Dir      string            `json:"dir"`
+	File     string            `json:"file,omitempty"`
+	FileSize int64             `json:"file_size,omitempty"`
+	Rows     []json.RawMessage `json:"rows"`
+	Error    string            `json:"error,omitempty"`
+}
+
+// readRecentAuditRows returns up to limit most-recent JSONL rows from the
+// newest *.jsonl file in dir. Rows are returned in file order (oldest of the
+// returned window first); the returned slice is parsed back into RawMessage
+// so the JSON shape stays opaque to the admin server.
+func readRecentAuditRows(dir string, limit int) ([]json.RawMessage, string, int64, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, "", 0, err
+	}
+	var newest os.DirEntry
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		if newest == nil {
+			newest = e
+			continue
+		}
+		ai, err1 := newest.Info()
+		bi, err2 := e.Info()
+		if err1 == nil && err2 == nil && bi.ModTime().After(ai.ModTime()) {
+			newest = e
+		}
+	}
+	if newest == nil {
+		return nil, "", 0, nil
+	}
+	path := filepath.Join(dir, newest.Name())
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, newest.Name(), 0, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, newest.Name(), info.Size(), err
+	}
+	defer func() { _ = f.Close() }()
+
+	// Tail with a ring buffer of size = limit.
+	ring := make([]json.RawMessage, 0, limit)
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		copyLine := make([]byte, len(line))
+		copy(copyLine, line)
+		if len(ring) < limit {
+			ring = append(ring, copyLine)
+			continue
+		}
+		// Slide window — drop oldest, append newest.
+		copy(ring, ring[1:])
+		ring[len(ring)-1] = copyLine
+	}
+	return ring, newest.Name(), info.Size(), sc.Err()
+}
 
 // buildAdminMux returns the HTTP handler for the local admin server.
 // All endpoints are read-only and served on localhost only.
@@ -292,10 +366,50 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 	mux.Handle("/ui", uiHandler)
 	mux.Handle("/ui/clipsync", uiHandler)
 	mux.Handle("/ui/filesync", uiHandler)
+	mux.Handle("/ui/gateway", uiHandler)
 	mux.Handle("/ui/logs", uiHandler)
 	mux.Handle("/ui/metrics", uiHandler)
 	mux.Handle("/ui/api", uiHandler)
 	mux.Handle("/ui/debug", uiHandler)
+
+	// GET /api/gateway/audit — recent audit rows for one or all gateways.
+	// Query params:
+	//   gateway=<name>  filter to a specific gateway (default: all).
+	//   limit=<N>       max rows per gateway (default: 200, capped at 2000).
+	mux.HandleFunc("GET /api/gateway/audit", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		filter := r.URL.Query().Get("gateway")
+		limit := 200
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				if n > 2000 {
+					n = 2000
+				}
+				limit = n
+			}
+		}
+
+		dirs := gateway.AuditDirs()
+		out := make([]gatewayAuditResponse, 0, len(dirs))
+		names := make([]string, 0, len(dirs))
+		for name := range dirs {
+			if filter != "" && filter != name {
+				continue
+			}
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			rows, file, size, err := readRecentAuditRows(dirs[name], limit)
+			entry := gatewayAuditResponse{Gateway: name, Dir: dirs[name], File: file, FileSize: size}
+			if err != nil {
+				entry.Error = err.Error()
+			}
+			entry.Rows = rows
+			out = append(out, entry)
+		}
+		_ = json.NewEncoder(w).Encode(out)
+	})
 
 	// pprof endpoints for runtime profiling (CPU, memory, goroutines).
 	// Only accessible on localhost via the admin server.

@@ -225,6 +225,7 @@ tbody tr:last-child td { border-bottom: none; }
   <div class="tab active" data-tab="dashboard">Dashboard</div>
   <div class="tab" data-tab="clipsync">Clipsync</div>
   <div class="tab" data-tab="filesync">Filesync</div>
+  <div class="tab" data-tab="gateway">Gateway</div>
   <div class="tab" data-tab="logs">Logs</div>
   <div class="tab" data-tab="metrics">Metrics</div>
   <div class="tab" data-tab="api">API</div>
@@ -320,6 +321,52 @@ tbody tr:last-child td { border-bottom: none; }
           <thead><tr><th>Direction</th><th>Folder</th><th>Peer</th><th>Files</th><th>Size</th><th>Time</th></tr></thead>
           <tbody id="fsa-body"></tbody>
         </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Gateway panel -->
+  <div class="panel" id="p-gateway">
+    <div class="card">
+      <div class="card-header">
+        <span>Gateways</span>
+        <div style="display:flex;gap:8px">
+          <select id="gw-select" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px"></select>
+          <input class="search-input" id="gw-search" placeholder="Filter rows..." style="width:220px">
+          <select id="gw-outcome" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
+            <option value="">all outcomes</option>
+            <option value="ok">ok</option>
+            <option value="error">error</option>
+            <option value="truncated">truncated</option>
+            <option value="client_cancelled">client_cancelled</option>
+          </select>
+        </div>
+      </div>
+      <div class="card-body">
+        <div id="gw-meta" style="font-size:12px;color:var(--text-muted);margin-bottom:8px"></div>
+        <table>
+          <thead><tr>
+            <th>Time</th>
+            <th>Dir</th>
+            <th>Model</th>
+            <th>Stream</th>
+            <th>Status</th>
+            <th>Outcome</th>
+            <th>Tokens</th>
+            <th>Elapsed</th>
+            <th>Summary</th>
+          </tr></thead>
+          <tbody id="gw-body"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card" id="gw-detail-card" style="display:none">
+      <div class="card-header">
+        <span id="gw-detail-title">Detail</span>
+        <div class="filter-btn" onclick="document.getElementById('gw-detail-card').style.display='none'">close</div>
+      </div>
+      <div class="card-body">
+        <pre id="gw-detail-body" style="white-space:pre-wrap;word-break:break-word;font-family:var(--mono);font-size:12px;max-height:60vh;overflow:auto"></pre>
       </div>
     </div>
   </div>
@@ -422,7 +469,7 @@ tbody tr:last-child td { border-bottom: none; }
 
 <script>
 // --- State ---
-let state = {}, logs = [], folders = [], conflicts = [], clipActivities = [], fsActivities = [], metricsText = '';
+let state = {}, logs = [], folders = [], conflicts = [], clipActivities = [], fsActivities = [], metricsText = '', gatewayAudit = [];
 let compSort = {col:'type', asc:true};
 let fsSort = {col:'id', asc:true};
 let logLevel = 'all';
@@ -433,7 +480,7 @@ const chartHist = {tx:[], rx:[], streams:[], goroutines:[], fds:[]};
 let prevTotalTx = 0, prevTotalRx = 0, firstTick = true;
 
 // --- Tabs ---
-const tabMap = {'/ui':'dashboard','/ui/clipsync':'clipsync','/ui/filesync':'filesync','/ui/logs':'logs','/ui/metrics':'metrics','/ui/api':'api','/ui/debug':'debug'};
+const tabMap = {'/ui':'dashboard','/ui/clipsync':'clipsync','/ui/filesync':'filesync','/ui/gateway':'gateway','/ui/logs':'logs','/ui/metrics':'metrics','/ui/api':'api','/ui/debug':'debug'};
 let activeTab = tabMap[location.pathname] || 'dashboard';
 
 function showTab(name) {
@@ -462,6 +509,7 @@ async function tick() {
     const needLogs = activeTab === 'dashboard' || activeTab === 'logs';
     const needFilesync = activeTab === 'dashboard' || activeTab === 'filesync';
     const needClipsync = activeTab === 'dashboard' || activeTab === 'clipsync';
+    const needGateway = activeTab === 'gateway';
     if (needLogs) fetches.push(fetch('/api/logs').then(r=>r.json()));
     if (needFilesync) {
       fetches.push(fetch('/api/filesync/folders').then(r=>r.json()));
@@ -469,6 +517,7 @@ async function tick() {
       fetches.push(fetch('/api/filesync/activity').then(r=>r.json()));
     }
     if (needClipsync) fetches.push(fetch('/api/clipsync/activity').then(r=>r.json()));
+    if (needGateway) fetches.push(fetch('/api/gateway/audit?limit=200').then(r=>r.json()));
 
     const results = await Promise.all(fetches);
     let i = 0;
@@ -476,6 +525,7 @@ async function tick() {
     if (needLogs) logs = results[i++];
     if (needFilesync) { folders = results[i++]; conflicts = results[i++]; fsActivities = results[i++]; }
     if (needClipsync) clipActivities = results[i++];
+    if (needGateway) gatewayAudit = results[i++];
 
     // Accumulate chart history from metrics
     const nowTx = sumMetric(metricsText, 'mesh_bytes_tx_total');
@@ -529,6 +579,7 @@ function render() {
   renderMetrics();
   renderCharts();
   renderDebugStats();
+  renderGateway();
 }
 
 function x(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -942,6 +993,7 @@ const endpoints = [
   {method:'GET', path:'/api/metrics', desc:'Prometheus text format metrics: mesh_component_up, mesh_bytes_tx_total, mesh_bytes_rx_total, mesh_active_streams, mesh_uptime_seconds, mesh_auth_failures_total.'},
   {method:'GET', path:'/api/filesync/folders', desc:'Filesync folder statuses as JSON array: id, path, direction, file_count, peers.'},
   {method:'GET', path:'/api/filesync/conflicts', desc:'Conflict files as JSON array: folder_id, path.'},
+  {method:'GET', path:'/api/gateway/audit?gateway=NAME&limit=N', desc:'Recent audit rows for one or all gateways. Each entry includes gateway, dir, file, file_size, and rows (raw JSONL objects).'},
 ];
 
 document.getElementById('api-list').innerHTML = endpoints.map((ep, i) =>
@@ -1009,6 +1061,119 @@ function timeAgo(ts) {
   if (d < 3600000) return Math.floor(d/60000)+'m ago';
   return Math.floor(d/3600000)+'h ago';
 }
+
+// --- Gateway audit ---
+let gwSelected = '';
+let gwRowsCache = []; // resp rows joined with their req row, newest first
+let gwSearchTerm = '';
+let gwOutcomeFilter = '';
+
+function renderGateway() {
+  const sel = document.getElementById('gw-select');
+  if (!sel) return;
+  if (!gatewayAudit || !gatewayAudit.length) {
+    sel.innerHTML = '<option value="">(no gateways with audit logging)</option>';
+    document.getElementById('gw-meta').textContent = '';
+    document.getElementById('gw-body').innerHTML =
+      '<tr><td colspan="9" style="color:var(--text-muted);padding:20px">No gateways with audit logging configured. Set log.level: full or metadata in the gateway YAML to populate this view.</td></tr>';
+    return;
+  }
+  // Populate selector once / on changes.
+  const names = gatewayAudit.map(g => g.gateway);
+  const desired = (sel.options[sel.selectedIndex]||{}).value || gwSelected || names[0];
+  if (sel.options.length !== names.length || Array.from(sel.options).some((o,i)=>o.value!==names[i])) {
+    sel.innerHTML = names.map(n => '<option value="'+x(n)+'">'+x(n)+'</option>').join('');
+    sel.value = names.includes(desired) ? desired : names[0];
+  }
+  gwSelected = sel.value;
+
+  const entry = gatewayAudit.find(g => g.gateway === gwSelected) || gatewayAudit[0];
+  const rowsRaw = entry.rows || [];
+  // Pair req with resp by id+run.
+  const reqs = new Map();
+  const pairs = [];
+  for (const r of rowsRaw) {
+    const key = (r.run||'')+'|'+r.id;
+    if (r.t === 'req') {
+      reqs.set(key, r);
+    } else if (r.t === 'resp') {
+      pairs.push({req: reqs.get(key) || {}, resp: r});
+    }
+  }
+  pairs.reverse(); // newest first
+  gwRowsCache = pairs;
+
+  document.getElementById('gw-meta').innerHTML =
+    'gateway <b>'+x(entry.gateway)+'</b> · file <span style="color:var(--text-dim)">'+x(entry.file||'(none)')+'</span>'+
+    (entry.file_size ? ' · '+fmtBytes(entry.file_size) : '')+
+    ' · '+pairs.length+' completed requests'+
+    (entry.error ? ' · <span style="color:var(--red)">error: '+x(entry.error)+'</span>' : '');
+
+  const term = (gwSearchTerm||'').toLowerCase();
+  const outcomeFilter = gwOutcomeFilter;
+  const filtered = pairs.filter(p => {
+    if (outcomeFilter && (p.resp.outcome||'') !== outcomeFilter) return false;
+    if (!term) return true;
+    return JSON.stringify(p.req).toLowerCase().includes(term) ||
+           JSON.stringify(p.resp).toLowerCase().includes(term);
+  });
+
+  const body = document.getElementById('gw-body');
+  if (!filtered.length) {
+    body.innerHTML = '<tr><td colspan="9" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
+    return;
+  }
+  body.innerHTML = filtered.map((p, idx) => {
+    const time = (p.resp.ts||p.req.ts||'').replace('T',' ').replace(/\..*Z/,'Z');
+    const dir = p.req.direction || '-';
+    const model = p.req.model || '-';
+    const stream = p.req.stream ? 'yes' : 'no';
+    const status = p.resp.status || 0;
+    const statusColor = status >= 400 ? 'var(--red)' : status >= 200 ? 'var(--green)' : 'var(--text-dim)';
+    const outcome = p.resp.outcome || '-';
+    const outcomeColor = outcome === 'ok' ? 'var(--green)' : outcome === 'error' ? 'var(--red)' : 'var(--yellow)';
+    const u = p.resp.usage || {};
+    const tokens = (u.input_tokens||0)+'/'+(u.output_tokens||0);
+    const elapsed = (p.resp.elapsed_ms||0)+'ms';
+    const summary = renderGwSummaryCell(p.resp);
+    return '<tr style="cursor:pointer" onclick="showGwDetail('+idx+')">'+
+      '<td style="color:var(--text-muted);white-space:nowrap">'+x(time)+'</td>'+
+      '<td>'+x(dir)+'</td>'+
+      '<td style="color:var(--text-dim)">'+x(model)+'</td>'+
+      '<td style="color:var(--text-muted)">'+stream+'</td>'+
+      '<td style="color:'+statusColor+'">'+status+'</td>'+
+      '<td style="color:'+outcomeColor+'">'+x(outcome)+'</td>'+
+      '<td style="color:var(--text-dim)">'+tokens+'</td>'+
+      '<td style="color:var(--text-muted)">'+elapsed+'</td>'+
+      '<td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)">'+summary+'</td>'+
+      '</tr>';
+  }).join('');
+  // Stash filtered rows for click-to-detail.
+  gwRowsCache = filtered;
+}
+
+function renderGwSummaryCell(resp) {
+  const s = resp.stream_summary;
+  if (s && s.content) return x(s.content.slice(0, 120));
+  if (s && s.errors && s.errors.length) return '<span style="color:var(--red)">'+x(s.errors.join('; '))+'</span>';
+  if (typeof resp.body === 'string') return x(resp.body.slice(0, 120));
+  if (resp.body && typeof resp.body === 'object') return x(JSON.stringify(resp.body).slice(0, 120));
+  return '<span style="color:var(--text-muted)">-</span>';
+}
+
+function showGwDetail(idx) {
+  const p = gwRowsCache[idx];
+  if (!p) return;
+  document.getElementById('gw-detail-card').style.display = 'block';
+  document.getElementById('gw-detail-title').textContent = 'Request '+(p.req.id||'?')+' (run '+(p.req.run||p.resp.run||'?')+')';
+  document.getElementById('gw-detail-body').textContent =
+    '--- request ---\n' + JSON.stringify(p.req, null, 2) +
+    '\n\n--- response ---\n' + JSON.stringify(p.resp, null, 2);
+}
+
+document.getElementById('gw-search').addEventListener('input', e => { gwSearchTerm = e.target.value; renderGateway(); });
+document.getElementById('gw-outcome').addEventListener('change', e => { gwOutcomeFilter = e.target.value; renderGateway(); });
+document.getElementById('gw-select').addEventListener('change', e => { gwSelected = e.target.value; renderGateway(); });
 
 // --- Debug ---
 function renderDebugStats() {
