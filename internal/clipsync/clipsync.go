@@ -362,14 +362,19 @@ func (n *Node) Broadcast(payload *pb.SyncPayload) {
 	}
 
 	// Send to Dynamic UDP Peers
+	pushed := 0
+	skippedEcho := 0
 	n.peersMu.RLock()
+	dynamicCount := len(n.peers)
 	for addr := range n.peers {
 		if isEchoOrigin(addr, origin) {
+			skippedEcho++
 			continue // don't echo back to the peer we received from
 		}
 		if n.canSendTo(addr, true) {
 			slog.Debug("Pushing payload via HTTP POST to dynamic peer", "peer", addr)
 			go n.postHTTP(addr, data)
+			pushed++
 		}
 	}
 	n.peersMu.RUnlock()
@@ -377,12 +382,17 @@ func (n *Node) Broadcast(payload *pb.SyncPayload) {
 	// Send to Static Peers (SSH Tunnels or explicit IP)
 	for _, addr := range n.config.StaticPeers {
 		if isEchoOrigin(addr, origin) {
+			skippedEcho++
 			continue // don't echo back to the peer we received from
 		}
 		if n.canSendTo(addr, false) {
 			slog.Debug("Pushing payload via HTTP POST to static peer", "peer", addr)
 			go n.postHTTP(addr, data)
+			pushed++
 		}
+	}
+	if pushed == 0 {
+		slog.Debug("Broadcast reached no peers", "dynamic_peers", dynamicCount, "static_peers", len(n.config.StaticPeers), "echo_skipped", skippedEcho, "origin", cleanLogStr(origin))
 	}
 }
 
@@ -415,9 +425,16 @@ func (n *Node) postHTTP(addr string, data []byte) {
 	req.ContentLength = int64(len(data))
 	req.Header.Set("Content-Encoding", "gzip")
 	resp, err := n.httpClient.Do(req)
-	if err == nil {
-		_ = resp.Body.Close()
+	if err != nil {
+		slog.Debug("HTTP push to peer failed", "peer", cleanLogStr(addr), "bytes", len(data), "error", err)
+		return
 	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		slog.Debug("HTTP push to peer rejected", "peer", cleanLogStr(addr), "status", resp.StatusCode, "bytes", len(data))
+		return
+	}
+	slog.Debug("HTTP push to peer ok", "peer", cleanLogStr(addr), "status", resp.StatusCode, "bytes", len(data))
 }
 
 // cleanLogStr replaces ASCII control characters (including newlines) with '?'
@@ -1417,10 +1434,11 @@ func (n *Node) cleanupPeers(ctx context.Context) {
 		now := time.Now()
 		n.peersMu.Lock()
 		for addr, lastSeen := range n.peers {
-			if now.Sub(lastSeen) > 15*time.Second {
+			if age := now.Sub(lastSeen); age > 15*time.Second {
 				delete(n.peers, addr)
 				delete(n.peerHashes, addr)
 				state.Global.Delete("clipsync-peer", n.config.Bind+"|"+addr)
+				slog.Info("Pruned stale clipsync peer (no beacon)", "peer", cleanLogStr(addr), "age", age.Round(time.Second))
 			}
 		}
 		n.peersMu.Unlock()
