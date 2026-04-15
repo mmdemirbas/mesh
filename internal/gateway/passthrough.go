@@ -57,6 +57,7 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, c
 
 	var peek peekRequest
 	_ = json.Unmarshal(body, &peek)
+	sessionID, turnIndex := extractSessionInfo(r.Header, body)
 
 	reqID := recorder.Request(RequestMeta{
 		Gateway:   cfg.Name,
@@ -66,6 +67,8 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, c
 		Method:    r.Method,
 		Path:      r.URL.Path,
 		Headers:   r.Header,
+		SessionID: sessionID,
+		TurnIndex: turnIndex,
 		StartTime: start,
 	}, body)
 

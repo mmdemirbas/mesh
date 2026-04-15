@@ -112,6 +112,14 @@ func TestTranslationAudit_A2O_NonStreaming(t *testing.T) {
 	if req["model"] != "claude-opus-4-6" {
 		t.Errorf("req model = %v", req["model"])
 	}
+	// Session id and turn index must land in the request row so the UI can
+	// group conversations and show prompt growth.
+	if sid, _ := req["session_id"].(string); len(sid) != sessionIDLen {
+		t.Errorf("session_id missing or wrong length: %q", sid)
+	}
+	if ti, _ := req["turn_index"].(float64); ti != 1 {
+		t.Errorf("turn_index = %v, want 1", ti)
+	}
 	if respRow["status"].(float64) != 200 {
 		t.Errorf("status = %v", respRow["status"])
 	}

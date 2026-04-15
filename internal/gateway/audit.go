@@ -46,6 +46,12 @@ var redactedHeaders = map[string]struct{}{
 type RequestID uint64
 
 // RequestMeta is the structured context written to an audit request row.
+//
+// SessionID and TurnIndex are derived from the request body at capture time
+// (see extractSessionInfo). They group turns of the same conversation in the
+// audit UI without requiring any client cooperation: the first message of a
+// chat is byte-stable across replays from history, so its hash is a sound
+// conversation key.
 type RequestMeta struct {
 	Gateway   string
 	Direction string
@@ -54,6 +60,8 @@ type RequestMeta struct {
 	Method    string
 	Path      string
 	Headers   map[string][]string
+	SessionID string
+	TurnIndex int
 	StartTime time.Time
 }
 
@@ -195,6 +203,12 @@ func (r *Recorder) Request(meta RequestMeta, body []byte) RequestID {
 		"method":    meta.Method,
 		"path":      meta.Path,
 		"headers":   redactHeaders(meta.Headers),
+	}
+	if meta.SessionID != "" {
+		row["session_id"] = meta.SessionID
+	}
+	if meta.TurnIndex > 0 {
+		row["turn_index"] = meta.TurnIndex
 	}
 	if r.level == LogLevelFull {
 		row["body"] = rawOrString(body)
@@ -472,6 +486,7 @@ func wrapAuditing(cfg GatewayCfg, recorder *Recorder, clientAPI string, inner ht
 			Stream bool   `json:"stream"`
 		}
 		_ = json.Unmarshal(body, &peek)
+		sessionID, turnIndex := extractSessionInfo(r.Header, body)
 
 		reqID := recorder.Request(RequestMeta{
 			Gateway:   cfg.Name,
@@ -481,6 +496,8 @@ func wrapAuditing(cfg GatewayCfg, recorder *Recorder, clientAPI string, inner ht
 			Method:    r.Method,
 			Path:      r.URL.Path,
 			Headers:   r.Header,
+			SessionID: sessionID,
+			TurnIndex: turnIndex,
 			StartTime: start,
 		}, body)
 
