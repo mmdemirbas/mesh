@@ -565,6 +565,9 @@ func TestAdminUIGatewayDetailMarkup(t *testing.T) {
 		`json-key`,
 		`json-str`,
 		`copyDetail`,
+		`renderRequestStructured`,
+		`msg-role`,
+		`tool-block`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("UI missing %q (regression: detail layout collapsed back to single pane)", want)

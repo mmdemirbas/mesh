@@ -135,6 +135,54 @@ tbody tr:last-child td { border-bottom: none; }
 .filter-btn:hover { border-color: var(--text-dim); color: var(--text); }
 .filter-btn.active { border-color: var(--green); color: var(--green); }
 
+/* Gateway structured view */
+.chip {
+  display: inline-block; padding: 2px 8px; margin: 0 4px 4px 0;
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 4px; font-size: 11px; color: var(--text-dim);
+  font-family: var(--mono);
+}
+.chip b { color: var(--text); font-weight: 600; }
+.chip.warn { border-color: var(--yellow); color: var(--yellow); }
+.chip.error { border-color: var(--red); color: var(--red); }
+.chip.ok { border-color: var(--green); color: var(--green); }
+.msg-block {
+  border: 1px solid var(--border); border-radius: 4px;
+  margin-bottom: 6px; background: var(--bg);
+}
+.msg-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 8px; border-bottom: 1px solid var(--border);
+  font-size: 11px; color: var(--text-dim);
+}
+.msg-role {
+  text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;
+  padding: 1px 6px; border-radius: 3px; background: var(--bg-input);
+}
+.msg-role.user      { color: var(--cyan); }
+.msg-role.assistant { color: var(--green); }
+.msg-role.system    { color: var(--purple); }
+.msg-role.tool      { color: var(--yellow); }
+.msg-body { padding: 6px 8px; font-size: 12px; }
+.msg-body .text { white-space: pre-wrap; word-break: break-word; }
+.msg-body .truncate { color: var(--text-dim); cursor: pointer; }
+.msg-body .truncate:hover { color: var(--green); }
+.tool-block {
+  border-left: 2px solid var(--yellow); padding: 4px 8px;
+  margin: 4px 0; background: var(--bg-card);
+}
+.tool-block .tool-name { color: var(--yellow); font-family: var(--mono); font-size: 11px; font-weight: 600; }
+.tool-block pre { font-family: var(--mono); font-size: 11px; color: var(--text-dim); white-space: pre-wrap; margin-top: 4px; }
+.collapse {
+  background: transparent; border: none; color: var(--text-muted);
+  font-size: 11px; cursor: pointer; padding: 2px 6px;
+}
+.collapse:hover { color: var(--green); }
+.section-title {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--text-muted); margin: 8px 0 4px;
+}
+
 /* Gateway detail (request | response) */
 .gw-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 1100px) { .gw-detail-grid { grid-template-columns: 1fr; } }
@@ -1229,9 +1277,174 @@ function showGwDetail(idx) {
     'Request '+(p.req.id||'?')+' (run '+(p.req.run||p.resp.run||'?')+')' + sid + turn;
   document.getElementById('gw-req-raw').innerHTML = highlightJSON(p.req);
   document.getElementById('gw-resp-raw').innerHTML = highlightJSON(p.resp);
-  // Structured views are populated by later tasks; clear placeholders for now.
-  document.getElementById('gw-req-structured').innerHTML = '';
+  document.getElementById('gw-req-structured').innerHTML = renderRequestStructured(p.req);
   document.getElementById('gw-resp-structured').innerHTML = '';
+}
+
+// --- Structured request view ---
+//
+// Renders the parsed body of a request row as a stack of message cards plus
+// chip metadata. Anthropic and OpenAI message shapes are unified: a text
+// content string is shown verbatim, an array of content blocks is unfolded
+// per type (text | image | tool_use | tool_result for Anthropic; text +
+// tool_calls + tool_call_id for OpenAI). Long text auto-truncates with an
+// expand toggle so a 200KB system prompt does not blow up the pane.
+const truncateLen = 400;
+function renderRequestStructured(req) {
+  const body = req.body;
+  if (!body || typeof body !== 'object') {
+    return '<span class="json-summary">(body not captured — set log.level: full)</span>';
+  }
+  let html = '';
+  // Header chips: model, stream, session, turn, temperature, max_tokens.
+  const chips = [];
+  if (body.model) chips.push(chip('model', body.model));
+  if (req.stream || body.stream) chips.push(chip('stream', 'true'));
+  if (req.session_id) chips.push(chip('session', req.session_id));
+  if (req.turn_index) chips.push(chip('turn', req.turn_index));
+  if (typeof body.temperature === 'number') chips.push(chip('temp', body.temperature));
+  if (body.max_tokens) chips.push(chip('max_tokens', body.max_tokens));
+  if (body.top_p) chips.push(chip('top_p', body.top_p));
+  if (chips.length) html += '<div style="margin-bottom:8px">' + chips.join('') + '</div>';
+
+  // System prompt (Anthropic top-level string or array of content blocks;
+  // OpenAI inlines the system message in the messages array, so it appears
+  // there instead).
+  if (body.system) {
+    html += '<div class="section-title">system</div>';
+    html += '<div class="msg-block"><div class="msg-body">' +
+      renderContent(body.system) + '</div></div>';
+  }
+
+  // Messages.
+  const msgs = Array.isArray(body.messages) ? body.messages : [];
+  if (msgs.length) {
+    html += '<div class="section-title">messages (' + msgs.length + ')</div>';
+    html += msgs.map((m, i) => renderMessage(m, i)).join('');
+  }
+
+  // Tools available to the model.
+  const tools = Array.isArray(body.tools) ? body.tools : [];
+  if (tools.length) {
+    html += '<div class="section-title">tools (' + tools.length + ')</div>';
+    html += tools.map(renderToolDefinition).join('');
+  }
+  return html || '<span class="json-summary">(empty body)</span>';
+}
+
+function chip(label, value, cls) {
+  const c = cls ? ' '+cls : '';
+  return '<span class="chip'+c+'">'+x(label)+' <b>'+x(String(value))+'</b></span>';
+}
+
+function renderMessage(m, idx) {
+  const role = String(m.role || 'unknown');
+  const content = m.content;
+  const inner = renderContent(content);
+  const toolID = m.tool_call_id ? '<span class="chip">tool_call_id <b>'+x(m.tool_call_id)+'</b></span>' : '';
+  const calls = Array.isArray(m.tool_calls) ? m.tool_calls.map(renderOpenAIToolCall).join('') : '';
+  return '<div class="msg-block">' +
+    '<div class="msg-head">' +
+      '<span class="msg-role '+x(role)+'">'+x(role)+'</span>' +
+      '<span style="color:var(--text-muted)">#'+(idx+1)+'</span>' +
+      toolID +
+    '</div>' +
+    '<div class="msg-body">' + inner + calls + '</div>' +
+  '</div>';
+}
+
+// renderContent dispatches on the shape: a string is shown verbatim with
+// truncation; an array is unfolded per Anthropic content-block type; an
+// object falls back to highlighted JSON so nothing is hidden.
+function renderContent(content) {
+  if (content == null) return '';
+  if (typeof content === 'string') return renderText(content);
+  if (Array.isArray(content)) return content.map(renderContentBlock).join('');
+  return '<pre style="font-family:var(--mono);font-size:11px;color:var(--text-dim);white-space:pre-wrap">' +
+    x(JSON.stringify(content, null, 2)) + '</pre>';
+}
+
+function renderContentBlock(b) {
+  if (!b || typeof b !== 'object') return '';
+  switch (b.type) {
+    case 'text':
+      return renderText(b.text || '');
+    case 'image':
+      return renderImage(b);
+    case 'tool_use':
+      return '<div class="tool-block">' +
+        '<span class="tool-name">tool_use: '+x(b.name||'?')+'</span> ' +
+        '<span style="color:var(--text-muted)">id='+x(b.id||'')+'</span>' +
+        '<pre>'+x(JSON.stringify(b.input || {}, null, 2))+'</pre>' +
+      '</div>';
+    case 'tool_result':
+      return '<div class="tool-block" style="border-left-color:var(--green)">' +
+        '<span class="tool-name" style="color:var(--green)">tool_result</span> ' +
+        '<span style="color:var(--text-muted)">tool_use_id='+x(b.tool_use_id||'')+'</span>' +
+        (b.is_error ? ' <span class="chip error">error</span>' : '') +
+        '<div style="margin-top:4px">'+renderContent(b.content)+'</div>' +
+      '</div>';
+    case 'thinking':
+      return '<div style="border-left:2px solid var(--purple);padding:4px 8px;color:var(--text-dim);font-style:italic">'+
+        renderText(b.thinking || '') + '</div>';
+    default:
+      return '<div class="tool-block"><span class="tool-name" style="color:var(--text-dim)">'+x(b.type||'unknown')+'</span>' +
+        '<pre>'+x(JSON.stringify(b, null, 2))+'</pre></div>';
+  }
+}
+
+function renderImage(b) {
+  const src = b.source || {};
+  if (src.type === 'base64') {
+    const data = src.data ? 'data:'+x(src.media_type||'image/png')+';base64,'+x(src.data) : '';
+    return data ? '<img src="'+data+'" style="max-width:200px;max-height:200px;border:1px solid var(--border);border-radius:4px"/>'
+                : '<span class="json-summary">(image, base64)</span>';
+  }
+  if (src.type === 'url' && src.url) {
+    return '<a href="'+x(src.url)+'" target="_blank" rel="noopener" style="color:var(--cyan)">[image: '+x(src.url)+']</a>';
+  }
+  return '<span class="json-summary">(image, '+x(src.type||'unknown')+')</span>';
+}
+
+function renderText(s) {
+  s = String(s);
+  if (s.length <= truncateLen) {
+    return '<div class="text">'+x(s)+'</div>';
+  }
+  const id = 'tx-'+(_hjId++);
+  return '<div class="text" id="'+id+'-short">'+x(s.slice(0, truncateLen))+'…' +
+    ' <span class="truncate" onclick="_txExpand(\''+id+'\')">expand ('+s.length+' chars)</span></div>' +
+    '<div class="text json-collapsed" id="'+id+'-full">'+x(s)+
+    ' <span class="truncate" onclick="_txCollapse(\''+id+'\')">collapse</span></div>';
+}
+function _txExpand(id) {
+  document.getElementById(id+'-short').classList.add('json-collapsed');
+  document.getElementById(id+'-full').classList.remove('json-collapsed');
+}
+function _txCollapse(id) {
+  document.getElementById(id+'-short').classList.remove('json-collapsed');
+  document.getElementById(id+'-full').classList.add('json-collapsed');
+}
+
+function renderOpenAIToolCall(tc) {
+  if (!tc || !tc.function) return '';
+  return '<div class="tool-block">' +
+    '<span class="tool-name">tool_call: '+x(tc.function.name||'?')+'</span> ' +
+    '<span style="color:var(--text-muted)">id='+x(tc.id||'')+'</span>' +
+    '<pre>'+x(tc.function.arguments||'')+'</pre>' +
+  '</div>';
+}
+
+function renderToolDefinition(t) {
+  const name = t.name || (t.function && t.function.name) || 'unknown';
+  const desc = t.description || (t.function && t.function.description) || '';
+  const schema = t.input_schema || (t.function && t.function.parameters) || {};
+  return '<details class="tool-block">' +
+    '<summary><span class="tool-name">'+x(name)+'</span>' +
+    (desc ? ' <span style="color:var(--text-dim);font-style:italic">'+x(desc.slice(0, 120))+'</span>' : '') +
+    '</summary>' +
+    '<pre>'+x(JSON.stringify(schema, null, 2))+'</pre>' +
+  '</details>';
 }
 
 function copyDetail(which) {
