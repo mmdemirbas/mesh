@@ -271,7 +271,7 @@ tbody tr:last-child td { border-bottom: none; }
 .ctx-item { border: 1px solid var(--border); border-radius: 3px; background: var(--bg); }
 .ctx-item > summary {
   list-style: none; cursor: pointer; user-select: none;
-  display: grid; grid-template-columns: 14px 1fr auto auto; gap: 8px;
+  display: grid; grid-template-columns: 14px minmax(0, 1fr) auto auto; gap: 8px;
   align-items: center; padding: 4px 8px; font-size: 11px;
 }
 .ctx-item > summary::-webkit-details-marker { display: none; }
@@ -281,10 +281,22 @@ tbody tr:last-child td { border-bottom: none; }
 }
 .ctx-item[open] > summary::before { transform: rotate(90deg); }
 .ctx-item:hover > summary { background: var(--bg-hover); }
-.ctx-item .ctx-name { font-family: var(--mono); color: var(--text); white-space: nowrap; }
-.ctx-item .ctx-name .ctx-preview { color: var(--text-muted); font-weight: normal; overflow: hidden; text-overflow: ellipsis; }
-.ctx-item .ctx-size { font-family: var(--mono); color: var(--text-muted); min-width: 80px; text-align: right; }
-.ctx-item .ctx-pct  { font-family: var(--mono); color: var(--text-dim); min-width: 52px; text-align: right; }
+/* Name column must be clippable so long previews cannot shove size/pct off
+   the right edge. min-width:0 lets the grid track actually shrink; overflow
+   clips and flex keeps <name> + <preview> on one line with the preview
+   absorbing the ellipsis. */
+.ctx-item .ctx-name {
+  font-family: var(--mono); color: var(--text);
+  display: flex; gap: 6px; align-items: baseline;
+  min-width: 0; overflow: hidden; white-space: nowrap;
+}
+.ctx-item .ctx-name > :first-child { flex: none; }
+.ctx-item .ctx-name .ctx-preview {
+  color: var(--text-muted); font-weight: normal;
+  overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1;
+}
+.ctx-item .ctx-size { font-family: var(--mono); color: var(--text-muted); min-width: 80px; text-align: right; white-space: nowrap; }
+.ctx-item .ctx-pct  { font-family: var(--mono); color: var(--text-dim); min-width: 52px; text-align: right; white-space: nowrap; }
 .ctx-item.k-system-reminder   > summary .ctx-name { color: var(--yellow); }
 .ctx-item.k-command           > summary .ctx-name { color: var(--cyan); }
 .ctx-item.k-stdout            > summary .ctx-name { color: var(--text); }
@@ -2170,8 +2182,9 @@ function renderContextDrawer(kind, blocks, messageLen) {
       : '<div>'+renderPlainText(b.body)+'</div>';
     return '<details class="ctx-item k-'+blkKind+'">' +
       '<summary>' +
-        '<span class="ctx-name">&lt;'+x(b.name)+'&gt;' +
-          (preview ? ' <span class="ctx-preview">'+x(preview)+'</span>' : '') +
+        '<span class="ctx-name">' +
+          '<span>&lt;'+x(b.name)+'&gt;</span>' +
+          (preview ? '<span class="ctx-preview">'+x(preview)+'</span>' : '') +
         '</span>' +
         '<span class="ctx-size">'+fmtLen(b.body.length)+' chars</span>' +
         '<span class="ctx-pct">'+pct+'</span>' +
