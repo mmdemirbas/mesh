@@ -523,21 +523,6 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 
 	// --- Build rows for each section ---
 
-	if len(cfg.Gateway) > 0 {
-		addHeader(sectionTitle("gateway"))
-		for _, gw := range cfg.Gateway {
-			indicator, st, comp := getComponentInfo("gateway", gw.Name)
-			bind := gw.Bind
-			if comp.BoundAddr != "" {
-				bind = comp.BoundAddr
-			}
-			left := cBold + cCyan + gw.Name + cReset + " " + colorAddr(bind)
-			annotation := cGray + gw.ClientAPI + "→" + gw.UpstreamAPI + cReset
-			addRow("", indicator, left, arrowRight, cGray+gw.Upstream+cReset, st, annotation, readMetrics(metricsMap["gateway:"+gw.Name]))
-		}
-		addHeader("")
-	}
-
 	if len(cfg.Clipsync) > 0 {
 		addHeader(sectionTitle("clipsync"))
 		for _, cs := range cfg.Clipsync {
@@ -666,6 +651,21 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 					}
 				}
 			}
+		}
+		addHeader("")
+	}
+
+	if len(cfg.Gateway) > 0 {
+		addHeader(sectionTitle("gateway"))
+		for _, gw := range cfg.Gateway {
+			indicator, st, comp := getComponentInfo("gateway", gw.Name)
+			bind := gw.Bind
+			if comp.BoundAddr != "" {
+				bind = comp.BoundAddr
+			}
+			left := cBold + cCyan + gw.Name + cReset + " " + colorAddr(bind)
+			annotation := cGray + gw.ClientAPI + "→" + gw.UpstreamAPI + cReset
+			addRow("", indicator, left, arrowRight, cGray+gw.Upstream+cReset, st, annotation, readMetrics(metricsMap["gateway:"+gw.Name]))
 		}
 		addHeader("")
 	}
