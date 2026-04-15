@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math/rand"
 	"net"
 	"os"
@@ -469,7 +470,6 @@ func (c *SSHClient) Run(ctx context.Context) error {
 	}
 	var wg sync.WaitGroup
 	for _, fset := range c.cfg.Forwards {
-		fset := fset
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -485,7 +485,6 @@ func (c *SSHClient) Run(ctx context.Context) error {
 func (c *SSHClient) runMultiplex(ctx context.Context) error {
 	var wg sync.WaitGroup
 	for _, target := range c.cfg.Targets {
-		target := target
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -506,7 +505,6 @@ func (c *SSHClient) runMultiplexTarget(ctx context.Context, target string) {
 
 	var wg sync.WaitGroup
 	for _, fset := range fsets {
-		fset := fset
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -938,7 +936,7 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 		}
 	}
 	sessionStart := time.Now()
-	remoteAddr := client.Conn.RemoteAddr()
+	remoteAddr := client.RemoteAddr()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -985,7 +983,6 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 
 	// Outbound rules: Remote (-R or remote proxy)
 	for _, fwd := range fset.Remote {
-		fwd := fwd
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1004,7 +1001,6 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 
 	// Inbound rules: Local (-L or local proxy)
 	for _, fwd := range fset.Local {
-		fwd := fwd
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1623,9 +1619,9 @@ func loadAuthorizedKeys(path string) ([]ssh.PublicKey, error) {
 }
 
 func parseTarget(target string) (user, host string) {
-	if i := strings.Index(target, "@"); i >= 0 {
-		user = target[:i]
-		host = target[i+1:]
+	if before, after, ok := strings.Cut(target, "@"); ok {
+		user = before
+		host = after
 	} else {
 		host = target
 	}
@@ -1645,12 +1641,8 @@ func retryDelay(base time.Duration) time.Duration {
 // mergeOptions merges two maps, with the child overriding the parent.
 func mergeOptions(parent, child map[string]string) map[string]string {
 	merged := make(map[string]string)
-	for k, v := range parent {
-		merged[k] = v
-	}
-	for k, v := range child {
-		merged[k] = v
-	}
+	maps.Copy(merged, parent)
+	maps.Copy(merged, child)
 	return merged
 }
 

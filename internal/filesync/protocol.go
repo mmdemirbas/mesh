@@ -313,12 +313,9 @@ func paginateResponse(resp *pb.IndexExchange) []*pb.IndexExchange {
 	totalPages := int32((len(files) + indexPageSize - 1) / indexPageSize)
 	pages := make([]*pb.IndexExchange, 0, totalPages)
 
-	for i := int32(0); i < totalPages; i++ {
+	for i := range totalPages {
 		start := int(i) * indexPageSize
-		end := start + indexPageSize
-		if end > len(files) {
-			end = len(files)
-		}
+		end := min(start+indexPageSize, len(files))
 		pages = append(pages, &pb.IndexExchange{
 			DeviceId:   resp.GetDeviceId(),
 			FolderId:   resp.GetFolderId(),
@@ -564,12 +561,9 @@ func sendPaginatedIndex(ctx context.Context, client *http.Client, peerAddr strin
 
 	var firstResp *pb.IndexExchange
 
-	for page := int32(0); page < totalPages; page++ {
+	for page := range totalPages {
 		start := int(page) * indexPageSize
-		end := start + indexPageSize
-		if end > len(files) {
-			end = len(files)
-		}
+		end := min(start+indexPageSize, len(files))
 
 		pageExchange := &pb.IndexExchange{
 			DeviceId:   clientDeviceID,

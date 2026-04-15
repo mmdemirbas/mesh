@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -58,7 +59,7 @@ type Component struct {
 	BoundAddr   string    `json:"bound_addr"`           // active resolved listener address
 	PeerAddr    string    `json:"peer_addr"`            // resolved remote peer address (connections)
 	FileCount   int       `json:"file_count,omitempty"` // tracked file count (filesync folders)
-	LastSync    time.Time `json:"last_sync,omitempty"`  // last successful sync time (filesync)
+	LastSync    time.Time `json:"last_sync"`            // last successful sync time (filesync)
 	LastUpdated time.Time `json:"last_updated"`         // used by TTL eviction
 }
 
@@ -162,9 +163,7 @@ func (s *State) SnapshotFull() FullSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	comps := make(map[string]Component, len(s.components))
-	for k, v := range s.components {
-		comps[k] = v
-	}
+	maps.Copy(comps, s.components)
 	metrics := make(map[string]*Metrics)
 	s.metrics.Range(func(key, value any) bool {
 		metrics[key.(string)] = value.(*Metrics)
@@ -197,9 +196,7 @@ func (s *State) Snapshot() map[string]Component {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	m := make(map[string]Component)
-	for k, v := range s.components {
-		m[k] = v
-	}
+	maps.Copy(m, s.components)
 	return m
 }
 

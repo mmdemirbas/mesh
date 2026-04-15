@@ -115,7 +115,7 @@ func applyDelta(oldPath, destPath string, blockSize, remoteFileSize int64, block
 
 	buf := make([]byte, blockSize)
 	totalBlocks := (remoteFileSize + blockSize - 1) / blockSize
-	for i := int64(0); i < totalBlocks; i++ {
+	for i := range totalBlocks {
 		if data, ok := changed[i]; ok {
 			// Use the delta block.
 			if _, err := out.Write(data); err != nil {

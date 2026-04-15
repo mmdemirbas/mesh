@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -155,9 +156,7 @@ func AuditDirs() map[string]string {
 	auditDirMu.RLock()
 	defer auditDirMu.RUnlock()
 	out := make(map[string]string, len(auditDirs))
-	for k, v := range auditDirs {
-		out[k] = v
-	}
+	maps.Copy(out, auditDirs)
 	return out
 }
 

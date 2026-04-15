@@ -79,8 +79,8 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		if strings.HasPrefix(line, "event: ") {
-			eventType = strings.TrimPrefix(line, "event: ")
+		if after, ok0 := strings.CutPrefix(line, "event: "); ok0 {
+			eventType = after
 			continue
 		}
 
@@ -136,7 +136,7 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 		// Emit first chunk with role.
 		s.emitChunk(OpenAIChunkChoice{
 			Index: 0,
-			Delta: OpenAIChunkDelta{Role: "assistant", Content: strPtr("")},
+			Delta: OpenAIChunkDelta{Role: "assistant", Content: new("")},
 		})
 		s.sentFirst = true
 
@@ -304,4 +304,5 @@ func (s *o2aStreamState) emitChunk(choice OpenAIChunkChoice) {
 	s.metrics.BytesTx.Add(int64(len(b) + 8))
 }
 
-func strPtr(s string) *string { return &s }
+//go:fix inline
+func strPtr(s string) *string { return new(s) }

@@ -204,7 +204,7 @@ func reassembleAnthropicSSE(body []byte) *SSESummary {
 	s.Thinking = thinking.String()
 	if len(toolBuf) > 0 {
 		// Stable order by index.
-		for i := 0; i < 1024; i++ {
+		for i := range 1024 {
 			call, ok := toolBuf[i]
 			if !ok {
 				continue
@@ -239,9 +239,9 @@ type openaiChunk struct {
 				Function struct {
 					Name      string `json:"name,omitempty"`
 					Arguments string `json:"arguments,omitempty"`
-				} `json:"function,omitempty"`
+				} `json:"function"`
 			} `json:"tool_calls,omitempty"`
-		} `json:"delta,omitempty"`
+		} `json:"delta"`
 		FinishReason *string `json:"finish_reason,omitempty"`
 	} `json:"choices,omitempty"`
 	Usage *struct {
@@ -294,7 +294,7 @@ func reassembleOpenAISSE(body []byte) *SSESummary {
 					call.Name = tc.Function.Name
 				}
 				if tc.Function.Arguments != "" {
-					toolArgs[tc.Index].WriteString(tc.Function.Arguments)
+					_, _ = toolArgs[tc.Index].WriteString(tc.Function.Arguments)
 				}
 			}
 			if ci.FinishReason != nil && *ci.FinishReason != "" {
@@ -305,7 +305,7 @@ func reassembleOpenAISSE(body []byte) *SSESummary {
 
 	s.Content = content.String()
 	if len(toolBuf) > 0 {
-		for i := 0; i < 1024; i++ {
+		for i := range 1024 {
 			call, ok := toolBuf[i]
 			if !ok {
 				continue

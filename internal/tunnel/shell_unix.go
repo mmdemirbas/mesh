@@ -460,7 +460,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 						agentCh, reqs, err := sshConn.OpenChannel("auth-agent@openssh.com", nil)
 						if err != nil {
 							log.Debug("Failed to open agent channel", "error", err)
-							conn.Close()
+							_ = conn.Close()
 							return
 						}
 						go ssh.DiscardRequests(reqs)

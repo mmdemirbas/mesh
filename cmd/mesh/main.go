@@ -503,7 +503,6 @@ func upCmd(nodeNames []string, configPath string) {
 
 		// 2. Outbound connections (Multi-set forwards)
 		for _, conn := range cfg.Connections {
-			conn := conn
 			nodeName := nodeName
 			wg.Add(1)
 			go func() {
@@ -517,7 +516,6 @@ func upCmd(nodeNames []string, configPath string) {
 
 		// 3. Clipsync
 		for _, cs := range cfg.Clipsync {
-			cs := cs
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -530,7 +528,6 @@ func upCmd(nodeNames []string, configPath string) {
 
 		// 4. Filesync
 		for _, fs := range cfg.Filesync {
-			fs := fs
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -542,7 +539,6 @@ func upCmd(nodeNames []string, configPath string) {
 
 		// 5. Gateway
 		for _, gw := range cfg.Gateway {
-			gw := gw
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -846,7 +842,7 @@ func downCmd(nodeNames []string) {
 
 		// Wait for the process to actually exit (up to 10 seconds)
 		stopped := false
-		for i := 0; i < 100; i++ {
+		for range 100 {
 			if !checkPid(pid) {
 				stopped = true
 				break

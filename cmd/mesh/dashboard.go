@@ -174,16 +174,16 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 		return
 	}
 
-	os.Stdout.WriteString("\033[?1049h") // enter alt screen
-	os.Stdout.WriteString("\033[?25l")   // hide cursor
+	_, _ = os.Stdout.WriteString("\033[?1049h") // enter alt screen
+	_, _ = os.Stdout.WriteString("\033[?25l")   // hide cursor
 
 	// Cleanup order (LIFO): restore raw→cooked FIRST, then leave alt screen.
 	// The alt-screen-leave escape must be written while still in raw mode,
 	// and raw mode must be restored before the shell resumes output.
 	defer func() {
-		os.Stdout.WriteString("\033[?25h")   // show cursor
-		os.Stdout.WriteString("\033[?1049l") // leave alt screen
-		term.Restore(fd, oldState)           // restore cooked mode last
+		_, _ = os.Stdout.WriteString("\033[?25h")   // show cursor
+		_, _ = os.Stdout.WriteString("\033[?1049l") // leave alt screen
+		_ = term.Restore(fd, oldState)              // restore cooked mode last
 	}()
 
 	headerHeight := 2 // header line + blank line
@@ -212,18 +212,12 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 
 	render := func(force bool) {
 		_, height := termSize()
-		vpHeight := height - headerHeight
-		if vpHeight < 1 {
-			vpHeight = 1
-		}
+		vpHeight := max(height-headerHeight, 1)
 
 		lines, _ := buildDashboardBody(cfgs, nodeNames, state.Global.SnapshotFull())
 
 		totalLines := len(lines)
-		maxScroll := totalLines - vpHeight
-		if maxScroll < 0 {
-			maxScroll = 0
-		}
+		maxScroll := max(totalLines-vpHeight, 0)
 		if autoScroll {
 			scrollOffset = maxScroll
 		}
@@ -239,10 +233,7 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 		}
 
 		start := scrollOffset
-		end := start + vpHeight
-		if end > totalLines {
-			end = totalLines
-		}
+		end := min(start+vpHeight, totalLines)
 
 		// Capture the exact byte sequence that will fill the body region.
 		// Including vpHeight and start in the key means terminal resizes and
@@ -259,13 +250,13 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 			// Body is unchanged — redraw only the header region so the clock
 			// and uptime advance without rewriting the rest of the screen.
 			// This is what keeps the dashboard flicker-free between ticks.
-			os.Stdout.WriteString(renderDashboardHeaderOnly(nodeNames, configPath, logFilePath, adminURL, startTime))
+			_, _ = os.Stdout.WriteString(renderDashboardHeaderOnly(nodeNames, configPath, logFilePath, adminURL, startTime))
 			return
 		}
 		lastBody = body
 
 		frame := renderDashboardFrame(lines, start, end, vpHeight, nodeNames, configPath, logFilePath, adminURL, startTime)
-		os.Stdout.WriteString(frame)
+		_, _ = os.Stdout.WriteString(frame)
 	}
 
 	// Input reader goroutine. Cannot be cancelled (blocking Read on stdin),
@@ -562,8 +553,8 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			prefix := "clipsync-peer:" + cs.Bind + "|"
 			if activeState != nil {
 				for k, comp := range activeState {
-					if strings.HasPrefix(k, prefix) {
-						peerList = append(peerList, peerEntry{strings.TrimPrefix(k, prefix), comp.Message})
+					if after, ok := strings.CutPrefix(k, prefix); ok {
+						peerList = append(peerList, peerEntry{after, comp.Message})
 					}
 				}
 				sort.Slice(peerList, func(i, j int) bool { return compareAddr(peerList[i].addr, peerList[j].addr) })
@@ -924,10 +915,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		}
 	}
 
-	statusPadCol := maxLineLen + 1
-	if statusPadCol > 60 {
-		statusPadCol = 60
-	}
+	statusPadCol := min(maxLineLen+1, 60)
 
 	// Compute metrics column: based on content + status + annotation width.
 	hasSnap := func(s metricsSnapshot) bool {
