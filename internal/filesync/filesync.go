@@ -799,13 +799,13 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	// Convert remote protobuf index to our internal format for diffing.
 	remoteFileIndex := protoToFileIndex(remoteIdx)
 
+	// Hold the lock across both diff and pending update so `pending` always
+	// reflects the same `actions` — releasing between lets a concurrent
+	// download update the index, leaving the UI summary out of sync with
+	// what's actually about to run.
 	fs.indexMu.Lock()
 	lastSeenSeq := peerLastSeq
-
 	actions := fs.index.diff(remoteFileIndex, lastSeenSeq, fs.cfg.Direction)
-	fs.indexMu.Unlock()
-
-	fs.indexMu.Lock()
 	if len(actions) == 0 {
 		delete(fs.pending, peerAddr)
 	} else {
