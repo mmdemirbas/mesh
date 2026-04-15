@@ -1,14 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/pprof"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -31,66 +29,6 @@ type gatewayAuditResponse struct {
 	FileSize int64             `json:"file_size,omitempty"`
 	Rows     []json.RawMessage `json:"rows"`
 	Error    string            `json:"error,omitempty"`
-}
-
-// readRecentAuditRows returns up to limit most-recent JSONL rows from the
-// newest *.jsonl file in dir. Rows are returned in file order (oldest of the
-// returned window first); the returned slice is parsed back into RawMessage
-// so the JSON shape stays opaque to the admin server.
-func readRecentAuditRows(dir string, limit int) ([]json.RawMessage, string, int64, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, "", 0, err
-	}
-	var newest os.DirEntry
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
-		}
-		if newest == nil {
-			newest = e
-			continue
-		}
-		ai, err1 := newest.Info()
-		bi, err2 := e.Info()
-		if err1 == nil && err2 == nil && bi.ModTime().After(ai.ModTime()) {
-			newest = e
-		}
-	}
-	if newest == nil {
-		return nil, "", 0, nil
-	}
-	path := filepath.Join(dir, newest.Name())
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, newest.Name(), 0, err
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, newest.Name(), info.Size(), err
-	}
-	defer func() { _ = f.Close() }()
-
-	// Tail with a ring buffer of size = limit.
-	ring := make([]json.RawMessage, 0, limit)
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		copyLine := make([]byte, len(line))
-		copy(copyLine, line)
-		if len(ring) < limit {
-			ring = append(ring, copyLine)
-			continue
-		}
-		// Slide window — drop oldest, append newest.
-		copy(ring, ring[1:])
-		ring[len(ring)-1] = copyLine
-	}
-	return ring, newest.Name(), info.Size(), sc.Err()
 }
 
 // buildAdminMux returns the HTTP handler for the local admin server.
@@ -397,18 +335,45 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 
 	// GET /api/gateway/audit — recent audit rows for one or all gateways.
 	// Query params:
-	//   gateway=<name>  filter to a specific gateway (default: all).
-	//   limit=<N>       max rows per gateway (default: 200, capped at 2000).
+	//   gateway=<name>     filter to a specific gateway (default: all).
+	//   limit=<N>          max rows per gateway (default: 200, capped at 2000).
+	//   session=<hex>      only pairs whose request row carries this session_id.
+	//   model=<name>       only pairs whose request row uses this model.
+	//   outcome=<token>    only pairs whose response row has this outcome.
+	//   since=<rfc3339>    only pairs whose request ts >= since.
+	//   until=<rfc3339>    only pairs whose request ts <= until.
+	//   min_tokens=<N>     only pairs whose response total tokens >= N.
 	mux.HandleFunc("GET /api/gateway/audit", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		filter := r.URL.Query().Get("gateway")
+		q := r.URL.Query()
+		filter := q.Get("gateway")
 		limit := 200
-		if v := r.URL.Query().Get("limit"); v != "" {
+		if v := q.Get("limit"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				if n > 2000 {
 					n = 2000
 				}
 				limit = n
+			}
+		}
+		af := auditFilter{
+			session: q.Get("session"),
+			model:   q.Get("model"),
+			outcome: q.Get("outcome"),
+		}
+		if v := q.Get("since"); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				af.since = t
+			}
+		}
+		if v := q.Get("until"); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				af.until = t
+			}
+		}
+		if v := q.Get("min_tokens"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				af.minTokens = n
 			}
 		}
 
@@ -423,7 +388,7 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			rows, file, size, err := readRecentAuditRows(dirs[name], limit)
+			rows, file, size, err := queryAuditRows(dirs[name], af, limit)
 			entry := gatewayAuditResponse{Gateway: name, Dir: dirs[name], File: file, FileSize: size}
 			if err != nil {
 				entry.Error = err.Error()
@@ -432,6 +397,40 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 			out = append(out, entry)
 		}
 		_ = json.NewEncoder(w).Encode(out)
+	})
+
+	// GET /api/gateway/audit/pair — full request+response rows for one pair.
+	// Required: gateway=<name>, id=<uint64>, run=<hex>.
+	mux.HandleFunc("GET /api/gateway/audit/pair", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		q := r.URL.Query()
+		name := q.Get("gateway")
+		idStr := q.Get("id")
+		run := q.Get("run")
+		if name == "" || idStr == "" || run == "" {
+			http.Error(w, "missing gateway, id, or run", http.StatusBadRequest)
+			return
+		}
+		id, err := strconv.ParseUint(idStr, 10, 64)
+		if err != nil {
+			http.Error(w, "id must be uint64", http.StatusBadRequest)
+			return
+		}
+		dirs := gateway.AuditDirs()
+		dir, ok := dirs[name]
+		if !ok {
+			http.Error(w, "unknown gateway", http.StatusNotFound)
+			return
+		}
+		req, resp, err := findAuditPair(dir, id, run)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]json.RawMessage{
+			"request":  req,
+			"response": resp,
+		})
 	})
 
 	// pprof endpoints for runtime profiling (CPU, memory, goroutines).
