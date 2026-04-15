@@ -985,9 +985,14 @@ let prevTotalTx = 0, prevTotalRx = 0, firstTick = true;
 const tabMap = {'/ui':'dashboard','/ui/clipsync':'clipsync','/ui/filesync':'filesync','/ui/gateway':'gateway','/ui/logs':'logs','/ui/metrics':'metrics','/ui/api':'api','/ui/debug':'debug'};
 let activeTab = tabMap[location.pathname] || 'dashboard';
 // Gateway hash routing state; declared up here so applyGwHash() (called from
-// showTab on initial load) does not hit the TDZ.
+// showTab on initial load) does not hit the TDZ. gwSelected / gwDetailKey /
+// gwSessSelected are also used by applyGwHash via jumpToPair/selectSession,
+// so they are hoisted here too to survive the same cold-load path.
 let gwHashLast = '';
 let gwHashApplyingDeep = '';
+let gwSelected = '';
+let gwDetailKey = '';
+let gwSessSelected = '';
 
 function showTab(name, opts) {
   opts = opts || {};
@@ -1763,12 +1768,12 @@ function timeAgo(ts) {
 }
 
 // --- Gateway audit ---
-let gwSelected = '';
+// gwSelected and gwDetailKey are hoisted near the tab-routing block so the
+// initial applyGwHash() (which may call jumpToPair) does not hit the TDZ.
 let gwRowsCache = []; // resp rows joined with their req row, newest first
 let gwRowsByKey = new Map(); // key "run|id" → pair, for click-to-detail across refreshes
 let gwSearchTerm = '';
 let gwOutcomeFilter = '';
-let gwDetailKey = '';   // stable (run|id) of the currently open detail card
 let gwSearchTimer = 0;  // debounce handle for the search input
 
 function renderGateway() {
@@ -3100,7 +3105,7 @@ function jumpToSession(sid) {
 // turn shows the message count (from turn_index when available, otherwise
 // derived), tokens, the delta vs the prior turn (so prompt growth is
 // visible), and the stop_reason. Click any turn → opens the detail card.
-let gwSessSelected = '';
+// gwSessSelected is hoisted to the tab-routing block for TDZ reasons.
 let gwSessRows = [];      // raw audit rows for the selected session
 let gwSessSearch = '';
 
