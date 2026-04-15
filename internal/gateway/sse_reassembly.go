@@ -258,9 +258,9 @@ type openaiChunk struct {
 		FinishReason *string `json:"finish_reason,omitempty"`
 	} `json:"choices,omitempty"`
 	Usage *struct {
-		PromptTokens            int `json:"prompt_tokens,omitempty"`
-		CompletionTokens        int `json:"completion_tokens,omitempty"`
-		PromptTokensDetails     *struct {
+		PromptTokens        int `json:"prompt_tokens,omitempty"`
+		CompletionTokens    int `json:"completion_tokens,omitempty"`
+		PromptTokensDetails *struct {
 			CachedTokens int `json:"cached_tokens,omitempty"`
 		} `json:"prompt_tokens_details,omitempty"`
 		CompletionTokensDetails *struct {

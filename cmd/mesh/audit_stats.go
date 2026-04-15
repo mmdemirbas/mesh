@@ -15,16 +15,16 @@ import (
 // further math; cache hit ratio is precomputed because clients otherwise have
 // to handle the divide-by-zero case in three places.
 type auditStatsResponse struct {
-	Window          string                 `json:"window"`
-	Bucket          string                 `json:"bucket"`
-	Totals          auditStatsTotals       `json:"totals"`
-	ByModel         []auditStatsRow        `json:"by_model"`
-	BySession       []auditStatsRow        `json:"by_session"`
-	ByPath          []auditStatsRow        `json:"by_path"`
-	ByHour          []auditStatsHourRow    `json:"by_hour"`
-	TopRequests     []auditStatsTopRequest `json:"top_requests"`
-	PreambleBlocks  []auditStatsRow        `json:"preamble_blocks"`
-	Series          []auditStatsBucket     `json:"series"`
+	Window         string                 `json:"window"`
+	Bucket         string                 `json:"bucket"`
+	Totals         auditStatsTotals       `json:"totals"`
+	ByModel        []auditStatsRow        `json:"by_model"`
+	BySession      []auditStatsRow        `json:"by_session"`
+	ByPath         []auditStatsRow        `json:"by_path"`
+	ByHour         []auditStatsHourRow    `json:"by_hour"`
+	TopRequests    []auditStatsTopRequest `json:"top_requests"`
+	PreambleBlocks []auditStatsRow        `json:"preamble_blocks"`
+	Series         []auditStatsBucket     `json:"series"`
 }
 
 // auditStatsHourRow is a sparse hour-of-day bucket (0..23). Used so the
@@ -39,27 +39,27 @@ type auditStatsHourRow struct {
 // auditStatsTopRequest points back at one specific pair so the UI can
 // open its detail card.
 type auditStatsTopRequest struct {
-	ID          uint64 `json:"id"`
-	Run         string `json:"run"`
-	TS          string `json:"ts"`
-	Model       string `json:"model"`
-	Session     string `json:"session"`
-	Path        string `json:"path"`
-	InputTokens int64  `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
-	TotalTokens int64  `json:"total_tokens"`
+	ID           uint64 `json:"id"`
+	Run          string `json:"run"`
+	TS           string `json:"ts"`
+	Model        string `json:"model"`
+	Session      string `json:"session"`
+	Path         string `json:"path"`
+	InputTokens  int64  `json:"input_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+	TotalTokens  int64  `json:"total_tokens"`
 }
 
 type auditStatsTotals struct {
-	Requests           int     `json:"requests"`
-	Errors             int     `json:"errors"`
-	InputTokens        int64   `json:"input_tokens"`
-	OutputTokens       int64   `json:"output_tokens"`
-	CacheReadTokens    int64   `json:"cache_read_tokens"`
-	CacheCreateTokens  int64   `json:"cache_creation_tokens"`
-	ReasoningTokens    int64   `json:"reasoning_tokens"`
-	CacheHitRatio      float64 `json:"cache_hit_ratio"`
-	ElapsedSumMs       int64   `json:"elapsed_sum_ms"`
+	Requests          int     `json:"requests"`
+	Errors            int     `json:"errors"`
+	InputTokens       int64   `json:"input_tokens"`
+	OutputTokens      int64   `json:"output_tokens"`
+	CacheReadTokens   int64   `json:"cache_read_tokens"`
+	CacheCreateTokens int64   `json:"cache_creation_tokens"`
+	ReasoningTokens   int64   `json:"reasoning_tokens"`
+	CacheHitRatio     float64 `json:"cache_hit_ratio"`
+	ElapsedSumMs      int64   `json:"elapsed_sum_ms"`
 }
 
 // auditStatsRow groups counters by a single key (model name, session id, …).
@@ -580,9 +580,9 @@ func extractPreamblePayloads(bodyJSON []byte) []preambleBlock {
 
 // matchedTag records one opener + its paired closing tag position.
 type matchedTag struct {
-	name                       string
-	start, end                 int // full tag range in s
-	bodyStart, bodyEnd         int
+	name               string
+	start, end         int // full tag range in s
+	bodyStart, bodyEnd int
 }
 
 // scanPreambleTags finds every <name>...</name> pair in s. RE2 has no

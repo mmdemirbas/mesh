@@ -46,14 +46,14 @@ type auditQueryRow struct {
 
 func parseAuditRow(line []byte) (auditQueryRow, bool) {
 	var minimal struct {
-		T         string  `json:"t"`
-		ID        uint64  `json:"id"`
-		Run       string  `json:"run"`
-		TS        string  `json:"ts"`
-		SessionID string  `json:"session_id"`
-		Model     string  `json:"model"`
-		Status    int     `json:"status"`
-		Outcome   string  `json:"outcome"`
+		T         string `json:"t"`
+		ID        uint64 `json:"id"`
+		Run       string `json:"run"`
+		TS        string `json:"ts"`
+		SessionID string `json:"session_id"`
+		Model     string `json:"model"`
+		Status    int    `json:"status"`
+		Outcome   string `json:"outcome"`
 		Usage     *struct {
 			InputTokens              int `json:"input_tokens"`
 			OutputTokens             int `json:"output_tokens"`
@@ -229,9 +229,9 @@ func queryAuditRows(dir string, f auditFilter, limit int) ([]json.RawMessage, st
 }
 
 type pairBuilder struct {
-	req, resp          auditQueryRow
-	haveReq, haveResp  bool
-	matched            bool
+	req, resp         auditQueryRow
+	haveReq, haveResp bool
+	matched           bool
 }
 
 func (f auditFilter) isEmpty() bool {
