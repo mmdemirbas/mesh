@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/proto"
 
@@ -69,8 +70,13 @@ type ClipActivity struct {
 	Size      int64     `json:"size"`      // payload size in bytes
 	Formats   []string  `json:"formats"`   // MIME types or file names
 	Peer      string    `json:"peer"`      // peer address (receive only)
+	Preview   string    `json:"preview"`   // up to previewMaxChars of text payload, control chars stripped
 	Time      time.Time `json:"time"`
 }
+
+// previewMaxChars caps the text snippet stored on each ClipActivity. The web
+// dashboard renders the full value; the CLI dashboard truncates further.
+const previewMaxChars = 100
 
 // activeNodes tracks running clipsync nodes for admin API access.
 var activeNodes nodeutil.Registry[Node]
@@ -201,12 +207,13 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 
 // recordActivity appends a clipboard activity to the ring buffer and updates
 // the state message shown in the dashboard.
-func (n *Node) recordActivity(direction string, size int64, formats []string, peer string) {
+func (n *Node) recordActivity(direction string, size int64, formats []string, peer, preview string) {
 	a := ClipActivity{
 		Direction: direction,
 		Size:      size,
 		Formats:   formats,
 		Peer:      peer,
+		Preview:   preview,
 		Time:      time.Now(),
 	}
 	n.activityMu.Lock()
@@ -230,6 +237,8 @@ func (n *Node) recordActivity(direction string, size int64, formats []string, pe
 }
 
 // formatActivitySummary builds a compact human-readable summary of a clipboard activity.
+// When a text preview is present it is truncated to cliPreviewMaxChars for the
+// CLI dashboard; the full preview is still available in ClipActivity.Preview.
 func formatActivitySummary(a ClipActivity) string {
 	dir := "sent"
 	if a.Direction == "receive" {
@@ -239,7 +248,70 @@ func formatActivitySummary(a ClipActivity) string {
 	if fmts == "" {
 		fmts = "unknown"
 	}
-	return fmt.Sprintf("%s %s %s", dir, formatBytes(a.Size), fmts)
+	base := fmt.Sprintf("%s %s %s", dir, formatBytes(a.Size), fmts)
+	if snippet := truncateRunes(a.Preview, cliPreviewMaxChars); snippet != "" {
+		base += " " + strconv.Quote(snippet)
+	}
+	return base
+}
+
+// cliPreviewMaxChars caps the preview shown in the CLI dashboard.
+const cliPreviewMaxChars = 10
+
+// extractTextPreview returns a sanitized snippet (up to previewMaxChars runes)
+// drawn from the first text/* format in p, or empty string if none found or
+// the payload is file-only. Control characters (tabs, newlines) are folded to
+// single spaces so the snippet stays on one line in both dashboards.
+func extractTextPreview(p *pb.SyncPayload) string {
+	if p == nil {
+		return ""
+	}
+	var raw []byte
+	for _, f := range p.GetFormats() {
+		mt := f.GetMimeType()
+		if mt == "text/plain" {
+			raw = f.GetData()
+			break
+		}
+	}
+	if raw == nil {
+		for _, f := range p.GetFormats() {
+			if strings.HasPrefix(f.GetMimeType(), "text/") {
+				raw = f.GetData()
+				break
+			}
+		}
+	}
+	if len(raw) == 0 {
+		return ""
+	}
+	s := strings.Map(func(r rune) rune {
+		if r == utf8.RuneError || r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, string(raw))
+	// Collapse repeated whitespace from mapped control chars.
+	s = strings.Join(strings.Fields(s), " ")
+	return truncateRunes(s, previewMaxChars)
+}
+
+// truncateRunes returns s truncated to at most n runes, with a trailing "…"
+// when content was dropped. Never splits a multi-byte rune.
+func truncateRunes(s string, n int) string {
+	if n <= 0 || s == "" {
+		return ""
+	}
+	i, count := 0, 0
+	for i < len(s) {
+		_, size := utf8.DecodeRuneInString(s[i:])
+		count++
+		if count > n {
+			return s[:i] + "…"
+		}
+		i += size
+	}
+	return s
 }
 
 func formatBytes(b int64) string {
@@ -348,7 +420,7 @@ func (n *Node) Broadcast(payload *pb.SyncPayload) {
 
 	// Record send activity (raw size for accurate metrics).
 	formats := extractFormatNames(payload)
-	n.recordActivity("send", int64(len(raw)), formats, "")
+	n.recordActivity("send", int64(len(raw)), formats, "", extractTextPreview(payload))
 
 	n.stateMu.Lock()
 	n.lastPayload = data
@@ -474,7 +546,7 @@ func extractFormatNames(p *pb.SyncPayload) []string {
 func (n *Node) processPayload(p *pb.SyncPayload, bodySize int, peerHostPort string) {
 	// Record receive activity using the original body size to avoid re-marshaling.
 	formats := extractFormatNames(p)
-	n.recordActivity("receive", int64(bodySize), formats, peerHostPort)
+	n.recordActivity("receive", int64(bodySize), formats, peerHostPort, extractTextPreview(p))
 
 	if len(p.GetFiles()) > 0 {
 		var writtenPaths []string

@@ -1529,10 +1529,18 @@ function renderClipsync() {
     const dir = a.direction === 'send'
       ? '<span style="color:var(--green)">&#x2191; send</span>'
       : '<span style="color:var(--purple)">&#x2193; receive</span>';
-    const fmts = (a.formats||[]).map(f => x(f)).join(', ') || '<span style="color:var(--text-muted)">-</span>';
+    const fmts = (a.formats||[]).map(f => x(f)).join(', ');
     const peer = a.peer ? x(a.peer) : '<span style="color:var(--text-muted)">-</span>';
     const ago = timeAgo(a.time);
-    return '<tr><td>'+dir+'</td><td>'+fmtBytes(a.size)+'</td><td style="color:var(--text-dim)">'+fmts+'</td><td>'+peer+'</td><td style="color:var(--text-muted)">'+ago+'</td></tr>';
+    let content;
+    if (a.preview) {
+      content = '<div style="color:var(--text)">'+x(a.preview)+'</div>'
+              + (fmts ? '<div style="color:var(--text-muted);font-size:85%">'+fmts+'</div>' : '');
+    } else {
+      content = fmts ? '<span style="color:var(--text-dim)">'+fmts+'</span>'
+                     : '<span style="color:var(--text-muted)">-</span>';
+    }
+    return '<tr><td>'+dir+'</td><td>'+fmtBytes(a.size)+'</td><td>'+content+'</td><td>'+peer+'</td><td style="color:var(--text-muted)">'+ago+'</td></tr>';
   }).join('');
 }
 

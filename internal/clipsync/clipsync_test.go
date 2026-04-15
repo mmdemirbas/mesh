@@ -30,6 +30,116 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func TestExtractTextPreview(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		p    *pb.SyncPayload
+		want string
+	}{
+		{"nil payload", nil, ""},
+		{"no formats", &pb.SyncPayload{}, ""},
+		{
+			"plain text",
+			&pb.SyncPayload{Formats: []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("hello world")}}},
+			"hello world",
+		},
+		{
+			"prefers text/plain over text/html",
+			&pb.SyncPayload{Formats: []*pb.ClipFormat{
+				{MimeType: "text/html", Data: []byte("<b>bold</b>")},
+				{MimeType: "text/plain", Data: []byte("bold")},
+			}},
+			"bold",
+		},
+		{
+			"falls back to text/html when no text/plain",
+			&pb.SyncPayload{Formats: []*pb.ClipFormat{{MimeType: "text/html", Data: []byte("<p>x</p>")}}},
+			"<p>x</p>",
+		},
+		{
+			"binary-only payload returns empty",
+			&pb.SyncPayload{Formats: []*pb.ClipFormat{{MimeType: "image/png", Data: []byte{0xff, 0xd8}}}},
+			"",
+		},
+		{
+			"collapses newlines and tabs to single spaces",
+			&pb.SyncPayload{Formats: []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("a\n\tb\r\nc")}}},
+			"a b c",
+		},
+		{
+			"truncates to previewMaxChars with ellipsis",
+			&pb.SyncPayload{Formats: []*pb.ClipFormat{{MimeType: "text/plain", Data: bytes.Repeat([]byte("x"), previewMaxChars+50)}}},
+			strings.Repeat("x", previewMaxChars) + "…",
+		},
+		{
+			"multi-byte runes counted by character not byte",
+			&pb.SyncPayload{Formats: []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("üñıç")}}},
+			"üñıç",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := extractTextPreview(tc.p)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTruncateRunes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in   string
+		n    int
+		want string
+	}{
+		{"", 5, ""},
+		{"abc", 0, ""},
+		{"abc", 10, "abc"},
+		{"abcdef", 3, "abc…"},
+		{"üñıç", 2, "üñ…"},
+		{"üñıç", 4, "üñıç"},
+	}
+	for _, tc := range tests {
+		if got := truncateRunes(tc.in, tc.n); got != tc.want {
+			t.Errorf("truncateRunes(%q,%d)=%q want %q", tc.in, tc.n, got, tc.want)
+		}
+	}
+}
+
+func TestFormatActivitySummaryPreview(t *testing.T) {
+	t.Parallel()
+	a := ClipActivity{
+		Direction: "send",
+		Size:      12,
+		Formats:   []string{"text/plain"},
+		Preview:   "hello world this is long",
+	}
+	got := formatActivitySummary(a)
+	// CLI snippet is truncated to cliPreviewMaxChars (10) and quoted.
+	if !strings.Contains(got, `"hello worl…"`) {
+		t.Errorf("summary missing truncated quoted snippet: %q", got)
+	}
+	if !strings.Contains(got, "sent") || !strings.Contains(got, "text/plain") {
+		t.Errorf("summary missing base fields: %q", got)
+	}
+}
+
+func TestFormatActivitySummaryNoPreview(t *testing.T) {
+	t.Parallel()
+	a := ClipActivity{Direction: "receive", Size: 100, Formats: []string{"image/png"}}
+	got := formatActivitySummary(a)
+	if strings.Contains(got, `"`) {
+		t.Errorf("unexpected quoted snippet when preview empty: %q", got)
+	}
+	if !strings.Contains(got, "received") || !strings.Contains(got, "image/png") {
+		t.Errorf("summary missing base fields: %q", got)
+	}
+}
+
 func TestContainsIP(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
