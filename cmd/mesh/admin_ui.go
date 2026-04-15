@@ -192,6 +192,28 @@ tbody tr:last-child td { border-bottom: none; }
 .gw-sub-btn.active { background: var(--bg-card); color: var(--green); }
 .gw-sub-btn:hover { color: var(--text); }
 
+/* Sessions sub-view layout */
+.gw-session-grid { display: grid; grid-template-columns: 280px 1fr; gap: 12px; }
+@media (max-width: 900px) { .gw-session-grid { grid-template-columns: 1fr; } }
+.gw-sess-row {
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  cursor: pointer; font-size: 12px;
+}
+.gw-sess-row:hover { background: var(--bg-hover); }
+.gw-sess-row.active { background: var(--bg-hover); border-left: 3px solid var(--green); padding-left: 9px; }
+.gw-sess-row .id { font-family: var(--mono); color: var(--cyan); font-size: 11px; }
+.gw-sess-row .meta { color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+.gw-turn {
+  display: grid; grid-template-columns: 60px 1fr auto; gap: 8px;
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px;
+  margin-bottom: 6px; font-size: 12px; cursor: pointer;
+  align-items: center;
+}
+.gw-turn:hover { background: var(--bg-hover); border-color: var(--text-dim); }
+.gw-turn .turn-no { font-family: var(--mono); color: var(--text-muted); font-size: 11px; text-align: center; }
+.gw-turn .delta-up { color: var(--red); }
+.gw-turn .delta-down { color: var(--green); }
+
 /* Stacked SVG bar chart */
 .gw-series-svg { width: 100%; height: 100%; display: block; }
 .gw-series-svg rect.gx-cache-read   { fill: var(--green); }
@@ -494,9 +516,21 @@ tbody tr:last-child td { border-bottom: none; }
       </div>
     </div>
 
-    <!-- Sessions sub-view (filled in step 9) -->
+    <!-- Sessions sub-view -->
     <div id="gw-sub-sessions" class="gw-subview" style="display:none">
-      <div class="card"><div class="card-body padded"><span class="json-summary">Sessions list and per-session timeline land in step 9.</span></div></div>
+      <div class="gw-session-grid">
+        <div class="card">
+          <div class="card-header">
+            <span>Sessions</span>
+            <input class="search-input" id="gw-sess-search" placeholder="Filter..." style="width:140px">
+          </div>
+          <div class="card-body" id="gw-sess-list" style="max-height:70vh;overflow:auto"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span id="gw-sess-title">Select a session</span></div>
+          <div class="card-body padded" id="gw-sess-timeline" style="max-height:70vh;overflow:auto"></div>
+        </div>
+      </div>
     </div>
 
     <!-- Requests sub-view (existing table) -->
@@ -1288,6 +1322,7 @@ function renderGateway() {
   }
   gwSelected = sel.value;
   renderGatewayOverview();
+  if (gwSubview === 'sessions') renderSessions();
 
   const entry = gatewayAudit.find(g => g.gateway === gwSelected) || gatewayAudit[0];
   const rowsRaw = entry.rows || [];
@@ -1747,6 +1782,7 @@ document.querySelectorAll('.gw-sub-btn').forEach(b => b.addEventListener('click'
   document.getElementById('gw-sub-overview').style.display = gwSubview === 'overview' ? '' : 'none';
   document.getElementById('gw-sub-sessions').style.display = gwSubview === 'sessions' ? '' : 'none';
   document.getElementById('gw-sub-requests').style.display = gwSubview === 'requests' ? '' : 'none';
+  if (gwSubview === 'sessions') renderSessions();
 }));
 
 // --- Gateway overview ---
@@ -1822,15 +1858,142 @@ function fmtAgo(ts) {
 }
 
 function jumpToSession(sid) {
-  // Hand-off to the (currently placeholder) Sessions view.
   gwSubview = 'sessions';
   document.querySelectorAll('.gw-sub-btn').forEach(x => x.classList.toggle('active', x.dataset.sub === 'sessions'));
   document.getElementById('gw-sub-overview').style.display = 'none';
   document.getElementById('gw-sub-requests').style.display = 'none';
   document.getElementById('gw-sub-sessions').style.display = '';
-  // Step 9 will read this and pre-select the session.
-  window._gwJumpSession = sid;
+  selectSession(sid);
+  renderSessions();
 }
+
+// --- Sessions sub-view ---
+//
+// Reads gwStats.by_session for the left list and fetches the per-session
+// pair stream from /api/gateway/audit?session= for the right timeline. Each
+// turn shows the message count (from turn_index when available, otherwise
+// derived), tokens, the delta vs the prior turn (so prompt growth is
+// visible), and the stop_reason. Click any turn → opens the detail card.
+let gwSessSelected = '';
+let gwSessRows = [];      // raw audit rows for the selected session
+let gwSessSearch = '';
+
+function renderSessions() {
+  const list = document.getElementById('gw-sess-list');
+  if (!list) return;
+  const sessions = (gwStats && gwStats.by_session) || [];
+  const term = (gwSessSearch||'').toLowerCase();
+  const filtered = term
+    ? sessions.filter(s => (s.key+' '+s.first_model).toLowerCase().includes(term))
+    : sessions;
+  if (!filtered.length) {
+    list.innerHTML = '<div style="color:var(--text-muted);padding:12px">No sessions in window.</div>';
+    document.getElementById('gw-sess-timeline').innerHTML = '';
+    document.getElementById('gw-sess-title').textContent = 'Select a session';
+    return;
+  }
+  list.innerHTML = filtered.map(s => {
+    const active = s.key === gwSessSelected ? ' active' : '';
+    return '<div class="gw-sess-row'+active+'" onclick="selectSession(\''+x(s.key)+'\')">' +
+      '<div class="id">'+x(s.key)+'</div>' +
+      '<div class="meta">'+x(s.first_model||'?')+' · '+(s.turns||s.requests)+' turns · ' +
+        ((s.input_tokens||0)+(s.output_tokens||0)).toLocaleString()+' tokens</div>' +
+      '<div class="meta">last '+x(timeAgo(s.last_seen||''))+'</div>' +
+    '</div>';
+  }).join('');
+  if (!gwSessSelected && filtered.length) {
+    selectSession(filtered[0].key);
+  } else if (gwSessSelected) {
+    renderSessionTimeline();
+  }
+}
+
+function selectSession(sid) {
+  gwSessSelected = sid;
+  document.querySelectorAll('.gw-sess-row').forEach(el => el.classList.remove('active'));
+  // Fetch the per-session rows; the response is paired so the timeline can
+  // be reconstructed.
+  fetch('/api/gateway/audit?gateway='+encodeURIComponent(gwSelected)+
+        '&session='+encodeURIComponent(sid)+'&limit=200')
+    .then(r => r.json())
+    .then(arr => {
+      gwSessRows = (arr && arr[0] && arr[0].rows) || [];
+      renderSessionTimeline();
+      // Re-mark active row in case the list re-rendered.
+      document.querySelectorAll('.gw-sess-row').forEach(el => {
+        if (el.querySelector('.id') && el.querySelector('.id').textContent === sid) {
+          el.classList.add('active');
+        }
+      });
+    })
+    .catch(() => {
+      gwSessRows = [];
+      renderSessionTimeline();
+    });
+}
+
+function renderSessionTimeline() {
+  const wrap = document.getElementById('gw-sess-timeline');
+  const title = document.getElementById('gw-sess-title');
+  if (!wrap || !title) return;
+  if (!gwSessSelected) {
+    title.textContent = 'Select a session';
+    wrap.innerHTML = '';
+    return;
+  }
+  // Pair req+resp by id+run, oldest first so turn order matches chat order.
+  const reqs = new Map();
+  const pairs = [];
+  for (const r of gwSessRows) {
+    const key = (r.run||'')+'|'+r.id;
+    if (r.t === 'req') reqs.set(key, r);
+    else if (r.t === 'resp') pairs.push({req: reqs.get(key) || {}, resp: r});
+  }
+  pairs.sort((a, b) => (a.req.ts||'').localeCompare(b.req.ts||''));
+
+  title.innerHTML = 'Session <code style="color:var(--cyan)">'+x(gwSessSelected)+'</code> · '+pairs.length+' turns';
+
+  if (!pairs.length) {
+    wrap.innerHTML = '<div style="color:var(--text-muted);padding:12px">No turns recorded.</div>';
+    return;
+  }
+  // Stash so click → detail can locate the same pair without a re-fetch.
+  gwRowsCache = pairs.slice().reverse(); // showGwDetail uses this index
+  let prevIn = 0;
+  wrap.innerHTML = pairs.map((p, i) => {
+    const u = p.resp.usage || (p.resp.stream_summary||{}).usage || {};
+    const totalIn = (u.input_tokens||0) + (u.cache_read_input_tokens||0) + (u.cache_creation_input_tokens||0);
+    const out = u.output_tokens||0;
+    const delta = i === 0 ? 0 : totalIn - prevIn;
+    prevIn = totalIn;
+    const deltaCls = delta > 0 ? 'delta-up' : delta < 0 ? 'delta-down' : '';
+    const deltaLabel = i === 0 ? '' : (delta >= 0 ? '+' : '') + delta.toLocaleString();
+    const stop = (p.resp.stream_summary||{}).stop_reason || '';
+    const elapsed = p.resp.elapsed_ms ? p.resp.elapsed_ms+'ms' : '';
+    const tools = ((p.resp.stream_summary||{}).tool_calls||[]).length;
+    const idx = gwRowsCache.length - 1 - i; // mirror the reversal above
+    return '<div class="gw-turn" onclick="showGwDetail('+idx+')">' +
+      '<div class="turn-no">#'+(p.req.turn_index||(i+1))+'</div>' +
+      '<div>' +
+        '<div>'+x((p.req.ts||'').replace('T',' ').slice(5,19))+'  ·  ' +
+          '<span style="color:var(--text-dim)">'+x(p.req.model||'?')+'</span>'+
+          (stop ? '  ·  <span class="chip">stop <b>'+x(stop)+'</b></span>' : '')+
+          (tools ? '  ·  <span class="chip">'+tools+' tool calls</span>' : '')+
+        '</div>' +
+        '<div style="color:var(--text-muted);font-size:11px;margin-top:2px">' +
+          'in '+totalIn.toLocaleString()+' / out '+out.toLocaleString()+
+          (deltaLabel ? ' · <span class="'+deltaCls+'">Δin '+deltaLabel+'</span>' : '')+
+          (elapsed ? ' · '+elapsed : '')+
+        '</div>' +
+      '</div>' +
+      '<div style="text-align:right;color:var(--text-muted);font-size:11px">→</div>' +
+    '</div>';
+  }).join('');
+}
+
+document.getElementById('gw-sess-search').addEventListener('input', e => {
+  gwSessSearch = e.target.value; renderSessions();
+});
 
 // renderSeriesSVG draws a stacked bar chart of the four token buckets per
 // time bucket. SVG only — no canvas, no chart libs. Each bar is a vertical

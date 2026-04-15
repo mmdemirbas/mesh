@@ -577,6 +577,10 @@ func TestAdminUIGatewayDetailMarkup(t *testing.T) {
 		`gw-sub-btn`,
 		`gw-kpi`,
 		`gw-top-sessions`,
+		`renderSessions`,
+		`renderSessionTimeline`,
+		`gw-sess-list`,
+		`gw-session-grid`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("UI missing %q (regression: detail layout collapsed back to single pane)", want)
