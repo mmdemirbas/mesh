@@ -2039,20 +2039,37 @@ function renderBubble(m, idx) {
     if (split.pre.length) preCtxHtml = renderContextDrawer('pre', split.pre, totalLen);
     if (split.post.length) postCtxHtml = renderContextDrawer('post', split.post, totalLen);
   } else if (role === 'user' && Array.isArray(m.content)) {
-    // Anthropic-style content blocks: any leaf that is a plain-text block
-    // gets the same preamble split. Non-text blocks (tool_result, image,
-    // tool_use) pass through as-is.
+    // Anthropic-style content blocks: text blocks get the preamble split and
+    // their pre/post context is aggregated into a single leading/trailing
+    // drawer so a turn with 3 reminder-only text blocks does not produce 3
+    // separate "Pre-context" rows. Non-text blocks (tool_result, image,
+    // tool_use) pass through as-is in document order.
+    typedChars = 0;
+    const aggPre = [], aggPost = [];
+    let sawTyped = false;
     const parts = m.content.map(b => {
       if (b && b.type === 'text' && typeof b.text === 'string') {
         const s = splitUserText(b.text);
-        const typedHtml = renderPlainText(s.typed);
-        const pre = s.pre.length ? renderContextDrawer('pre', s.pre, b.text.length) : '';
-        const post = s.post.length ? renderContextDrawer('post', s.post, b.text.length) : '';
-        typedChars = s.typed.length;
-        return pre + typedHtml + post;
+        typedChars += s.typed.length;
+        // Blocks before any typed prose fold into pre-context; blocks after
+        // the last typed prose fold into post-context. If this block has no
+        // typed prose at all, route everything through the side we are still
+        // collecting for (pre before we have seen typed, post after).
+        if (s.typed === '') {
+          if (sawTyped) aggPost.push(...s.pre, ...s.post);
+          else aggPre.push(...s.pre, ...s.post);
+          return '';
+        }
+        aggPre.push(...s.pre);
+        aggPost.push(...s.post);
+        sawTyped = true;
+        return renderPlainText(s.typed);
       }
+      sawTyped = true;
       return renderContentBlock(b);
     });
+    if (aggPre.length) preCtxHtml = renderContextDrawer('pre', aggPre, totalLen);
+    if (aggPost.length) postCtxHtml = renderContextDrawer('post', aggPost, totalLen);
     contentHtml = parts.join('');
   } else {
     contentHtml = renderContent(m.content);
@@ -2105,7 +2122,9 @@ function splitUserText(s) {
   }
   if (firstText === -1) {
     // Nothing but blocks (or whitespace) — treat all blocks as pre-context.
-    return {pre: parts.filter(p => p.kind === 'block'), typed: s.trim(), post: []};
+    // typed must be empty here, otherwise the full original string (blocks
+    // included) renders alongside the drawer and we get duplicated content.
+    return {pre: parts.filter(p => p.kind === 'block'), typed: '', post: []};
   }
   const pre = parts.slice(0, firstText).filter(p => p.kind === 'block');
   const post = parts.slice(lastText + 1).filter(p => p.kind === 'block');
