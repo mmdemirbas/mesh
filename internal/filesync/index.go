@@ -157,18 +157,55 @@ func (idx *FileIndex) activeCount() int {
 	return count
 }
 
+// ScanStats captures measurable work performed by a single scan pass so
+// callers can attribute wall time to concrete phases instead of guessing.
+// All counters are populated even on error — partial stats are still useful
+// for triage. Zero-valued fields mean "phase did not run" (e.g. deletions
+// are skipped on WalkDir error).
+type ScanStats struct {
+	WalkDuration   time.Duration // total time inside filepath.WalkDir
+	HashDuration   time.Duration // cumulative time spent in hashFile
+	StatDuration   time.Duration // cumulative time spent in d.Info()
+	IgnoreDuration time.Duration // cumulative time spent in ignore.shouldIgnore
+	DeletionScan   time.Duration // post-walk tombstone pass
+
+	EntriesVisited  int // total WalkDir callbacks
+	DirsWalked      int // directories descended (excluding root)
+	DirsIgnored     int // directories skipped by ignore rules
+	FilesIgnored    int // files skipped by ignore rules
+	SymlinksSkipped int
+	TempCleaned     int // stale .mesh-tmp-* / .mesh-delta-tmp removed
+	FastPathHits    int // stat matched — skipped rehash
+	FilesHashed     int
+	BytesHashed     int64 // sum of sizes of hashed files
+	StatErrors      int
+	HashErrors      int
+	Deletions       int // tombstones created in this pass
+}
+
 // scan walks the folder, updates the index, cleans stale temp files, and
 // returns whether any files changed, the active (non-deleted) file count,
 // and the number of directories walked (excluding the root and ignored subtrees).
 func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignoreMatcher) (changed bool, activeCount, dirCount int, err error) {
+	changed, activeCount, dirCount, _, err = idx.scanWithStats(ctx, folderRoot, ignore)
+	return
+}
+
+// scanWithStats is scan with detailed per-phase instrumentation. Callers that
+// want evidence (runScan) use this; tests keep the simpler signature.
+//
+//nolint:gocyclo // scan is a single-pass WalkDir; splitting it would hurt locality more than it helps.
+func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, ignore *ignoreMatcher) (changed bool, activeCount, dirCount int, stats ScanStats, err error) {
 	changed = false
 	seen := make(map[string]struct{})
 	tempCutoff := time.Now().Add(-maxTempFileAge)
 
+	walkStart := time.Now()
 	err = filepath.WalkDir(folderRoot, func(path string, d fs.DirEntry, walkErr error) error {
 		if ctx.Err() != nil {
 			return ctx.Err() // bail out on shutdown
 		}
+		stats.EntriesVisited++
 		if walkErr != nil {
 			return nil // skip inaccessible entries
 		}
@@ -177,7 +214,9 @@ func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignor
 		name := d.Name()
 		if !d.IsDir() && (strings.HasPrefix(name, ".mesh-tmp-") || strings.HasSuffix(name, ".mesh-delta-tmp")) {
 			if info, infoErr := d.Info(); infoErr == nil && info.ModTime().Before(tempCutoff) {
-				_ = os.Remove(path)
+				if os.Remove(path) == nil {
+					stats.TempCleaned++
+				}
 			}
 			return nil
 		}
@@ -194,20 +233,27 @@ func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignor
 
 		isDir := d.IsDir()
 
-		if ignore.shouldIgnore(rel, isDir) {
+		ignStart := time.Now()
+		skip := ignore.shouldIgnore(rel, isDir)
+		stats.IgnoreDuration += time.Since(ignStart)
+		if skip {
 			if isDir {
+				stats.DirsIgnored++
 				return filepath.SkipDir
 			}
+			stats.FilesIgnored++
 			return nil
 		}
 
 		if isDir {
 			dirCount++
+			stats.DirsWalked++
 			return nil
 		}
 
 		// Skip symlinks.
 		if d.Type()&fs.ModeSymlink != 0 {
+			stats.SymlinksSkipped++
 			return nil
 		}
 
@@ -216,8 +262,11 @@ func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignor
 		}
 		seen[rel] = struct{}{}
 
+		statStart := time.Now()
 		info, err := d.Info()
+		stats.StatDuration += time.Since(statStart)
 		if err != nil {
+			stats.StatErrors++
 			return nil
 		}
 
@@ -227,13 +276,19 @@ func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignor
 
 		// Fast path: skip hashing if stat is unchanged.
 		if exists && !existing.Deleted && existing.Size == size && existing.MtimeNS == mtimeNS {
+			stats.FastPathHits++
 			return nil
 		}
 
-		hash, err := hashFile(path)
-		if err != nil {
+		hashStart := time.Now()
+		hash, hashErr := hashFile(path)
+		stats.HashDuration += time.Since(hashStart)
+		if hashErr != nil {
+			stats.HashErrors++
 			return nil // skip unreadable files
 		}
+		stats.FilesHashed++
+		stats.BytesHashed += size
 
 		if exists && !existing.Deleted && existing.SHA256 == hash {
 			// Content identical despite stat change (e.g., touch). Update stat only.
@@ -253,10 +308,12 @@ func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignor
 		changed = true
 		return nil
 	})
+	stats.WalkDuration = time.Since(walkStart)
 	if err != nil {
-		return changed, len(seen), dirCount, fmt.Errorf("scan %s: %w", folderRoot, err)
+		return changed, len(seen), dirCount, stats, fmt.Errorf("scan %s: %w", folderRoot, err)
 	}
 
+	delStart := time.Now()
 	// Mark deletions: entries in index not seen on disk.
 	for rel, entry := range idx.Files {
 		if entry.Deleted {
@@ -269,11 +326,13 @@ func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignor
 			entry.Sequence = idx.Sequence
 			idx.Files[rel] = entry
 			changed = true
+			stats.Deletions++
 		}
 	}
+	stats.DeletionScan = time.Since(delStart)
 
 	// P7: len(seen) is the active file count — computed during walk, not a separate loop.
-	return changed, len(seen), dirCount, nil
+	return changed, len(seen), dirCount, stats, nil
 }
 
 // hashFile computes the SHA-256 hex digest of a file.
@@ -384,14 +443,18 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, direction strin
 	return actions
 }
 
-// purgeTombstones removes deleted entries older than the given duration.
-func (idx *FileIndex) purgeTombstones(maxAge time.Duration) {
+// purgeTombstones removes deleted entries older than maxAge and returns the
+// number removed (useful for debug telemetry).
+func (idx *FileIndex) purgeTombstones(maxAge time.Duration) int {
 	cutoff := time.Now().Add(-maxAge).UnixNano()
+	purged := 0
 	for path, entry := range idx.Files {
 		if entry.Deleted && entry.MtimeNS < cutoff {
 			delete(idx.Files, path)
+			purged++
 		}
 	}
+	return purged
 }
 
 // cleanTempFiles removes stale .mesh-tmp-* files from the entire folder tree.

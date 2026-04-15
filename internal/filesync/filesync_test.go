@@ -157,6 +157,96 @@ func TestIsConflictFile(t *testing.T) {
 
 // --- Index tests ---
 
+// TestScanWithStatsPopulatesEvidence pins the instrumentation contract:
+// every counter that corresponds to observable work must increment when
+// that work happens. Without this, runScan's debug logs would silently go
+// stale as the scan body evolves and we'd lose the ability to attribute
+// heaviness to a concrete phase.
+func TestScanWithStatsPopulatesEvidence(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "kept.txt", "alpha")
+	writeFile(t, dir, "sub/nested.txt", "beta payload")
+	writeFile(t, dir, "ignored.log", "noise")
+	writeFile(t, dir, "build/artifact.bin", "drop")
+
+	ignore := newIgnoreMatcher([]string{"*.log", "build/"})
+	idx := newFileIndex()
+
+	// First pass: every tracked file must be hashed (no fast-path hits).
+	_, _, _, stats, err := idx.scanWithStats(context.Background(), dir, ignore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.FilesHashed != 2 {
+		t.Errorf("FilesHashed=%d, want 2 (kept.txt + sub/nested.txt)", stats.FilesHashed)
+	}
+	if stats.BytesHashed != int64(len("alpha")+len("beta payload")) {
+		t.Errorf("BytesHashed=%d, want %d", stats.BytesHashed, len("alpha")+len("beta payload"))
+	}
+	if stats.FastPathHits != 0 {
+		t.Errorf("FastPathHits=%d on first pass, want 0", stats.FastPathHits)
+	}
+	if stats.FilesIgnored != 1 {
+		t.Errorf("FilesIgnored=%d, want 1 (ignored.log)", stats.FilesIgnored)
+	}
+	if stats.DirsIgnored != 1 {
+		t.Errorf("DirsIgnored=%d, want 1 (build/)", stats.DirsIgnored)
+	}
+	if stats.DirsWalked != 1 {
+		t.Errorf("DirsWalked=%d, want 1 (sub/)", stats.DirsWalked)
+	}
+	if stats.WalkDuration <= 0 {
+		t.Error("WalkDuration must be positive")
+	}
+	if stats.HashDuration <= 0 {
+		t.Error("HashDuration must be positive when files are hashed")
+	}
+
+	// Second pass on unchanged tree: every file must hit the fast path,
+	// no rehashing.
+	_, _, _, stats2, err := idx.scanWithStats(context.Background(), dir, ignore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats2.FilesHashed != 0 {
+		t.Errorf("FilesHashed=%d on unchanged rescan, want 0 (fast path)", stats2.FilesHashed)
+	}
+	if stats2.FastPathHits != 2 {
+		t.Errorf("FastPathHits=%d on unchanged rescan, want 2", stats2.FastPathHits)
+	}
+	if stats2.BytesHashed != 0 {
+		t.Errorf("BytesHashed=%d on unchanged rescan, want 0", stats2.BytesHashed)
+	}
+}
+
+// TestPurgeTombstonesReturnsCount pins the count return used by the debug
+// log. A silent drop to void return would blind the telemetry.
+func TestPurgeTombstonesReturnsCount(t *testing.T) {
+	t.Parallel()
+	idx := newFileIndex()
+	oldNs := time.Now().Add(-60 * 24 * time.Hour).UnixNano()
+	recentNs := time.Now().UnixNano()
+	idx.Files["old-gone"] = FileEntry{Deleted: true, MtimeNS: oldNs}
+	idx.Files["also-old-gone"] = FileEntry{Deleted: true, MtimeNS: oldNs}
+	idx.Files["recent-gone"] = FileEntry{Deleted: true, MtimeNS: recentNs}
+	idx.Files["live"] = FileEntry{Size: 3, MtimeNS: recentNs, SHA256: "x"}
+
+	n := idx.purgeTombstones(30 * 24 * time.Hour)
+	if n != 2 {
+		t.Errorf("purgeTombstones returned %d, want 2", n)
+	}
+	if _, ok := idx.Files["live"]; !ok {
+		t.Error("live entry removed")
+	}
+	if _, ok := idx.Files["recent-gone"]; !ok {
+		t.Error("recent tombstone removed (within retention)")
+	}
+	if _, ok := idx.Files["old-gone"]; ok {
+		t.Error("old tombstone not removed")
+	}
+}
+
 // TestFileIndexClone verifies that clone produces a deep copy — mutating the
 // clone's Files must not affect the original, and bumping Sequence must not
 // leak back. Regression: the scan-without-lock path depends on this isolation.

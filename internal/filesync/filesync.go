@@ -567,41 +567,54 @@ func (n *Node) runScan(ctx context.Context) {
 			continue
 		}
 
+		folderStart := time.Now()
+
 		// Snapshot the current index under a short read lock so the walk
 		// operates on a private copy. Readers (GetFolderStatuses, syncLoop)
 		// see the old index until we swap.
+		snapStart := time.Now()
 		fs.indexMu.RLock()
 		idxCopy := fs.index.clone()
 		scanStartSeq := fs.index.Sequence
 		ignore := fs.ignore
+		existingFiles := len(fs.index.Files)
 		fs.indexMu.RUnlock()
+		snapDuration := time.Since(snapStart)
 
 		state.Global.Update("filesync-folder", id, state.Scanning, "scanning "+fs.cfg.Path)
 
-		changed, count, dirs, err := idxCopy.scan(ctx, fs.cfg.Path, ignore)
+		changed, count, dirs, stats, err := idxCopy.scanWithStats(ctx, fs.cfg.Path, ignore)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			slog.Warn("scan error", "folder", id, "error", err)
 		}
-		idxCopy.purgeTombstones(tombstoneMaxAge)
+
+		purgeStart := time.Now()
+		purged := idxCopy.purgeTombstones(tombstoneMaxAge)
+		purgeDuration := time.Since(purgeStart)
 
 		// Refresh conflicts cache outside the lock — listConflicts walks the
 		// filesystem and must not block admin reads.
+		conflictStart := time.Now()
 		var conflicts []string
 		if conf, cerr := listConflicts(fs.cfg.Path); cerr == nil {
 			sort.Strings(conf)
 			conflicts = conf
 		}
+		conflictDuration := time.Since(conflictStart)
 
 		// Swap under a short write lock. Merge-preserve any entries that were
 		// written after the scan started (concurrent sync downloads bumped
 		// Sequence past scanStartSeq) so we don't clobber their work.
+		swapStart := time.Now()
 		fs.indexMu.Lock()
+		mergedBack := 0
 		for path, live := range fs.index.Files {
 			if live.Sequence > scanStartSeq {
 				idxCopy.Files[path] = live
 				if live.Sequence > idxCopy.Sequence {
 					idxCopy.Sequence = live.Sequence
 				}
+				mergedBack++
 			}
 		}
 		if fs.index.Sequence > idxCopy.Sequence {
@@ -613,9 +626,62 @@ func (n *Node) runScan(ctx context.Context) {
 			fs.conflicts = conflicts
 		}
 		fs.indexMu.Unlock()
+		swapDuration := time.Since(swapStart)
 
 		state.Global.Update("filesync-folder", id, state.Connected, "idle")
 		state.Global.UpdateFileCount("filesync-folder", id, count)
+
+		total := time.Since(folderStart)
+		// Emit at DEBUG: volume-sensitive, but every field is evidence for
+		// attributing slow scans to a concrete phase. Never enabled in
+		// production steady-state; operators flip to debug to investigate.
+		slog.Debug("filesync scan complete",
+			"folder", id,
+			"path", fs.cfg.Path,
+			"total", total,
+			"walk", stats.WalkDuration,
+			"hash", stats.HashDuration,
+			"stat", stats.StatDuration,
+			"ignore_check", stats.IgnoreDuration,
+			"deletion_scan", stats.DeletionScan,
+			"snapshot", snapDuration,
+			"tombstone_purge", purgeDuration,
+			"conflicts_walk", conflictDuration,
+			"swap", swapDuration,
+			"entries_visited", stats.EntriesVisited,
+			"dirs_walked", stats.DirsWalked,
+			"dirs_ignored", stats.DirsIgnored,
+			"files_ignored", stats.FilesIgnored,
+			"symlinks_skipped", stats.SymlinksSkipped,
+			"temp_cleaned", stats.TempCleaned,
+			"fast_path_hits", stats.FastPathHits,
+			"files_hashed", stats.FilesHashed,
+			"bytes_hashed", stats.BytesHashed,
+			"stat_errors", stats.StatErrors,
+			"hash_errors", stats.HashErrors,
+			"deletions", stats.Deletions,
+			"tombstones_purged", purged,
+			"merged_back", mergedBack,
+			"existing_files", existingFiles,
+			"active_files", count,
+			"changed", changed,
+		)
+
+		// Surface pathological scans at INFO so the dashboard log ring picks
+		// them up without requiring debug level. Thresholds are chosen to
+		// avoid spam on small repos: anything that takes >2s, hashes >100 MB,
+		// or rehashes >1000 files deserves attention.
+		if total > 2*time.Second || stats.BytesHashed > 100<<20 || stats.FilesHashed > 1000 {
+			slog.Info("filesync scan slow",
+				"folder", id,
+				"total", total,
+				"files_hashed", stats.FilesHashed,
+				"bytes_hashed", stats.BytesHashed,
+				"fast_path_hits", stats.FastPathHits,
+				"dirs_walked", stats.DirsWalked,
+				"active_files", count,
+			)
+		}
 
 		if changed {
 			anyChanged = true
