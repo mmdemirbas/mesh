@@ -220,9 +220,17 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 
 	// Initialize folders.
 	for _, fcfg := range cfg.ResolvedFolders {
-		// Ensure folder root exists.
+		// Ensure folder root exists. A missing path (e.g. host-specific mount
+		// point not present on this machine) must not abort the whole node —
+		// record the folder as failed and continue so the listener and other
+		// folders come up.
 		if _, err := os.Stat(fcfg.Path); err != nil {
-			return fmt.Errorf("folder %q path %q: %w", fcfg.ID, fcfg.Path, err)
+			slog.Warn("filesync folder path missing, skipping", "folder", fcfg.ID, "path", fcfg.Path, "error", err)
+			state.Global.Update("filesync-folder", fcfg.ID, state.Failed, "path missing: "+err.Error())
+			for _, peer := range fcfg.Peers {
+				state.Global.Update("filesync-peer", fcfg.ID+"|"+peer, state.Failed, "folder path missing")
+			}
+			continue
 		}
 
 		// Load or create index.
