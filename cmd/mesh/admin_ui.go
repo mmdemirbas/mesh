@@ -361,6 +361,10 @@ tbody tr:last-child td { border-bottom: none; }
 .gw-sub-btn.active { background: var(--bg-card); color: var(--green); }
 .gw-sub-btn:hover { color: var(--text); }
 
+/* Scroll container for long tables; keeps thead visible while body scrolls. */
+.gw-scroll { max-height: 65vh; overflow: auto; }
+.gw-scroll table thead th { position: sticky; top: 0; background: var(--bg-card); z-index: 1; }
+
 /* Sessions sub-view layout */
 .gw-session-grid { display: grid; grid-template-columns: 280px 1fr; gap: 12px; }
 @media (max-width: 900px) { .gw-session-grid { grid-template-columns: 1fr; } }
@@ -768,7 +772,7 @@ tbody tr:last-child td { border-bottom: none; }
         </div>
         <div class="card">
           <div class="card-header"><span id="gw-sess-title">Select a session</span></div>
-          <div class="card-body padded" id="gw-sess-timeline"></div>
+          <div class="card-body padded" id="gw-sess-timeline" style="max-height:70vh;overflow:auto"></div>
         </div>
       </div>
     </div>
@@ -791,20 +795,22 @@ tbody tr:last-child td { border-bottom: none; }
       </div>
       <div class="card-body">
         <div id="gw-meta" style="font-size:12px;color:var(--text-muted);margin-bottom:8px"></div>
-        <table>
-          <thead><tr>
-            <th>Time</th>
-            <th>Dir</th>
-            <th>Model</th>
-            <th>Stream</th>
-            <th>Status</th>
-            <th>Outcome</th>
-            <th>Tokens</th>
-            <th>Elapsed</th>
-            <th>Summary</th>
-          </tr></thead>
-          <tbody id="gw-body"></tbody>
-        </table>
+        <div class="gw-scroll">
+          <table>
+            <thead><tr>
+              <th>Time</th>
+              <th>Dir</th>
+              <th>Model</th>
+              <th>Stream</th>
+              <th>Status</th>
+              <th>Outcome</th>
+              <th>Tokens</th>
+              <th>Elapsed</th>
+              <th>Summary</th>
+            </tr></thead>
+            <tbody id="gw-body"></tbody>
+          </table>
+        </div>
       </div>
     </div>
     </div><!-- /#gw-sub-requests -->
@@ -965,19 +971,30 @@ let prevTotalTx = 0, prevTotalRx = 0, firstTick = true;
 const tabMap = {'/ui':'dashboard','/ui/clipsync':'clipsync','/ui/filesync':'filesync','/ui/gateway':'gateway','/ui/logs':'logs','/ui/metrics':'metrics','/ui/api':'api','/ui/debug':'debug'};
 let activeTab = tabMap[location.pathname] || 'dashboard';
 
-function showTab(name) {
+function showTab(name, opts) {
+  opts = opts || {};
+  const changed = activeTab !== name;
   activeTab = name;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'p-'+name));
   const path = '/ui' + (name === 'dashboard' ? '' : '/'+name);
-  if (location.pathname !== path) history.pushState(null, '', path);
+  // Preserve the hash when pushing so deep-links (e.g. /ui/gateway#sessions/SID)
+  // survive programmatic tab changes. Strip the hash for non-gateway tabs.
+  const hash = (name === 'gateway' && !opts.clearHash) ? location.hash : '';
+  const full = path + hash;
+  if (opts.push !== false && (location.pathname + location.hash) !== full) {
+    history.pushState(null, '', full);
+  }
+  if (name === 'gateway') applyGwHash();
+  else if (changed && location.hash) history.replaceState(null, '', path);
 }
 
 document.getElementById('tabs').addEventListener('click', e => {
-  if (e.target.classList.contains('tab')) showTab(e.target.dataset.tab);
+  if (e.target.classList.contains('tab')) showTab(e.target.dataset.tab, {clearHash: true});
 });
-window.addEventListener('popstate', () => { showTab(tabMap[location.pathname] || 'dashboard'); });
-showTab(activeTab);
+window.addEventListener('popstate', () => { showTab(tabMap[location.pathname] || 'dashboard', {push: false}); });
+window.addEventListener('hashchange', () => { if (activeTab === 'gateway') applyGwHash(); });
+showTab(activeTab, {push: false});
 
 // --- Data fetch (gated by active tab) ---
 async function tick() {
@@ -1655,6 +1672,18 @@ function renderGateway() {
   gwSelected = sel.value;
   renderGatewayOverview();
   if (gwSubview === 'sessions') renderSessions();
+  // If a hash-driven deep restore was queued before data arrived, run it now
+  // that gwSelected is known. Guarded by gwHashApplyingDeep so we only retry
+  // until the corresponding fetch has been issued.
+  if (gwHashApplyingDeep && gwSelected) {
+    const deep = gwHashApplyingDeep;
+    gwHashApplyingDeep = '';
+    if (gwSubview === 'sessions') { gwSessSelected = deep; selectSession(deep); }
+    else if (gwSubview === 'requests') {
+      const bar = deep.indexOf('|');
+      if (bar > 0) jumpToPair(deep.slice(0, bar), deep.slice(bar+1));
+    }
+  }
 
   const entry = gatewayAudit.find(g => g.gateway === gwSelected) || gatewayAudit[0];
   const rowsRaw = entry.rows || [];
@@ -1760,6 +1789,7 @@ function showGwDetail(idx) {
   if (!p) return;
   gwDetailKey = p.key || '';
   gwDetailCache = {req: p.req, resp: p.resp};
+  if (gwSubview === 'requests') writeGwHash();
   document.getElementById('gw-detail-card').style.display = 'block';
   const sid = p.req.session_id ? ' · session '+p.req.session_id : '';
   const turn = p.req.turn_index ? ' · turn '+p.req.turn_index : '';
@@ -2642,13 +2672,80 @@ document.getElementById('gw-outcome').addEventListener('change', e => { gwOutcom
 document.getElementById('gw-select').addEventListener('change', e => { gwSelected = e.target.value; gwStats = null; refresh(); });
 document.getElementById('gw-window').addEventListener('change', e => { gwWindow = e.target.value; gwStats = null; refresh(); });
 document.querySelectorAll('.gw-sub-btn').forEach(b => b.addEventListener('click', () => {
-  document.querySelectorAll('.gw-sub-btn').forEach(x => x.classList.toggle('active', x === b));
-  gwSubview = b.dataset.sub;
-  document.getElementById('gw-sub-overview').style.display = gwSubview === 'overview' ? '' : 'none';
-  document.getElementById('gw-sub-sessions').style.display = gwSubview === 'sessions' ? '' : 'none';
-  document.getElementById('gw-sub-requests').style.display = gwSubview === 'requests' ? '' : 'none';
-  if (gwSubview === 'sessions') renderSessions();
+  setGwSub(b.dataset.sub);
+  // User changed sub-view; drop any previous deep state from the URL.
+  gwDetailKey = '';
+  gwSessSelected = '';
+  writeGwHash();
 }));
+
+// setGwSub switches the gateway sub-view (overview | sessions | requests).
+// Caller is responsible for writeGwHash() afterwards when the state change
+// should be reflected in the URL.
+function setGwSub(sub) {
+  const valid = sub === 'overview' || sub === 'sessions' || sub === 'requests';
+  if (!valid) sub = 'overview';
+  gwSubview = sub;
+  document.querySelectorAll('.gw-sub-btn').forEach(x => x.classList.toggle('active', x.dataset.sub === sub));
+  document.getElementById('gw-sub-overview').style.display = sub === 'overview' ? '' : 'none';
+  document.getElementById('gw-sub-sessions').style.display = sub === 'sessions' ? '' : 'none';
+  document.getElementById('gw-sub-requests').style.display = sub === 'requests' ? '' : 'none';
+  if (sub === 'sessions') renderSessions();
+}
+
+// writeGwHash syncs the URL hash to the current gateway sub-view + deep
+// selection, so refresh/back/forward restore the same view. Uses replaceState
+// when the sub alone changed and pushState when a deep selection changed, so
+// back navigation lands on the sub-view without the selection.
+let gwHashLast = '';
+function writeGwHash() {
+  if (activeTab !== 'gateway') return;
+  let h = '#' + (gwSubview || 'overview');
+  if (gwSubview === 'sessions' && gwSessSelected) h += '/' + encodeURIComponent(gwSessSelected);
+  else if (gwSubview === 'requests' && gwDetailKey) h += '/' + encodeURIComponent(gwDetailKey);
+  if (location.hash === h) return;
+  const full = location.pathname + h;
+  // Push when gaining a deep segment so "back" clears selection; replace otherwise.
+  const prevDeep = gwHashLast.indexOf('/') >= 0;
+  const nextDeep = h.indexOf('/') >= 0;
+  if (nextDeep && !prevDeep) history.pushState(null, '', full);
+  else history.replaceState(null, '', full);
+  gwHashLast = h;
+  gwHashApplyingDeep = ''; // URL now reflects live state; no pending restore.
+}
+
+function parseGwHash() {
+  const h = (location.hash || '').replace(/^#/, '');
+  if (!h) return {sub: 'overview', deep: ''};
+  const slash = h.indexOf('/');
+  if (slash < 0) return {sub: h, deep: ''};
+  return {sub: h.slice(0, slash), deep: decodeURIComponent(h.slice(slash+1))};
+}
+
+let gwHashApplyingDeep = '';
+function applyGwHash() {
+  if (activeTab !== 'gateway') return;
+  const {sub, deep} = parseGwHash();
+  setGwSub(sub);
+  gwHashLast = location.hash;
+  if (!deep) {
+    if (sub !== 'requests') gwDetailKey = '';
+    if (sub !== 'sessions') gwSessSelected = '';
+    return;
+  }
+  gwHashApplyingDeep = deep;
+  if (sub === 'sessions') {
+    gwSessSelected = deep;
+    selectSession(deep);
+  } else if (sub === 'requests') {
+    const bar = deep.indexOf('|');
+    if (bar > 0) {
+      const run = deep.slice(0, bar);
+      const id = deep.slice(bar+1);
+      jumpToPair(run, id);
+    }
+  }
+}
 
 // --- Gateway overview ---
 //
@@ -2777,8 +2874,7 @@ function renderHourChart(rows) {
 // opens the detail card. Handy from the top-requests table and anywhere
 // else the user wants to drill into a specific id+run.
 function jumpToPair(run, id) {
-  const sub = document.querySelector('.gw-sub-btn[data-sub="requests"]');
-  if (sub) sub.click();
+  setGwSub('requests');
   fetch('/api/gateway/audit/pair?gateway='+encodeURIComponent(gwSelected)+
         '&run='+encodeURIComponent(run)+'&id='+encodeURIComponent(id))
     .then(r => r.ok ? r.json() : null)
@@ -2808,11 +2904,7 @@ function fmtAgo(ts) {
 }
 
 function jumpToSession(sid) {
-  gwSubview = 'sessions';
-  document.querySelectorAll('.gw-sub-btn').forEach(x => x.classList.toggle('active', x.dataset.sub === 'sessions'));
-  document.getElementById('gw-sub-overview').style.display = 'none';
-  document.getElementById('gw-sub-requests').style.display = 'none';
-  document.getElementById('gw-sub-sessions').style.display = '';
+  setGwSub('sessions');
   selectSession(sid);
   renderSessions();
 }
@@ -2860,6 +2952,7 @@ function renderSessions() {
 
 function selectSession(sid) {
   gwSessSelected = sid;
+  if (gwSubview === 'sessions') writeGwHash();
   document.querySelectorAll('.gw-sess-row').forEach(el => el.classList.remove('active'));
   // Fetch the per-session rows; the response is paired so the timeline can
   // be reconstructed.
