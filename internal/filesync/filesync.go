@@ -257,15 +257,16 @@ func (n *Node) recordActivity(a SyncActivity) {
 
 // folderState holds runtime state for a single synced folder.
 type folderState struct {
-	cfg           config.FolderCfg
-	index         *FileIndex
-	ignore        *ignoreMatcher
-	peers         map[string]PeerState      // peerAddr -> state
-	pending       map[string]PendingSummary // peerAddr -> most recent pending plan
-	peerLastError map[string]string         // peerAddr -> last transport error
-	dirCount      int                       // directory count from last scan (dashboard only)
-	conflicts     []string                  // conflict file paths from last scan (sorted)
-	indexMu       sync.RWMutex
+	cfg             config.FolderCfg
+	index           *FileIndex
+	ignore          *ignoreMatcher
+	peers           map[string]PeerState      // peerAddr -> state
+	pending         map[string]PendingSummary // peerAddr -> most recent pending plan
+	peerLastError   map[string]string         // peerAddr -> last transport error
+	dirCount        int                       // directory count from last scan (dashboard only)
+	conflicts       []string                  // conflict file paths from last scan (sorted)
+	firstScanLogged bool                      // true after first scan INFO line emitted
+	indexMu         sync.RWMutex
 }
 
 // Node is the runtime instance for a filesync configuration.
@@ -667,20 +668,37 @@ func (n *Node) runScan(ctx context.Context) {
 			"changed", changed,
 		)
 
-		// Surface pathological scans at INFO so the dashboard log ring picks
-		// them up without requiring debug level. Thresholds are chosen to
-		// avoid spam on small repos: anything that takes >2s, hashes >100 MB,
-		// or rehashes >1000 files deserves attention.
-		if total > 2*time.Second || stats.BytesHashed > 100<<20 || stats.FilesHashed > 1000 {
-			slog.Info("filesync scan slow",
+		// Always log the first scan per folder at INFO so a single run gives
+		// baseline evidence (walk/hash time, file counts, FD-pressure phase)
+		// without requiring DEBUG. Subsequent scans only log INFO when
+		// pathological: >2s, >100 MB hashed, or >1000 files rehashed.
+		slow := total > 2*time.Second || stats.BytesHashed > 100<<20 || stats.FilesHashed > 1000
+		if !fs.firstScanLogged || slow {
+			reason := "first"
+			if slow {
+				reason = "slow"
+			}
+			slog.Info("filesync scan",
+				"reason", reason,
 				"folder", id,
 				"total", total,
+				"walk", stats.WalkDuration,
+				"hash", stats.HashDuration,
+				"stat", stats.StatDuration,
+				"ignore_check", stats.IgnoreDuration,
+				"deletion_scan", stats.DeletionScan,
+				"entries_visited", stats.EntriesVisited,
+				"dirs_walked", stats.DirsWalked,
+				"dirs_ignored", stats.DirsIgnored,
+				"files_ignored", stats.FilesIgnored,
+				"fast_path_hits", stats.FastPathHits,
 				"files_hashed", stats.FilesHashed,
 				"bytes_hashed", stats.BytesHashed,
-				"fast_path_hits", stats.FastPathHits,
-				"dirs_walked", stats.DirsWalked,
+				"stat_errors", stats.StatErrors,
+				"hash_errors", stats.HashErrors,
 				"active_files", count,
 			)
+			fs.firstScanLogged = true
 		}
 
 		if changed {

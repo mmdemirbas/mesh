@@ -2,16 +2,32 @@ package filesync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
+
+// watchStats is per-root evidence captured during addRecursive so one run
+// surfaces which folders exhaust FDs and which trees are huge despite ignores.
+type watchStats struct {
+	root         string
+	dirsWalked   int
+	dirsIgnored  int
+	dirsAdded    int
+	addErrors    int
+	fdExhaustion int // ENFILE / EMFILE count
+	firstErr     error
+	firstErrPath string
+	walkDuration time.Duration
+}
 
 const (
 	// debounceInterval batches rapid filesystem events into a single scan trigger.
@@ -52,20 +68,51 @@ func newFolderWatcher(roots []string, ignoreMap map[string]*ignoreMatcher) (*fol
 		roots:   roots,
 		ignore:  ignoreMap,
 	}
+	totalWalked, totalIgnored, totalAdded, totalAddErrors, totalFD := 0, 0, 0, 0, 0
 	for _, root := range roots {
-		fw.addRecursive(root)
+		s := fw.addRecursive(root)
+		totalWalked += s.dirsWalked
+		totalIgnored += s.dirsIgnored
+		totalAdded += s.dirsAdded
+		totalAddErrors += s.addErrors
+		totalFD += s.fdExhaustion
+		// Per-root INFO so we can see which folder is heaviest / most error-prone.
+		attrs := []any{
+			"root", s.root,
+			"duration", s.walkDuration,
+			"dirs_walked", s.dirsWalked,
+			"dirs_ignored", s.dirsIgnored,
+			"dirs_added", s.dirsAdded,
+			"add_errors", s.addErrors,
+			"fd_exhaustion", s.fdExhaustion,
+		}
+		if s.firstErr != nil {
+			attrs = append(attrs, "first_error", s.firstErr.Error(), "first_error_path", s.firstErrPath)
+		}
+		slog.Info("fsnotify watch setup", attrs...)
 	}
 	if fw.capped {
 		// Too many directories — close the watcher and fall back to periodic scan.
 		_ = w.Close()
 		return nil, fmt.Errorf("directory count exceeds fsnotify limit (%d), using periodic scan only", maxWatches)
 	}
-	slog.Info("fsnotify watching directories", "count", fw.watchCount)
+	slog.Info("fsnotify watching directories",
+		"total_watches", fw.watchCount,
+		"dirs_walked", totalWalked,
+		"dirs_ignored", totalIgnored,
+		"dirs_added", totalAdded,
+		"add_errors", totalAddErrors,
+		"fd_exhaustion", totalFD,
+	)
 	return fw, nil
 }
 
-// addRecursive adds a directory and all its subdirectories to the watcher.
-func (fw *folderWatcher) addRecursive(root string) {
+// addRecursive adds a directory and all its subdirectories to the watcher,
+// returning per-root stats so callers can attribute FD pressure and huge
+// trees to a specific folder.
+func (fw *folderWatcher) addRecursive(root string) watchStats {
+	s := watchStats{root: root}
+	start := time.Now()
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -73,6 +120,7 @@ func (fw *folderWatcher) addRecursive(root string) {
 		if !d.IsDir() {
 			return nil
 		}
+		s.dirsWalked++
 
 		// Check ignore rules.
 		if matcher, ok := fw.findMatcher(path); ok {
@@ -80,6 +128,7 @@ func (fw *folderWatcher) addRecursive(root string) {
 			if relErr == nil && rel != "." {
 				rel = filepath.ToSlash(rel)
 				if matcher.shouldIgnore(rel, true) {
+					s.dirsIgnored++
 					return filepath.SkipDir
 				}
 			}
@@ -95,12 +144,28 @@ func (fw *folderWatcher) addRecursive(root string) {
 		}
 
 		if err := fw.watcher.Add(path); err != nil {
-			slog.Debug("fsnotify: failed to watch directory", "path", path, "error", err)
+			s.addErrors++
+			if isFDExhaustion(err) {
+				s.fdExhaustion++
+			}
+			if s.firstErr == nil {
+				s.firstErr = err
+				s.firstErrPath = path
+			}
 		} else {
 			fw.watchCount++
+			s.dirsAdded++
 		}
 		return nil
 	})
+	s.walkDuration = time.Since(start)
+	return s
+}
+
+// isFDExhaustion reports whether err is ENFILE or EMFILE, signalling the
+// process or system has run out of file descriptors.
+func isFDExhaustion(err error) bool {
+	return errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE)
 }
 
 // rootFor finds which configured root contains the given path.
