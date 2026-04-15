@@ -229,14 +229,16 @@ mynode:
 mynode:
   gateway:
     - name: claude-via-oneapi
-      mode: anthropic-to-openai
+      client_api: anthropic
+      upstream_api: openai
       bind: "127.0.0.1:3457"
       upstream: "http://oneapi.internal/v1/chat/completions"
       api_key_env: ONEAPI_KEY
       model_map:
         claude-sonnet-4-6: glm-4
     - name: cursor-to-claude
-      mode: openai-to-anthropic
+      client_api: openai
+      upstream_api: anthropic
       bind: "127.0.0.1:3458"
       upstream: "https://api.anthropic.com/v1/messages"
       api_key_env: ANTHROPIC_API_KEY

@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- LLM API gateway: bidirectional translation between Anthropic Messages API and OpenAI Chat Completions API. Supports streaming (SSE), tool use, image content, model name remapping, and error translation. Two modes: `anthropic-to-openai` (run Claude Code against non-Anthropic backends) and `openai-to-anthropic` (use Claude from OpenAI-only tools like Cursor/Aider)
+- LLM API gateway: bidirectional translation between Anthropic Messages API and OpenAI Chat Completions API. Supports streaming (SSE), tool use, image content, model name remapping, and error translation. Configured via `client_api` and `upstream_api` (each `anthropic` or `openai`); the pair selects translation (`a2o`, `o2a`) or transparent passthrough (`a2a`, `o2o`)
 
 ## [0.0.1] - 2026-04-08
 

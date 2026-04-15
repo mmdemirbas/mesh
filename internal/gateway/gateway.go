@@ -60,15 +60,19 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 
-	switch cfg.Mode {
-	case ModeAnthropicToOpenAI:
+	dir := cfg.Direction()
+	switch dir {
+	case DirA2O:
 		mux.HandleFunc("POST /v1/messages", func(w http.ResponseWriter, r *http.Request) {
 			handleA2O(w, r, cfg, client, apiKey, log)
 		})
-	case ModeOpenAIToAnthropic:
+	case DirO2A:
 		mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 			handleO2A(w, r, cfg, client, apiKey, log)
 		})
+	case DirA2A, DirO2O:
+		state.Global.Update("gateway", cfg.Name, state.Failed, "passthrough not yet implemented")
+		return fmt.Errorf("passthrough direction %s not yet implemented", dir)
 	}
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
@@ -88,7 +92,7 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 	metrics := state.Global.GetMetrics("gateway", cfg.Name)
 	metrics.StartTime.Store(time.Now().UnixNano())
 
-	log.Info("Gateway started", "bind", ln.Addr(), "mode", cfg.Mode, "upstream", cfg.Upstream)
+	log.Info("Gateway started", "bind", ln.Addr(), "direction", dir, "client_api", cfg.ClientAPI, "upstream_api", cfg.UpstreamAPI, "upstream", cfg.Upstream)
 
 	srv := &http.Server{
 		Handler:           mux,
@@ -196,7 +200,7 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 	}
 
 	if statusCode != http.StatusOK {
-		status := translateUpstreamErrorStatus(statusCode, cfg.Mode)
+		status := translateUpstreamErrorStatus(statusCode, cfg.Direction())
 		writeAnthropicError(w, status, "upstream error")
 		log.Warn("Upstream error", "status", statusCode, "body", truncateBody(respBody, 512), "elapsed", time.Since(start))
 		return
@@ -280,7 +284,7 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 	}
 
 	if statusCode != http.StatusOK {
-		status := translateUpstreamErrorStatus(statusCode, cfg.Mode)
+		status := translateUpstreamErrorStatus(statusCode, cfg.Direction())
 		writeOpenAIError(w, status, "upstream error")
 		log.Warn("Upstream error", "status", statusCode, "body", truncateBody(respBody, 512), "elapsed", time.Since(start))
 		return

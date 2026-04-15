@@ -1,4 +1,3 @@
-Warning: failed to load Go comments: lstat ./internal/config: no such file or directory
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/mmdemirbas/mesh/internal/config/config",
@@ -296,10 +295,13 @@ Warning: failed to load Go comments: lstat ./internal/config: no such file or di
         "bind": {
           "type": "string"
         },
-        "mode": {
+        "upstream": {
           "type": "string"
         },
-        "upstream": {
+        "upstream_api": {
+          "type": "string"
+        },
+        "client_api": {
           "type": "string"
         },
         "api_key_env": {
@@ -319,6 +321,9 @@ Warning: failed to load Go comments: lstat ./internal/config: no such file or di
         },
         "default_max_tokens": {
           "type": "integer"
+        },
+        "log": {
+          "$ref": "#/$defs/LogCfg"
         }
       },
       "additionalProperties": false,
@@ -326,8 +331,9 @@ Warning: failed to load Go comments: lstat ./internal/config: no such file or di
       "required": [
         "name",
         "bind",
-        "mode",
-        "upstream"
+        "upstream",
+        "upstream_api",
+        "client_api"
       ]
     },
     "Listener": {
@@ -396,6 +402,24 @@ Warning: failed to load Go comments: lstat ./internal/config: no such file or di
         "type",
         "bind"
       ]
+    },
+    "LogCfg": {
+      "properties": {
+        "level": {
+          "type": "string"
+        },
+        "dir": {
+          "type": "string"
+        },
+        "max_file_size": {
+          "type": "string"
+        },
+        "max_age": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
     }
   }
 }

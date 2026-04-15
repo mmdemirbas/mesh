@@ -584,11 +584,12 @@ func runA2OStreamTest(t *testing.T, upstreamURL, model string, modelMap map[stri
 	t.Helper()
 
 	cfg := GatewayCfg{
-		Name:     "test-a2o-stream",
-		Bind:     "127.0.0.1:0",
-		Mode:     ModeAnthropicToOpenAI,
-		Upstream: upstreamURL,
-		ModelMap: modelMap,
+		Name:        "test-a2o-stream",
+		Bind:        "127.0.0.1:0",
+		ClientAPI:   APIAnthropic,
+		UpstreamAPI: APIOpenAI,
+		Upstream:    upstreamURL,
+		ModelMap:    modelMap,
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -625,11 +626,12 @@ func runO2AStreamTest(t *testing.T, upstreamURL, model string, modelMap map[stri
 	t.Helper()
 
 	cfg := GatewayCfg{
-		Name:     "test-o2a-stream",
-		Bind:     "127.0.0.1:0",
-		Mode:     ModeOpenAIToAnthropic,
-		Upstream: upstreamURL,
-		ModelMap: modelMap,
+		Name:        "test-o2a-stream",
+		Bind:        "127.0.0.1:0",
+		ClientAPI:   APIOpenAI,
+		UpstreamAPI: APIAnthropic,
+		Upstream:    upstreamURL,
+		ModelMap:    modelMap,
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())

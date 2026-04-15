@@ -4,30 +4,35 @@ gw:
   gateway:
     - name: a2o-happy
       bind: "127.0.0.1:3101"
-      mode: anthropic-to-openai
+      client_api: anthropic
+      upstream_api: openai
       upstream: http://STUB_IP:8080/openai/happy
       api_key_env: STUB_KEY
 
     - name: o2a-happy
       bind: "127.0.0.1:3102"
-      mode: openai-to-anthropic
+      client_api: openai
+      upstream_api: anthropic
       upstream: http://STUB_IP:8080/anthropic/happy
       api_key_env: STUB_KEY
 
     - name: o2a-529
       bind: "127.0.0.1:3103"
-      mode: openai-to-anthropic
+      client_api: openai
+      upstream_api: anthropic
       upstream: http://STUB_IP:8080/anthropic/529
       api_key_env: STUB_KEY
 
     - name: a2o-malformed
       bind: "127.0.0.1:3104"
-      mode: anthropic-to-openai
+      client_api: anthropic
+      upstream_api: openai
       upstream: http://STUB_IP:8080/openai/malformed
       api_key_env: STUB_KEY
 
     - name: a2o-stream
       bind: "127.0.0.1:3105"
-      mode: anthropic-to-openai
+      client_api: anthropic
+      upstream_api: openai
       upstream: http://STUB_IP:8080/openai/stream
       api_key_env: STUB_KEY

@@ -99,18 +99,24 @@ my-vps-tunnel-service:
           direction: send-only           # One-way backup
 
   # ==============================================================================
-  # 3. LLM API Gateway (Anthropic <-> OpenAI format translation)
+  # 3. LLM API Gateway (translation + transparent passthrough with audit logging)
   # ==============================================================================
-  # Bidirectional translation layer between Anthropic and OpenAI API formats.
-  # Each gateway instance listens on a local port, translates requests, forwards
-  # to an upstream LLM API, translates the response back, and returns it.
+  # Each gateway instance listens on a local port, forwards requests to an
+  # upstream LLM API, and returns the response. The (client_api, upstream_api)
+  # pair selects one of four directions:
+  #   - anthropic -> openai  (translate): Claude Code against OpenAI backends
+  #   - openai    -> anthropic (translate): OpenAI-only tools against Claude
+  #   - anthropic -> anthropic (passthrough): log every Claude Code request
+  #   - openai    -> openai    (passthrough): log every OpenAI-style request
+  # When api_key_env is unset, the gateway preserves client auth headers
+  # verbatim (needed for OAuth-authenticated clients).
   gateway:
-    # Direction A: Claude Code -> non-Anthropic backend (e.g., OneAPI, Ollama, vLLM)
-    # Client sends Anthropic /v1/messages, gateway translates to OpenAI /v1/chat/completions.
+    # Claude Code -> non-Anthropic backend (e.g., OneAPI, Ollama, vLLM)
     - name: claude-to-oneapi
       bind: "127.0.0.1:3457"
-      mode: anthropic-to-openai
       upstream: https://oneapi.example.com/v1/chat/completions
+      upstream_api: openai
+      client_api: anthropic
       api_key_env: ONEAPI_KEY         # env var name, never a literal key
       # proxy: socks5://127.0.0.1:1081  # optional outbound proxy
       timeout: 600s
@@ -119,18 +125,32 @@ my-vps-tunnel-service:
         claude-opus-4-6: glm-4.7
         claude-sonnet-4-6: glm-4.7
 
-    # Direction B: OpenAI-only tools (Cursor, Aider) -> Anthropic
-    # Client sends OpenAI /v1/chat/completions, gateway translates to Anthropic /v1/messages.
+    # OpenAI-only tools (Cursor, Aider) -> Anthropic
     - name: claude-for-cursor
       bind: "127.0.0.1:3458"
-      mode: openai-to-anthropic
       upstream: https://api.anthropic.com/v1/messages
+      upstream_api: anthropic
+      client_api: openai
       api_key_env: ANTHROPIC_API_KEY
       timeout: 600s
       default_max_tokens: 32768
       model_map:
         gpt-4o: claude-sonnet-4-6
         gpt-4: claude-sonnet-4-6
+
+    # Transparent passthrough: Claude Code against Anthropic with full audit log.
+    # api_key_env omitted so Claude Code's OAuth auth is forwarded verbatim.
+    - name: claude-passthrough-audit
+      bind: "127.0.0.1:3459"
+      upstream: https://api.anthropic.com
+      upstream_api: anthropic
+      client_api: anthropic
+      timeout: 600s
+      log:
+        level: full                   # off | metadata | full   (default: metadata)
+        # dir: ~/.mesh/gateway        # default
+        # max_file_size: 100MB        # default
+        # max_age: 720h               # default (30 days)
 
   # ==============================================================================
   # 4. Listeners (Accept incoming connections and requests)

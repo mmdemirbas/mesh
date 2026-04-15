@@ -42,7 +42,7 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 
 	if upstreamResp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(upstreamResp.Body, 4096))
-		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, cfg.Mode)
+		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, cfg.Direction())
 		writeOpenAIError(w, status, "upstream error")
 		log.Warn("Upstream stream error", "status", upstreamResp.StatusCode, "body", string(errBody))
 		return

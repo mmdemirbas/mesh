@@ -55,11 +55,12 @@ func TestGateway_A2O_NonStreaming(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := GatewayCfg{
-		Name:     "test-a2o",
-		Bind:     "127.0.0.1:0", // will use listener
-		Mode:     ModeAnthropicToOpenAI,
-		Upstream: upstream.URL,
-		ModelMap: map[string]string{"claude-sonnet-4-6": "glm-4.7"},
+		Name:        "test-a2o",
+		Bind:        "127.0.0.1:0", // will use listener
+		ClientAPI:   APIAnthropic,
+		UpstreamAPI: APIOpenAI,
+		Upstream:    upstream.URL,
+		ModelMap:    map[string]string{"claude-sonnet-4-6": "glm-4.7"},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -156,12 +157,13 @@ func TestGateway_O2A_NonStreaming(t *testing.T) {
 	t.Setenv("TEST_ANTH_KEY", "test-key")
 
 	cfg := GatewayCfg{
-		Name:      "test-o2a",
-		Bind:      "127.0.0.1:0",
-		Mode:      ModeOpenAIToAnthropic,
-		Upstream:  upstream.URL,
-		APIKeyEnv: "TEST_ANTH_KEY",
-		ModelMap:  map[string]string{"gpt-4o": "claude-sonnet-4-6"},
+		Name:        "test-o2a",
+		Bind:        "127.0.0.1:0",
+		ClientAPI:   APIOpenAI,
+		UpstreamAPI: APIAnthropic,
+		Upstream:    upstream.URL,
+		APIKeyEnv:   "TEST_ANTH_KEY",
+		ModelMap:    map[string]string{"gpt-4o": "claude-sonnet-4-6"},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -224,12 +226,7 @@ func TestGateway_O2A_NonStreaming(t *testing.T) {
 
 func TestGateway_Health(t *testing.T) {
 	t.Parallel()
-	cfg := GatewayCfg{
-		Name:     "test-health",
-		Bind:     "127.0.0.1:0",
-		Mode:     ModeAnthropicToOpenAI,
-		Upstream: "http://localhost:9999", // not used
-	}
+	cfg := GatewayCfg{Name: "test-health", Bind: "127.0.0.1:0", ClientAPI: APIAnthropic, UpstreamAPI: APIOpenAI, Upstream: "http://localhost:9999"}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -267,12 +264,7 @@ func TestGateway_UpstreamError(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfg := GatewayCfg{
-		Name:     "test-error",
-		Bind:     "127.0.0.1:0",
-		Mode:     ModeAnthropicToOpenAI,
-		Upstream: upstream.URL,
-	}
+	cfg := GatewayCfg{Name: "test-error", Bind: "127.0.0.1:0", ClientAPI: APIAnthropic, UpstreamAPI: APIOpenAI, Upstream: upstream.URL}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -315,10 +307,11 @@ func TestGateway_O2A_UpstreamError_529(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := GatewayCfg{
-		Name:     "test-529",
-		Bind:     "127.0.0.1:0",
-		Mode:     ModeOpenAIToAnthropic,
-		Upstream: upstream.URL,
+		Name:        "test-529",
+		Bind:        "127.0.0.1:0",
+		ClientAPI:   APIOpenAI,
+		UpstreamAPI: APIAnthropic,
+		Upstream:    upstream.URL,
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -359,12 +352,7 @@ func TestGateway_UpstreamError_ResponseFormat(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfg := GatewayCfg{
-		Name:     "test-err-format",
-		Bind:     "127.0.0.1:0",
-		Mode:     ModeAnthropicToOpenAI,
-		Upstream: upstream.URL,
-	}
+	cfg := GatewayCfg{Name: "test-err-format", Bind: "127.0.0.1:0", ClientAPI: APIAnthropic, UpstreamAPI: APIOpenAI, Upstream: upstream.URL}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -410,12 +398,7 @@ func TestGateway_UpstreamError_ResponseFormat(t *testing.T) {
 
 func TestGateway_A2O_InvalidJSON(t *testing.T) {
 	t.Parallel()
-	cfg := GatewayCfg{
-		Name:     "test-bad-json",
-		Bind:     "127.0.0.1:0",
-		Mode:     ModeAnthropicToOpenAI,
-		Upstream: "http://localhost:9999",
-	}
+	cfg := GatewayCfg{Name: "test-bad-json", Bind: "127.0.0.1:0", ClientAPI: APIAnthropic, UpstreamAPI: APIOpenAI, Upstream: "http://localhost:9999"}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -446,10 +429,11 @@ func TestGateway_A2O_InvalidJSON(t *testing.T) {
 func TestGateway_O2A_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	cfg := GatewayCfg{
-		Name:     "test-bad-json-o2a",
-		Bind:     "127.0.0.1:0",
-		Mode:     ModeOpenAIToAnthropic,
-		Upstream: "http://localhost:9999",
+		Name:        "test-bad-json-o2a",
+		Bind:        "127.0.0.1:0",
+		ClientAPI:   APIOpenAI,
+		UpstreamAPI: APIAnthropic,
+		Upstream:    "http://localhost:9999",
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -481,12 +465,7 @@ func TestGateway_O2A_InvalidJSON(t *testing.T) {
 func TestGateway_A2O_UpstreamConnectionFailure(t *testing.T) {
 	t.Parallel()
 	// Upstream on a port that refuses connections.
-	cfg := GatewayCfg{
-		Name:     "test-conn-fail",
-		Bind:     "127.0.0.1:0",
-		Mode:     ModeAnthropicToOpenAI,
-		Upstream: "http://127.0.0.1:1", // port 1 — connection refused
-	}
+	cfg := GatewayCfg{Name: "test-conn-fail", Bind: "127.0.0.1:0", ClientAPI: APIAnthropic, UpstreamAPI: APIOpenAI, Upstream: "http://127.0.0.1:1"}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -524,12 +503,7 @@ func TestGateway_A2O_StreamUpstreamError(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfg := GatewayCfg{
-		Name:     "test-stream-err",
-		Bind:     "127.0.0.1:0",
-		Mode:     ModeAnthropicToOpenAI,
-		Upstream: upstream.URL,
-	}
+	cfg := GatewayCfg{Name: "test-stream-err", Bind: "127.0.0.1:0", ClientAPI: APIAnthropic, UpstreamAPI: APIOpenAI, Upstream: upstream.URL}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -567,10 +541,11 @@ func TestGateway_O2A_StreamUpstreamError(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := GatewayCfg{
-		Name:     "test-stream-err-o2a",
-		Bind:     "127.0.0.1:0",
-		Mode:     ModeOpenAIToAnthropic,
-		Upstream: upstream.URL,
+		Name:        "test-stream-err-o2a",
+		Bind:        "127.0.0.1:0",
+		ClientAPI:   APIOpenAI,
+		UpstreamAPI: APIAnthropic,
+		Upstream:    upstream.URL,
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())

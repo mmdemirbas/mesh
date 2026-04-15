@@ -88,10 +88,10 @@ docker exec mesh-bastion cat /tmp/mesh-clip/UTF8_STRING
 
 ### LLM gateway
 
-The client runs an `anthropic-to-openai` gateway on `127.0.0.1:3100`
-pointing at the stub-llm container. Clients can POST Anthropic-style
-requests and will see Anthropic-shaped responses even though the upstream
-is the stub's canned OpenAI JSON.
+The client runs a gateway on `127.0.0.1:3100` with `client_api: anthropic`
+and `upstream_api: openai`, pointing at the stub-llm container. Clients can
+POST Anthropic-style requests and will see Anthropic-shaped responses even
+though the upstream is the stub's canned OpenAI JSON.
 
 ```
 docker exec mesh-client curl -sS http://127.0.0.1:3100/v1/messages \

@@ -103,7 +103,8 @@ client:
   gateway:
     - name: playground-gw
       bind: "127.0.0.1:3100"
-      mode: anthropic-to-openai
+      client_api: anthropic
+      upstream_api: openai
       upstream: http://172.30.0.50:8080/openai/happy
       api_key_env: STUB_KEY
       default_max_tokens: 128

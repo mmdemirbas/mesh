@@ -95,21 +95,19 @@ func writeAnthropicError(w http.ResponseWriter, status int, msg string) {
 	_, _ = w.Write(b)
 }
 
-// translateUpstreamError maps an upstream HTTP error status to the client-facing
-// status. Direction A (client=Anthropic, upstream=OpenAI): openai->anthropic mapping.
-// Direction B (client=OpenAI, upstream=Anthropic): anthropic->openai mapping.
-func translateUpstreamErrorStatus(upstreamStatus int, mode string) int {
-	if mode == ModeAnthropicToOpenAI {
-		// Upstream is OpenAI, client expects Anthropic status.
+// translateUpstreamErrorStatus maps an upstream HTTP error status to the
+// client-facing status based on the translation direction. Same-API passthrough
+// directions return the upstream status unchanged.
+func translateUpstreamErrorStatus(upstreamStatus int, dir Direction) int {
+	switch dir {
+	case DirA2O:
 		if mapped, ok := openaiToAnthropicStatus[upstreamStatus]; ok {
 			return mapped
 		}
-	} else {
-		// Upstream is Anthropic, client expects OpenAI status.
+	case DirO2A:
 		if mapped, ok := anthropicToOpenAIStatus[upstreamStatus]; ok {
 			return mapped
 		}
 	}
-	// Pass through unknown statuses.
 	return upstreamStatus
 }
