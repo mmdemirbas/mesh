@@ -200,14 +200,34 @@ tbody tr:last-child td { border-bottom: none; }
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
   color: var(--text-muted); margin: 8px 0 4px;
 }
-/* Help icon (?) tooltip */
+/* Help icon (?) tooltip — custom CSS tooltip, not native title (native is
+   slow/flaky across browsers). Text lives in data-help; ::after renders it. */
 .help {
+  position: relative;
   display: inline-block; width: 14px; height: 14px; line-height: 13px;
   text-align: center; border-radius: 50%; border: 1px solid var(--border);
   color: var(--text-muted); font-size: 9px; font-family: var(--mono);
   cursor: help; margin-left: 4px; vertical-align: middle;
 }
 .help:hover { color: var(--green); border-color: var(--green); }
+.help[data-help]:hover::after {
+  content: attr(data-help);
+  position: absolute; z-index: 1000;
+  bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  background: var(--bg-card); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 6px 8px; font-size: 11px; font-family: var(--sans, sans-serif);
+  line-height: 1.4; text-align: left; white-space: normal;
+  width: max-content; max-width: 320px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  pointer-events: none;
+}
+.help[data-help]:hover::before {
+  content: ''; position: absolute; z-index: 1001;
+  bottom: calc(100% + 1px); left: 50%; transform: translateX(-50%);
+  border: 5px solid transparent; border-top-color: var(--border);
+  pointer-events: none;
+}
 
 .empty-note {
   color: var(--text-muted); font-style: italic; font-size: 12px;
@@ -765,7 +785,7 @@ tbody tr:last-child td { border-bottom: none; }
       <div class="card">
         <div class="card-header">
           <span>Biggest single requests</span>
-          <span class="help" title="Highest-total-token pairs in the current window. Click any row to open its detail card.">?</span>
+          <span class="help" data-help="Highest-total-token pairs in the current window. Click any row to open its detail card.">?</span>
         </div>
         <div class="card-body">
           <table>
@@ -777,7 +797,7 @@ tbody tr:last-child td { border-bottom: none; }
       <div class="card">
         <div class="card-header">
           <span>Biggest preamble blocks</span>
-          <span class="help" title="Injected pseudo-XML blocks (system-reminder, command-*, task-notification, hooks) aggregated by tag + first 60 chars. Total chars tells you which recurring context is wasting the most tokens across the window.">?</span>
+          <span class="help" data-help="Injected pseudo-XML blocks (system-reminder, command-*, task-notification, hooks) aggregated by tag + first 60 chars. Total chars tells you which recurring context is wasting the most tokens across the window.">?</span>
         </div>
         <div class="card-body">
           <table>
@@ -1983,10 +2003,11 @@ function bulkSec(side, open) {
   root.querySelectorAll('details.sec').forEach(d => { d.open = open; });
 }
 
-// info renders a small (?) tooltip. Plain title attribute is used so it
-// works across browsers without a popper library; one-line strings only.
+// info renders a small (?) tooltip. Uses data-help with a pure-CSS ::after
+// tooltip so the hint appears instantly on hover — native title is slow and
+// unreliable across browsers.
 function info(text) {
-  return '<span class="help" title="'+xa(text)+'">?</span>';
+  return '<span class="help" data-help="'+xa(text)+'">?</span>';
 }
 
 // emptyNote is the standard placeholder for sections with nothing to show.
