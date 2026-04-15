@@ -8,6 +8,7 @@ design notes that informed the change — kept for context.
 
 | ID   | Item                                | Notes |
 |------|-------------------------------------|-------|
+| G1   | Gateway four directions + transparent passthrough + audit logging | Split `mode` into `client_api` + `upstream_api` (a2o, o2a, a2a, o2o). Passthrough path via `httputil` semantics (incremental SSE tee, Flush per chunk, X-Accel-Buffering: no). Auth policy: `api_key_env` unset → preserve client headers verbatim (OAuth support). JSONL audit log under `~/.mesh/gateway/<name>/<date>.jsonl` with metadata/full levels, size + age rollover, header redaction, gzip body decode, SSE event reassembly into `stream_summary` (content, tool_calls, usage, stop_reason, errors). Translation handlers gated through shared `wrapAuditing` for uniform coverage across all four directions. Dashboard renders the gateway section. Commits `5774514` (config), `da05a4a` (audit), `364ae70` (passthrough), `c831f27` (gzip decode), `7ce9fca` (SSE reassembly), `5796864` (translation audit wrap). |
 | P1   | Profile and optimize CPU + memory   | Regex → byte scanning, dashboard dirty check, log ring allocation, metrics caching, SSE JSON encoder reuse. Commits `363f775`, `a27bbfa`, `3bb6b4d`. |
 | F8   | SSH signal forwarding               | Unix: `syscall.Kill(-pid, sig)`. Windows: `Process.Kill()` for KILL/TERM/INT/HUP. |
 | R8   | systemd / launchd plist             | Promoted to D2. |

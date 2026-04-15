@@ -8,7 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- LLM API gateway: bidirectional translation between Anthropic Messages API and OpenAI Chat Completions API. Supports streaming (SSE), tool use, image content, model name remapping, and error translation. Configured via `client_api` and `upstream_api` (each `anthropic` or `openai`); the pair selects translation (`a2o`, `o2a`) or transparent passthrough (`a2a`, `o2o`)
+- LLM API gateway: bidirectional translation between Anthropic Messages API and OpenAI Chat Completions API. Supports streaming (SSE), tool use, image content, model name remapping, and error translation. Configured via `client_api` and `upstream_api` (each `anthropic` or `openai`); the pair selects translation (`a2o`, `o2a`) or transparent passthrough (`a2a`, `o2o`). Transparent passthrough preserves client auth headers when `api_key_env` is unset (supports OAuth-authenticated clients like Claude Code)
+- Gateway audit log: optional per-gateway JSONL log under `~/.mesh/gateway/<name>/<date>.jsonl`. Records request/response correlation, redacted headers, decoded bodies (gzip-aware), reassembled SSE summaries (content, tool calls, usage, stop_reason), and outcome (`ok`/`error`/`truncated`/`client_cancelled`). Size-based rollover and age-based cleanup
+- Gateway section rendered in `mesh config` and `mesh status` output
 
 ## [0.0.1] - 2026-04-08
 
