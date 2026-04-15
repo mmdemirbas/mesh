@@ -139,6 +139,7 @@ Goal: dynamically watch frequently-changing paths with fsnotify, poll the rest. 
 | [D13](#d13-gateway-audit-historical-file-browsing) | gateway | Audit UI shows only newest jsonl file       | `/api/gateway/audit` and the UI tab read only the most-recent file in each gateway dir. After rollover, older rows become invisible to the UI. |
 | [D14](#d14-gateway-audit-spillover-to-disk) | gateway | Audit body buffer is in-memory (64 MB cap)  | Single in-flight passthrough response is bounded; multi-tenant or pathological cases should spill to a temp file. |
 | [D15](#d15-gateway-passthrough-e2e-coverage) | gateway | No e2e scenario for passthrough             | S4 covers a2o/o2a translation only. An a2a passthrough scenario against the stub would catch wire-level regressions unit tests can't. |
+| [D16](#d16-flaky-tcp-test-on-macos) | testing | `TestAcceptAndForward_DialerErrorDropsConnection` flakes on macOS | `SetLinger(0)` on the accepted side can RST during the TCP handshake. Current 3-attempt retry isn't always enough; failed in CI on `504ac77` and `c831f27`. |
 
 #### D1: Log rotation
 
@@ -272,6 +273,20 @@ Goal: dynamically watch frequently-changing paths with fsnotify, poll the rest. 
 **Risks/dependencies:** Temp file lifetime — must clean up on context cancellation and on Recorder.Close. Filesystem permissions match the audit dir.
 
 **Effort:** M.
+
+#### D16: flaky TCP test on macOS
+
+**Goal:** Stop intermittent CI failures of `TestAcceptAndForward_DialerErrorDropsConnection` on `macos-latest`.
+
+**Symptom:** `Dial failed after retries: dial tcp 127.0.0.1:NNNNN: connect: connection reset by peer`. The accepted side of the listener calls `SetLinger(0)` so that `Close()` immediately RSTs once the dialer fails. On macOS the RST sometimes races the SYN-ACK of the test's own dial, so the dial itself fails. The current 3-iteration `for range 3` retry loop is not enough on a slow CI runner.
+
+**Approach:**
+- Replace the bounded retry with a deadline-bounded poll: keep dialing until `time.Now().After(deadline)`, with a small backoff between attempts. ~250 ms total budget is plenty.
+- Optionally drop `SetLinger(0)` for this specific test path and verify the assertion still holds — the goal is "client sees an error after dialer failure", which a graceful FIN also satisfies.
+
+**Risks/dependencies:** None — test-only change.
+
+**Effort:** XS.
 
 #### D15: gateway passthrough e2e coverage
 
