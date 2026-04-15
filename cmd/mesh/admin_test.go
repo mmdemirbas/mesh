@@ -623,6 +623,12 @@ func TestAdminUIGatewayDetailMarkup(t *testing.T) {
 		`ctx-list`,
 		`ctx-preview`,
 		`ctx-summary-meta`,
+		// Markdown highlight + tool_result non-splitting render.
+		`function highlightMarkdown`,
+		`function renderToolResultContent`,
+		`md-code`,
+		`md-fence`,
+		`md-h`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("UI missing %q (regression: detail layout collapsed back to single pane)", want)

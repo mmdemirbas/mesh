@@ -165,6 +165,20 @@ tbody tr:last-child td { border-bottom: none; }
 .msg-role.tool      { color: var(--yellow); }
 .msg-body { padding: 6px 8px; font-size: 12px; }
 .msg-body .text { white-space: pre-wrap; word-break: break-word; }
+/* .text is used outside .msg-body too (tool_result, custom-block bodies). */
+.text { white-space: pre-wrap; word-break: break-word; }
+
+/* Markdown syntax coloring for plain-text content. Not rendered — colored. */
+.md-h        { color: var(--purple); font-weight: 700; }
+.md-bold     { color: var(--text); font-weight: 700; }
+.md-italic   { color: var(--text-dim); font-style: italic; }
+.md-code     { color: var(--green); background: var(--bg-input); padding: 0 3px; border-radius: 3px; font-family: var(--mono); }
+.md-fence    { color: var(--green); background: var(--bg-input); padding: 4px 6px; border-radius: 3px; display: block; font-family: var(--mono); white-space: pre-wrap; }
+.md-link     { color: var(--cyan); }
+.md-url      { color: var(--text-muted); }
+.md-list     { color: var(--yellow); font-weight: 700; }
+.md-quote    { color: var(--text-dim); border-left: 2px solid var(--border); padding-left: 6px; display: block; }
+.md-hr       { color: var(--text-muted); }
 .msg-body .truncate { color: var(--text-dim); cursor: pointer; }
 .msg-body .truncate:hover { color: var(--green); }
 .tool-block {
@@ -2504,14 +2518,19 @@ function renderContentBlock(b) {
       return '<div class="tool-block">' +
         '<span class="tool-name">tool_use: '+x(b.name||'?')+'</span> ' +
         '<span style="color:var(--text-muted)">id='+x(b.id||'')+'</span>' +
-        '<pre>'+x(JSON.stringify(b.input || {}, null, 2))+'</pre>' +
+        '<pre class="gw-detail-raw" style="margin-top:4px">'+highlightJSON(b.input || {})+'</pre>' +
       '</div>';
     case 'tool_result':
+      // tool_result bodies are machine output (file contents, HTML source,
+      // stack traces). They frequently contain angle brackets that look like
+      // pseudo-XML tags (<div>, <tbody>) but are NOT Claude-Code injected
+      // blocks — feeding them through splitCustomBlocks creates spurious
+      // sub-drawers. Render them as plain text with Markdown coloring only.
       return '<div class="tool-block" style="border-left-color:var(--green)">' +
         '<span class="tool-name" style="color:var(--green)">tool_result</span> ' +
         '<span style="color:var(--text-muted)">tool_use_id='+x(b.tool_use_id||'')+'</span>' +
         (b.is_error ? ' <span class="chip error">error</span>' : '') +
-        '<div style="margin-top:4px">'+renderContent(b.content)+'</div>' +
+        '<div style="margin-top:4px">'+renderToolResultContent(b.content)+'</div>' +
       '</div>';
     case 'thinking':
       return '<div style="border-left:2px solid var(--purple);padding:4px 8px;color:var(--text-dim);font-style:italic">'+
@@ -2568,13 +2587,72 @@ function renderText(s) {
 function renderPlainText(s) {
   if (!s) return '';
   if (s.length <= truncateLen) {
-    return '<div class="text">'+x(s)+'</div>';
+    return '<div class="text">'+highlightMarkdown(s)+'</div>';
   }
   const id = 'tx-'+(_hjId++);
-  return '<div class="text" id="'+id+'-short">'+x(s.slice(0, truncateLen))+'…' +
+  return '<div class="text" id="'+id+'-short">'+highlightMarkdown(s.slice(0, truncateLen))+'…' +
     ' <span class="truncate" onclick="_txExpand(\''+id+'\')">expand ('+fmtLen(s.length)+' chars)</span></div>' +
-    '<div class="text json-collapsed" id="'+id+'-full">'+x(s)+
+    '<div class="text json-collapsed" id="'+id+'-full">'+highlightMarkdown(s)+
     ' <span class="truncate" onclick="_txCollapse(\''+id+'\')">collapse</span></div>';
+}
+
+// renderToolResultContent renders a tool_result payload. Unlike renderText,
+// it does NOT call splitCustomBlocks — tool output routinely contains literal
+// angle brackets (HTML source, XML, compiler error messages) that must not be
+// misread as Claude-Code injected pseudo-XML wrappers.
+function renderToolResultContent(content) {
+  if (content == null) return '';
+  if (typeof content === 'string') return renderPlainText(content);
+  if (Array.isArray(content)) {
+    return content.map(b => {
+      if (!b || typeof b !== 'object') return '';
+      if (b.type === 'text') return renderPlainText(b.text || '');
+      if (b.type === 'image') return renderImage(b);
+      return renderContentBlock(b);
+    }).join('');
+  }
+  return '<pre class="gw-detail-raw">'+highlightJSON(content)+'</pre>';
+}
+
+// highlightMarkdown escapes HTML then applies lightweight syntax coloring to
+// common Markdown structures. It does NOT render Markdown (no semantic <h1>,
+// <strong>, <em>) — the user wants plain source with color cues so token
+// boundaries are visible without fighting a rendered view. Order matters: we
+// extract fenced/inline code first so later rules cannot mutate code bodies.
+function highlightMarkdown(s) {
+  if (!s) return '';
+  const holds = [];
+  const hold = (html) => { const i = holds.length; holds.push(html); return '\u0001MD' + i + '\u0002'; };
+  // Escape HTML once; subsequent regexes operate on escaped text.
+  let out = x(s);
+  // Fenced code blocks (triple backtick). \x60 escapes keep the Go raw string
+  // intact — literal backticks cannot appear in the enclosing Go raw string.
+  out = out.replace(/\x60\x60\x60([a-zA-Z0-9_+.-]*)\n([\s\S]*?)\x60\x60\x60/g, (m, lang, body) =>
+    hold('<span class="md-fence">\x60\x60\x60' + (lang ? x(lang) : '') + '\n' + body + '\x60\x60\x60</span>'));
+  // Inline code (single backtick, same line only).
+  out = out.replace(/\x60([^\x60\n]+)\x60/g, (m, body) => hold('<span class="md-code">\x60' + body + '\x60</span>'));
+  // Links [text](url) — url is escaped already; we only color.
+  out = out.replace(/\[([^\]\n]+)\]\(([^)\n\s]+)\)/g,
+    (m, text, url) => hold('<span class="md-link">[' + text + ']</span><span class="md-url">(' + url + ')</span>'));
+  // Headings (line-start # .. ######, at most 6 #).
+  out = out.replace(/(^|\n)(#{1,6} [^\n]*)/g, (m, lead, h) => lead + hold('<span class="md-h">' + h + '</span>'));
+  // Blockquotes (line starting with "> "). Highlight the whole line.
+  out = out.replace(/(^|\n)(&gt; [^\n]*)/g, (m, lead, q) => lead + hold('<span class="md-quote">' + q + '</span>'));
+  // Horizontal rule (line consisting of 3+ -, *, or _).
+  out = out.replace(/(^|\n)(---+|\*\*\*+|___+)(?=\n|$)/g, (m, lead, hr) => lead + hold('<span class="md-hr">' + hr + '</span>'));
+  // List markers at line start: -, *, +, or digits followed by . or ).
+  out = out.replace(/(^|\n)([ \t]*)([-*+]|\d+[.)]) /g,
+    (m, lead, indent, marker) => lead + indent + hold('<span class="md-list">' + marker + '</span>') + ' ');
+  // Bold **..** (non-greedy, same-line only so we do not swallow paragraphs).
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, (m, body) => hold('<span class="md-bold">**' + body + '**</span>'));
+  // Italic *..* / _.._ (same-line, not adjacent to word chars to avoid false
+  // positives on identifiers like foo_bar_baz).
+  out = out.replace(/(^|[^*\w])\*([^*\n]+)\*(?=[^*\w]|$)/g,
+    (m, pre, body) => pre + hold('<span class="md-italic">*' + body + '*</span>'));
+  out = out.replace(/(^|[^_\w])_([^_\n]+)_(?=[^_\w]|$)/g,
+    (m, pre, body) => pre + hold('<span class="md-italic">_' + body + '_</span>'));
+  // Restore placeholders.
+  return out.replace(/\u0001MD(\d+)\u0002/g, (m, i) => holds[+i]);
 }
 
 // splitCustomBlocks scans s for pseudo-XML wrappers and returns an ordered
