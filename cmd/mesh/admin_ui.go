@@ -182,6 +182,99 @@ tbody tr:last-child td { border-bottom: none; }
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
   color: var(--text-muted); margin: 8px 0 4px;
 }
+/* Help icon (?) tooltip */
+.help {
+  display: inline-block; width: 14px; height: 14px; line-height: 13px;
+  text-align: center; border-radius: 50%; border: 1px solid var(--border);
+  color: var(--text-muted); font-size: 9px; font-family: var(--mono);
+  cursor: help; margin-left: 4px; vertical-align: middle;
+}
+.help:hover { color: var(--green); border-color: var(--green); }
+
+.empty-note {
+  color: var(--text-muted); font-style: italic; font-size: 12px;
+  padding: 8px 4px;
+}
+
+/* Chat-style messages */
+.chat { display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
+.chat-row { display: flex; gap: 6px; align-items: flex-start; }
+.chat-row.right { justify-content: flex-end; }
+.chat-row.center { justify-content: center; }
+.bubble {
+  max-width: min(78%, 720px); min-width: 0;
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 8px 10px; background: var(--bg-card);
+  font-size: 13px; line-height: 1.45;
+  display: flex; flex-direction: column; gap: 4px;
+}
+@media (max-width: 700px) { .bubble { max-width: 100%; } }
+.bubble.role-user      { border-color: var(--cyan);   border-top-right-radius: 2px; background: linear-gradient(180deg, rgba(34,211,238,0.05), transparent); }
+.bubble.role-assistant { border-color: var(--green);  border-top-left-radius: 2px;  background: linear-gradient(180deg, rgba(52,211,153,0.05), transparent); }
+.bubble.role-system    { border-color: var(--purple); width: 100%; max-width: 100%; background: linear-gradient(180deg, rgba(167,139,250,0.06), transparent); }
+.bubble.role-tool      { border-color: var(--yellow); border-top-left-radius: 2px;  background: linear-gradient(180deg, rgba(251,191,36,0.05), transparent); }
+.bubble.role-unknown   { border-color: var(--text-muted); }
+.bubble .b-foot {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 10px; color: var(--text-muted);
+  border-top: 1px dashed var(--border); padding-top: 4px; margin-top: 2px;
+}
+.bubble .b-foot .role-pill {
+  padding: 0 6px; border-radius: 3px; background: var(--bg-input);
+  text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; font-size: 9px;
+}
+.bubble.role-user      .b-foot .role-pill { color: var(--cyan); }
+.bubble.role-assistant .b-foot .role-pill { color: var(--green); }
+.bubble.role-system    .b-foot .role-pill { color: var(--purple); }
+.bubble.role-tool      .b-foot .role-pill { color: var(--yellow); }
+.bubble .b-foot .b-len { margin-left: auto; font-family: var(--mono); }
+.bubble .b-foot a, .bubble .b-foot button {
+  background: none; border: none; color: var(--text-muted);
+  cursor: pointer; font-size: 10px; padding: 0;
+}
+.bubble .b-foot a:hover, .bubble .b-foot button:hover { color: var(--green); }
+
+/* Bubble flash highlight (used for tool_use_id click-back) */
+@keyframes bubble-flash {
+  0%   { box-shadow: 0 0 0 0 var(--green); }
+  50%  { box-shadow: 0 0 0 4px rgba(52,211,153,0.4); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+.bubble.flash { animation: bubble-flash 1.2s ease-out 1; }
+
+/* Custom embedded blocks (system-reminder, command-*, task-notification, ...) */
+.cblock {
+  border: 1px solid var(--border); border-left-width: 3px;
+  border-radius: 4px; margin: 6px 0; background: var(--bg-card);
+  font-size: 12px;
+}
+.cblock > .cblock-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 8px; font-family: var(--mono); font-size: 11px;
+  color: var(--text-dim); border-bottom: 1px solid var(--border);
+  cursor: pointer; user-select: none;
+}
+.cblock > .cblock-head:hover { background: var(--bg-hover); }
+.cblock > .cblock-head .icon { font-size: 13px; }
+.cblock > .cblock-head .name { font-weight: 600; color: var(--text); }
+.cblock > .cblock-head .sec-len { margin-left: auto; }
+.cblock > .cblock-body { padding: 8px; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+.cblock > .cblock-body pre { font-family: var(--mono); font-size: 11px; }
+.cblock.json-collapsed > .cblock-body { display: none; }
+
+.cblock.k-system-reminder    { border-left-color: var(--yellow); }
+.cblock.k-command            { border-left-color: var(--cyan); }
+.cblock.k-stdout             { border-left-color: var(--text-dim); }
+.cblock.k-stderr             { border-left-color: var(--red); }
+.cblock.k-task-notification  { border-left-color: var(--purple); }
+.cblock.k-hook               { border-left-color: var(--purple); }
+.cblock.k-unknown            { border-left-color: var(--blue); }
+.cblock.k-system-reminder .name { color: var(--yellow); }
+.cblock.k-command         .name { color: var(--cyan); }
+.cblock.k-stderr          .name { color: var(--red); }
+.cblock.k-task-notification .name { color: var(--purple); }
+.cblock.k-hook .name { color: var(--purple); }
+
 /* Sub-view segmented control */
 .gw-sub-btn {
   padding: 6px 14px; cursor: pointer; font-size: 12px;
@@ -236,7 +329,8 @@ tbody tr:last-child td { border-bottom: none; }
 .token-legend span { display: inline-flex; align-items: center; gap: 4px; }
 .token-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
 
-/* Gateway detail (request | response) */
+/* Gateway detail (request | response) — single scroll surface, no nested boxes */
+#gw-detail-card .card-body { max-height: 78vh; overflow: auto; scroll-behavior: smooth; }
 .gw-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 1100px) { .gw-detail-grid { grid-template-columns: 1fr; } }
 .gw-detail-pane {
@@ -248,6 +342,7 @@ tbody tr:last-child td { border-bottom: none; }
   padding: 8px 12px; border-bottom: 1px solid var(--border);
   text-transform: uppercase; letter-spacing: 0.5px;
   display: flex; justify-content: space-between; align-items: center;
+  position: sticky; top: 0; background: var(--bg-card); z-index: 1;
 }
 .gw-detail-pane .copy-btn {
   background: transparent; border: 1px solid var(--border);
@@ -255,12 +350,34 @@ tbody tr:last-child td { border-bottom: none; }
   padding: 2px 8px; cursor: pointer; font-family: var(--mono);
 }
 .gw-detail-pane .copy-btn:hover { color: var(--green); border-color: var(--green); }
-.gw-detail-structured { padding: 8px 12px; font-size: 13px; color: var(--text); border-bottom: 1px solid var(--border); max-height: 40vh; overflow: auto; }
+.gw-detail-structured { padding: 8px 12px; font-size: 13px; color: var(--text); }
 .gw-detail-structured:empty { display: none; }
 .gw-detail-raw {
   font-family: var(--mono); font-size: 12px; line-height: 1.5;
-  padding: 8px 12px; max-height: 50vh; overflow: auto; white-space: pre;
+  padding: 8px 12px; white-space: pre;
 }
+
+/* Collapsible section primitive — used everywhere a block can be folded */
+.sec { border: 1px solid var(--border); border-radius: 4px; margin: 6px 0; background: var(--bg); }
+.sec > summary {
+  list-style: none; cursor: pointer; padding: 6px 10px;
+  display: flex; align-items: center; gap: 8px; font-size: 12px;
+  color: var(--text-dim); user-select: none; border-radius: 4px;
+}
+.sec > summary::-webkit-details-marker { display: none; }
+.sec > summary::before {
+  content: '▶'; font-size: 9px; color: var(--text-muted);
+  transition: transform 0.1s; display: inline-block; width: 10px;
+}
+.sec[open] > summary::before { transform: rotate(90deg); }
+.sec > summary:hover { background: var(--bg-hover); color: var(--text); }
+.sec > summary .sec-title { font-weight: 600; color: var(--text); }
+.sec > summary .sec-len {
+  margin-left: auto; font-family: var(--mono); font-size: 11px;
+  color: var(--text-muted); padding: 1px 6px; border-radius: 3px;
+  background: var(--bg-input);
+}
+.sec > .sec-body { padding: 8px 10px; border-top: 1px solid var(--border); }
 /* JSON syntax tokens */
 .json-key   { color: var(--cyan); }
 .json-str   { color: var(--green); }
@@ -528,7 +645,7 @@ tbody tr:last-child td { border-bottom: none; }
         </div>
         <div class="card">
           <div class="card-header"><span id="gw-sess-title">Select a session</span></div>
-          <div class="card-body padded" id="gw-sess-timeline" style="max-height:70vh;overflow:auto"></div>
+          <div class="card-body padded" id="gw-sess-timeline"></div>
         </div>
       </div>
     </div>
@@ -578,14 +695,34 @@ tbody tr:last-child td { border-bottom: none; }
       <div class="card-body padded">
         <div class="gw-detail-grid">
           <div class="gw-detail-pane">
-            <h4>Request <button class="copy-btn" onclick="copyDetail('req')">copy</button></h4>
+            <h4>
+              <span>Request <span id="gw-req-len" class="sec-len" style="margin-left:6px"></span></span>
+              <span style="display:flex;gap:6px">
+                <button class="copy-btn" onclick="bulkSec('req', true)">expand all</button>
+                <button class="copy-btn" onclick="bulkSec('req', false)">collapse all</button>
+                <button class="copy-btn" onclick="copyDetail('req')">copy</button>
+              </span>
+            </h4>
+            <details class="sec" id="gw-req-json-sec">
+              <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-req-json-len"></span></summary>
+              <div class="sec-body"><div class="gw-detail-raw" id="gw-req-raw"></div></div>
+            </details>
             <div class="gw-detail-structured" id="gw-req-structured"></div>
-            <div class="gw-detail-raw" id="gw-req-raw"></div>
           </div>
           <div class="gw-detail-pane">
-            <h4>Response <button class="copy-btn" onclick="copyDetail('resp')">copy</button></h4>
+            <h4>
+              <span>Response <span id="gw-resp-len" class="sec-len" style="margin-left:6px"></span></span>
+              <span style="display:flex;gap:6px">
+                <button class="copy-btn" onclick="bulkSec('resp', true)">expand all</button>
+                <button class="copy-btn" onclick="bulkSec('resp', false)">collapse all</button>
+                <button class="copy-btn" onclick="copyDetail('resp')">copy</button>
+              </span>
+            </h4>
+            <details class="sec" id="gw-resp-json-sec">
+              <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-resp-json-len"></span></summary>
+              <div class="sec-body"><div class="gw-detail-raw" id="gw-resp-raw"></div></div>
+            </details>
             <div class="gw-detail-structured" id="gw-resp-structured"></div>
-            <div class="gw-detail-raw" id="gw-resp-raw"></div>
           </div>
         </div>
       </div>
@@ -1411,11 +1548,78 @@ function showGwDetail(idx) {
   const turn = p.req.turn_index ? ' · turn '+p.req.turn_index : '';
   document.getElementById('gw-detail-title').textContent =
     'Request '+(p.req.id||'?')+' (run '+(p.req.run||p.resp.run||'?')+')' + sid + turn;
+  const reqJSON = JSON.stringify(p.req);
+  const respJSON = JSON.stringify(p.resp);
   document.getElementById('gw-req-raw').innerHTML = highlightJSON(p.req);
   document.getElementById('gw-resp-raw').innerHTML = highlightJSON(p.resp);
+  document.getElementById('gw-req-json-len').textContent = fmtLen(reqJSON.length) + ' chars';
+  document.getElementById('gw-resp-json-len').textContent = fmtLen(respJSON.length) + ' chars';
+  document.getElementById('gw-req-len').textContent = fmtLen(reqJSON.length) + ' chars';
+  document.getElementById('gw-resp-len').textContent = fmtLen(respJSON.length) + ' chars';
+  // Force-collapse JSON panes when re-opening the card so the structured view is the focus.
+  document.getElementById('gw-req-json-sec').open = false;
+  document.getElementById('gw-resp-json-sec').open = false;
   document.getElementById('gw-req-structured').innerHTML = renderRequestStructured(p.req);
   document.getElementById('gw-resp-structured').innerHTML = renderResponseStructured(p.resp);
+  // Reset scroll on the single scroll surface.
+  const body = document.querySelector('#gw-detail-card .card-body');
+  if (body) body.scrollTop = 0;
 }
+
+// fmtLen renders an integer in a compact form: < 1k raw, < 1M as 1.2k,
+// else 1.4M. Used by every length badge so badges read uniformly.
+function fmtLen(n) {
+  n = Number(n) || 0;
+  if (n < 1000) return String(n);
+  if (n < 1000000) return (n/1000).toFixed(n < 10000 ? 1 : 0) + 'k';
+  return (n/1000000).toFixed(1) + 'M';
+}
+
+// sec wraps content in a <details class="sec"> with a title + length badge.
+// Pass open:true to render expanded by default. Used by every collapsible
+// block in the structured panes so they all behave identically.
+function sec(title, lenBadge, body, open) {
+  const len = lenBadge ? '<span class="sec-len">'+x(lenBadge)+'</span>' : '';
+  return '<details class="sec"'+(open ? ' open' : '')+'>' +
+    '<summary><span class="sec-title">'+x(title)+'</span>'+len+'</summary>' +
+    '<div class="sec-body">'+body+'</div>' +
+  '</details>';
+}
+
+// bulkSec opens or closes every <details class="sec"> inside a pane. The
+// Raw JSON section is excluded so it stays collapsed by default — users
+// asking for "expand all" want the conversation, not a 200KB dump.
+function bulkSec(side, open) {
+  const root = document.getElementById('gw-' + side + '-structured');
+  if (!root) return;
+  root.querySelectorAll('details.sec').forEach(d => { d.open = open; });
+}
+
+// info renders a small (?) tooltip. Plain title attribute is used so it
+// works across browsers without a popper library; one-line strings only.
+function info(text) {
+  return '<span class="help" title="'+x(text)+'">?</span>';
+}
+
+// emptyNote is the standard placeholder for sections with nothing to show.
+// Keeps the visual rhythm of the pane consistent and gives the user a hint
+// about why it might be empty.
+function emptyNote(text) {
+  return '<div class="empty-note">'+x(text)+'</div>';
+}
+
+// Token glossary — shared by the per-pair token bar and the Overview KPI strip.
+const tokenHelp = {
+  cacheRead:    'Cache read: prompt tokens served from prompt cache. Cheapest. Anthropic returns this directly; OpenAI exposes it under prompt_tokens_details.cached_tokens.',
+  cacheWrite:   'Cache write (creation): prompt tokens stored in cache for future reuse. One-time cost; subsequent matching prompts read them as cache_read.',
+  freshInput:   'Fresh input: prompt tokens neither read from nor written to cache. The most expensive bucket — minimize by structuring prompts so the cacheable prefix is stable.',
+  output:       'Output: tokens generated by the model in this response.',
+  reasoning:    'Reasoning: OpenAI o-series internal thinking tokens. Billed but not visible in the output.',
+  cacheRatio:   'Cache hit ratio = cache_read / (cache_read + cache_write + fresh_input). Higher is cheaper. Typical Claude Code sessions on a stable system prompt should sit above 0.7.',
+  stopReason:   'Anthropic: end_turn (normal) | max_tokens | tool_use | stop_sequence | refusal. OpenAI maps to: stop | length | tool_calls | content_filter.',
+  sessionId:    'Derived from sha256(messages[0])[:12]. Same first message → same session, so a Claude Code conversation keeps its id across turns. Override with X-Mesh-Session header.',
+  turnIndex:    'Number of messages in the request. Turn 1 is the first user message; turn N is 2N-1 (alternating user/assistant) plus the new user message.',
+};
 
 // --- Structured response view ---
 //
@@ -1431,7 +1635,7 @@ function renderResponseStructured(resp) {
   if (resp.outcome) chips.push(chip('outcome', resp.outcome,
     resp.outcome === 'ok' ? 'ok' : resp.outcome === 'error' ? 'error' : 'warn'));
   const summary = resp.stream_summary || {};
-  if (summary.stop_reason) chips.push(chip('stop', summary.stop_reason));
+  if (summary.stop_reason) chips.push(chip('stop'+info(tokenHelp.stopReason), summary.stop_reason));
   if (resp.elapsed_ms) chips.push(chip('elapsed', resp.elapsed_ms+'ms'));
   if (summary.events) chips.push(chip('events', summary.events));
   if (summary.message_id) chips.push(chip('msg_id', summary.message_id));
@@ -1446,57 +1650,72 @@ function renderResponseStructured(resp) {
 
   // Mid-stream errors (Anthropic event:error) — show in red, prominent.
   if (Array.isArray(summary.errors) && summary.errors.length) {
-    html += '<div class="section-title">stream errors</div>';
-    html += summary.errors.map(e =>
-      '<div style="border-left:2px solid var(--red);padding:4px 8px;color:var(--red)">'+x(e)+'</div>'
-    ).join('');
+    html += sec('Stream errors ('+summary.errors.length+')', summary.errors.length+' errors',
+      summary.errors.map(e =>
+        '<div style="border-left:2px solid var(--red);padding:4px 8px;color:var(--red)">'+x(e)+'</div>'
+      ).join(''), true);
   }
 
-  // Reassembled assistant content (streamed). When buffered, the body has
-  // an Anthropic-shaped content array we can render with the same dispatcher.
-  if (summary.content) {
-    html += '<div class="section-title">content</div>';
-    html += '<div class="msg-block"><div class="msg-body">'+renderText(summary.content)+'</div></div>';
-  }
-  if (summary.thinking) {
-    html += '<div class="section-title">thinking</div>';
-    html += '<div style="border-left:2px solid var(--purple);padding:4px 8px;color:var(--text-dim);font-style:italic">'+
-      renderText(summary.thinking)+'</div>';
-  }
-  if (Array.isArray(summary.tool_calls) && summary.tool_calls.length) {
-    html += '<div class="section-title">tool calls</div>';
-    html += summary.tool_calls.map(tc =>
-      '<div class="tool-block">' +
-        '<span class="tool-name">'+x(tc.name||'?')+'</span> ' +
-        '<span style="color:var(--text-muted)">id='+x(tc.id||'')+'</span>' +
-        '<pre>'+x(typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args, null, 2))+'</pre>' +
-      '</div>'
-    ).join('');
-  }
-
-  // Buffered (non-streamed) JSON body — render Anthropic content blocks the
-  // same way the request side does.
-  if (resp.body && typeof resp.body === 'object' && !summary.content) {
+  // Build a synthetic assistant message from whichever shape we have, then
+  // render it as the assistant bubble that continues the request chat.
+  // - SSE summary: reassembled .content + .tool_calls (mapped to tool_use blocks).
+  // - Anthropic buffered: body.content already has the right shape.
+  // - OpenAI buffered: body.choices[0].message has content + optional tool_calls.
+  let assistantMsg = null;
+  if (summary.content || (Array.isArray(summary.tool_calls) && summary.tool_calls.length)) {
+    const blocks = [];
+    if (summary.content) blocks.push({type:'text', text: summary.content});
+    for (const tc of (summary.tool_calls||[])) {
+      let input = tc.args;
+      if (typeof input === 'string') {
+        try { input = JSON.parse(input); } catch (_) { /* leave as string */ }
+      }
+      blocks.push({type:'tool_use', id: tc.id, name: tc.name, input: input});
+    }
+    assistantMsg = {role:'assistant', content: blocks};
+  } else if (resp.body && typeof resp.body === 'object') {
     if (Array.isArray(resp.body.content)) {
-      html += '<div class="section-title">content</div>';
-      html += '<div class="msg-block"><div class="msg-body">' +
-        resp.body.content.map(renderContentBlock).join('') + '</div></div>';
-    } else if (Array.isArray(resp.body.choices)) {
-      // OpenAI shape.
-      html += '<div class="section-title">choices ('+resp.body.choices.length+')</div>';
-      html += resp.body.choices.map((c, i) => {
-        const msg = c.message || {};
-        const inner = renderContent(msg.content);
-        const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls.map(renderOpenAIToolCall).join('') : '';
-        return '<div class="msg-block"><div class="msg-head">' +
-          '<span class="msg-role assistant">'+x(msg.role||'assistant')+'</span>' +
-          '<span style="color:var(--text-muted)">#'+(i+1)+'</span>' +
-          (c.finish_reason ? '<span class="chip">finish_reason <b>'+x(c.finish_reason)+'</b></span>' : '') +
-        '</div><div class="msg-body">'+inner+calls+'</div></div>';
-      }).join('');
+      assistantMsg = {role:'assistant', content: resp.body.content};
+    } else if (Array.isArray(resp.body.choices) && resp.body.choices[0]) {
+      const m = resp.body.choices[0].message || {};
+      assistantMsg = {role:'assistant', content: m.content, tool_calls: m.tool_calls};
     }
   }
-  return html || '<span class="json-summary">(no body captured — set log.level: full to see content)</span>';
+
+  if (assistantMsg) {
+    const totalChars = msgChars(assistantMsg);
+    html += sec('Assistant reply', fmtLen(totalChars)+' chars',
+      '<div class="chat">'+renderBubble(assistantMsg, 0)+'</div>', true);
+  }
+
+  // Mid-stream errors (Anthropic event:error) — show in red, prominent.
+  if (Array.isArray(summary.errors) && summary.errors.length) {
+    html += sec('Stream errors ('+summary.errors.length+')', summary.errors.length+' errors',
+      summary.errors.map(e =>
+        '<div style="border-left:2px solid var(--red);padding:4px 8px;color:var(--red)">'+x(e)+'</div>'
+      ).join(''), true);
+  }
+
+  if (summary.thinking) {
+    html += sec('Thinking', fmtLen(summary.thinking.length)+' chars',
+      '<div style="border-left:2px solid var(--purple);padding:4px 8px;color:var(--text-dim);font-style:italic">'+
+        renderText(summary.thinking)+'</div>', false);
+  }
+
+  // Multi-choice OpenAI responses surface remaining choices verbatim — rare,
+  // but keep the data accessible without forcing the user into the JSON pane.
+  if (resp.body && Array.isArray(resp.body.choices) && resp.body.choices.length > 1) {
+    html += sec('Other choices ('+(resp.body.choices.length-1)+')', (resp.body.choices.length-1)+' alts',
+      resp.body.choices.slice(1).map((c, i) => {
+        const msg = c.message || {};
+        return '<div class="chat">'+renderBubble({role: msg.role||'assistant', content: msg.content, tool_calls: msg.tool_calls}, i+1)+'</div>';
+      }).join(''), false);
+  }
+
+  if (!assistantMsg && (!summary.errors || !summary.errors.length)) {
+    return html + emptyNote('No assistant content captured. Common causes: log.level=metadata (set to full), upstream returned only headers, or response was streamed and disconnected before any deltas.');
+  }
+  return html;
 }
 
 // renderTokenBar draws the four-segment horizontal stack used by both the
@@ -1515,12 +1734,12 @@ function renderTokenBar(u) {
     return '<div class="'+cls+'" style="flex:'+n+'" title="'+label+': '+n.toLocaleString()+' ('+pct(n)+'%)">'+
       (n / total > 0.08 ? n.toLocaleString() : '') + '</div>';
   };
-  return '<div class="section-title">tokens (total '+total.toLocaleString()+')</div>' +
+  return '<div class="section-title">tokens (total '+total.toLocaleString()+')'+info('Per-pair token breakdown. Hover any segment for absolute count and percentage.')+'</div>' +
     '<div class="token-legend">' +
-      '<span><i class="seg-cache-read" style="background:var(--green)"></i>cache read '+cacheRead.toLocaleString()+'</span>' +
-      '<span><i class="seg-cache-create" style="background:var(--purple)"></i>cache write '+cacheCreate.toLocaleString()+'</span>' +
-      '<span><i class="seg-input" style="background:var(--cyan)"></i>fresh input '+fresh.toLocaleString()+'</span>' +
-      '<span><i class="seg-output" style="background:var(--yellow)"></i>output '+out.toLocaleString()+'</span>' +
+      '<span><i class="seg-cache-read" style="background:var(--green)"></i>cache read '+cacheRead.toLocaleString()+info(tokenHelp.cacheRead)+'</span>' +
+      '<span><i class="seg-cache-create" style="background:var(--purple)"></i>cache write '+cacheCreate.toLocaleString()+info(tokenHelp.cacheWrite)+'</span>' +
+      '<span><i class="seg-input" style="background:var(--cyan)"></i>fresh input '+fresh.toLocaleString()+info(tokenHelp.freshInput)+'</span>' +
+      '<span><i class="seg-output" style="background:var(--yellow)"></i>output '+out.toLocaleString()+info(tokenHelp.output)+'</span>' +
     '</div>' +
     '<div class="token-bar">' +
       seg('seg-cache-read', 'cache read', cacheRead) +
@@ -1542,15 +1761,15 @@ const truncateLen = 400;
 function renderRequestStructured(req) {
   const body = req.body;
   if (!body || typeof body !== 'object') {
-    return '<span class="json-summary">(body not captured — set log.level: full)</span>';
+    return emptyNote('Body not captured. Set log.level: full in the gateway YAML to record full request bodies.');
   }
   let html = '';
   // Header chips: model, stream, session, turn, temperature, max_tokens.
   const chips = [];
   if (body.model) chips.push(chip('model', body.model));
   if (req.stream || body.stream) chips.push(chip('stream', 'true'));
-  if (req.session_id) chips.push(chip('session', req.session_id));
-  if (req.turn_index) chips.push(chip('turn', req.turn_index));
+  if (req.session_id) chips.push(chip('session'+info(tokenHelp.sessionId), req.session_id));
+  if (req.turn_index) chips.push(chip('turn'+info(tokenHelp.turnIndex), req.turn_index));
   if (typeof body.temperature === 'number') chips.push(chip('temp', body.temperature));
   if (body.max_tokens) chips.push(chip('max_tokens', body.max_tokens));
   if (body.top_p) chips.push(chip('top_p', body.top_p));
@@ -1560,30 +1779,108 @@ function renderRequestStructured(req) {
   // OpenAI inlines the system message in the messages array, so it appears
   // there instead).
   if (body.system) {
-    html += '<div class="section-title">system</div>';
-    html += '<div class="msg-block"><div class="msg-body">' +
-      renderContent(body.system) + '</div></div>';
+    const txt = typeof body.system === 'string' ? body.system : JSON.stringify(body.system);
+    html += sec('System prompt', fmtLen(txt.length)+' chars',
+      '<div class="msg-block"><div class="msg-body">'+renderContent(body.system)+'</div></div>', true);
   }
 
-  // Messages.
+  // Messages → chat-style bubbles.
   const msgs = Array.isArray(body.messages) ? body.messages : [];
   if (msgs.length) {
-    html += '<div class="section-title">messages (' + msgs.length + ')</div>';
-    html += msgs.map((m, i) => renderMessage(m, i)).join('');
+    const totalChars = msgs.reduce((n, m) => n + msgChars(m), 0);
+    html += sec('Conversation ('+msgs.length+')', msgs.length+' msgs · '+fmtLen(totalChars)+' chars',
+      '<div class="chat">' + msgs.map((m, i) => renderBubble(m, i)).join('') + '</div>', true);
   }
 
   // Tools available to the model.
   const tools = Array.isArray(body.tools) ? body.tools : [];
   if (tools.length) {
-    html += '<div class="section-title">tools (' + tools.length + ')</div>';
-    html += tools.map(renderToolDefinition).join('');
+    html += sec('Tools ('+tools.length+')', tools.length+' tools',
+      tools.map(renderToolDefinition).join(''), false);
   }
-  return html || '<span class="json-summary">(empty body)</span>';
+  return html || emptyNote('Empty body — request had no system, messages, or tools.');
 }
 
+// msgChars returns the visible character count of a message — used for the
+// per-section length badge. Counts only string content; tool blocks contribute
+// their JSON length so a fat tool result still registers.
+function msgChars(m) {
+  if (!m) return 0;
+  const c = m.content;
+  if (typeof c === 'string') return c.length;
+  if (Array.isArray(c)) return c.reduce((n, b) => {
+    if (!b) return n;
+    if (typeof b === 'string') return n + b.length;
+    if (b.type === 'text') return n + (b.text||'').length;
+    if (b.type === 'thinking') return n + (b.thinking||'').length;
+    return n + JSON.stringify(b).length;
+  }, 0);
+  return c == null ? 0 : JSON.stringify(c).length;
+}
+
+// chip renders a labeled value pill. label may contain trusted HTML so an
+// info(?) icon can sit beside the label; value is always escaped.
 function chip(label, value, cls) {
   const c = cls ? ' '+cls : '';
-  return '<span class="chip'+c+'">'+x(label)+' <b>'+x(String(value))+'</b></span>';
+  return '<span class="chip'+c+'">'+label+' <b>'+x(String(value))+'</b></span>';
+}
+
+// renderBubble paints a single chat message as a role-colored bubble with a
+// footer carrying the index, role pill, length, and any contextual chips
+// (tool_call_id, finish_reason). User bubbles right-align; assistant + tool
+// left-align; system spans the full row. The footer doubles as the affordance
+// for revealing detail (currently expand/collapse on long text only).
+function renderBubble(m, idx) {
+  const role = String(m.role || 'unknown').toLowerCase();
+  const cls = (role === 'user' || role === 'assistant' || role === 'system' || role === 'tool') ? role : 'unknown';
+  const align = role === 'user' ? 'right' : role === 'system' ? 'center' : 'left';
+  const inner = renderContent(m.content);
+  const calls = Array.isArray(m.tool_calls) ? m.tool_calls.map(renderOpenAIToolCall).join('') : '';
+  const len = msgChars(m);
+  const chips = [];
+  if (m.tool_call_id) chips.push('<span class="role-pill" data-link-tool="'+x(m.tool_call_id)+'" onclick="flashToolUse(\''+x(m.tool_call_id)+'\')">tool_call_id '+x(m.tool_call_id)+'</span>');
+  // Bubble id encodes any tool_use_id this message contains so a click on a
+  // tool_call_id elsewhere can locate it.
+  const dataIds = collectToolUseIds(m).map(id => 'data-tool-use="'+x(id)+'"').join(' ');
+  return '<div class="chat-row '+align+'">' +
+    '<div class="bubble role-'+cls+'" '+dataIds+'>' +
+      '<div class="b-content">'+inner+calls+'</div>' +
+      '<div class="b-foot">' +
+        '<span class="role-pill">'+x(role)+'</span>' +
+        '<span>#'+(idx+1)+'</span>' +
+        chips.join('') +
+        '<span class="b-len">'+fmtLen(len)+' chars</span>' +
+      '</div>' +
+    '</div>' +
+  '</div>';
+}
+
+function collectToolUseIds(m) {
+  const out = [];
+  const c = m.content;
+  if (Array.isArray(c)) {
+    for (const b of c) {
+      if (b && b.type === 'tool_use' && b.id) out.push(b.id);
+    }
+  }
+  if (Array.isArray(m.tool_calls)) {
+    for (const tc of m.tool_calls) if (tc && tc.id) out.push(tc.id);
+  }
+  return out;
+}
+
+function flashToolUse(id) {
+  // Find the bubble that originated this tool_use_id (request-side assistant
+  // bubble for prior turns, or the response-side current assistant bubble)
+  // and flash it. Best-effort within the open detail card.
+  const sel = '.bubble[data-tool-use="'+CSS.escape(id)+'"]';
+  const target = document.querySelector('#gw-req-structured '+sel) ||
+                 document.querySelector('#gw-resp-structured '+sel);
+  if (!target) return;
+  target.classList.remove('flash');
+  void target.offsetWidth;
+  target.classList.add('flash');
+  target.scrollIntoView({behavior:'smooth', block:'center'});
 }
 
 function renderMessage(m, idx) {
@@ -1592,11 +1889,13 @@ function renderMessage(m, idx) {
   const inner = renderContent(content);
   const toolID = m.tool_call_id ? '<span class="chip">tool_call_id <b>'+x(m.tool_call_id)+'</b></span>' : '';
   const calls = Array.isArray(m.tool_calls) ? m.tool_calls.map(renderOpenAIToolCall).join('') : '';
+  const len = msgChars(m);
   return '<div class="msg-block">' +
     '<div class="msg-head">' +
       '<span class="msg-role '+x(role)+'">'+x(role)+'</span>' +
       '<span style="color:var(--text-muted)">#'+(idx+1)+'</span>' +
       toolID +
+      '<span class="sec-len" style="margin-left:auto">'+fmtLen(len)+' chars</span>' +
     '</div>' +
     '<div class="msg-body">' + inner + calls + '</div>' +
   '</div>';
@@ -1655,16 +1954,99 @@ function renderImage(b) {
   return '<span class="json-summary">(image, '+x(src.type||'unknown')+')</span>';
 }
 
+// renderText is the leaf renderer for any string content the model sees or
+// produces. It first carves out custom embedded blocks (<system-reminder>,
+// <command-name>, <local-command-stdout>, etc.) and renders each as its own
+// labeled box. The remaining plain-text spans are escaped, truncated past
+// truncateLen, and shown verbatim. Markdown rendering is intentionally NOT
+// applied here per user preference (Markdown=plain) — strings stay literal
+// so debugging prompt issues never has to fight a renderer.
 function renderText(s) {
   s = String(s);
+  const parts = splitCustomBlocks(s);
+  if (parts.length === 1 && parts[0].kind === 'text') {
+    return renderPlainText(parts[0].text);
+  }
+  return parts.map(p => p.kind === 'text' ? renderPlainText(p.text) : renderCustomBlock(p)).join('');
+}
+
+function renderPlainText(s) {
+  if (!s) return '';
   if (s.length <= truncateLen) {
     return '<div class="text">'+x(s)+'</div>';
   }
   const id = 'tx-'+(_hjId++);
   return '<div class="text" id="'+id+'-short">'+x(s.slice(0, truncateLen))+'…' +
-    ' <span class="truncate" onclick="_txExpand(\''+id+'\')">expand ('+s.length+' chars)</span></div>' +
+    ' <span class="truncate" onclick="_txExpand(\''+id+'\')">expand ('+fmtLen(s.length)+' chars)</span></div>' +
     '<div class="text json-collapsed" id="'+id+'-full">'+x(s)+
     ' <span class="truncate" onclick="_txCollapse(\''+id+'\')">collapse</span></div>';
+}
+
+// splitCustomBlocks scans s for known pseudo-XML wrappers and returns an
+// ordered list of {kind:'text'|<tag>, text}. Tag matching is greedy by name:
+// any of the recognized tag names matches, plus a fallback for any other
+// well-formed <name>...</name> pair so unknown signals are still surfaced.
+//
+// The regex is intentionally non-DOM (we never trust the body to be HTML)
+// and uses a non-greedy body match to handle adjacent blocks correctly.
+const customTagPatternSrc =
+  '<(system-reminder|command-name|command-message|command-args|command-stdout|command-stderr|local-command-stdout|local-command-stderr|task-notification|user-prompt-submit-hook|stop-hook-feedback)\\b[^>]*>([\\s\\S]*?)<\\/\\1>';
+const customTagFallbackSrc =
+  '<([a-z][a-z0-9-]{2,40})\\b[^>]*>([\\s\\S]*?)<\\/\\1>';
+function splitCustomBlocks(s) {
+  const out = [];
+  let i = 0;
+  // Combined regex: known tags first, then a generic fallback so unknown
+  // <foo>…</foo> blocks still surface as "Custom block".
+  const re = new RegExp('('+customTagPatternSrc+'|'+customTagFallbackSrc+')', 'gi');
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    if (m.index > i) out.push({kind: 'text', text: s.slice(i, m.index)});
+    const knownName = m[2];   // capture from known list
+    const knownBody = m[3];
+    const anyName   = m[4];   // capture from fallback
+    const anyBody   = m[5];
+    const name = (knownName || anyName || '').toLowerCase();
+    const body = knownName ? knownBody : anyBody;
+    out.push({kind: 'block', name: name, body: body || ''});
+    i = m.index + m[0].length;
+  }
+  if (i < s.length) out.push({kind: 'text', text: s.slice(i)});
+  return out;
+}
+
+// renderCustomBlock paints a single detected pseudo-XML block. Each block
+// gets its own color, an icon hint, a length badge, and a default-open
+// toggle. system-reminder is yellow because the user usually opens these to
+// audit what Claude Code injected; command/* are cyan terminal-like; stdout
+// preserves whitespace; stderr is red.
+function renderCustomBlock(p) {
+  const name = p.name;
+  const body = p.body;
+  let kind = 'unknown', icon = '◆';
+  if (name === 'system-reminder') { kind = 'system-reminder'; icon = '⚠'; }
+  else if (/^command-(name|message|args|stdout|stderr)$|^local-command-(stdout|stderr)$/.test(name)) {
+    kind = name.endsWith('stdout') ? 'stdout' : name.endsWith('stderr') ? 'stderr' : 'command';
+    icon = name.endsWith('err') ? '✖' : name.endsWith('out') ? '▮' : '$';
+  }
+  else if (name === 'task-notification') { kind = 'task-notification'; icon = '🔔'.length===1 ? '🔔' : '*'; }
+  else if (name === 'user-prompt-submit-hook' || name === 'stop-hook-feedback') { kind = 'hook'; icon = '◈'; }
+  const id = 'cb-'+(_hjId++);
+  const isLong = body.length > truncateLen;
+  const collapseInitial = name === 'system-reminder' && isLong;
+  const head = '<div class="cblock-head" onclick="document.getElementById(\''+id+'\').classList.toggle(\'json-collapsed\')">' +
+    '<span class="icon">'+x(icon)+'</span>' +
+    '<span class="name">&lt;'+x(name)+'&gt;</span>' +
+    '<span class="sec-len">'+fmtLen(body.length)+' chars</span>' +
+  '</div>';
+  // Body is rendered as plain text with the same truncate behavior as text
+  // content. stdout/stderr keep raw whitespace via a <pre> for readability.
+  const inner = (kind === 'stdout' || kind === 'stderr')
+    ? '<pre>'+x(body)+'</pre>'
+    : renderPlainText(body);
+  return '<div id="'+id+'" class="cblock k-'+kind+(collapseInitial?' json-collapsed':'')+'">' +
+    head + '<div class="cblock-body">'+inner+'</div>' +
+  '</div>';
 }
 function _txExpand(id) {
   document.getElementById(id+'-short').classList.add('json-collapsed');
@@ -1809,9 +2191,9 @@ function renderGatewayOverview() {
   kpi.innerHTML =
     statBox('Requests', (t.requests||0).toLocaleString(), gwStats.window) +
     statBox('Errors', (t.errors||0).toLocaleString()+' ('+errPct+')', '', t.errors > 0 ? 'var(--red)' : '') +
-    statBox('Input tokens', totalIn.toLocaleString(), '(incl. cache)') +
-    statBox('Output tokens', (t.output_tokens||0).toLocaleString(), '') +
-    statBox('Cache hit ratio', cacheRatio, 'reads / total input', t.cache_hit_ratio >= 0.5 ? 'var(--green)' : t.cache_hit_ratio >= 0.2 ? 'var(--yellow)' : 'var(--red)') +
+    statBox('Input tokens'+info('Sum of fresh + cache_read + cache_write input tokens.'), totalIn.toLocaleString(), '(incl. cache)') +
+    statBox('Output tokens'+info(tokenHelp.output), (t.output_tokens||0).toLocaleString(), '') +
+    statBox('Cache hit ratio'+info(tokenHelp.cacheRatio), cacheRatio, 'reads / total input', t.cache_hit_ratio >= 0.5 ? 'var(--green)' : t.cache_hit_ratio >= 0.2 ? 'var(--yellow)' : 'var(--red)') +
     statBox('Avg latency', avgMs, 'per request');
 
   document.getElementById('gw-series').innerHTML = renderSeriesSVG(gwStats.series || []);
@@ -1844,9 +2226,11 @@ function renderGatewayOverview() {
       '</tr>').join('');
 }
 
+// statBox renders one KPI cell. label may contain trusted HTML (info icons);
+// value and sub are escaped because they often hold dynamic data.
 function statBox(label, value, sub, color) {
   return '<div class="stat">' +
-    '<div class="stat-label">'+x(label)+'</div>' +
+    '<div class="stat-label">'+label+'</div>' +
     '<div class="stat-value"'+(color ? ' style="color:'+color+'"' : '')+'>'+x(value)+'</div>' +
     (sub ? '<div class="stat-sub">'+x(sub)+'</div>' : '') +
   '</div>';

@@ -581,6 +581,27 @@ func TestAdminUIGatewayDetailMarkup(t *testing.T) {
 		`renderSessionTimeline`,
 		`gw-sess-list`,
 		`gw-session-grid`,
+		// Step 11–17 redesign: chat-first layout, custom blocks, length badges, tooltips.
+		`function fmtLen`,
+		`function bulkSec`,
+		`function renderBubble`,
+		`function flashToolUse`,
+		`function splitCustomBlocks`,
+		`function renderCustomBlock`,
+		`bubble role-`,
+		`role-user`,
+		`role-assistant`,
+		`role-system`,
+		`role-tool`,
+		`cblock`,
+		`k-system-reminder`,
+		`k-stderr`,
+		`details class="sec"`,
+		`gw-req-json-sec`,
+		`gw-resp-json-sec`,
+		`function info`,
+		`function emptyNote`,
+		`tokenHelp`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("UI missing %q (regression: detail layout collapsed back to single pane)", want)
