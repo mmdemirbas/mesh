@@ -134,6 +134,11 @@ Goal: dynamically watch frequently-changing paths with fsnotify, poll the rest. 
 | [D6](#d6-binary-signing-cosignsigstore) | release | Binary signing | No cosign/Sigstore. |
 | D8   | ops       | `time.Sleep` in `downCmd` and tests         | Replace with channel-based sync. |
 | [D10](#d10-darwinarm64-dist-allows-cgo) | build | darwin/arm64 dist allows CGO | Align Taskfile with GoReleaser. |
+| [D11](#d11-modernize-waitgroupgo-migration) | refactor | `sync.WaitGroup.Go` migration (22 sites)    | Mechanical migration deferred — needs per-site review for panic recovery and error propagation. |
+| [D12](#d12-modernize-unused-parameters) | refactor | Unused parameters in tunnel.go (2 sites)    | `unusedparams` analyzer flagged `id` and `t0`. Removing them changes function signatures; must check call sites. |
+| [D13](#d13-gateway-audit-historical-file-browsing) | gateway | Audit UI shows only newest jsonl file       | `/api/gateway/audit` and the UI tab read only the most-recent file in each gateway dir. After rollover, older rows become invisible to the UI. |
+| [D14](#d14-gateway-audit-spillover-to-disk) | gateway | Audit body buffer is in-memory (64 MB cap)  | Single in-flight passthrough response is bounded; multi-tenant or pathological cases should spill to a temp file. |
+| [D15](#d15-gateway-passthrough-e2e-coverage) | gateway | No e2e scenario for passthrough             | S4 covers a2o/o2a translation only. An a2a passthrough scenario against the stub would catch wire-level regressions unit tests can't. |
 
 #### D1: Log rotation
 
@@ -220,6 +225,65 @@ Goal: dynamically watch frequently-changing paths with fsnotify, poll the rest. 
 **Risks/dependencies:** If future clipboard or keychain integration requires CGO, this decision must be revisited. Flag this in a comment.
 
 **Effort:** XS — a one-word change in `Taskfile.yml` plus a comment update.
+
+#### D11: modernize WaitGroup.Go migration
+
+**Goal:** Replace 22 `wg.Add(1) + go func(){ defer wg.Done(); ... }()` patterns with `wg.Go(func(){ ... })` (Go 1.25+).
+
+**Approach:**
+- Sites: `internal/filesync/filesync.go` (5), `internal/proxy/proxy.go` (2), `internal/tunnel/tunnel.go` (12), `cmd/mesh/main.go` (5). Run `~/go/bin/modernize -waitgroup ./...` for the current list.
+- For each site: confirm the goroutine body has no early `wg.Done()` (e.g. inside a select), no panic recovery wrapping that depends on the explicit `defer wg.Done`, and no error-channel pattern that needs ordering against `wg.Done`.
+- `wg.Go` runs the function synchronously up to the first await — same as `Add`+`go func` in practice, but the rewrite is mechanical only if the body is straightforward.
+
+**Key decisions:** Whether to use `modernize -waitgroup -fix` and rely on tests (969 across 14 packages) to catch any semantic break. The risk is that subtle differences in defer ordering or panic-recovery behavior slip through without a failing test.
+
+**Effort:** S–M — `modernize -fix` runs in a second; per-site review is the time sink.
+
+#### D12: modernize unused parameters
+
+**Goal:** Remove unused parameters `id` (tunnel.go:521) and `t0` (tunnel.go:875).
+
+**Approach:** For each site, locate every call site (`gopls references`), confirm the value is genuinely unused, then either drop the parameter or rename to `_`.
+
+**Risks/dependencies:** Both functions may be exposed via interfaces or callbacks; check before dropping.
+
+**Effort:** XS once verified.
+
+#### D13: gateway audit historical file browsing
+
+**Goal:** Allow the admin UI to browse audit rows from older `*.jsonl` files in the same gateway directory, not just the most-recent one.
+
+**Approach:**
+- Add `GET /api/gateway/audit/files?gateway=NAME` returning `[{name, size, mtime}]`.
+- Extend `GET /api/gateway/audit?gateway=NAME&file=<name>&limit=N` to honour `file`.
+- UI: file picker dropdown next to the gateway selector; default to "newest" (current behavior).
+
+**Effort:** S.
+
+#### D14: gateway audit spillover to disk
+
+**Goal:** Cap audit memory usage when many concurrent passthrough requests run with large bodies.
+
+**Approach:**
+- Replace the per-request `bytes.Buffer` in `streamPassthroughResponse` with a writer that switches to a temp file once it exceeds a threshold (e.g., 4 MB).
+- On record finalization, read the temp file back into the audit row and delete it.
+- Bound concurrent in-flight audit buffers to fail fast if temp-file disk fills.
+
+**Risks/dependencies:** Temp file lifetime — must clean up on context cancellation and on Recorder.Close. Filesystem permissions match the audit dir.
+
+**Effort:** M.
+
+#### D15: gateway passthrough e2e coverage
+
+**Goal:** A scenario test in `e2e/scenarios/` that drives an a2a passthrough gateway against the stub LLM and asserts on audit log content.
+
+**Approach:**
+- Reuse `e2e/stub` to serve canned Anthropic SSE responses.
+- Add `s5_gateway_passthrough_test.go` with build tag `e2e`. Start a mesh node with `client_api: anthropic`, `upstream_api: anthropic`, and the audit log enabled in a temp dir.
+- Drive a request via `docker exec curl`, then read the audit JSONL via `docker exec cat` and assert on the reassembled `stream_summary.content`.
+- Cover both gzip-encoded and identity upstream responses to exercise `decodeForAudit`.
+
+**Effort:** M — adding a scenario is mechanical now that the stub and harness exist.
 
 ---
 
