@@ -54,6 +54,7 @@ type ResponseMeta struct {
 	Status    int
 	Outcome   string
 	Usage     *Usage
+	Summary   *SSESummary // optional reassembled SSE summary (streamed responses)
 	StartTime time.Time
 	EndTime   time.Time
 	Headers   map[string][]string
@@ -166,6 +167,10 @@ func (r *Recorder) Response(id RequestID, meta ResponseMeta, body []byte) {
 	}
 	if meta.Usage != nil {
 		row["usage"] = meta.Usage
+	}
+	// Summary is cheap and highly useful — include it at metadata level too.
+	if meta.Summary != nil {
+		row["stream_summary"] = meta.Summary
 	}
 	if r.level == LogLevelFull {
 		row["body"] = rawOrString(body)

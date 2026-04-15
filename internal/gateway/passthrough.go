@@ -199,9 +199,16 @@ func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *ht
 	metrics.BytesTx.Add(totalBytes)
 
 	auditBody := decodeForAudit(buf.Bytes(), uresp.Header.Get("Content-Encoding"), log)
+	summary := reassembleSSE(auditBody, cfg.UpstreamAPI)
+	var usage *Usage
+	if summary != nil {
+		usage = summary.Usage
+	}
 	recorder.Response(reqID, ResponseMeta{
 		Status:    uresp.StatusCode,
 		Outcome:   outcome,
+		Usage:     usage,
+		Summary:   summary,
 		StartTime: start,
 		EndTime:   time.Now(),
 		Headers:   uresp.Header,

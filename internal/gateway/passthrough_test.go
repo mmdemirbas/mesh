@@ -227,8 +227,8 @@ func TestPassthrough_StreamingForwardsBytes(t *testing.T) {
 		w.WriteHeader(200)
 		f := w.(http.Flusher)
 		events := []string{
-			`event: message_start` + "\n" + `data: {"type":"message_start"}` + "\n\n",
-			`event: content_block_delta` + "\n" + `data: {"delta":{"text":"hello "}}` + "\n\n",
+			`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-4-6","usage":{"input_tokens":3,"output_tokens":1}}}` + "\n\n",
+			`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello "}}` + "\n\n",
 			`event: message_stop` + "\n" + `data: {"type":"message_stop"}` + "\n\n",
 		}
 		for _, e := range events {
@@ -285,6 +285,14 @@ func TestPassthrough_StreamingForwardsBytes(t *testing.T) {
 		if !strings.Contains(bodyStr, want) {
 			t.Errorf("audit body missing %q: %s", want, bodyStr)
 		}
+	}
+	// stream_summary must reassemble the text deltas into a single field.
+	summary, ok := respRow["stream_summary"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream_summary missing or wrong type: %T", respRow["stream_summary"])
+	}
+	if summary["content"] != "hello " {
+		t.Errorf("stream_summary.content = %v, want %q", summary["content"], "hello ")
 	}
 }
 
