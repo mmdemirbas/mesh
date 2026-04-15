@@ -174,7 +174,7 @@ func TestScanWithStatsPopulatesEvidence(t *testing.T) {
 	idx := newFileIndex()
 
 	// First pass: every tracked file must be hashed (no fast-path hits).
-	_, _, _, stats, err := idx.scanWithStats(context.Background(), dir, ignore)
+	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, ignore)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestScanWithStatsPopulatesEvidence(t *testing.T) {
 
 	// Second pass on unchanged tree: every file must hit the fast path,
 	// no rehashing.
-	_, _, _, stats2, err := idx.scanWithStats(context.Background(), dir, ignore)
+	_, _, _, stats2, _, err := idx.scanWithStats(context.Background(), dir, ignore)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1929,16 +1929,17 @@ func TestHandleIndex_UnknownFolder(t *testing.T) {
 	}
 }
 
-// --- listConflicts test (FT6) ---
+// --- scan collects conflicts (FT6) ---
 
-func TestListConflicts(t *testing.T) {
+func TestScanCollectsConflicts(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "normal.txt", "ok")
 	writeFile(t, dir, "report.sync-conflict-20260406-143022-abc123.docx", "conflict1")
 	writeFile(t, dir, "sub/data.sync-conflict-20260101-000000-def456.csv", "conflict2")
 
-	conflicts, err := listConflicts(dir)
+	idx := newFileIndex()
+	_, _, _, _, conflicts, err := idx.scanWithStats(context.Background(), dir, &ignoreMatcher{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1955,6 +1956,13 @@ func TestListConflicts(t *testing.T) {
 	}
 	if !conflictSet["sub/data.sync-conflict-20260101-000000-def456.csv"] {
 		t.Error("missing nested conflict")
+	}
+
+	// Conflicts must be sorted for stable UI rendering.
+	for i := 1; i < len(conflicts); i++ {
+		if conflicts[i-1] >= conflicts[i] {
+			t.Errorf("conflicts not sorted: %v", conflicts)
+		}
 	}
 }
 

@@ -60,24 +60,3 @@ func conflictFileName(relPath, deviceID string) string {
 	}
 	return filepath.ToSlash(filepath.Join(dir, conflictBase))
 }
-
-// listConflicts walks a folder and returns all conflict file paths (relative).
-func listConflicts(folderRoot string) ([]string, error) {
-	var conflicts []string
-	err := filepath.WalkDir(folderRoot, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if isConflictFile(d.Name()) {
-			rel, relErr := filepath.Rel(folderRoot, path)
-			if relErr == nil {
-				conflicts = append(conflicts, filepath.ToSlash(rel))
-			}
-		}
-		return nil
-	})
-	return conflicts, err
-}

@@ -187,7 +187,7 @@ type ScanStats struct {
 // returns whether any files changed, the active (non-deleted) file count,
 // and the number of directories walked (excluding the root and ignored subtrees).
 func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignoreMatcher) (changed bool, activeCount, dirCount int, err error) {
-	changed, activeCount, dirCount, _, err = idx.scanWithStats(ctx, folderRoot, ignore)
+	changed, activeCount, dirCount, _, _, err = idx.scanWithStats(ctx, folderRoot, ignore)
 	return
 }
 
@@ -195,7 +195,7 @@ func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignor
 // want evidence (runScan) use this; tests keep the simpler signature.
 //
 //nolint:gocyclo // scan is a single-pass WalkDir; splitting it would hurt locality more than it helps.
-func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, ignore *ignoreMatcher) (changed bool, activeCount, dirCount int, stats ScanStats, err error) {
+func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, ignore *ignoreMatcher) (changed bool, activeCount, dirCount int, stats ScanStats, conflicts []string, err error) {
 	changed = false
 	seen := make(map[string]struct{})
 	tempCutoff := time.Now().Add(-maxTempFileAge)
@@ -257,6 +257,14 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			return nil
 		}
 
+		// Collect Syncthing-style conflict files during the main walk so the
+		// admin UI doesn't need a second full-tree traversal per scan.
+		// Conflict files are still tracked as normal files (they remain on
+		// disk and get synced like any other file).
+		if isConflictFile(name) {
+			conflicts = append(conflicts, rel)
+		}
+
 		if len(seen) >= maxIndexFiles {
 			return fmt.Errorf("folder exceeds max tracked files (%d)", maxIndexFiles)
 		}
@@ -310,7 +318,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	})
 	stats.WalkDuration = time.Since(walkStart)
 	if err != nil {
-		return changed, len(seen), dirCount, stats, fmt.Errorf("scan %s: %w", folderRoot, err)
+		return changed, len(seen), dirCount, stats, conflicts, fmt.Errorf("scan %s: %w", folderRoot, err)
 	}
 
 	delStart := time.Now()
@@ -331,8 +339,9 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	}
 	stats.DeletionScan = time.Since(delStart)
 
+	sort.Strings(conflicts)
 	// P7: len(seen) is the active file count — computed during walk, not a separate loop.
-	return changed, len(seen), dirCount, stats, nil
+	return changed, len(seen), dirCount, stats, conflicts, nil
 }
 
 // hashFile computes the SHA-256 hex digest of a file.

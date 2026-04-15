@@ -584,7 +584,7 @@ func (n *Node) runScan(ctx context.Context) {
 
 		state.Global.Update("filesync-folder", id, state.Scanning, "scanning "+fs.cfg.Path)
 
-		changed, count, dirs, stats, err := idxCopy.scanWithStats(ctx, fs.cfg.Path, ignore)
+		changed, count, dirs, stats, conflicts, err := idxCopy.scanWithStats(ctx, fs.cfg.Path, ignore)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			slog.Warn("scan error", "folder", id, "error", err)
 		}
@@ -592,16 +592,6 @@ func (n *Node) runScan(ctx context.Context) {
 		purgeStart := time.Now()
 		purged := idxCopy.purgeTombstones(tombstoneMaxAge)
 		purgeDuration := time.Since(purgeStart)
-
-		// Refresh conflicts cache outside the lock — listConflicts walks the
-		// filesystem and must not block admin reads.
-		conflictStart := time.Now()
-		var conflicts []string
-		if conf, cerr := listConflicts(fs.cfg.Path); cerr == nil {
-			sort.Strings(conf)
-			conflicts = conf
-		}
-		conflictDuration := time.Since(conflictStart)
 
 		// Swap under a short write lock. Merge-preserve any entries that were
 		// written after the scan started (concurrent sync downloads bumped
@@ -647,7 +637,7 @@ func (n *Node) runScan(ctx context.Context) {
 			"deletion_scan", stats.DeletionScan,
 			"snapshot", snapDuration,
 			"tombstone_purge", purgeDuration,
-			"conflicts_walk", conflictDuration,
+			"conflicts_found", len(conflicts),
 			"swap", swapDuration,
 			"entries_visited", stats.EntriesVisited,
 			"dirs_walked", stats.DirsWalked,
