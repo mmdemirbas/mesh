@@ -23,12 +23,86 @@ import (
 
 // gatewayAuditResponse is the JSON shape returned by GET /api/gateway/audit.
 type gatewayAuditResponse struct {
-	Gateway  string            `json:"gateway"`
-	Dir      string            `json:"dir"`
-	File     string            `json:"file,omitempty"`
-	FileSize int64             `json:"file_size,omitempty"`
-	Rows     []json.RawMessage `json:"rows"`
-	Error    string            `json:"error,omitempty"`
+	Gateway   string            `json:"gateway"`
+	Dir       string            `json:"dir"`
+	File      string            `json:"file,omitempty"`
+	FileSize  int64             `json:"file_size,omitempty"`
+	Rows      []json.RawMessage `json:"rows"`
+	Error     string            `json:"error,omitempty"`
+	Truncated bool              `json:"truncated,omitempty"`
+}
+
+// auditResponseByteCap bounds the total /api/gateway/audit response body so
+// one huge audit row cannot wedge the browser or this process. 2000 rows of
+// typical telemetry are well under 16 MB; 32 MB gives headroom for occasional
+// large tool-result blobs while still capping worst-case transfer and parse
+// time in the UI.
+const auditResponseByteCap = 32 * 1024 * 1024
+
+// perRowByteCap bounds a single audit row before it is emitted. Rows past
+// this size are replaced with a stub {t, id, run, truncated:true, size} so
+// the UI can still list the entry and the user can drill in via the pair
+// endpoint if they really need the full payload.
+const perRowByteCap = 256 * 1024
+
+// capAuditRows enforces per-row and cumulative byte caps. Oversized rows are
+// replaced with a truncation stub that preserves the identity fields (t, id,
+// run, ts) so the UI renders a placeholder entry. Returns the clipped slice,
+// whether any clipping happened, and the remaining byte budget.
+func capAuditRows(rows []json.RawMessage, budget int) ([]json.RawMessage, bool, int) {
+	truncated := false
+	out := make([]json.RawMessage, 0, len(rows))
+	for _, row := range rows {
+		if budget <= 0 {
+			truncated = true
+			break
+		}
+		if len(row) > perRowByteCap {
+			stub := auditTruncationStub(row)
+			if len(stub) > budget {
+				truncated = true
+				break
+			}
+			out = append(out, stub)
+			budget -= len(stub)
+			truncated = true
+			continue
+		}
+		if len(row) > budget {
+			truncated = true
+			break
+		}
+		out = append(out, row)
+		budget -= len(row)
+	}
+	return out, truncated, budget
+}
+
+// auditTruncationStub extracts the identity fields from an oversized row
+// without re-parsing the whole payload, so the UI can show the row as
+// truncated without paying the decode cost of the original blob.
+func auditTruncationStub(row json.RawMessage) json.RawMessage {
+	var hdr struct {
+		T    string `json:"t"`
+		ID   uint64 `json:"id,omitempty"`
+		Run  string `json:"run,omitempty"`
+		TS   string `json:"ts,omitempty"`
+		Size int    `json:"size"`
+	}
+	_ = json.Unmarshal(row, &hdr)
+	hdr.Size = len(row)
+	b, err := json.Marshal(struct {
+		T         string `json:"t"`
+		ID        uint64 `json:"id,omitempty"`
+		Run       string `json:"run,omitempty"`
+		TS        string `json:"ts,omitempty"`
+		Size      int    `json:"size"`
+		Truncated bool   `json:"truncated"`
+	}{hdr.T, hdr.ID, hdr.Run, hdr.TS, hdr.Size, true})
+	if err != nil {
+		return json.RawMessage(`{"truncated":true}`)
+	}
+	return b
 }
 
 // buildAdminMux returns the HTTP handler for the local admin server.
@@ -146,11 +220,11 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 		b.WriteString("# TYPE mesh_component_up gauge\n")
 
 		type compMetric struct {
-			compType, id                                              string
-			tx, rx                                                    int64
-			streams                                                   int32
+			compType, id                                                    string
+			tx, rx                                                          int64
+			streams                                                         int32
 			tokensIn, tokensOut, tokensCacheRd, tokensCacheWr, tokensReason int64
-			uptime                                                    float64
+			uptime                                                          float64
 		}
 		var cms []compMetric
 
@@ -388,13 +462,17 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 			names = append(names, name)
 		}
 		sort.Strings(names)
+		// Track cumulative response size so one gateway's rows cannot starve
+		// the others and the total payload stays bounded. Past the cap, later
+		// gateways flip Truncated=true and ship zero rows.
+		budget := auditResponseByteCap
 		for _, name := range names {
 			rows, file, size, err := queryAuditRows(dirs[name], af, limit)
 			entry := gatewayAuditResponse{Gateway: name, Dir: dirs[name], File: file, FileSize: size}
 			if err != nil {
 				entry.Error = err.Error()
 			}
-			entry.Rows = rows
+			entry.Rows, entry.Truncated, budget = capAuditRows(rows, budget)
 			out = append(out, entry)
 		}
 		_ = json.NewEncoder(w).Encode(out)

@@ -1070,6 +1070,42 @@ function render() {
 }
 
 function x(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// xa: HTML-attribute-safe escape. Use whenever an interpolation lands inside
+// attr="..." (title, data-*, href, src, style). x() alone leaves " and '
+// which let attacker-controlled strings break out of the attribute value.
+function xa(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                  .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+// xj: JS-string-in-HTML-attribute escape. Use for every '+ id +' interpolation
+// inside onclick="foo('…')". HTML entities decode before JS sees the value, so
+// xa() alone does not contain a breakout via ' — we must JS-escape first, then
+// HTML-escape. Pattern: '<a onclick="foo(\''+xj(id)+'\')">'.
+function xj(s) {
+  const j = String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'")
+                     .replace(/\r/g,'\\r').replace(/\n/g,'\\n');
+  return j.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+// safeUrl: return url if scheme is http/https, else '#'. Blocks javascript:,
+// data:, vbscript:, file: from reaching a rendered href/src. Called before xa.
+function safeUrl(u) {
+  const s = String(u||'').trim();
+  return /^https?:\/\//i.test(s) ? s : '#';
+}
+// fmtLocalTime: show an ISO timestamp in the viewer's local timezone with the
+// raw UTC string kept in a tooltip so the user can still copy/verify it.
+function fmtLocalTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return String(ts);
+  return '<span title="'+xa(ts)+'">'+xa(d.toLocaleString())+'</span>';
+}
+// fmtTokens: localized integer with a warning prefix when JS loses precision.
+function fmtTokens(n) {
+  const v = Number(n||0);
+  if (!Number.isSafeInteger(v)) return '≈'+v.toLocaleString();
+  return v.toLocaleString();
+}
 
 function badge(status) {
   const s = String(status);
@@ -1125,7 +1161,7 @@ function renderComponents() {
     const arrow = collapsed ? '&#9654;' : '&#9660;';
     const count = items.length;
     const okCount = items.filter(c => c.status === 'connected' || c.status === 'listening').length;
-    html += '<tr class="tree-group" onclick="toggleGroup(\''+typ+'\')" style="cursor:pointer;background:var(--bg-alt)">';
+    html += '<tr class="tree-group" onclick="toggleGroup(\''+xj(typ)+'\')" style="cursor:pointer;background:var(--bg-alt)">';
     html += '<td colspan="2" style="font-weight:600">'+arrow+' '+x(typ)+' <span style="color:var(--text-muted);font-weight:400">('+okCount+'/'+count+')</span></td>';
     html += '<td colspan="2"></td></tr>';
     if (!collapsed) {
@@ -1172,7 +1208,7 @@ function renderFilesync() {
                      f.direction === 'dry-run' ? 'badge-warn' : 'badge-ok';
     return '<tr><td style="font-weight:600">'+x(f.id)+'</td><td style="color:var(--text-dim)">'+x(f.path)+'</td>' +
            '<td><span class="badge '+dirBadge+'">'+x(f.direction)+'</span></td>' +
-           '<td>'+(f.file_count||0).toLocaleString()+'</td>' +
+           '<td>'+fmtTokens(f.file_count)+'</td>' +
            '<td style="color:var(--text-dim)">'+x((f.peers||[]).join(', '))+'</td></tr>';
   }).join('');
 }
@@ -1396,7 +1432,7 @@ function renderMetrics() {
     if (f.samples.length === 1 && !f.samples[0].labels) {
       // Single value — show inline
       samplesHtml = '<span style="font-family:var(--mono);color:var(--green);font-weight:600;font-size:13px">' + x(fmtVal(f.samples[0].value)) + '</span>';
-      return '<div class="met-family' + cls + '" data-met="' + x(f.name) + '">' +
+      return '<div class="met-family' + cls + '" data-met="' + xa(f.name) + '">' +
         '<div class="met-family-header">' +
           '<span class="met-family-name">' + x(f.name) + '</span>' +
           '<span class="met-family-help">' + x(f.help) + '</span>' +
@@ -1413,7 +1449,7 @@ function renderMetrics() {
       }).join(' ') : '';
       return '<tr><td class="met-labels">' + labelParts + '</td><td class="met-value">' + x(fmtVal(s.value)) + '</td></tr>';
     }).join('');
-    return '<div class="met-family' + cls + '" data-met="' + x(f.name) + '">' +
+    return '<div class="met-family' + cls + '" data-met="' + xa(f.name) + '">' +
       '<div class="met-family-header">' +
         '<span class="met-family-arrow">&#9654;</span>' +
         '<span class="met-family-name">' + x(f.name) + '</span>' +
@@ -1562,8 +1598,11 @@ function timeAgo(ts) {
 // --- Gateway audit ---
 let gwSelected = '';
 let gwRowsCache = []; // resp rows joined with their req row, newest first
+let gwRowsByKey = new Map(); // key "run|id" → pair, for click-to-detail across refreshes
 let gwSearchTerm = '';
 let gwOutcomeFilter = '';
+let gwDetailKey = '';   // stable (run|id) of the currently open detail card
+let gwSearchTimer = 0;  // debounce handle for the search input
 
 function renderGateway() {
   const sel = document.getElementById('gw-select');
@@ -1591,7 +1630,10 @@ function renderGateway() {
 
   const entry = gatewayAudit.find(g => g.gateway === gwSelected) || gatewayAudit[0];
   const rowsRaw = entry.rows || [];
-  // Pair req with resp by id+run.
+  // Pair req with resp by id+run. Each pair gets a stable composite key
+  // (run|id) so the detail card survives auto-refresh even when the list
+  // reorders. Haystack is precomputed so the search input below can test
+  // in O(1) per row per keystroke instead of re-serializing JSON each time.
   const reqs = new Map();
   const pairs = [];
   for (const r of rowsRaw) {
@@ -1599,11 +1641,18 @@ function renderGateway() {
     if (r.t === 'req') {
       reqs.set(key, r);
     } else if (r.t === 'resp') {
-      pairs.push({req: reqs.get(key) || {}, resp: r});
+      const req = reqs.get(key) || {};
+      // Cap haystack size so one 16 MB row cannot bloat filter RAM into the
+      // hundreds of MB. 200 KB × 2000 rows ≈ 400 MB worst case — still the
+      // hot edge, but far better than unbounded.
+      const hay = (JSON.stringify(req).slice(0, 200000) + ' ' +
+                   JSON.stringify(r).slice(0, 200000)).toLowerCase();
+      pairs.push({req, resp: r, key, hay});
     }
   }
   pairs.reverse(); // newest first
   gwRowsCache = pairs;
+  gwRowsByKey = new Map(pairs.map(p => [p.key, p]));
 
   document.getElementById('gw-meta').innerHTML =
     'gateway <b>'+x(entry.gateway)+'</b> · file <span style="color:var(--text-dim)">'+x(entry.file||'(none)')+'</span>'+
@@ -1616,8 +1665,7 @@ function renderGateway() {
   const filtered = pairs.filter(p => {
     if (outcomeFilter && (p.resp.outcome||'') !== outcomeFilter) return false;
     if (!term) return true;
-    return JSON.stringify(p.req).toLowerCase().includes(term) ||
-           JSON.stringify(p.resp).toLowerCase().includes(term);
+    return p.hay.includes(term);
   });
 
   const body = document.getElementById('gw-body');
@@ -1625,8 +1673,8 @@ function renderGateway() {
     body.innerHTML = '<tr><td colspan="9" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
     return;
   }
-  body.innerHTML = filtered.map((p, idx) => {
-    const time = (p.resp.ts||p.req.ts||'').replace('T',' ').replace(/\..*Z/,'Z');
+  body.innerHTML = filtered.map(p => {
+    const ts = p.resp.ts||p.req.ts||'';
     const dir = p.req.direction || '-';
     const model = p.req.model || '-';
     const stream = p.req.stream ? 'yes' : 'no';
@@ -1635,11 +1683,11 @@ function renderGateway() {
     const outcome = p.resp.outcome || '-';
     const outcomeColor = outcome === 'ok' ? 'var(--green)' : outcome === 'error' ? 'var(--red)' : 'var(--yellow)';
     const u = p.resp.usage || {};
-    const tokens = (u.input_tokens||0)+'/'+(u.output_tokens||0);
+    const tokens = fmtTokens(u.input_tokens)+'/'+fmtTokens(u.output_tokens);
     const elapsed = (p.resp.elapsed_ms||0)+'ms';
     const summary = renderGwSummaryCell(p.resp);
-    return '<tr style="cursor:pointer" onclick="showGwDetail('+idx+')">'+
-      '<td style="color:var(--text-muted);white-space:nowrap">'+x(time)+'</td>'+
+    return '<tr style="cursor:pointer" onclick="showGwDetail(\''+xj(p.key)+'\')">'+
+      '<td style="color:var(--text-muted);white-space:nowrap">'+fmtLocalTime(ts)+'</td>'+
       '<td>'+x(dir)+'</td>'+
       '<td style="color:var(--text-dim)">'+x(model)+'</td>'+
       '<td style="color:var(--text-muted)">'+stream+'</td>'+
@@ -1650,8 +1698,13 @@ function renderGateway() {
       '<td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)">'+summary+'</td>'+
       '</tr>';
   }).join('');
-  // Stash filtered rows for click-to-detail.
-  gwRowsCache = filtered;
+  // If a detail card is open, re-resolve it against the new data so the copy
+  // buttons reflect the current req/resp and not the stale snapshot from
+  // before the last refresh.
+  if (gwDetailKey && gwRowsByKey.has(gwDetailKey)) {
+    const p = gwRowsByKey.get(gwDetailKey);
+    gwDetailCache = {req: p.req, resp: p.resp};
+  }
 }
 
 function renderGwSummaryCell(resp) {
@@ -1668,8 +1721,16 @@ function renderGwSummaryCell(resp) {
 let gwDetailCache = {req: null, resp: null};
 
 function showGwDetail(idx) {
-  const p = gwRowsCache[idx];
+  // idx is a (run|id) composite key when called from the rendered list, a
+  // numeric index when called from older paths (top-requests-by-tokens in
+  // the overview builds a numeric index from gwRowsCache directly). Both
+  // have to resolve to the same pair even after auto-refresh reorders the
+  // list — the Map lookup handles that; numeric fallback is a last resort.
+  let p = null;
+  if (typeof idx === 'string') p = gwRowsByKey.get(idx);
+  else if (typeof idx === 'number') p = gwRowsCache[idx];
   if (!p) return;
+  gwDetailKey = p.key || '';
   gwDetailCache = {req: p.req, resp: p.resp};
   document.getElementById('gw-detail-card').style.display = 'block';
   const sid = p.req.session_id ? ' · session '+p.req.session_id : '';
@@ -1726,7 +1787,7 @@ function bulkSec(side, open) {
 // info renders a small (?) tooltip. Plain title attribute is used so it
 // works across browsers without a popper library; one-line strings only.
 function info(text) {
-  return '<span class="help" title="'+x(text)+'">?</span>';
+  return '<span class="help" title="'+xa(text)+'">?</span>';
 }
 
 // emptyNote is the standard placeholder for sections with nothing to show.
@@ -2097,8 +2158,8 @@ function renderBubble(m, idx) {
   const calls = Array.isArray(m.tool_calls) ? m.tool_calls.map(renderOpenAIToolCall).join('') : '';
 
   const chips = [];
-  if (m.tool_call_id) chips.push('<span class="role-pill" data-link-tool="'+x(m.tool_call_id)+'" onclick="flashToolUse(\''+x(m.tool_call_id)+'\')">tool_call_id '+x(m.tool_call_id)+'</span>');
-  const dataIds = collectToolUseIds(m).map(id => 'data-tool-use="'+x(id)+'"').join(' ');
+  if (m.tool_call_id) chips.push('<span class="role-pill" data-link-tool="'+xa(m.tool_call_id)+'" onclick="flashToolUse(\''+xj(m.tool_call_id)+'\')">tool_call_id '+x(m.tool_call_id)+'</span>');
+  const dataIds = collectToolUseIds(m).map(id => 'data-tool-use="'+xa(id)+'"').join(' ');
 
   const lenLabel = (role === 'user' && typedChars !== totalLen)
     ? fmtLen(typedChars)+' typed · '+fmtLen(totalLen)+' total'
@@ -2298,12 +2359,26 @@ function renderContentBlock(b) {
 function renderImage(b) {
   const src = b.source || {};
   if (src.type === 'base64') {
-    const data = src.data ? 'data:'+x(src.media_type||'image/png')+';base64,'+x(src.data) : '';
-    return data ? '<img src="'+data+'" style="max-width:200px;max-height:200px;border:1px solid var(--border);border-radius:4px"/>'
+    // Whitelist media_type so a crafted value like image/png" onerror="... cannot
+    // break out of the src attribute, and so text/html;base64,... cannot turn a
+    // rendered <img> into a scripted document.
+    const mt = String(src.media_type||'image/png').toLowerCase();
+    const ok = /^image\/(png|jpe?g|gif|webp|svg\+xml)$/.test(mt);
+    const safeMt = ok ? mt : 'image/png';
+    // Base64 payload: keep to the Base64 alphabet so nothing else can slip into
+    // the data URI. An invalid blob just renders broken, which is the desired
+    // failure mode when the upstream sent garbage.
+    const b64 = String(src.data||'').replace(/[^A-Za-z0-9+/=]/g, '');
+    const data = b64 ? 'data:'+safeMt+';base64,'+b64 : '';
+    return data ? '<img src="'+xa(data)+'" style="max-width:200px;max-height:200px;border:1px solid var(--border);border-radius:4px"/>'
                 : '<span class="json-summary">(image, base64)</span>';
   }
   if (src.type === 'url' && src.url) {
-    return '<a href="'+x(src.url)+'" target="_blank" rel="noopener" style="color:var(--cyan)">[image: '+x(src.url)+']</a>';
+    // Only http/https survive safeUrl — javascript:, data:, vbscript:, file:
+    // collapse to "#" and render as a dead link.
+    const href = safeUrl(src.url);
+    const display = href === '#' ? '(blocked: non-http url)' : src.url;
+    return '<a href="'+xa(href)+'" target="_blank" rel="noopener noreferrer" style="color:var(--cyan)">[image: '+x(display)+']</a>';
   }
   return '<span class="json-summary">(image, '+x(src.type||'unknown')+')</span>';
 }
@@ -2351,21 +2426,23 @@ function splitCustomBlocks(s) {
   const out = [];
   let i = 0;
   customTagOpenRe.lastIndex = 0;
+  // Lowercase the whole input ONCE. The previous implementation did
+  // s.slice(openEnd).toLowerCase() inside the loop, which allocated and
+  // scanned a fresh copy of the remaining string per match — O(n²) on inputs
+  // with many open tags but no close tags (5 MB × 50k tags ≈ 100 GB of work).
+  const lower = s.toLowerCase();
   let m;
   while ((m = customTagOpenRe.exec(s)) !== null) {
     const openStart = m.index;
     const openEnd   = openStart + m[0].length;
     const name      = m[1].toLowerCase();
     const closeTag  = '</' + name + '>';
-    // Case-insensitive close-tag search from just after the open tag.
-    const tail      = s.slice(openEnd);
-    const closeIdx  = tail.toLowerCase().indexOf(closeTag);
-    if (closeIdx < 0) continue; // no matching close tag — treat as plain text
-    // Text before this block.
+    const closeAbs  = lower.indexOf(closeTag, openEnd);
+    if (closeAbs < 0) continue;
     if (openStart > i) out.push({kind: 'text', text: s.slice(i, openStart)});
-    out.push({kind: 'block', name, body: tail.slice(0, closeIdx)});
-    i = openEnd + closeIdx + closeTag.length;
-    customTagOpenRe.lastIndex = i; // skip past the matched block
+    out.push({kind: 'block', name, body: s.slice(openEnd, closeAbs)});
+    i = closeAbs + closeTag.length;
+    customTagOpenRe.lastIndex = i;
   }
   if (i < s.length) out.push({kind: 'text', text: s.slice(i)});
   return out;
@@ -2528,7 +2605,11 @@ function _hjTog(togEl) {
   }
 }
 
-document.getElementById('gw-search').addEventListener('input', e => { gwSearchTerm = e.target.value; renderGateway(); });
+document.getElementById('gw-search').addEventListener('input', e => {
+  gwSearchTerm = e.target.value;
+  if (gwSearchTimer) clearTimeout(gwSearchTimer);
+  gwSearchTimer = setTimeout(() => { gwSearchTimer = 0; renderGateway(); }, 150);
+});
 document.getElementById('gw-outcome').addEventListener('change', e => { gwOutcomeFilter = e.target.value; renderGateway(); });
 document.getElementById('gw-select').addEventListener('change', e => { gwSelected = e.target.value; gwStats = null; refresh(); });
 document.getElementById('gw-window').addEventListener('change', e => { gwWindow = e.target.value; gwStats = null; refresh(); });
@@ -2563,10 +2644,10 @@ function renderGatewayOverview() {
   const avgMs = t.requests > 0 ? Math.round(t.elapsed_sum_ms/t.requests)+'ms' : '-';
   const cacheRatio = (100*(t.cache_hit_ratio||0)).toFixed(1)+'%';
   kpi.innerHTML =
-    statBox('Requests', (t.requests||0).toLocaleString(), gwStats.window) +
-    statBox('Errors', (t.errors||0).toLocaleString()+' ('+errPct+')', '', t.errors > 0 ? 'var(--red)' : '') +
+    statBox('Requests', fmtTokens(t.requests), gwStats.window) +
+    statBox('Errors', fmtTokens(t.errors)+' ('+errPct+')', '', t.errors > 0 ? 'var(--red)' : '') +
     statBox('Input tokens'+info('Sum of fresh + cache_read + cache_write input tokens.'), totalIn.toLocaleString(), '(incl. cache)') +
-    statBox('Output tokens'+info(tokenHelp.output), (t.output_tokens||0).toLocaleString(), '') +
+    statBox('Output tokens'+info(tokenHelp.output), fmtTokens(t.output_tokens), '') +
     statBox('Cache hit ratio'+info(tokenHelp.cacheRatio), cacheRatio, 'reads / total input', t.cache_hit_ratio >= 0.5 ? 'var(--green)' : t.cache_hit_ratio >= 0.2 ? 'var(--yellow)' : 'var(--red)') +
     statBox('Avg latency', avgMs, 'per request');
 
@@ -2581,11 +2662,11 @@ function renderGatewayOverview() {
   const sessions = (gwStats.by_session || []).slice(0, 10);
   document.getElementById('gw-top-sessions').innerHTML = sessions.length === 0
     ? '<tr><td colspan="5" style="color:var(--text-muted);padding:12px">No sessions in window.</td></tr>'
-    : sessions.map(s => '<tr style="cursor:pointer" onclick="jumpToSession(\''+x(s.key)+'\')">' +
+    : sessions.map(s => '<tr style="cursor:pointer" onclick="jumpToSession(\''+xj(s.key)+'\')">' +
         '<td><code style="color:var(--cyan)">'+x(s.key)+'</code></td>' +
         '<td style="color:var(--text-dim)">'+x(s.first_model||'-')+'</td>' +
         '<td>'+(s.turns||s.requests)+'</td>' +
-        '<td>'+(s.input_tokens||0).toLocaleString()+' / '+(s.output_tokens||0).toLocaleString()+'</td>' +
+        '<td>'+fmtTokens(s.input_tokens)+' / '+fmtTokens(s.output_tokens)+'</td>' +
         '<td style="color:var(--text-muted)">'+x(fmtAgo(s.last_seen||''))+'</td>' +
       '</tr>').join('');
 
@@ -2595,8 +2676,8 @@ function renderGatewayOverview() {
     : models.map(m => '<tr>' +
         '<td style="color:var(--text-dim)">'+x(m.key||'-')+'</td>' +
         '<td>'+m.requests+'</td>' +
-        '<td>'+(m.input_tokens||0).toLocaleString()+' / '+(m.output_tokens||0).toLocaleString()+'</td>' +
-        '<td>'+(m.cache_read_tokens||0).toLocaleString()+'</td>' +
+        '<td>'+fmtTokens(m.input_tokens)+' / '+fmtTokens(m.output_tokens)+'</td>' +
+        '<td>'+fmtTokens(m.cache_read_tokens)+'</td>' +
       '</tr>').join('');
 
   // By-project: local project path (last two segments) extracted from the
@@ -2607,7 +2688,7 @@ function renderGatewayOverview() {
     : paths.map(p => '<tr>' +
         '<td><code style="color:var(--cyan)">'+x(p.key||'-')+'</code></td>' +
         '<td>'+p.requests+'</td>' +
-        '<td>'+(p.input_tokens||0).toLocaleString()+' / '+(p.output_tokens||0).toLocaleString()+'</td>' +
+        '<td>'+fmtTokens(p.input_tokens)+' / '+fmtTokens(p.output_tokens)+'</td>' +
       '</tr>').join('');
 
   // By-hour-of-day: 24-bucket bar chart (only populated hours). Tells the
@@ -2618,13 +2699,13 @@ function renderGatewayOverview() {
   const topReqs = gwStats.top_requests || [];
   document.getElementById('gw-top-requests').innerHTML = topReqs.length === 0
     ? '<tr><td colspan="6" style="color:var(--text-muted);padding:12px">No requests in window.</td></tr>'
-    : topReqs.map(r => '<tr style="cursor:pointer" onclick="jumpToPair(\''+x(r.run)+'\','+r.id+')">' +
+    : topReqs.map(r => '<tr style="cursor:pointer" onclick="jumpToPair(\''+xj(r.run)+'\','+(Number(r.id)||0)+')">' +
         '<td style="color:var(--text-muted);white-space:nowrap">'+x(fmtAgo(r.ts))+'</td>' +
         '<td><code style="color:var(--cyan)">'+x(r.session||'-')+'</code></td>' +
         '<td style="color:var(--text-dim)">'+x(r.model||'-')+'</td>' +
         '<td style="color:var(--text-muted)">'+x(r.path||'-')+'</td>' +
-        '<td style="font-weight:600">'+(r.total_tokens||0).toLocaleString()+'</td>' +
-        '<td>'+(r.input_tokens||0).toLocaleString()+' / '+(r.output_tokens||0).toLocaleString()+'</td>' +
+        '<td style="font-weight:600">'+fmtTokens(r.total_tokens)+'</td>' +
+        '<td>'+fmtTokens(r.input_tokens)+' / '+fmtTokens(r.output_tokens)+'</td>' +
       '</tr>').join('');
 
   // Biggest preamble blocks: the "what injected block is costing me the
@@ -2633,9 +2714,9 @@ function renderGatewayOverview() {
   document.getElementById('gw-preamble-blocks').innerHTML = pre.length === 0
     ? '<tr><td colspan="3" style="color:var(--text-muted);padding:12px">No preamble blocks detected in user messages.</td></tr>'
     : pre.map(p => '<tr>' +
-        '<td style="font-family:var(--mono);font-size:11px;color:var(--text-dim);max-width:600px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+x(p.key)+'">'+x(p.key)+'</td>' +
+        '<td style="font-family:var(--mono);font-size:11px;color:var(--text-dim);max-width:600px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+xa(p.key)+'">'+x(p.key)+'</td>' +
         '<td>'+p.requests+'</td>' +
-        '<td>'+(p.input_tokens||0).toLocaleString()+'</td>' +
+        '<td>'+fmtTokens(p.input_tokens)+'</td>' +
       '</tr>').join('');
 }
 
@@ -2675,9 +2756,11 @@ function jumpToPair(run, id) {
     .then(r => r.ok ? r.json() : null)
     .then(pair => {
       if (!pair) return;
-      // Inject synthesized gwRowsCache so showGwDetail can run.
-      gwRowsCache = [{req: pair.request, resp: pair.response}];
-      showGwDetail(0);
+      const key = (run||'')+'|'+id;
+      const p = {req: pair.request, resp: pair.response, key, hay: ''};
+      gwRowsCache = [p];
+      gwRowsByKey.set(key, p);
+      showGwDetail(key);
     }).catch(()=>{});
 }
 
@@ -2733,7 +2816,7 @@ function renderSessions() {
   }
   list.innerHTML = filtered.map(s => {
     const active = s.key === gwSessSelected ? ' active' : '';
-    return '<div class="gw-sess-row'+active+'" onclick="selectSession(\''+x(s.key)+'\')">' +
+    return '<div class="gw-sess-row'+active+'" onclick="selectSession(\''+xj(s.key)+'\')">' +
       '<div class="id">'+x(s.key)+'</div>' +
       '<div class="meta">'+x(s.first_model||'?')+' · '+(s.turns||s.requests)+' turns · ' +
         ((s.input_tokens||0)+(s.output_tokens||0)).toLocaleString()+' tokens</div>' +
@@ -2796,8 +2879,15 @@ function renderSessionTimeline() {
     wrap.innerHTML = '<div style="color:var(--text-muted);padding:12px">No turns recorded.</div>';
     return;
   }
-  // Stash so click → detail can locate the same pair without a re-fetch.
-  gwRowsCache = pairs.slice().reverse(); // showGwDetail uses this index
+  // Give each pair a stable key so showGwDetail can resolve through the Map
+  // and survive auto-refresh. Session pairs come from a separate endpoint so
+  // their keys are composed the same way as the main list.
+  pairs.forEach(p => {
+    const key = ((p.req && p.req.run)||(p.resp && p.resp.run)||'')+'|'+((p.req && p.req.id)||(p.resp && p.resp.id)||'');
+    p.key = key;
+    gwRowsByKey.set(key, p);
+  });
+  gwRowsCache = pairs.slice().reverse();
   let prevIn = 0;
   wrap.innerHTML = pairs.map((p, i) => {
     const u = p.resp.usage || (p.resp.stream_summary||{}).usage || {};
@@ -2810,11 +2900,10 @@ function renderSessionTimeline() {
     const stop = (p.resp.stream_summary||{}).stop_reason || '';
     const elapsed = p.resp.elapsed_ms ? p.resp.elapsed_ms+'ms' : '';
     const tools = ((p.resp.stream_summary||{}).tool_calls||[]).length;
-    const idx = gwRowsCache.length - 1 - i; // mirror the reversal above
-    return '<div class="gw-turn" onclick="showGwDetail('+idx+')">' +
+    return '<div class="gw-turn" onclick="showGwDetail(\''+xj(p.key)+'\')">' +
       '<div class="turn-no">#'+(p.req.turn_index||(i+1))+'</div>' +
       '<div>' +
-        '<div>'+x((p.req.ts||'').replace('T',' ').slice(5,19))+'  ·  ' +
+        '<div>'+fmtLocalTime(p.req.ts||'')+'  ·  ' +
           '<span style="color:var(--text-dim)">'+x(p.req.model||'?')+'</span>'+
           (stop ? '  ·  <span class="chip">stop <b>'+x(stop)+'</b></span>' : '')+
           (tools ? '  ·  <span class="chip">'+tools+' tool calls</span>' : '')+

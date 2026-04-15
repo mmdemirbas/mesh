@@ -605,6 +605,12 @@ func TestAdminUIGatewayDetailMarkup(t *testing.T) {
 		// Step 18–23 redesign
 		`function splitUserText`,
 		`function renderContextDrawer`,
+		// Security helpers — adversarial review F1/F2/F7
+		`function xa(`,
+		`function xj(`,
+		`function safeUrl(`,
+		`function fmtLocalTime(`,
+		`function fmtTokens(`,
 		`function renderSystemPrompt`,
 		`function renderHourChart`,
 		`function jumpToPair`,
@@ -639,6 +645,51 @@ func TestAdminUICacheControl(t *testing.T) {
 	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("Cache-Control = %q, want no-store", got)
 	}
+}
+
+func TestCapAuditRows(t *testing.T) {
+	t.Parallel()
+	small := json.RawMessage(`{"t":"req","id":1,"run":"a","ts":"2026-01-01T00:00:00Z","body":"ok"}`)
+	// Oversized row: padded body past perRowByteCap.
+	big := json.RawMessage(`{"t":"req","id":42,"run":"r","ts":"2026-01-01T00:00:01Z","body":"` + strings.Repeat("x", perRowByteCap+1) + `"}`)
+
+	t.Run("small rows pass through", func(t *testing.T) {
+		out, tr, _ := capAuditRows([]json.RawMessage{small, small}, auditResponseByteCap)
+		if tr || len(out) != 2 {
+			t.Fatalf("got tr=%v len=%d, want tr=false len=2", tr, len(out))
+		}
+	})
+
+	t.Run("oversized row replaced with stub", func(t *testing.T) {
+		out, tr, _ := capAuditRows([]json.RawMessage{big}, auditResponseByteCap)
+		if !tr || len(out) != 1 {
+			t.Fatalf("got tr=%v len=%d, want tr=true len=1", tr, len(out))
+		}
+		var stub map[string]any
+		if err := json.Unmarshal(out[0], &stub); err != nil {
+			t.Fatalf("stub not valid json: %v", err)
+		}
+		if stub["truncated"] != true {
+			t.Errorf("stub truncated=%v, want true", stub["truncated"])
+		}
+		if stub["id"].(float64) != 42 {
+			t.Errorf("stub id=%v, want 42", stub["id"])
+		}
+		if stub["run"] != "r" {
+			t.Errorf("stub run=%v, want r", stub["run"])
+		}
+		if _, ok := stub["size"]; !ok {
+			t.Errorf("stub missing size field")
+		}
+	})
+
+	t.Run("cumulative budget stops emission", func(t *testing.T) {
+		// Budget just big enough for one small row.
+		out, tr, _ := capAuditRows([]json.RawMessage{small, small, small}, len(small)+1)
+		if !tr || len(out) != 1 {
+			t.Fatalf("got tr=%v len=%d, want tr=true len=1", tr, len(out))
+		}
+	})
 }
 
 func TestAdminRootRedirect(t *testing.T) {
