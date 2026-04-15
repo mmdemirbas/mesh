@@ -416,16 +416,25 @@ func upCmd(nodeNames []string, configPath string) {
 
 	state.Global.StartEviction(ctx)
 
-	sigCh := make(chan os.Signal, 1)
+	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 	go func() {
 		sig := <-sigCh
 		log.Info("Shutting down", "signal", sig)
 		cancel()
-		// Second signal forces immediate exit for stuck shutdowns.
-		sig = <-sigCh
-		log.Warn("Forced exit", "signal", sig)
+		// Belt-and-suspenders forced exit: a second signal forces an
+		// immediate exit, but a hard deadline also triggers exit in case
+		// subsequent signals are swallowed (seen on Windows consoles
+		// where the runtime may consume follow-up Ctrl+C events).
+		forceExit := time.NewTimer(10 * time.Second)
+		defer forceExit.Stop()
+		select {
+		case sig = <-sigCh:
+			log.Warn("Forced exit", "signal", sig)
+		case <-forceExit.C:
+			log.Warn("Forced exit (shutdown deadline reached)")
+		}
 		os.Exit(1)
 	}()
 
@@ -555,6 +564,17 @@ func upCmd(nodeNames []string, configPath string) {
 	}
 
 	<-ctx.Done()
+
+	// Shutdown watchdog: once ctx is cancelled we want the process gone
+	// within 10s regardless of whether shutdown was triggered by a
+	// signal (handled by the signal goroutine above) or by in-dashboard
+	// Ctrl+C (which is consumed by raw-mode stdin and never reaches
+	// signal.Notify), or by a stuck wg.Wait on a misbehaving component.
+	go func() {
+		time.Sleep(10 * time.Second)
+		log.Warn("Forced exit (shutdown deadline reached)")
+		os.Exit(1)
+	}()
 
 	wg.Wait()
 	log.Info("mesh gracefully stopped")
