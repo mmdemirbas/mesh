@@ -379,6 +379,58 @@ func toJSONString(s string) string {
 	return string(b)
 }
 
+// TestExtractProjectPath verifies the project-path extractor finds the
+// "Primary working directory:" hint in the system field (string and block
+// array) and falls back gracefully when absent.
+func TestExtractProjectPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "system string",
+			body: `{"system":"Primary working directory: /Users/md/dev/mmdemirbas/mesh\nOther info.","messages":[]}`,
+			want: "mmdemirbas/mesh",
+		},
+		{
+			name: "system content blocks",
+			body: `{"system":[{"type":"text","text":"Primary working directory: /home/user/projects/my-app\nMore."}],"messages":[]}`,
+			want: "projects/my-app",
+		},
+		{
+			name: "system message role",
+			body: `{"messages":[{"role":"system","content":"Primary working directory: /var/code/acme/backend"}]}`,
+			want: "acme/backend",
+		},
+		{
+			name: "no hint falls back empty",
+			body: `{"messages":[{"role":"user","content":"hi"}]}`,
+			want: "",
+		},
+		{
+			name: "empty body",
+			body: ``,
+			want: "",
+		},
+		{
+			name: "single segment path",
+			body: `{"system":"Primary working directory: /root","messages":[]}`,
+			want: "root",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := extractProjectPath([]byte(tc.body))
+			if got != tc.want {
+				t.Errorf("extractProjectPath = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestParseWindowParam covers the canned windows + duration fallback + the
 // rejection path that should return zero values.
 func TestParseWindowParam(t *testing.T) {

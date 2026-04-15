@@ -234,29 +234,55 @@ tbody tr:last-child td { border-bottom: none; }
 }
 .bubble .b-foot a:hover, .bubble .b-foot button:hover { color: var(--green); }
 
-/* Pre/post-context drawers on user bubbles — keep the bubble showing only
-   typed text; injected system-reminders and similar are tucked underneath. */
+/* Pre/post-context drawers on user bubbles */
 .bubble .pre-ctx, .bubble .post-ctx {
   margin-top: 6px; border-top: 1px dashed var(--border); padding-top: 6px;
   font-size: 11px;
 }
-.bubble .pre-ctx summary, .bubble .post-ctx summary {
+.bubble .pre-ctx > summary, .bubble .post-ctx > summary {
   list-style: none; cursor: pointer; color: var(--text-muted);
   display: flex; align-items: center; gap: 6px; padding: 2px 0;
 }
-.bubble .pre-ctx summary::-webkit-details-marker,
-.bubble .post-ctx summary::-webkit-details-marker { display: none; }
-.bubble .pre-ctx summary::before, .bubble .post-ctx summary::before {
+.bubble .pre-ctx > summary::-webkit-details-marker,
+.bubble .post-ctx > summary::-webkit-details-marker { display: none; }
+.bubble .pre-ctx > summary::before, .bubble .post-ctx > summary::before {
   content: '▶'; font-size: 8px; color: var(--text-muted);
   transition: transform 0.1s;
 }
-.bubble .pre-ctx[open] summary::before,
-.bubble .post-ctx[open] summary::before { transform: rotate(90deg); }
-.bubble .pre-ctx .sec-len, .bubble .post-ctx .sec-len { margin-left: auto; }
-.ctx-blocks {
-  margin-top: 6px; max-height: 400px; overflow-y: auto;
-  border: 1px solid var(--border); border-radius: 4px;
-  background: var(--bg);
+.bubble .pre-ctx[open] > summary::before,
+.bubble .post-ctx[open] > summary::before { transform: rotate(90deg); }
+.bubble .pre-ctx > summary .sec-len,
+.bubble .post-ctx > summary .sec-len { margin-left: auto; }
+
+/* Block list — one row per injected block, name + size + % of message */
+.ctx-list { margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
+.ctx-item { border: 1px solid var(--border); border-radius: 3px; background: var(--bg); }
+.ctx-item > summary {
+  list-style: none; cursor: pointer; user-select: none;
+  display: grid; grid-template-columns: 14px 1fr auto auto; gap: 8px;
+  align-items: center; padding: 4px 8px; font-size: 11px;
+}
+.ctx-item > summary::-webkit-details-marker { display: none; }
+.ctx-item > summary::before {
+  content: '▶'; font-size: 8px; color: var(--text-muted);
+  transition: transform 0.1s;
+}
+.ctx-item[open] > summary::before { transform: rotate(90deg); }
+.ctx-item:hover > summary { background: var(--bg-hover); }
+.ctx-item .ctx-name { font-family: var(--mono); color: var(--text); }
+.ctx-item .ctx-size { font-family: var(--mono); color: var(--text-muted); min-width: 80px; text-align: right; }
+.ctx-item .ctx-pct  { font-family: var(--mono); color: var(--text-dim); min-width: 52px; text-align: right; }
+.ctx-item.k-system-reminder   > summary .ctx-name { color: var(--yellow); }
+.ctx-item.k-command           > summary .ctx-name { color: var(--cyan); }
+.ctx-item.k-stdout            > summary .ctx-name { color: var(--text); }
+.ctx-item.k-stderr            > summary .ctx-name { color: var(--red); }
+.ctx-item.k-task-notification > summary .ctx-name { color: var(--purple); }
+.ctx-item.k-hook              > summary .ctx-name { color: var(--purple); }
+.ctx-item.k-unknown           > summary .ctx-name { color: var(--blue); }
+.ctx-item > .ctx-body {
+  border-top: 1px solid var(--border);
+  padding: 6px 10px; white-space: pre-wrap; word-break: break-word;
+  font-size: 11px; color: var(--text); max-height: 360px; overflow-y: auto;
 }
 
 /* Bubble flash highlight (used for tool_use_id click-back) */
@@ -661,10 +687,10 @@ tbody tr:last-child td { border-bottom: none; }
           </div>
         </div>
         <div class="card">
-          <div class="card-header"><span>By path</span></div>
+          <div class="card-header"><span>By project</span></div>
           <div class="card-body">
             <table>
-              <thead><tr><th>Path</th><th>Requests</th><th>Tokens (in/out)</th></tr></thead>
+              <thead><tr><th>Project</th><th>Requests</th><th>Tokens (in/out)</th></tr></thead>
               <tbody id="gw-by-path"></tbody>
             </table>
           </div>
@@ -2086,16 +2112,34 @@ function renderContextDrawer(kind, blocks, messageLen) {
   const label = kind === 'pre' ? 'Pre-context injected before your message'
                                : 'Post-context injected after your message';
   const rows = blocks.map(b => {
+    // Determine kind class from block name (same logic as renderCustomBlock)
+    let blkKind = 'unknown';
+    const n = b.name;
+    if (n === 'system-reminder') blkKind = 'system-reminder';
+    else if (/^command-(name|message|args|stdout|stderr)$|^local-command-(stdout|stderr)$/.test(n))
+      blkKind = n.endsWith('stdout') ? 'stdout' : n.endsWith('stderr') ? 'stderr' : 'command';
+    else if (n === 'task-notification') blkKind = 'task-notification';
+    else if (n === 'user-prompt-submit-hook' || n === 'stop-hook-feedback') blkKind = 'hook';
+
     const pct = messageLen > 0 ? (100 * b.body.length / messageLen).toFixed(1) + '%' : '';
-    const len = fmtLen(b.body.length) + ' chars · ' + pct;
-    return sec('<'+b.name+'>', len, renderCustomBlock(b), false);
+    const inner = (blkKind === 'stdout' || blkKind === 'stderr')
+      ? '<pre>'+x(b.body)+'</pre>'
+      : '<div>'+renderPlainText(b.body)+'</div>';
+    return '<details class="ctx-item k-'+blkKind+'">' +
+      '<summary>' +
+        '<span class="ctx-name">&lt;'+x(b.name)+'&gt;</span>' +
+        '<span class="ctx-size">'+fmtLen(b.body.length)+' chars</span>' +
+        '<span class="ctx-pct">'+pct+'</span>' +
+      '</summary>' +
+      '<div class="ctx-body">'+inner+'</div>' +
+    '</details>';
   }).join('');
   return '<details class="'+(kind === 'pre' ? 'pre-ctx' : 'post-ctx')+'">' +
     '<summary>' +
       '<span>'+x(label)+'</span>' +
       '<span class="sec-len">'+blocks.length+' blocks · '+fmtLen(total)+' chars</span>' +
     '</summary>' +
-    '<div class="ctx-blocks">'+rows+'</div>' +
+    '<div class="ctx-list">'+rows+'</div>' +
   '</details>';
 }
 
@@ -2487,11 +2531,11 @@ function renderGatewayOverview() {
         '<td>'+(m.cache_read_tokens||0).toLocaleString()+'</td>' +
       '</tr>').join('');
 
-  // By-path: URL path the request hit. Handy for multi-upstream gateways and
-  // translation-vs-passthrough breakdowns.
+  // By-project: local project path (last two segments) extracted from the
+  // system prompt. Falls back to URL path for non-Claude-Code clients.
   const paths = (gwStats.by_path || []).slice(0, 10);
   document.getElementById('gw-by-path').innerHTML = paths.length === 0
-    ? '<tr><td colspan="3" style="color:var(--text-muted);padding:12px">No paths in window.</td></tr>'
+    ? '<tr><td colspan="3" style="color:var(--text-muted);padding:12px">No projects in window.</td></tr>'
     : paths.map(p => '<tr>' +
         '<td><code style="color:var(--cyan)">'+x(p.key||'-')+'</code></td>' +
         '<td>'+p.requests+'</td>' +

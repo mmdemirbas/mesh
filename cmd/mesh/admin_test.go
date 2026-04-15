@@ -614,7 +614,7 @@ func TestAdminUIGatewayDetailMarkup(t *testing.T) {
 		`gw-preamble-blocks`,
 		`pre-ctx`,
 		`post-ctx`,
-		`ctx-blocks`,
+		`ctx-list`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("UI missing %q (regression: detail layout collapsed back to single pane)", want)

@@ -197,8 +197,15 @@ func computeAuditStats(dir string, f statsFilter) (auditStatsResponse, error) {
 			}
 		}
 
-		if pa.req.path != "" {
-			applyPair(upsertRow(paths, pa.req.path), pa)
+		// Prefer a human-readable project name extracted from the system prompt
+		// over the raw URL path. Falls back to the URL path when the body has
+		// no working-directory hint (non-Claude-Code clients, passthrough mode).
+		projectKey := extractProjectPath(pa.req.body)
+		if projectKey == "" {
+			projectKey = pa.req.path
+		}
+		if projectKey != "" {
+			applyPair(upsertRow(paths, projectKey), pa)
 		}
 
 		if !pa.req.ts.IsZero() {
@@ -629,6 +636,87 @@ func preambleSignature(name, body string) string {
 		sig = sig[:maxSig] + "…"
 	}
 	return "<" + name + "> " + sig
+}
+
+// extractProjectPath scans a request body JSON for a "Primary working
+// directory:" line injected by Claude Code into the system prompt. Returns the
+// last two path segments of that directory (e.g. "mmdemirbas/mesh") so the
+// "By project" breakdown shows meaningful names instead of URL paths.
+// Returns "" when the body is absent or carries no working-directory hint.
+func extractProjectPath(bodyJSON []byte) string {
+	if len(bodyJSON) == 0 {
+		return ""
+	}
+	// The working-directory line appears in the top-level "system" field
+	// (Anthropic format) or as the content of a system-role message.
+	var shell struct {
+		System   json.RawMessage `json:"system"`
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(bodyJSON, &shell); err != nil {
+		return ""
+	}
+	candidates := make([]string, 0, 4)
+	// system field may be a plain string or an array of content blocks.
+	if len(shell.System) > 0 {
+		var s string
+		if json.Unmarshal(shell.System, &s) == nil {
+			candidates = append(candidates, s)
+		} else {
+			var blocks []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(shell.System, &blocks) == nil {
+				for _, b := range blocks {
+					if b.Type == "text" {
+						candidates = append(candidates, b.Text)
+					}
+				}
+			}
+		}
+	}
+	for _, m := range shell.Messages {
+		if m.Role != "system" {
+			continue
+		}
+		var s string
+		if json.Unmarshal(m.Content, &s) == nil {
+			candidates = append(candidates, s)
+		}
+	}
+	const marker = "Primary working directory: "
+	for _, text := range candidates {
+		_, after, found := strings.Cut(text, marker)
+		if !found {
+			continue
+		}
+		line, _, _ := strings.Cut(after, "\n")
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Return last two non-empty path segments for concise display.
+		line = filepath.ToSlash(line)
+		rawParts := strings.Split(strings.TrimRight(line, "/"), "/")
+		var parts []string
+		for _, p := range rawParts {
+			if p != "" {
+				parts = append(parts, p)
+			}
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		if len(parts) >= 2 {
+			return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+		}
+		return parts[len(parts)-1]
+	}
+	return ""
 }
 
 // parseBucketParam maps "minute" | "hour" | "day" to a duration. Empty or
