@@ -234,6 +234,31 @@ tbody tr:last-child td { border-bottom: none; }
 }
 .bubble .b-foot a:hover, .bubble .b-foot button:hover { color: var(--green); }
 
+/* Pre/post-context drawers on user bubbles — keep the bubble showing only
+   typed text; injected system-reminders and similar are tucked underneath. */
+.bubble .pre-ctx, .bubble .post-ctx {
+  margin-top: 6px; border-top: 1px dashed var(--border); padding-top: 6px;
+  font-size: 11px;
+}
+.bubble .pre-ctx summary, .bubble .post-ctx summary {
+  list-style: none; cursor: pointer; color: var(--text-muted);
+  display: flex; align-items: center; gap: 6px; padding: 2px 0;
+}
+.bubble .pre-ctx summary::-webkit-details-marker,
+.bubble .post-ctx summary::-webkit-details-marker { display: none; }
+.bubble .pre-ctx summary::before, .bubble .post-ctx summary::before {
+  content: '▶'; font-size: 8px; color: var(--text-muted);
+  transition: transform 0.1s;
+}
+.bubble .pre-ctx[open] summary::before,
+.bubble .post-ctx[open] summary::before { transform: rotate(90deg); }
+.bubble .pre-ctx .sec-len, .bubble .post-ctx .sec-len { margin-left: auto; }
+.ctx-blocks {
+  margin-top: 6px; max-height: 400px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg);
+}
+
 /* Bubble flash highlight (used for tool_use_id click-back) */
 @keyframes bubble-flash {
   0%   { box-shadow: 0 0 0 0 var(--green); }
@@ -329,20 +354,22 @@ tbody tr:last-child td { border-bottom: none; }
 .token-legend span { display: inline-flex; align-items: center; gap: 4px; }
 .token-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
 
-/* Gateway detail (request | response) — single scroll surface, no nested boxes */
-#gw-detail-card .card-body { max-height: 78vh; overflow: auto; scroll-behavior: smooth; }
+/* Gateway detail (request | response) — page scrolls the card; only leaf
+   content scrollers where justified (raw JSON pane, pre-context drawer). */
+#gw-detail-card .card-body { scroll-behavior: smooth; }
 .gw-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 1100px) { .gw-detail-grid { grid-template-columns: 1fr; } }
 .gw-detail-pane {
   background: var(--bg-card); border: 1px solid var(--border);
-  border-radius: 6px; display: flex; flex-direction: column; min-width: 0;
+  border-radius: 6px; display: flex; flex-direction: column;
+  /* Allow shrinking below content intrinsic size so overflow is real. */
+  min-width: 0; max-width: 100%;
 }
 .gw-detail-pane h4 {
   font-size: 12px; font-weight: 600; color: var(--text-dim);
   padding: 8px 12px; border-bottom: 1px solid var(--border);
   text-transform: uppercase; letter-spacing: 0.5px;
   display: flex; justify-content: space-between; align-items: center;
-  position: sticky; top: 0; background: var(--bg-card); z-index: 1;
 }
 .gw-detail-pane .copy-btn {
   background: transparent; border: 1px solid var(--border);
@@ -350,15 +377,18 @@ tbody tr:last-child td { border-bottom: none; }
   padding: 2px 8px; cursor: pointer; font-family: var(--mono);
 }
 .gw-detail-pane .copy-btn:hover { color: var(--green); border-color: var(--green); }
-.gw-detail-structured { padding: 8px 12px; font-size: 13px; color: var(--text); }
+.gw-detail-structured { padding: 8px 12px; font-size: 13px; color: var(--text); min-width: 0; max-width: 100%; }
 .gw-detail-structured:empty { display: none; }
 .gw-detail-raw {
   font-family: var(--mono); font-size: 12px; line-height: 1.5;
   padding: 8px 12px; white-space: pre;
+  /* Inner leaf scroller: raw JSON can be arbitrarily wide on a long string. */
+  overflow-x: auto; max-width: 100%;
+  max-height: 60vh; overflow-y: auto;
 }
 
 /* Collapsible section primitive — used everywhere a block can be folded */
-.sec { border: 1px solid var(--border); border-radius: 4px; margin: 6px 0; background: var(--bg); }
+.sec { border: 1px solid var(--border); border-radius: 4px; margin: 6px 0; background: var(--bg); min-width: 0; max-width: 100%; }
 .sec > summary {
   list-style: none; cursor: pointer; padding: 6px 10px;
   display: flex; align-items: center; gap: 8px; font-size: 12px;
@@ -377,7 +407,7 @@ tbody tr:last-child td { border-bottom: none; }
   color: var(--text-muted); padding: 1px 6px; border-radius: 3px;
   background: var(--bg-input);
 }
-.sec > .sec-body { padding: 8px 10px; border-top: 1px solid var(--border); }
+.sec > .sec-body { padding: 8px 10px; border-top: 1px solid var(--border); min-width: 0; max-width: 100%; overflow-x: hidden; }
 /* JSON syntax tokens */
 .json-key   { color: var(--cyan); }
 .json-str   { color: var(--green); }
@@ -629,6 +659,45 @@ tbody tr:last-child td { border-bottom: none; }
               <tbody id="gw-top-models"></tbody>
             </table>
           </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span>By path</span></div>
+          <div class="card-body">
+            <table>
+              <thead><tr><th>Path</th><th>Requests</th><th>Tokens (in/out)</th></tr></thead>
+              <tbody id="gw-by-path"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span>By hour of day (UTC)</span></div>
+          <div class="card-body padded">
+            <div id="gw-by-hour" style="height:140px"></div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <span>Biggest single requests</span>
+          <span class="help" title="Highest-total-token pairs in the current window. Click any row to open its detail card.">?</span>
+        </div>
+        <div class="card-body">
+          <table>
+            <thead><tr><th>When</th><th>Session</th><th>Model</th><th>Path</th><th>Total tokens</th><th>In / Out</th></tr></thead>
+            <tbody id="gw-top-requests"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <span>Biggest preamble blocks</span>
+          <span class="help" title="Injected pseudo-XML blocks (system-reminder, command-*, task-notification, hooks) aggregated by tag + first 60 chars. Total chars tells you which recurring context is wasting the most tokens across the window.">?</span>
+        </div>
+        <div class="card-body">
+          <table>
+            <thead><tr><th>Tag + signature</th><th>Occurrences</th><th>Total chars</th></tr></thead>
+            <tbody id="gw-preamble-blocks"></tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -1781,7 +1850,7 @@ function renderRequestStructured(req) {
   if (body.system) {
     const txt = typeof body.system === 'string' ? body.system : JSON.stringify(body.system);
     html += sec('System prompt', fmtLen(txt.length)+' chars',
-      '<div class="msg-block"><div class="msg-body">'+renderContent(body.system)+'</div></div>', true);
+      renderSystemPrompt(body.system), true);
   }
 
   // Messages → chat-style bubbles.
@@ -1792,13 +1861,96 @@ function renderRequestStructured(req) {
       '<div class="chat">' + msgs.map((m, i) => renderBubble(m, i)).join('') + '</div>', true);
   }
 
-  // Tools available to the model.
+  // Tools available to the model. Each tool carries its own length so it
+  // is obvious which one is bloating the request; the section summary
+  // shows the aggregate.
   const tools = Array.isArray(body.tools) ? body.tools : [];
   if (tools.length) {
-    html += sec('Tools ('+tools.length+')', tools.length+' tools',
+    const totalToolChars = tools.reduce((n, t) => n + JSON.stringify(t).length, 0);
+    html += sec('Tools ('+tools.length+')', tools.length+' tools · '+fmtLen(totalToolChars)+' chars',
       tools.map(renderToolDefinition).join(''), false);
   }
   return html || emptyNote('Empty body — request had no system, messages, or tools.');
+}
+
+// renderSystemPrompt turns a system prompt string into a minimal outline:
+// a leading metadata row for key:value header lines, then one <details> per
+// Markdown heading (# / ## / ###). Each heading section shows its char
+// count. No Markdown styling is applied — the user prefers plain text, so
+// we only introduce *structure*, never typography.
+//
+// Array form (Anthropic content-block style) falls back to recursing on the
+// concatenated text, since the structure we care about is the prose, not
+// the block wrapping.
+function renderSystemPrompt(v) {
+  if (Array.isArray(v)) {
+    const joined = v.map(b => typeof b === 'string' ? b : (b && b.text) || '').join('\n');
+    return renderSystemPrompt(joined);
+  }
+  if (typeof v !== 'string') {
+    return '<div class="msg-block"><div class="msg-body">' + renderContent(v) + '</div></div>';
+  }
+  const s = v;
+  const lines = s.split('\n');
+
+  // Step 1: peel off leading key:value metadata lines (e.g. billing headers).
+  // A metadata line matches /^[a-z][a-z0-9-]*:\s+\S/ and continues until the
+  // first non-matching line.
+  const metaRe = /^[a-z][a-z0-9-]*:\s+\S/i;
+  const meta = [];
+  let i = 0;
+  while (i < lines.length && (lines[i] === '' || metaRe.test(lines[i]))) {
+    if (lines[i] !== '') meta.push(lines[i]);
+    i++;
+  }
+
+  // Step 2: collect sections split by # / ## / ### headings. Text before
+  // the first heading becomes a synthetic "Preamble" section.
+  const body = lines.slice(i);
+  const headingRe = /^(#{1,6})\s+(.+)$/;
+  const sections = [];
+  let current = {depth: 0, title: 'Preamble', lines: []};
+  for (const ln of body) {
+    const h = ln.match(headingRe);
+    if (h) {
+      if (current.lines.length > 0 || current.title !== 'Preamble') sections.push(current);
+      current = {depth: h[1].length, title: h[2].trim(), lines: []};
+    } else {
+      current.lines.push(ln);
+    }
+  }
+  if (current.lines.length > 0 || current.title !== 'Preamble') sections.push(current);
+
+  let html = '';
+  if (meta.length) {
+    html += '<div style="margin-bottom:8px;display:flex;flex-wrap:wrap;gap:4px">' +
+      meta.map(line => {
+        const colon = line.indexOf(':');
+        const k = line.slice(0, colon);
+        const v = line.slice(colon+1).trim();
+        return chip(x(k), v);
+      }).join('') +
+    '</div>';
+  }
+
+  // If there are no headings and only one synthetic section, just render
+  // the text straight — no pointless outer details wrapper.
+  if (sections.length === 0) return html + emptyNote('(no body)');
+  if (sections.length === 1 && sections[0].title === 'Preamble') {
+    return html + '<div class="msg-block"><div class="msg-body">' +
+      renderPlainText(sections[0].lines.join('\n').trim()) +
+      '</div></div>';
+  }
+
+  for (const sec0 of sections) {
+    const body = sec0.lines.join('\n').trim();
+    const title = (sec0.depth ? '#'.repeat(sec0.depth) + ' ' : '') + sec0.title;
+    const open = sec0.title === 'Preamble';
+    html += sec(title, fmtLen(body.length)+' chars',
+      '<div class="msg-block"><div class="msg-body">'+renderPlainText(body)+'</div></div>',
+      open);
+  }
+  return html;
 }
 
 // msgChars returns the visible character count of a message — used for the
@@ -1826,33 +1978,125 @@ function chip(label, value, cls) {
 }
 
 // renderBubble paints a single chat message as a role-colored bubble with a
-// footer carrying the index, role pill, length, and any contextual chips
-// (tool_call_id, finish_reason). User bubbles right-align; assistant + tool
-// left-align; system spans the full row. The footer doubles as the affordance
-// for revealing detail (currently expand/collapse on long text only).
+// footer carrying the index, role pill, length, and any contextual chips.
+// User bubbles right-align; assistant + tool left-align; system spans the
+// full row.
+//
+// For user messages, the content is split into: [pre-context blocks] +
+// [typed text] + [post-context blocks]. Only the typed text shows in the
+// bubble proper; the context drawers collapse underneath with per-block
+// size. This keeps a 51 KB user message that says "Hi" actually legible.
 function renderBubble(m, idx) {
   const role = String(m.role || 'unknown').toLowerCase();
   const cls = (role === 'user' || role === 'assistant' || role === 'system' || role === 'tool') ? role : 'unknown';
   const align = role === 'user' ? 'right' : role === 'system' ? 'center' : 'left';
-  const inner = renderContent(m.content);
+  const totalLen = msgChars(m);
+
+  let contentHtml, preCtxHtml = '', postCtxHtml = '', typedChars = totalLen;
+  if (role === 'user' && typeof m.content === 'string') {
+    const split = splitUserText(m.content);
+    contentHtml = renderPlainText(split.typed);
+    typedChars = split.typed.length;
+    if (split.pre.length) preCtxHtml = renderContextDrawer('pre', split.pre, totalLen);
+    if (split.post.length) postCtxHtml = renderContextDrawer('post', split.post, totalLen);
+  } else if (role === 'user' && Array.isArray(m.content)) {
+    // Anthropic-style content blocks: any leaf that is a plain-text block
+    // gets the same preamble split. Non-text blocks (tool_result, image,
+    // tool_use) pass through as-is.
+    const parts = m.content.map(b => {
+      if (b && b.type === 'text' && typeof b.text === 'string') {
+        const s = splitUserText(b.text);
+        const typedHtml = renderPlainText(s.typed);
+        const pre = s.pre.length ? renderContextDrawer('pre', s.pre, b.text.length) : '';
+        const post = s.post.length ? renderContextDrawer('post', s.post, b.text.length) : '';
+        typedChars = s.typed.length;
+        return pre + typedHtml + post;
+      }
+      return renderContentBlock(b);
+    });
+    contentHtml = parts.join('');
+  } else {
+    contentHtml = renderContent(m.content);
+  }
   const calls = Array.isArray(m.tool_calls) ? m.tool_calls.map(renderOpenAIToolCall).join('') : '';
-  const len = msgChars(m);
+
   const chips = [];
   if (m.tool_call_id) chips.push('<span class="role-pill" data-link-tool="'+x(m.tool_call_id)+'" onclick="flashToolUse(\''+x(m.tool_call_id)+'\')">tool_call_id '+x(m.tool_call_id)+'</span>');
-  // Bubble id encodes any tool_use_id this message contains so a click on a
-  // tool_call_id elsewhere can locate it.
   const dataIds = collectToolUseIds(m).map(id => 'data-tool-use="'+x(id)+'"').join(' ');
+
+  const lenLabel = (role === 'user' && typedChars !== totalLen)
+    ? fmtLen(typedChars)+' typed · '+fmtLen(totalLen)+' total'
+    : fmtLen(totalLen)+' chars';
+
   return '<div class="chat-row '+align+'">' +
     '<div class="bubble role-'+cls+'" '+dataIds+'>' +
-      '<div class="b-content">'+inner+calls+'</div>' +
+      '<div class="b-content">'+contentHtml+calls+'</div>' +
+      preCtxHtml + postCtxHtml +
       '<div class="b-foot">' +
         '<span class="role-pill">'+x(role)+'</span>' +
         '<span>#'+(idx+1)+'</span>' +
         chips.join('') +
-        '<span class="b-len">'+fmtLen(len)+' chars</span>' +
+        '<span class="b-len">'+x(lenLabel)+'</span>' +
       '</div>' +
     '</div>' +
   '</div>';
+}
+
+// splitUserText separates a user message into [pre-context | typed | post-context].
+// Claude Code (and similar agent harnesses) wrap reminders, hook outputs, and
+// IDE hints in pseudo-XML blocks around the user's actual text. The heuristic:
+//
+//   - Tokenize the string into an alternating sequence of tag-blocks and
+//     text-runs using the same splitter as the custom-block renderer.
+//   - pre = leading contiguous tag-blocks (before the first non-blank text).
+//   - post = trailing contiguous tag-blocks (after the last non-blank text).
+//   - typed = everything in between, concatenated.
+//
+// False positive: if a user deliberately types <system-reminder>...</system-reminder>
+// the splitter will treat it as injected context. User can still read it via
+// the drawer. Per user's 1a choice.
+function splitUserText(s) {
+  const parts = splitCustomBlocks(s);
+  let firstText = -1, lastText = -1;
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i].kind === 'text' && parts[i].text.trim() !== '') {
+      if (firstText === -1) firstText = i;
+      lastText = i;
+    }
+  }
+  if (firstText === -1) {
+    // Nothing but blocks (or whitespace) — treat all blocks as pre-context.
+    return {pre: parts.filter(p => p.kind === 'block'), typed: s.trim(), post: []};
+  }
+  const pre = parts.slice(0, firstText).filter(p => p.kind === 'block');
+  const post = parts.slice(lastText + 1).filter(p => p.kind === 'block');
+  const typedParts = parts.slice(firstText, lastText + 1);
+  // Within the typed span, concatenate text runs and *inline* any blocks
+  // that sit between words of the user's actual prose — those are usually
+  // legitimate (e.g. a pasted code example) so we do not hide them.
+  const typed = typedParts.map(p => p.kind === 'text' ? p.text : '').join('').trim();
+  return {pre, typed, post};
+}
+
+// renderContextDrawer emits the pre/post drawer listing injected blocks with
+// per-block chars and percentage of message. Each block is a nested <details>
+// so the user can expand the ones that matter.
+function renderContextDrawer(kind, blocks, messageLen) {
+  const total = blocks.reduce((n, b) => n + b.body.length, 0);
+  const label = kind === 'pre' ? 'Pre-context injected before your message'
+                               : 'Post-context injected after your message';
+  const rows = blocks.map(b => {
+    const pct = messageLen > 0 ? (100 * b.body.length / messageLen).toFixed(1) + '%' : '';
+    const len = fmtLen(b.body.length) + ' chars · ' + pct;
+    return sec('<'+b.name+'>', len, renderCustomBlock(b), false);
+  }).join('');
+  return '<details class="'+(kind === 'pre' ? 'pre-ctx' : 'post-ctx')+'">' +
+    '<summary>' +
+      '<span>'+x(label)+'</span>' +
+      '<span class="sec-len">'+blocks.length+' blocks · '+fmtLen(total)+' chars</span>' +
+    '</summary>' +
+    '<div class="ctx-blocks">'+rows+'</div>' +
+  '</details>';
 }
 
 function collectToolUseIds(m) {
@@ -2066,15 +2310,33 @@ function renderOpenAIToolCall(tc) {
   '</div>';
 }
 
+// renderToolDefinition shows the tool's name, short description, and its
+// input schema with full JSON syntax highlighting so the properties and
+// types are scannable instead of a wall of monochrome text.
 function renderToolDefinition(t) {
   const name = t.name || (t.function && t.function.name) || 'unknown';
   const desc = t.description || (t.function && t.function.description) || '';
   const schema = t.input_schema || (t.function && t.function.parameters) || {};
+  const totalChars = JSON.stringify(t).length;
+  const schemaChars = JSON.stringify(schema).length;
+  const propCount = schema && schema.properties ? Object.keys(schema.properties).length : 0;
+  const required = Array.isArray(schema && schema.required) ? schema.required.length : 0;
   return '<details class="tool-block">' +
-    '<summary><span class="tool-name">'+x(name)+'</span>' +
-    (desc ? ' <span style="color:var(--text-dim);font-style:italic">'+x(desc.slice(0, 120))+'</span>' : '') +
+    '<summary>' +
+      '<span class="tool-name">'+x(name)+'</span>' +
+      (desc ? ' <span style="color:var(--text-dim);font-style:italic">'+x(desc.slice(0, 120))+'</span>' : '') +
+      '<span class="sec-len" style="float:right">' +
+        (propCount ? propCount+' params' + (required ? ' ('+required+' req)' : '') + ' · ' : '') +
+        fmtLen(totalChars)+' chars' +
+      '</span>' +
     '</summary>' +
-    '<pre>'+x(JSON.stringify(schema, null, 2))+'</pre>' +
+    (desc && desc.length > 120
+      ? '<div style="color:var(--text-dim);font-style:italic;margin:4px 0;white-space:pre-wrap">'+x(desc)+'</div>'
+      : '') +
+    '<div style="margin-top:6px">' +
+      '<div class="section-title" style="margin:0 0 4px">input_schema · '+fmtLen(schemaChars)+' chars</div>' +
+      '<div class="gw-detail-raw" style="max-height:300px">'+highlightJSON(schema)+'</div>' +
+    '</div>' +
   '</details>';
 }
 
@@ -2224,6 +2486,87 @@ function renderGatewayOverview() {
         '<td>'+(m.input_tokens||0).toLocaleString()+' / '+(m.output_tokens||0).toLocaleString()+'</td>' +
         '<td>'+(m.cache_read_tokens||0).toLocaleString()+'</td>' +
       '</tr>').join('');
+
+  // By-path: URL path the request hit. Handy for multi-upstream gateways and
+  // translation-vs-passthrough breakdowns.
+  const paths = (gwStats.by_path || []).slice(0, 10);
+  document.getElementById('gw-by-path').innerHTML = paths.length === 0
+    ? '<tr><td colspan="3" style="color:var(--text-muted);padding:12px">No paths in window.</td></tr>'
+    : paths.map(p => '<tr>' +
+        '<td><code style="color:var(--cyan)">'+x(p.key||'-')+'</code></td>' +
+        '<td>'+p.requests+'</td>' +
+        '<td>'+(p.input_tokens||0).toLocaleString()+' / '+(p.output_tokens||0).toLocaleString()+'</td>' +
+      '</tr>').join('');
+
+  // By-hour-of-day: 24-bucket bar chart (only populated hours). Tells the
+  // user whether usage clusters at specific times (e.g. morning pair-programming).
+  document.getElementById('gw-by-hour').innerHTML = renderHourChart(gwStats.by_hour || []);
+
+  // Biggest single requests: jump-to-pair from the observability view.
+  const topReqs = gwStats.top_requests || [];
+  document.getElementById('gw-top-requests').innerHTML = topReqs.length === 0
+    ? '<tr><td colspan="6" style="color:var(--text-muted);padding:12px">No requests in window.</td></tr>'
+    : topReqs.map(r => '<tr style="cursor:pointer" onclick="jumpToPair(\''+x(r.run)+'\','+r.id+')">' +
+        '<td style="color:var(--text-muted);white-space:nowrap">'+x(fmtAgo(r.ts))+'</td>' +
+        '<td><code style="color:var(--cyan)">'+x(r.session||'-')+'</code></td>' +
+        '<td style="color:var(--text-dim)">'+x(r.model||'-')+'</td>' +
+        '<td style="color:var(--text-muted)">'+x(r.path||'-')+'</td>' +
+        '<td style="font-weight:600">'+(r.total_tokens||0).toLocaleString()+'</td>' +
+        '<td>'+(r.input_tokens||0).toLocaleString()+' / '+(r.output_tokens||0).toLocaleString()+'</td>' +
+      '</tr>').join('');
+
+  // Biggest preamble blocks: the "what injected block is costing me the
+  // most" table. key is already "<tag> first-60-chars".
+  const pre = (gwStats.preamble_blocks || []).slice(0, 15);
+  document.getElementById('gw-preamble-blocks').innerHTML = pre.length === 0
+    ? '<tr><td colspan="3" style="color:var(--text-muted);padding:12px">No preamble blocks detected in user messages.</td></tr>'
+    : pre.map(p => '<tr>' +
+        '<td style="font-family:var(--mono);font-size:11px;color:var(--text-dim);max-width:600px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+x(p.key)+'">'+x(p.key)+'</td>' +
+        '<td>'+p.requests+'</td>' +
+        '<td>'+(p.input_tokens||0).toLocaleString()+'</td>' +
+      '</tr>').join('');
+}
+
+// renderHourChart paints a 24-column bar chart. Each bar's height is
+// proportional to that hour's request count. Hours with no data render as
+// an empty bar so the 0..23 scale is always visible.
+function renderHourChart(rows) {
+  const byHour = {};
+  for (const r of rows) byHour[r.hour] = r;
+  const max = Math.max(1, ...rows.map(r => r.requests));
+  const w = 800, h = 120, pad = 16;
+  const barW = (w - 2*pad) / 24 - 2;
+  let out = '';
+  for (let i = 0; i < 24; i++) {
+    const r = byHour[i];
+    const req = r ? r.requests : 0;
+    const ht = req * (h - 2*pad) / max;
+    const x0 = pad + i * (barW + 2);
+    const y = h - pad - ht;
+    const title = i + ':00 — ' + req + ' req';
+    out += '<g><title>'+x(title)+'</title>' +
+      (ht > 0 ? '<rect x="'+x0+'" y="'+y+'" width="'+barW+'" height="'+ht+'" fill="var(--cyan)"></rect>' : '') +
+      (i % 6 === 0 ? '<text x="'+x0+'" y="'+(h-4)+'">'+i+'h</text>' : '') +
+    '</g>';
+  }
+  return '<svg class="gw-series-svg" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+out+'</svg>';
+}
+
+// jumpToPair switches to the Requests sub-view, fetches the pair, and
+// opens the detail card. Handy from the top-requests table and anywhere
+// else the user wants to drill into a specific id+run.
+function jumpToPair(run, id) {
+  const sub = document.querySelector('.gw-sub-btn[data-sub="requests"]');
+  if (sub) sub.click();
+  fetch('/api/gateway/audit/pair?gateway='+encodeURIComponent(gwSelected)+
+        '&run='+encodeURIComponent(run)+'&id='+encodeURIComponent(id))
+    .then(r => r.ok ? r.json() : null)
+    .then(pair => {
+      if (!pair) return;
+      // Inject synthesized gwRowsCache so showGwDetail can run.
+      gwRowsCache = [{req: pair.request, resp: pair.response}];
+      showGwDetail(0);
+    }).catch(()=>{});
 }
 
 // statBox renders one KPI cell. label may contain trusted HTML (info icons);

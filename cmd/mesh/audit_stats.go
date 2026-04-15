@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -13,12 +15,39 @@ import (
 // further math; cache hit ratio is precomputed because clients otherwise have
 // to handle the divide-by-zero case in three places.
 type auditStatsResponse struct {
-	Window    string             `json:"window"`
-	Bucket    string             `json:"bucket"`
-	Totals    auditStatsTotals   `json:"totals"`
-	ByModel   []auditStatsRow    `json:"by_model"`
-	BySession []auditStatsRow    `json:"by_session"`
-	Series    []auditStatsBucket `json:"series"`
+	Window          string                 `json:"window"`
+	Bucket          string                 `json:"bucket"`
+	Totals          auditStatsTotals       `json:"totals"`
+	ByModel         []auditStatsRow        `json:"by_model"`
+	BySession       []auditStatsRow        `json:"by_session"`
+	ByPath          []auditStatsRow        `json:"by_path"`
+	ByHour          []auditStatsHourRow    `json:"by_hour"`
+	TopRequests     []auditStatsTopRequest `json:"top_requests"`
+	PreambleBlocks  []auditStatsRow        `json:"preamble_blocks"`
+	Series          []auditStatsBucket     `json:"series"`
+}
+
+// auditStatsHourRow is a sparse hour-of-day bucket (0..23). Used so the
+// overview can show whether token usage clumps at certain hours.
+type auditStatsHourRow struct {
+	Hour         int   `json:"hour"`
+	Requests     int   `json:"requests"`
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+}
+
+// auditStatsTopRequest points back at one specific pair so the UI can
+// open its detail card.
+type auditStatsTopRequest struct {
+	ID          uint64 `json:"id"`
+	Run         string `json:"run"`
+	TS          string `json:"ts"`
+	Model       string `json:"model"`
+	Session     string `json:"session"`
+	Path        string `json:"path"`
+	InputTokens int64  `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+	TotalTokens int64  `json:"total_tokens"`
 }
 
 type auditStatsTotals struct {
@@ -124,7 +153,11 @@ func computeAuditStats(dir string, f statsFilter) (auditStatsResponse, error) {
 
 	models := map[string]*auditStatsRow{}
 	sessions := map[string]*auditStatsRow{}
+	paths := map[string]*auditStatsRow{}
+	preambles := map[string]*auditStatsRow{}
+	hours := map[int]*auditStatsHourRow{}
 	series := map[time.Time]*auditStatsBucket{}
+	var topCandidates []auditStatsTopRequest
 
 	for _, pa := range pairs {
 		if !pa.haveReq {
@@ -164,6 +197,53 @@ func computeAuditStats(dir string, f statsFilter) (auditStatsResponse, error) {
 			}
 		}
 
+		if pa.req.path != "" {
+			applyPair(upsertRow(paths, pa.req.path), pa)
+		}
+
+		if !pa.req.ts.IsZero() {
+			h := pa.req.ts.UTC().Hour()
+			hr, ok := hours[h]
+			if !ok {
+				hr = &auditStatsHourRow{Hour: h}
+				hours[h] = hr
+			}
+			hr.Requests++
+			if pa.haveResp {
+				hr.InputTokens += int64(pa.resp.inputTokens)
+				hr.OutputTokens += int64(pa.resp.outputTokens)
+			}
+		}
+
+		// Preamble signature = tag name + first 40 chars of the body,
+		// collapsed whitespace. Same-content injected blocks collapse
+		// into one bucket so the UI reveals the biggest wasteful
+		// recurring block (e.g. "Skills available" dumped every turn).
+		for _, blk := range extractPreamblePayloads(pa.req.body) {
+			key := preambleSignature(blk.name, blk.body)
+			prow := upsertRow(preambles, key)
+			prow.Requests++
+			prow.InputTokens += int64(len(blk.body))
+		}
+
+		if pa.haveResp {
+			total := int64(pa.resp.inputTokens) + int64(pa.resp.outputTokens) +
+				int64(pa.resp.cacheReadTokens) + int64(pa.resp.cacheCreateTokens)
+			if total > 0 {
+				topCandidates = append(topCandidates, auditStatsTopRequest{
+					ID:           pa.req.id,
+					Run:          pa.req.run,
+					TS:           pa.req.ts.UTC().Format(time.RFC3339),
+					Model:        pa.req.model,
+					Session:      pa.req.sessionID,
+					Path:         pa.req.path,
+					InputTokens:  int64(pa.resp.inputTokens) + int64(pa.resp.cacheReadTokens) + int64(pa.resp.cacheCreateTokens),
+					OutputTokens: int64(pa.resp.outputTokens),
+					TotalTokens:  total,
+				})
+			}
+		}
+
 		if f.bucket > 0 && !pa.req.ts.IsZero() {
 			b := pa.req.ts.Truncate(f.bucket)
 			bucket, ok := series[b]
@@ -188,6 +268,22 @@ func computeAuditStats(dir string, f statsFilter) (auditStatsResponse, error) {
 
 	resp.ByModel = sortedRows(models)
 	resp.BySession = sortedRows(sessions)
+	resp.ByPath = sortedRows(paths)
+	resp.PreambleBlocks = sortedRows(preambles)
+
+	resp.ByHour = make([]auditStatsHourRow, 0, 24)
+	for _, h := range hours {
+		resp.ByHour = append(resp.ByHour, *h)
+	}
+	sort.Slice(resp.ByHour, func(i, j int) bool { return resp.ByHour[i].Hour < resp.ByHour[j].Hour })
+
+	sort.Slice(topCandidates, func(i, j int) bool {
+		return topCandidates[i].TotalTokens > topCandidates[j].TotalTokens
+	})
+	if len(topCandidates) > 20 {
+		topCandidates = topCandidates[:20]
+	}
+	resp.TopRequests = topCandidates
 
 	resp.Series = make([]auditStatsBucket, 0, len(series))
 	for _, b := range series {
@@ -225,20 +321,24 @@ type auditStatsRowSource struct {
 	cacheCreateTokens int
 	reasoningTokens   int
 	elapsedMs         int64
+	path              string // only on req rows
+	body              []byte // only on req rows, for preamble block extraction
 }
 
 func parseStatsRow(line []byte) (auditStatsRowSource, bool) {
 	var minimal struct {
-		T         string `json:"t"`
-		ID        uint64 `json:"id"`
-		Run       string `json:"run"`
-		TS        string `json:"ts"`
-		Model     string `json:"model"`
-		SessionID string `json:"session_id"`
-		TurnIndex int    `json:"turn_index"`
-		Status    int    `json:"status"`
-		Outcome   string `json:"outcome"`
-		ElapsedMs int64  `json:"elapsed_ms"`
+		T         string          `json:"t"`
+		ID        uint64          `json:"id"`
+		Run       string          `json:"run"`
+		TS        string          `json:"ts"`
+		Path      string          `json:"path"`
+		Model     string          `json:"model"`
+		SessionID string          `json:"session_id"`
+		TurnIndex int             `json:"turn_index"`
+		Status    int             `json:"status"`
+		Outcome   string          `json:"outcome"`
+		ElapsedMs int64           `json:"elapsed_ms"`
+		Body      json.RawMessage `json:"body"`
 		Usage     *struct {
 			InputTokens              int `json:"input_tokens"`
 			OutputTokens             int `json:"output_tokens"`
@@ -269,6 +369,8 @@ func parseStatsRow(line []byte) (auditStatsRowSource, bool) {
 		status:    minimal.Status,
 		outcome:   minimal.Outcome,
 		elapsedMs: minimal.ElapsedMs,
+		path:      minimal.Path,
+		body:      minimal.Body,
 	}
 	if t, err := time.Parse(time.RFC3339Nano, minimal.TS); err == nil {
 		row.ts = t
@@ -367,6 +469,166 @@ func parseWindowParam(window string, now time.Time) (since, until time.Time) {
 		return now.Add(-d), until
 	}
 	return time.Time{}, time.Time{}
+}
+
+// preambleBlock is one injected pseudo-XML block (<system-reminder>...) from
+// the messages array in a request body. We count characters, not tokens, so
+// the signature stays cheap to compute.
+type preambleBlock struct {
+	name string
+	body string
+}
+
+// extractPreamblePayloads walks the user-role messages in a request body
+// and returns every pseudo-XML block found at the leading/trailing edges.
+// Same heuristic as the UI's splitUserText: the typed-by-user span is in
+// the middle; everything outside is preamble/postamble context worth
+// aggregating so the observability view can answer "which injected block
+// is wasting the most tokens?".
+//
+// Tolerates any number of input shapes (Anthropic string content, Anthropic
+// content-block array, OpenAI inline string). Non-user messages are skipped
+// because they are the assistant's or tools' output, not preamble.
+// customTagOpen finds opening tags like <system-reminder> or <command-name ...>.
+// RE2 has no backreferences, so we match the open tag, then search for the
+// matching close tag manually in scanPreambleTags.
+var customTagOpen = regexp.MustCompile(`(?i)<([a-z][a-z0-9-]{2,40})\b[^>]*>`)
+
+func extractPreamblePayloads(bodyJSON []byte) []preambleBlock {
+	if len(bodyJSON) == 0 {
+		return nil
+	}
+	var shell struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(bodyJSON, &shell); err != nil {
+		return nil
+	}
+	var out []preambleBlock
+	for _, m := range shell.Messages {
+		if m.Role != "user" {
+			continue
+		}
+		// content may be a JSON string or an array of blocks.
+		var asStr string
+		if err := json.Unmarshal(m.Content, &asStr); err == nil {
+			out = append(out, scanPreambleTags(asStr)...)
+			continue
+		}
+		var asArr []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(m.Content, &asArr); err == nil {
+			for _, b := range asArr {
+				if b.Type == "text" {
+					out = append(out, scanPreambleTags(b.Text)...)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// matchedTag records one opener + its paired closing tag position.
+type matchedTag struct {
+	name                       string
+	start, end                 int // full tag range in s
+	bodyStart, bodyEnd         int
+}
+
+// scanPreambleTags finds every <name>...</name> pair in s. RE2 has no
+// backreferences, so we locate open tags with one regex and hand-scan for
+// the matching close tag. Blocks are kept when they sit before the first
+// typed char or after the last — blocks in the middle of typed prose are
+// treated as intentional user quotes and ignored.
+func scanPreambleTags(s string) []preambleBlock {
+	opens := customTagOpen.FindAllStringSubmatchIndex(s, -1)
+	if len(opens) == 0 {
+		return nil
+	}
+	var tags []matchedTag
+	for _, om := range opens {
+		name := strings.ToLower(s[om[2]:om[3]])
+		close := "</" + name + ">"
+		// Case-insensitive close scan.
+		tail := s[om[1]:]
+		idx := strings.Index(strings.ToLower(tail), close)
+		if idx < 0 {
+			continue
+		}
+		tags = append(tags, matchedTag{
+			name:      name,
+			start:     om[0],
+			end:       om[1] + idx + len(close),
+			bodyStart: om[1],
+			bodyEnd:   om[1] + idx,
+		})
+	}
+	if len(tags) == 0 {
+		return nil
+	}
+	inBlock := func(i int) bool {
+		for _, t := range tags {
+			if i >= t.start && i < t.end {
+				return true
+			}
+		}
+		return false
+	}
+	firstTyped, lastTyped := -1, -1
+	for i, r := range s {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			continue
+		}
+		if inBlock(i) {
+			continue
+		}
+		if firstTyped == -1 {
+			firstTyped = i
+		}
+		lastTyped = i
+	}
+	out := make([]preambleBlock, 0, len(tags))
+	for _, t := range tags {
+		if firstTyped != -1 && t.start >= firstTyped && t.end <= lastTyped+1 {
+			continue
+		}
+		out = append(out, preambleBlock{name: t.name, body: s[t.bodyStart:t.bodyEnd]})
+	}
+	return out
+}
+
+// preambleSignature collapses long matching blocks into one aggregation
+// bucket: tag name + first 40 collapsed-whitespace chars. Two blocks with
+// the same leading text aggregate together, so the UI answers "the Skills
+// reminder is showing up in 90% of requests, totalling 4.2 MB" instead of
+// fracturing by punctuation noise.
+func preambleSignature(name, body string) string {
+	// Collapse runs of whitespace to a single space, trim.
+	var b strings.Builder
+	prevSpace := true
+	b.Grow(len(body))
+	for _, r := range body {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			if !prevSpace {
+				b.WriteByte(' ')
+				prevSpace = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		prevSpace = false
+	}
+	sig := strings.TrimSpace(b.String())
+	const maxSig = 60
+	if len(sig) > maxSig {
+		sig = sig[:maxSig] + "…"
+	}
+	return "<" + name + "> " + sig
 }
 
 // parseBucketParam maps "minute" | "hour" | "day" to a duration. Empty or

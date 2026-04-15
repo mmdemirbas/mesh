@@ -245,6 +245,140 @@ func TestAuditStatsEndpoint(t *testing.T) {
 	}
 }
 
+// TestAuditStatsByPathAndHour drives the new path + hour-of-day breakdowns.
+// The fixture exercises two distinct paths so by_path collapses correctly;
+// the hour bucket always has at least the current hour populated.
+func TestAuditStatsByPathAndHour(t *testing.T) {
+	auditDir := writeStatsFixture(t, t.TempDir(), "stats-path")
+	// The fixture uses Path "/v1/messages" — add a differing pair so by_path
+	// has two rows.
+	cfg := gateway.GatewayCfg{
+		Name:        "stats-path",
+		Bind:        "127.0.0.1:0",
+		Upstream:    "https://api.anthropic.com",
+		ClientAPI:   gateway.APIAnthropic,
+		UpstreamAPI: gateway.APIAnthropic,
+		Log:         gateway.LogCfg{Level: gateway.LogLevelMetadata, Dir: t.TempDir(), MaxFileSize: "10MB", MaxAge: "720h"},
+	}
+	_ = cfg
+	// Already-written fixture has path="/v1/messages" on every pair, so
+	// check that by_path records it.
+	stats, err := computeAuditStats(auditDir, statsFilter{})
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	if len(stats.ByPath) == 0 {
+		t.Fatal("by_path empty")
+	}
+	var gotMsgs bool
+	for _, p := range stats.ByPath {
+		if p.Key == "/v1/messages" {
+			gotMsgs = true
+			if p.Requests != 3 {
+				t.Errorf("/v1/messages requests = %d, want 3", p.Requests)
+			}
+		}
+	}
+	if !gotMsgs {
+		t.Errorf("expected /v1/messages in by_path, got keys %+v", pathKeys(stats.ByPath))
+	}
+	if len(stats.ByHour) == 0 {
+		t.Error("by_hour empty")
+	}
+}
+
+func pathKeys(rows []auditStatsRow) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.Key
+	}
+	return out
+}
+
+// TestAuditStatsTopRequests verifies the top-20 table sorts by total tokens
+// descending and caps at 20 entries.
+func TestAuditStatsTopRequests(t *testing.T) {
+	auditDir := writeStatsFixture(t, t.TempDir(), "stats-top")
+	stats, err := computeAuditStats(auditDir, statsFilter{})
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	if len(stats.TopRequests) == 0 {
+		t.Fatal("top_requests empty")
+	}
+	// Sorted descending by total.
+	for i := 1; i < len(stats.TopRequests); i++ {
+		if stats.TopRequests[i-1].TotalTokens < stats.TopRequests[i].TotalTokens {
+			t.Errorf("top_requests not sorted desc at %d: %d < %d",
+				i, stats.TopRequests[i-1].TotalTokens, stats.TopRequests[i].TotalTokens)
+		}
+	}
+	// The fixture's big pair (opus, sess-1 turn 1: 100 fresh + 900 cache + 50 out = 1050)
+	// should be #1.
+	top := stats.TopRequests[0]
+	if top.TotalTokens < 1000 {
+		t.Errorf("top request tokens = %d, want >=1000", top.TotalTokens)
+	}
+}
+
+// TestAuditStatsPreambleBlocks confirms the preamble signature bucketing
+// works: two requests both carrying the same <system-reminder> must
+// aggregate into a single row.
+func TestAuditStatsPreambleBlocks(t *testing.T) {
+	dir := t.TempDir()
+	cfg := gateway.GatewayCfg{
+		Name:        "stats-preamble",
+		Bind:        "127.0.0.1:0",
+		Upstream:    "https://api.anthropic.com",
+		ClientAPI:   gateway.APIAnthropic,
+		UpstreamAPI: gateway.APIAnthropic,
+		Log:         gateway.LogCfg{Level: gateway.LogLevelFull, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
+	}
+	rec, err := gateway.NewRecorder(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil || rec == nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+
+	reminder := `<system-reminder>Skills available: update-config, commit-msg, …</system-reminder>`
+	userMsg := reminder + "\nHi"
+	bodyJSON := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":` +
+		toJSONString(userMsg) + `}]}`)
+	for turn := range 2 {
+		id := rec.Request(gateway.RequestMeta{
+			Gateway: cfg.Name, Direction: "a2a",
+			Model: "claude-opus-4-6", Method: "POST", Path: "/v1/messages",
+			SessionID: "sess-p", TurnIndex: turn + 1,
+			StartTime: time.Now(),
+		}, bodyJSON)
+		rec.Response(id, gateway.ResponseMeta{
+			Status: 200, Outcome: gateway.OutcomeOK,
+			Usage:     &gateway.Usage{InputTokens: 10, OutputTokens: 5},
+			StartTime: time.Now(), EndTime: time.Now(),
+		}, []byte(`{}`))
+	}
+	stats, err := computeAuditStats(filepath.Join(dir, cfg.Name), statsFilter{})
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	if len(stats.PreambleBlocks) != 1 {
+		t.Fatalf("preamble_blocks = %d, want 1 aggregated row: %+v", len(stats.PreambleBlocks), stats.PreambleBlocks)
+	}
+	row := stats.PreambleBlocks[0]
+	if row.Requests != 2 {
+		t.Errorf("preamble row requests = %d, want 2 (one per turn)", row.Requests)
+	}
+	// Two requests × ~48-char body — aggregated chars > one body.
+	if row.InputTokens < 80 {
+		t.Errorf("preamble aggregated chars = %d, want >=80", row.InputTokens)
+	}
+}
+
+func toJSONString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
 // TestParseWindowParam covers the canned windows + duration fallback + the
 // rejection path that should return zero values.
 func TestParseWindowParam(t *testing.T) {

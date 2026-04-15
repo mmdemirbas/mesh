@@ -602,6 +602,19 @@ func TestAdminUIGatewayDetailMarkup(t *testing.T) {
 		`function info`,
 		`function emptyNote`,
 		`tokenHelp`,
+		// Step 18–23 redesign
+		`function splitUserText`,
+		`function renderContextDrawer`,
+		`function renderSystemPrompt`,
+		`function renderHourChart`,
+		`function jumpToPair`,
+		`gw-by-path`,
+		`gw-by-hour`,
+		`gw-top-requests`,
+		`gw-preamble-blocks`,
+		`pre-ctx`,
+		`post-ctx`,
+		`ctx-blocks`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("UI missing %q (regression: detail layout collapsed back to single pane)", want)
