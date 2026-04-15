@@ -123,6 +123,9 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, c
 	if usage != nil {
 		metrics.TokensIn.Add(int64(usage.InputTokens))
 		metrics.TokensOut.Add(int64(usage.OutputTokens))
+		metrics.TokensCacheRd.Add(int64(usage.CacheReadInputTokens))
+		metrics.TokensCacheWr.Add(int64(usage.CacheCreationInputTokens))
+		metrics.TokensReason.Add(int64(usage.ReasoningTokens))
 	}
 
 	recorder.Response(reqID, ResponseMeta{
@@ -213,6 +216,9 @@ func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *ht
 	if usage != nil {
 		metrics.TokensIn.Add(int64(usage.InputTokens))
 		metrics.TokensOut.Add(int64(usage.OutputTokens))
+		metrics.TokensCacheRd.Add(int64(usage.CacheReadInputTokens))
+		metrics.TokensCacheWr.Add(int64(usage.CacheCreationInputTokens))
+		metrics.TokensReason.Add(int64(usage.ReasoningTokens))
 	}
 	recorder.Response(reqID, ResponseMeta{
 		Status:    uresp.StatusCode,
@@ -354,31 +360,51 @@ func parseUsage(body []byte, upstreamAPI string) *Usage {
 	case APIAnthropic:
 		var r struct {
 			Usage struct {
-				InputTokens  int `json:"input_tokens"`
-				OutputTokens int `json:"output_tokens"`
+				InputTokens              int `json:"input_tokens"`
+				OutputTokens             int `json:"output_tokens"`
+				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal(body, &r); err != nil {
 			return nil
 		}
-		if r.Usage.InputTokens == 0 && r.Usage.OutputTokens == 0 {
+		u := &Usage{
+			InputTokens:              r.Usage.InputTokens,
+			OutputTokens:             r.Usage.OutputTokens,
+			CacheCreationInputTokens: r.Usage.CacheCreationInputTokens,
+			CacheReadInputTokens:     r.Usage.CacheReadInputTokens,
+		}
+		if u.isZero() {
 			return nil
 		}
-		return &Usage{InputTokens: r.Usage.InputTokens, OutputTokens: r.Usage.OutputTokens}
+		return u
 	case APIOpenAI:
 		var r struct {
 			Usage struct {
-				PromptTokens     int `json:"prompt_tokens"`
-				CompletionTokens int `json:"completion_tokens"`
+				PromptTokens            int `json:"prompt_tokens"`
+				CompletionTokens        int `json:"completion_tokens"`
+				CompletionTokensDetails struct {
+					ReasoningTokens int `json:"reasoning_tokens"`
+				} `json:"completion_tokens_details"`
+				PromptTokensDetails struct {
+					CachedTokens int `json:"cached_tokens"`
+				} `json:"prompt_tokens_details"`
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal(body, &r); err != nil {
 			return nil
 		}
-		if r.Usage.PromptTokens == 0 && r.Usage.CompletionTokens == 0 {
+		u := &Usage{
+			InputTokens:          r.Usage.PromptTokens,
+			OutputTokens:         r.Usage.CompletionTokens,
+			CacheReadInputTokens: r.Usage.PromptTokensDetails.CachedTokens,
+			ReasoningTokens:      r.Usage.CompletionTokensDetails.ReasoningTokens,
+		}
+		if u.isZero() {
 			return nil
 		}
-		return &Usage{InputTokens: r.Usage.PromptTokens, OutputTokens: r.Usage.CompletionTokens}
+		return u
 	}
 	return nil
 }

@@ -530,3 +530,36 @@ func TestParseUsage(t *testing.T) {
 		t.Errorf("invalid json should return nil, got %+v", u)
 	}
 }
+
+// TestParseUsageCacheTokens verifies that prompt-cache and reasoning fields
+// surface in the parsed Usage. Without these the per-pair token bar in the UI
+// cannot show how much of the input came from cache versus fresh prompt.
+func TestParseUsageCacheTokens(t *testing.T) {
+	t.Parallel()
+	anthropic := []byte(`{"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":2000,"cache_read_input_tokens":7000}}`)
+	u := parseUsage(anthropic, APIAnthropic)
+	if u == nil {
+		t.Fatal("anthropic usage parsed as nil")
+	}
+	if u.InputTokens != 100 || u.OutputTokens != 50 ||
+		u.CacheCreationInputTokens != 2000 || u.CacheReadInputTokens != 7000 {
+		t.Errorf("anthropic cache tokens not captured: %+v", u)
+	}
+
+	openai := []byte(`{"usage":{"prompt_tokens":120,"completion_tokens":80,"prompt_tokens_details":{"cached_tokens":40},"completion_tokens_details":{"reasoning_tokens":25}}}`)
+	o := parseUsage(openai, APIOpenAI)
+	if o == nil {
+		t.Fatal("openai usage parsed as nil")
+	}
+	if o.InputTokens != 120 || o.OutputTokens != 80 ||
+		o.CacheReadInputTokens != 40 || o.ReasoningTokens != 25 {
+		t.Errorf("openai detail tokens not captured: %+v", o)
+	}
+
+	// Cache-only response (zero in/out) must still surface as non-nil so the
+	// audit row records the cache effectiveness.
+	cacheOnly := []byte(`{"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":500}}`)
+	if c := parseUsage(cacheOnly, APIAnthropic); c == nil || c.CacheReadInputTokens != 500 {
+		t.Errorf("cache-only anthropic usage = %+v", c)
+	}
+}

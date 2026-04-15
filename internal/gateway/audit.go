@@ -68,12 +68,27 @@ type ResponseMeta struct {
 	Headers   map[string][]string
 }
 
-// Usage is the token accounting captured per response. Either side may be zero
-// when the upstream does not report that field (common for streamed OpenAI
-// responses without stream_options.include_usage).
+// Usage is the token accounting captured per response. Any field may be zero
+// when the upstream does not report it (common for streamed OpenAI responses
+// without stream_options.include_usage). Cache fields are Anthropic-specific
+// and surface prompt-cache effectiveness; ReasoningTokens is OpenAI-specific
+// (o-series). Kept in one struct so the audit row stays flat.
 type Usage struct {
-	InputTokens  int `json:"input_tokens,omitempty"`
-	OutputTokens int `json:"output_tokens,omitempty"`
+	InputTokens              int `json:"input_tokens,omitempty"`
+	OutputTokens             int `json:"output_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
+}
+
+// isZero reports whether the usage struct carries any non-zero token count.
+func (u *Usage) isZero() bool {
+	if u == nil {
+		return true
+	}
+	return u.InputTokens == 0 && u.OutputTokens == 0 &&
+		u.CacheCreationInputTokens == 0 && u.CacheReadInputTokens == 0 &&
+		u.ReasoningTokens == 0
 }
 
 // Recorder writes request/response audit rows to JSONL files. A nil receiver
@@ -500,6 +515,9 @@ func wrapAuditing(cfg GatewayCfg, recorder *Recorder, clientAPI string, inner ht
 			metrics := state.Global.GetMetrics("gateway", cfg.Name)
 			metrics.TokensIn.Add(int64(usage.InputTokens))
 			metrics.TokensOut.Add(int64(usage.OutputTokens))
+			metrics.TokensCacheRd.Add(int64(usage.CacheReadInputTokens))
+			metrics.TokensCacheWr.Add(int64(usage.CacheCreationInputTokens))
+			metrics.TokensReason.Add(int64(usage.ReasoningTokens))
 		}
 
 		recorder.Response(reqID, ResponseMeta{

@@ -216,6 +216,63 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
 	}
 }
 
+// TestReassembleSSE_AnthropicCacheTokens verifies that prompt-cache fields
+// surface from message_start and that message_delta updates carry them through
+// when the upstream re-emits the cache counters mid-stream.
+func TestReassembleSSE_AnthropicCacheTokens(t *testing.T) {
+	t.Parallel()
+	stream := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_x","model":"claude-opus-4-6","usage":{"input_tokens":50,"output_tokens":1,"cache_creation_input_tokens":2000,"cache_read_input_tokens":7000}}}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42,"cache_read_input_tokens":7100}}`,
+		``,
+	}, "\n")
+	got := reassembleSSE([]byte(stream), APIAnthropic)
+	if got == nil || got.Usage == nil {
+		t.Fatal("nil summary or usage")
+	}
+	if got.Usage.InputTokens != 50 || got.Usage.OutputTokens != 42 {
+		t.Errorf("input/output = %d/%d", got.Usage.InputTokens, got.Usage.OutputTokens)
+	}
+	if got.Usage.CacheCreationInputTokens != 2000 {
+		t.Errorf("cache_creation = %d, want 2000", got.Usage.CacheCreationInputTokens)
+	}
+	// message_delta should overwrite when non-zero (cache window grew mid-stream).
+	if got.Usage.CacheReadInputTokens != 7100 {
+		t.Errorf("cache_read = %d, want 7100", got.Usage.CacheReadInputTokens)
+	}
+}
+
+// TestReassembleSSE_OpenAIDetailTokens verifies that prompt_tokens_details and
+// completion_tokens_details surface when the upstream emits include_usage with
+// reasoning details (o-series) and cached prompt fragments.
+func TestReassembleSSE_OpenAIDetailTokens(t *testing.T) {
+	t.Parallel()
+	stream := strings.Join([]string{
+		`data: {"id":"chatcmpl-1","model":"o1-mini","choices":[{"delta":{"content":"hi"},"finish_reason":null}]}`,
+		``,
+		`data: {"id":"chatcmpl-1","model":"o1-mini","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":80,"prompt_tokens_details":{"cached_tokens":40},"completion_tokens_details":{"reasoning_tokens":25}}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	got := reassembleSSE([]byte(stream), APIOpenAI)
+	if got == nil || got.Usage == nil {
+		t.Fatal("nil summary or usage")
+	}
+	if got.Usage.InputTokens != 120 || got.Usage.OutputTokens != 80 {
+		t.Errorf("in/out = %d/%d", got.Usage.InputTokens, got.Usage.OutputTokens)
+	}
+	if got.Usage.CacheReadInputTokens != 40 {
+		t.Errorf("cached = %d, want 40", got.Usage.CacheReadInputTokens)
+	}
+	if got.Usage.ReasoningTokens != 25 {
+		t.Errorf("reasoning = %d, want 25", got.Usage.ReasoningTokens)
+	}
+}
+
 func TestReassembleSSE_EmptyBody(t *testing.T) {
 	t.Parallel()
 	if got := reassembleSSE(nil, APIAnthropic); got != nil {

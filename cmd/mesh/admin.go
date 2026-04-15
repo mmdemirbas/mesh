@@ -208,11 +208,11 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 		b.WriteString("# TYPE mesh_component_up gauge\n")
 
 		type compMetric struct {
-			compType, id        string
-			tx, rx              int64
-			streams             int32
-			tokensIn, tokensOut int64
-			uptime              float64
+			compType, id                                              string
+			tx, rx                                                    int64
+			streams                                                   int32
+			tokensIn, tokensOut, tokensCacheRd, tokensCacheWr, tokensReason int64
+			uptime                                                    float64
 		}
 		var cms []compMetric
 
@@ -228,7 +228,9 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 			if m, ok := metrics[key]; ok {
 				cm := compMetric{compType: comp.Type, id: comp.ID,
 					tx: m.BytesTx.Load(), rx: m.BytesRx.Load(), streams: m.Streams.Load(),
-					tokensIn: m.TokensIn.Load(), tokensOut: m.TokensOut.Load()}
+					tokensIn: m.TokensIn.Load(), tokensOut: m.TokensOut.Load(),
+					tokensCacheRd: m.TokensCacheRd.Load(), tokensCacheWr: m.TokensCacheWr.Load(),
+					tokensReason: m.TokensReason.Load()}
 				if st := m.StartTime.Load(); st != 0 {
 					cm.uptime = float64(nowNano-st) / 1e9
 				}
@@ -276,6 +278,27 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 		for _, cm := range cms {
 			if cm.compType == "gateway" {
 				fmt.Fprintf(&b, "mesh_gateway_tokens_out_total{id=%q} %d\n", cm.id, cm.tokensOut)
+			}
+		}
+		b.WriteString("# HELP mesh_gateway_tokens_cache_read_total Cumulative input tokens served from prompt cache.\n")
+		b.WriteString("# TYPE mesh_gateway_tokens_cache_read_total counter\n")
+		for _, cm := range cms {
+			if cm.compType == "gateway" {
+				fmt.Fprintf(&b, "mesh_gateway_tokens_cache_read_total{id=%q} %d\n", cm.id, cm.tokensCacheRd)
+			}
+		}
+		b.WriteString("# HELP mesh_gateway_tokens_cache_creation_total Cumulative input tokens written to prompt cache (Anthropic).\n")
+		b.WriteString("# TYPE mesh_gateway_tokens_cache_creation_total counter\n")
+		for _, cm := range cms {
+			if cm.compType == "gateway" {
+				fmt.Fprintf(&b, "mesh_gateway_tokens_cache_creation_total{id=%q} %d\n", cm.id, cm.tokensCacheWr)
+			}
+		}
+		b.WriteString("# HELP mesh_gateway_tokens_reasoning_total Cumulative reasoning tokens (OpenAI o-series).\n")
+		b.WriteString("# TYPE mesh_gateway_tokens_reasoning_total counter\n")
+		for _, cm := range cms {
+			if cm.compType == "gateway" {
+				fmt.Fprintf(&b, "mesh_gateway_tokens_reasoning_total{id=%q} %d\n", cm.id, cm.tokensReason)
 			}
 		}
 

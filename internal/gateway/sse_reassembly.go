@@ -122,8 +122,10 @@ type anthropicDelta struct {
 	StopReason  string `json:"stop_reason,omitempty"`
 }
 type anthropicUsage struct {
-	InputTokens  int `json:"input_tokens,omitempty"`
-	OutputTokens int `json:"output_tokens,omitempty"`
+	InputTokens              int `json:"input_tokens,omitempty"`
+	OutputTokens             int `json:"output_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 }
 type anthropicErrObj struct {
 	Type    string `json:"type,omitempty"`
@@ -154,7 +156,12 @@ func reassembleAnthropicSSE(body []byte) *SSESummary {
 				s.MessageID = ev.Message.ID
 				s.Model = ev.Message.Model
 				if ev.Message.Usage != nil {
-					s.Usage = &Usage{InputTokens: ev.Message.Usage.InputTokens, OutputTokens: ev.Message.Usage.OutputTokens}
+					s.Usage = &Usage{
+						InputTokens:              ev.Message.Usage.InputTokens,
+						OutputTokens:             ev.Message.Usage.OutputTokens,
+						CacheCreationInputTokens: ev.Message.Usage.CacheCreationInputTokens,
+						CacheReadInputTokens:     ev.Message.Usage.CacheReadInputTokens,
+					}
 				}
 			}
 		case "content_block_start":
@@ -191,6 +198,12 @@ func reassembleAnthropicSSE(body []byte) *SSESummary {
 				}
 				if ev.Usage.InputTokens != 0 {
 					s.Usage.InputTokens = ev.Usage.InputTokens
+				}
+				if ev.Usage.CacheCreationInputTokens != 0 {
+					s.Usage.CacheCreationInputTokens = ev.Usage.CacheCreationInputTokens
+				}
+				if ev.Usage.CacheReadInputTokens != 0 {
+					s.Usage.CacheReadInputTokens = ev.Usage.CacheReadInputTokens
 				}
 			}
 		case "error":
@@ -245,8 +258,14 @@ type openaiChunk struct {
 		FinishReason *string `json:"finish_reason,omitempty"`
 	} `json:"choices,omitempty"`
 	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens,omitempty"`
-		CompletionTokens int `json:"completion_tokens,omitempty"`
+		PromptTokens            int `json:"prompt_tokens,omitempty"`
+		CompletionTokens        int `json:"completion_tokens,omitempty"`
+		PromptTokensDetails     *struct {
+			CachedTokens int `json:"cached_tokens,omitempty"`
+		} `json:"prompt_tokens_details,omitempty"`
+		CompletionTokensDetails *struct {
+			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+		} `json:"completion_tokens_details,omitempty"`
 	} `json:"usage,omitempty"`
 }
 
@@ -274,7 +293,14 @@ func reassembleOpenAISSE(body []byte) *SSESummary {
 			s.Model = ch.Model
 		}
 		if ch.Usage != nil {
-			s.Usage = &Usage{InputTokens: ch.Usage.PromptTokens, OutputTokens: ch.Usage.CompletionTokens}
+			u := &Usage{InputTokens: ch.Usage.PromptTokens, OutputTokens: ch.Usage.CompletionTokens}
+			if ch.Usage.PromptTokensDetails != nil {
+				u.CacheReadInputTokens = ch.Usage.PromptTokensDetails.CachedTokens
+			}
+			if ch.Usage.CompletionTokensDetails != nil {
+				u.ReasoningTokens = ch.Usage.CompletionTokensDetails.ReasoningTokens
+			}
+			s.Usage = u
 		}
 		for _, ci := range ch.Choices {
 			if ci.Delta.Content != "" {
