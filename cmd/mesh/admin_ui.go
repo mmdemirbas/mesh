@@ -970,6 +970,10 @@ let prevTotalTx = 0, prevTotalRx = 0, firstTick = true;
 // --- Tabs ---
 const tabMap = {'/ui':'dashboard','/ui/clipsync':'clipsync','/ui/filesync':'filesync','/ui/gateway':'gateway','/ui/logs':'logs','/ui/metrics':'metrics','/ui/api':'api','/ui/debug':'debug'};
 let activeTab = tabMap[location.pathname] || 'dashboard';
+// Gateway hash routing state; declared up here so applyGwHash() (called from
+// showTab on initial load) does not hit the TDZ.
+let gwHashLast = '';
+let gwHashApplyingDeep = '';
 
 function showTab(name, opts) {
   opts = opts || {};
@@ -2697,7 +2701,6 @@ function setGwSub(sub) {
 // selection, so refresh/back/forward restore the same view. Uses replaceState
 // when the sub alone changed and pushState when a deep selection changed, so
 // back navigation lands on the sub-view without the selection.
-let gwHashLast = '';
 function writeGwHash() {
   if (activeTab !== 'gateway') return;
   let h = '#' + (gwSubview || 'overview');
@@ -2722,7 +2725,6 @@ function parseGwHash() {
   return {sub: h.slice(0, slash), deep: decodeURIComponent(h.slice(slash+1))};
 }
 
-let gwHashApplyingDeep = '';
 function applyGwHash() {
   if (activeTab !== 'gateway') return;
   const {sub, deep} = parseGwHash();
