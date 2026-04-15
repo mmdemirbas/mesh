@@ -244,6 +244,39 @@ mynode:
       api_key_env: ANTHROPIC_API_KEY
 ```
 
+Point your LLM client at the gateway's `bind` address. Examples:
+
+**Claude Code → non-Anthropic backend** (translation, with the `claude-via-oneapi` block above):
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:3457
+export ANTHROPIC_API_KEY=unused   # gateway ignores it; upstream key comes from ONEAPI_KEY
+claude
+```
+
+**Claude Code → Anthropic with audit log** (passthrough). Omit `api_key_env` so Claude Code's OAuth headers pass through verbatim:
+
+```yaml
+- name: claude-passthrough-audit
+  client_api: anthropic
+  upstream_api: anthropic
+  bind: "127.0.0.1:3459"
+  upstream: "https://api.anthropic.com/v1/messages"
+  log:
+    level: full          # off | metadata | full
+```
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:3459
+claude                   # existing OAuth login is reused
+```
+
+Logs land in `~/.mesh/gateway/<name>/<date>.jsonl` (`Authorization`, `x-api-key`, and `Cookie` are redacted). View them in the admin UI Gateway tab or via `GET /api/gateway/audit`.
+
+**OpenAI-format clients (Cursor, Aider) → Anthropic** — use the `cursor-to-claude` block above and set whatever base-URL / API-key env vars the client exposes to `http://127.0.0.1:3458` and any non-empty string.
+
+`bind` must be a loopback address; non-loopback binds are rejected at config load.
+
 See [`configs/example.yaml`](configs/example.yaml) for a comprehensive reference with all options documented.
 
 ## SSH Options
