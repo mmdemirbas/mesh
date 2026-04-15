@@ -58,7 +58,17 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 		Timeout:   cfg.TimeoutDuration(),
 	}
 
+	recorder, err := NewRecorder(cfg, log)
+	if err != nil {
+		return fmt.Errorf("audit log init: %w", err)
+	}
+	defer func() { _ = recorder.Close() }()
+
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
 
 	dir := cfg.Direction()
 	switch dir {
@@ -71,14 +81,10 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 			handleO2A(w, r, cfg, client, apiKey, log)
 		})
 	case DirA2A, DirO2O:
-		state.Global.Update("gateway", cfg.Name, state.Failed, "passthrough not yet implemented")
-		return fmt.Errorf("passthrough direction %s not yet implemented", dir)
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			handlePassthrough(w, r, cfg, client, apiKey, recorder, log)
+		})
 	}
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
 
 	ln, err := net.Listen("tcp", cfg.Bind)
 	if err != nil {
