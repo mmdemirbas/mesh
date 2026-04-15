@@ -540,6 +540,38 @@ func TestAdminUIEndpoint(t *testing.T) {
 	}
 }
 
+// TestAdminUIGatewayDetailMarkup pins the request/response split layout and
+// the JSON syntax-highlighter style hooks so a future cleanup pass does not
+// silently revert the detail card to a single <pre> block.
+func TestAdminUIGatewayDetailMarkup(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(buildAdminMux(newLogRing(4), ""))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/ui/gateway")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+	for _, want := range []string{
+		`id="gw-req-raw"`,
+		`id="gw-resp-raw"`,
+		`id="gw-req-structured"`,
+		`id="gw-resp-structured"`,
+		`gw-detail-grid`,
+		`function highlightJSON`,
+		`json-key`,
+		`json-str`,
+		`copyDetail`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("UI missing %q (regression: detail layout collapsed back to single pane)", want)
+		}
+	}
+}
+
 func TestAdminRootRedirect(t *testing.T) {
 	t.Parallel()
 	ring := newLogRing(4)

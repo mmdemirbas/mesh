@@ -135,6 +135,46 @@ tbody tr:last-child td { border-bottom: none; }
 .filter-btn:hover { border-color: var(--text-dim); color: var(--text); }
 .filter-btn.active { border-color: var(--green); color: var(--green); }
 
+/* Gateway detail (request | response) */
+.gw-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 1100px) { .gw-detail-grid { grid-template-columns: 1fr; } }
+.gw-detail-pane {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 6px; display: flex; flex-direction: column; min-width: 0;
+}
+.gw-detail-pane h4 {
+  font-size: 12px; font-weight: 600; color: var(--text-dim);
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  text-transform: uppercase; letter-spacing: 0.5px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.gw-detail-pane .copy-btn {
+  background: transparent; border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text-muted); font-size: 11px;
+  padding: 2px 8px; cursor: pointer; font-family: var(--mono);
+}
+.gw-detail-pane .copy-btn:hover { color: var(--green); border-color: var(--green); }
+.gw-detail-structured { padding: 8px 12px; font-size: 13px; color: var(--text); border-bottom: 1px solid var(--border); max-height: 40vh; overflow: auto; }
+.gw-detail-structured:empty { display: none; }
+.gw-detail-raw {
+  font-family: var(--mono); font-size: 12px; line-height: 1.5;
+  padding: 8px 12px; max-height: 50vh; overflow: auto; white-space: pre;
+}
+/* JSON syntax tokens */
+.json-key   { color: var(--cyan); }
+.json-str   { color: var(--green); }
+.json-num   { color: var(--yellow); }
+.json-bool  { color: var(--purple); }
+.json-null  { color: var(--text-muted); }
+.json-punct { color: var(--text-dim); }
+.json-toggle {
+  cursor: pointer; user-select: none; color: var(--text-muted);
+  display: inline-block; width: 12px; text-align: center;
+}
+.json-toggle:hover { color: var(--green); }
+.json-collapsed { display: none; }
+.json-summary { color: var(--text-muted); font-style: italic; }
+
 /* Logs */
 .log-container {
   font-family: var(--mono); font-size: 12px; line-height: 1.8;
@@ -365,8 +405,19 @@ tbody tr:last-child td { border-bottom: none; }
         <span id="gw-detail-title">Detail</span>
         <div class="filter-btn" onclick="document.getElementById('gw-detail-card').style.display='none'">close</div>
       </div>
-      <div class="card-body">
-        <pre id="gw-detail-body" style="white-space:pre-wrap;word-break:break-word;font-family:var(--mono);font-size:12px;max-height:60vh;overflow:auto"></pre>
+      <div class="card-body padded">
+        <div class="gw-detail-grid">
+          <div class="gw-detail-pane">
+            <h4>Request <button class="copy-btn" onclick="copyDetail('req')">copy</button></h4>
+            <div class="gw-detail-structured" id="gw-req-structured"></div>
+            <div class="gw-detail-raw" id="gw-req-raw"></div>
+          </div>
+          <div class="gw-detail-pane">
+            <h4>Response <button class="copy-btn" onclick="copyDetail('resp')">copy</button></h4>
+            <div class="gw-detail-structured" id="gw-resp-structured"></div>
+            <div class="gw-detail-raw" id="gw-resp-raw"></div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -1163,14 +1214,100 @@ function renderGwSummaryCell(resp) {
   return '<span style="color:var(--text-muted)">-</span>';
 }
 
+// gwDetailCache holds the currently shown pair so the copy buttons and any
+// future tab switching can reach it without re-fetching.
+let gwDetailCache = {req: null, resp: null};
+
 function showGwDetail(idx) {
   const p = gwRowsCache[idx];
   if (!p) return;
+  gwDetailCache = {req: p.req, resp: p.resp};
   document.getElementById('gw-detail-card').style.display = 'block';
-  document.getElementById('gw-detail-title').textContent = 'Request '+(p.req.id||'?')+' (run '+(p.req.run||p.resp.run||'?')+')';
-  document.getElementById('gw-detail-body').textContent =
-    '--- request ---\n' + JSON.stringify(p.req, null, 2) +
-    '\n\n--- response ---\n' + JSON.stringify(p.resp, null, 2);
+  const sid = p.req.session_id ? ' · session '+p.req.session_id : '';
+  const turn = p.req.turn_index ? ' · turn '+p.req.turn_index : '';
+  document.getElementById('gw-detail-title').textContent =
+    'Request '+(p.req.id||'?')+' (run '+(p.req.run||p.resp.run||'?')+')' + sid + turn;
+  document.getElementById('gw-req-raw').innerHTML = highlightJSON(p.req);
+  document.getElementById('gw-resp-raw').innerHTML = highlightJSON(p.resp);
+  // Structured views are populated by later tasks; clear placeholders for now.
+  document.getElementById('gw-req-structured').innerHTML = '';
+  document.getElementById('gw-resp-structured').innerHTML = '';
+}
+
+function copyDetail(which) {
+  const v = gwDetailCache[which];
+  if (!v) return;
+  navigator.clipboard.writeText(JSON.stringify(v, null, 2)).catch(()=>{});
+}
+
+// highlightJSON returns syntax-highlighted HTML for any JSON-compatible value.
+// Walks the structure once, emitting span-classed tokens. Strings are escaped
+// against XSS at the leaf. Objects/arrays past collapseAt entries fold by
+// default with a clickable toggle; click expands them in place.
+//
+// Implementation note: we do this from the parsed value (not from a JSON
+// string + regex tokenize) because the audit rows arrive as JS objects via
+// fetch().json(); reserializing then regex-tokenizing would lose object key
+// order on most engines and double the work.
+const collapseAt = 30;
+function highlightJSON(value) {
+  return _hjVal(value, 0);
+}
+function _hjEsc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function _hjIndent(n) { return '  '.repeat(n); }
+function _hjVal(v, depth) {
+  if (v === null) return '<span class="json-null">null</span>';
+  if (typeof v === 'boolean') return '<span class="json-bool">'+v+'</span>';
+  if (typeof v === 'number') return '<span class="json-num">'+v+'</span>';
+  if (typeof v === 'string') return '<span class="json-str">"'+_hjEsc(v)+'"</span>';
+  if (Array.isArray(v)) return _hjArr(v, depth);
+  if (typeof v === 'object') return _hjObj(v, depth);
+  return _hjEsc(String(v));
+}
+function _hjFold(open, close, items, depth, summaryText) {
+  if (items.length === 0) return '<span class="json-punct">'+open+close+'</span>';
+  const id = 'hj-'+(_hjId++);
+  const collapsed = items.length > collapseAt;
+  // Always emit a summary span; CSS toggles its visibility together with the
+  // inner block so a single class flip on the inner span reverses the view.
+  return '<span class="json-punct">'+open+'</span>' +
+    '<span class="json-toggle" data-target="'+id+'" onclick="_hjTog(this)">'+(collapsed?'+':'-')+'</span>' +
+    '<span class="json-summary"'+(collapsed?'':' style="display:none"')+'>'+summaryText+'</span>' +
+    '<span id="'+id+'" class="'+(collapsed?'json-collapsed':'')+'">' +
+    '\n' + items.join('\n') + '\n' + _hjIndent(depth) +
+    '</span><span class="json-punct">'+close+'</span>';
+}
+function _hjArr(arr, depth) {
+  const items = arr.map((v, i) =>
+    _hjIndent(depth+1) + _hjVal(v, depth+1) +
+    (i < arr.length-1 ? '<span class="json-punct">,</span>' : '')
+  );
+  return _hjFold('[', ']', items, depth, '['+arr.length+' items]');
+}
+function _hjObj(obj, depth) {
+  const keys = Object.keys(obj);
+  const items = keys.map((k, i) =>
+    _hjIndent(depth+1) +
+    '<span class="json-key">"'+_hjEsc(k)+'"</span>' +
+    '<span class="json-punct">: </span>' +
+    _hjVal(obj[k], depth+1) +
+    (i < keys.length-1 ? '<span class="json-punct">,</span>' : '')
+  );
+  return _hjFold('{', '}', items, depth, '{'+keys.length+' fields}');
+}
+let _hjId = 0;
+function _hjTog(togEl) {
+  const inner = document.getElementById(togEl.dataset.target);
+  if (!inner) return;
+  const summary = togEl.nextElementSibling;
+  inner.classList.toggle('json-collapsed');
+  const isCollapsed = inner.classList.contains('json-collapsed');
+  togEl.textContent = isCollapsed ? '+' : '-';
+  if (summary && summary.classList.contains('json-summary')) {
+    summary.style.display = isCollapsed ? '' : 'none';
+  }
 }
 
 document.getElementById('gw-search').addEventListener('input', e => { gwSearchTerm = e.target.value; renderGateway(); });
