@@ -566,6 +566,10 @@ func TestAdminUIGatewayDetailMarkup(t *testing.T) {
 		`json-str`,
 		`copyDetail`,
 		`renderRequestStructured`,
+		`renderResponseStructured`,
+		`renderTokenBar`,
+		`token-bar`,
+		`seg-cache-read`,
 		`msg-role`,
 		`tool-block`,
 	} {

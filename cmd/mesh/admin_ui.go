@@ -182,6 +182,19 @@ tbody tr:last-child td { border-bottom: none; }
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
   color: var(--text-muted); margin: 8px 0 4px;
 }
+/* Per-pair token bar */
+.token-bar {
+  display: flex; height: 18px; border-radius: 4px; overflow: hidden;
+  border: 1px solid var(--border); margin: 6px 0;
+}
+.token-bar > div { display: flex; align-items: center; justify-content: center; font-size: 10px; color: var(--bg); font-weight: 600; min-width: 0; }
+.token-bar .seg-cache-read { background: var(--green); }
+.token-bar .seg-cache-create { background: var(--purple); }
+.token-bar .seg-input { background: var(--cyan); }
+.token-bar .seg-output { background: var(--yellow); }
+.token-legend { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+.token-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.token-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
 
 /* Gateway detail (request | response) */
 .gw-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -1278,7 +1291,120 @@ function showGwDetail(idx) {
   document.getElementById('gw-req-raw').innerHTML = highlightJSON(p.req);
   document.getElementById('gw-resp-raw').innerHTML = highlightJSON(p.resp);
   document.getElementById('gw-req-structured').innerHTML = renderRequestStructured(p.req);
-  document.getElementById('gw-resp-structured').innerHTML = '';
+  document.getElementById('gw-resp-structured').innerHTML = renderResponseStructured(p.resp);
+}
+
+// --- Structured response view ---
+//
+// Renders chips (status, outcome, stop_reason, elapsed, events) plus the
+// per-pair token bar. The body view dispatches on stream_summary first
+// (streamed responses) and falls back to the parsed body for buffered
+// JSON. tool_calls and errors are surfaced explicitly because they are the
+// signals a user opens this view to find.
+function renderResponseStructured(resp) {
+  let html = '';
+  const chips = [];
+  if (resp.status) chips.push(chip('status', resp.status, resp.status >= 400 ? 'error' : 'ok'));
+  if (resp.outcome) chips.push(chip('outcome', resp.outcome,
+    resp.outcome === 'ok' ? 'ok' : resp.outcome === 'error' ? 'error' : 'warn'));
+  const summary = resp.stream_summary || {};
+  if (summary.stop_reason) chips.push(chip('stop', summary.stop_reason));
+  if (resp.elapsed_ms) chips.push(chip('elapsed', resp.elapsed_ms+'ms'));
+  if (summary.events) chips.push(chip('events', summary.events));
+  if (summary.message_id) chips.push(chip('msg_id', summary.message_id));
+  if (summary.model) chips.push(chip('upstream_model', summary.model));
+  if (chips.length) html += '<div style="margin-bottom:8px">' + chips.join('') + '</div>';
+
+  // Token breakdown bar — visible whenever any of the four buckets is non-zero.
+  const u = resp.usage || summary.usage;
+  if (u && (u.input_tokens || u.output_tokens || u.cache_read_input_tokens || u.cache_creation_input_tokens)) {
+    html += renderTokenBar(u);
+  }
+
+  // Mid-stream errors (Anthropic event:error) — show in red, prominent.
+  if (Array.isArray(summary.errors) && summary.errors.length) {
+    html += '<div class="section-title">stream errors</div>';
+    html += summary.errors.map(e =>
+      '<div style="border-left:2px solid var(--red);padding:4px 8px;color:var(--red)">'+x(e)+'</div>'
+    ).join('');
+  }
+
+  // Reassembled assistant content (streamed). When buffered, the body has
+  // an Anthropic-shaped content array we can render with the same dispatcher.
+  if (summary.content) {
+    html += '<div class="section-title">content</div>';
+    html += '<div class="msg-block"><div class="msg-body">'+renderText(summary.content)+'</div></div>';
+  }
+  if (summary.thinking) {
+    html += '<div class="section-title">thinking</div>';
+    html += '<div style="border-left:2px solid var(--purple);padding:4px 8px;color:var(--text-dim);font-style:italic">'+
+      renderText(summary.thinking)+'</div>';
+  }
+  if (Array.isArray(summary.tool_calls) && summary.tool_calls.length) {
+    html += '<div class="section-title">tool calls</div>';
+    html += summary.tool_calls.map(tc =>
+      '<div class="tool-block">' +
+        '<span class="tool-name">'+x(tc.name||'?')+'</span> ' +
+        '<span style="color:var(--text-muted)">id='+x(tc.id||'')+'</span>' +
+        '<pre>'+x(typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args, null, 2))+'</pre>' +
+      '</div>'
+    ).join('');
+  }
+
+  // Buffered (non-streamed) JSON body — render Anthropic content blocks the
+  // same way the request side does.
+  if (resp.body && typeof resp.body === 'object' && !summary.content) {
+    if (Array.isArray(resp.body.content)) {
+      html += '<div class="section-title">content</div>';
+      html += '<div class="msg-block"><div class="msg-body">' +
+        resp.body.content.map(renderContentBlock).join('') + '</div></div>';
+    } else if (Array.isArray(resp.body.choices)) {
+      // OpenAI shape.
+      html += '<div class="section-title">choices ('+resp.body.choices.length+')</div>';
+      html += resp.body.choices.map((c, i) => {
+        const msg = c.message || {};
+        const inner = renderContent(msg.content);
+        const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls.map(renderOpenAIToolCall).join('') : '';
+        return '<div class="msg-block"><div class="msg-head">' +
+          '<span class="msg-role assistant">'+x(msg.role||'assistant')+'</span>' +
+          '<span style="color:var(--text-muted)">#'+(i+1)+'</span>' +
+          (c.finish_reason ? '<span class="chip">finish_reason <b>'+x(c.finish_reason)+'</b></span>' : '') +
+        '</div><div class="msg-body">'+inner+calls+'</div></div>';
+      }).join('');
+    }
+  }
+  return html || '<span class="json-summary">(no body captured — set log.level: full to see content)</span>';
+}
+
+// renderTokenBar draws the four-segment horizontal stack used by both the
+// detail card and (later) the overview view. Widths are proportional to the
+// total of all four buckets; an empty bucket renders a 0-width segment.
+function renderTokenBar(u) {
+  const cacheRead   = u.cache_read_input_tokens || 0;
+  const cacheCreate = u.cache_creation_input_tokens || 0;
+  const fresh       = u.input_tokens || 0;
+  const out         = u.output_tokens || 0;
+  const total = cacheRead + cacheCreate + fresh + out;
+  if (total === 0) return '';
+  const pct = n => total === 0 ? 0 : (n / total * 100).toFixed(1);
+  const seg = (cls, label, n) => {
+    if (n === 0) return '';
+    return '<div class="'+cls+'" style="flex:'+n+'" title="'+label+': '+n.toLocaleString()+' ('+pct(n)+'%)">'+
+      (n / total > 0.08 ? n.toLocaleString() : '') + '</div>';
+  };
+  return '<div class="section-title">tokens (total '+total.toLocaleString()+')</div>' +
+    '<div class="token-legend">' +
+      '<span><i class="seg-cache-read" style="background:var(--green)"></i>cache read '+cacheRead.toLocaleString()+'</span>' +
+      '<span><i class="seg-cache-create" style="background:var(--purple)"></i>cache write '+cacheCreate.toLocaleString()+'</span>' +
+      '<span><i class="seg-input" style="background:var(--cyan)"></i>fresh input '+fresh.toLocaleString()+'</span>' +
+      '<span><i class="seg-output" style="background:var(--yellow)"></i>output '+out.toLocaleString()+'</span>' +
+    '</div>' +
+    '<div class="token-bar">' +
+      seg('seg-cache-read', 'cache read', cacheRead) +
+      seg('seg-cache-create', 'cache write', cacheCreate) +
+      seg('seg-input', 'fresh input', fresh) +
+      seg('seg-output', 'output', out) +
+    '</div>';
 }
 
 // --- Structured request view ---
