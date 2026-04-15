@@ -3,6 +3,7 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 )
 
@@ -210,7 +211,12 @@ func translateAnthropicMessage(m AnthropicMsg) ([]OpenAIMsg, error) {
 			}
 
 		case "thinking":
-			// Dropped — no OpenAI equivalent.
+			// OpenAI Chat Completions has no native thinking type. Log and
+			// drop. Round-trip preservation would require a lossy approximation
+			// (e.g., XML-tagging into assistant text) that conflicts with
+			// downstream tools expecting clean output.
+			slog.Debug("dropping anthropic 'thinking' block in a2o translation",
+				"role", m.Role, "thinking_chars", len(b.Thinking))
 		}
 	}
 

@@ -62,6 +62,16 @@ func translateOpenAIRequest(req *ChatCompletionRequest, cfg *GatewayCfg) (*Messa
 	if err != nil {
 		return nil, err
 	}
+	// response_format: Anthropic has no first-class JSON mode, so honor the
+	// OpenAI request by appending an instruction to the system prompt. This
+	// is best-effort — the model may still deviate.
+	if extra := responseFormatSystemSuffix(req.ResponseFormat); extra != "" {
+		if system != "" {
+			system = system + "\n\n" + extra
+		} else {
+			system = extra
+		}
+	}
 	if system != "" {
 		b, err := json.Marshal(system)
 		if err != nil {
@@ -95,6 +105,48 @@ func translateOpenAIRequest(req *ChatCompletionRequest, cfg *GatewayCfg) (*Messa
 	}
 
 	return out, nil
+}
+
+// responseFormatSystemSuffix returns text to append to the Anthropic system
+// prompt to approximate an OpenAI response_format directive. Anthropic models
+// do not have a first-class JSON mode, so this is best-effort. Returns "" for
+// no directive, type=text, or empty input. type=json_schema additionally
+// embeds the schema if present. Unknown types log a warning and return "".
+func responseFormatSystemSuffix(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var rf struct {
+		Type       string          `json:"type"`
+		JSONSchema json.RawMessage `json:"json_schema,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &rf); err != nil {
+		slog.Warn("cannot parse response_format; dropping directive", "error", err)
+		return ""
+	}
+	switch rf.Type {
+	case "", "text":
+		return ""
+	case "json_object":
+		return "Respond with valid JSON only. Do not include any explanatory text outside of the JSON object."
+	case "json_schema":
+		if len(rf.JSONSchema) == 0 {
+			return "Respond with valid JSON only. Do not include any explanatory text outside of the JSON object."
+		}
+		// json_schema field shape: {"name":"...","schema":{...},"strict":true}
+		var inner struct {
+			Schema json.RawMessage `json:"schema,omitempty"`
+		}
+		_ = json.Unmarshal(rf.JSONSchema, &inner)
+		schema := inner.Schema
+		if len(schema) == 0 {
+			schema = rf.JSONSchema
+		}
+		return "Respond with JSON that conforms to this JSON Schema. Do not include any explanatory text outside of the JSON object.\n\n" + string(schema)
+	default:
+		slog.Warn("unsupported response_format.type; dropping directive", "type", rf.Type)
+		return ""
+	}
 }
 
 // parseStopSequences handles both string and []string forms.
@@ -405,7 +457,10 @@ func translateAnthropicResponse(resp *MessagesResponse, clientModel string) (*Ch
 				},
 			})
 		case "thinking":
-			// Dropped.
+			// OpenAI Chat Completions has no native thinking type, so we
+			// drop these on the response side too. Logged at debug level.
+			slog.Debug("dropping anthropic 'thinking' block in o2a translation",
+				"thinking_chars", len(b.Thinking))
 		}
 	}
 

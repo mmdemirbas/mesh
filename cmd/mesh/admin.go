@@ -134,10 +134,11 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 		b.WriteString("# TYPE mesh_component_up gauge\n")
 
 		type compMetric struct {
-			compType, id string
-			tx, rx       int64
-			streams      int32
-			uptime       float64
+			compType, id        string
+			tx, rx              int64
+			streams             int32
+			tokensIn, tokensOut int64
+			uptime              float64
 		}
 		var cms []compMetric
 
@@ -152,7 +153,8 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 
 			if m, ok := metrics[key]; ok {
 				cm := compMetric{compType: comp.Type, id: comp.ID,
-					tx: m.BytesTx.Load(), rx: m.BytesRx.Load(), streams: m.Streams.Load()}
+					tx: m.BytesTx.Load(), rx: m.BytesRx.Load(), streams: m.Streams.Load(),
+					tokensIn: m.TokensIn.Load(), tokensOut: m.TokensOut.Load()}
 				if st := m.StartTime.Load(); st != 0 {
 					cm.uptime = float64(nowNano-st) / 1e9
 				}
@@ -184,6 +186,22 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 		for _, cm := range cms {
 			if cm.uptime > 0 {
 				fmt.Fprintf(&b, "mesh_uptime_seconds{type=%q,id=%q} %.3f\n", cm.compType, cm.id, cm.uptime)
+			}
+		}
+
+		// Gateway-only token counters (zero on every other component type).
+		b.WriteString("# HELP mesh_gateway_tokens_in_total Cumulative input tokens reported by upstream usage fields.\n")
+		b.WriteString("# TYPE mesh_gateway_tokens_in_total counter\n")
+		for _, cm := range cms {
+			if cm.compType == "gateway" {
+				fmt.Fprintf(&b, "mesh_gateway_tokens_in_total{id=%q} %d\n", cm.id, cm.tokensIn)
+			}
+		}
+		b.WriteString("# HELP mesh_gateway_tokens_out_total Cumulative output tokens reported by upstream usage fields.\n")
+		b.WriteString("# TYPE mesh_gateway_tokens_out_total counter\n")
+		for _, cm := range cms {
+			if cm.compType == "gateway" {
+				fmt.Fprintf(&b, "mesh_gateway_tokens_out_total{id=%q} %d\n", cm.id, cm.tokensOut)
 			}
 		}
 

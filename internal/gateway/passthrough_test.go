@@ -2,11 +2,14 @@ package gateway
 
 import (
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -450,6 +453,59 @@ func TestBuildUpstreamURL(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("buildUpstreamURL(%q, %q) = %q, want %q", tt.upstream, tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDecodeForAudit(t *testing.T) {
+	t.Parallel()
+	plaintext := `{"hello":"world"}`
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	gz := func(s string) []byte {
+		var b bytes.Buffer
+		w := gzip.NewWriter(&b)
+		_, _ = w.Write([]byte(s))
+		_ = w.Close()
+		return b.Bytes()
+	}
+	zl := func(s string) []byte {
+		var b bytes.Buffer
+		w := zlib.NewWriter(&b)
+		_, _ = w.Write([]byte(s))
+		_ = w.Close()
+		return b.Bytes()
+	}
+	rawFlate := func(s string) []byte {
+		var b bytes.Buffer
+		w, _ := flate.NewWriter(&b, flate.DefaultCompression)
+		_, _ = w.Write([]byte(s))
+		_ = w.Close()
+		return b.Bytes()
+	}
+
+	tests := []struct {
+		name     string
+		body     []byte
+		encoding string
+		want     []byte
+	}{
+		{"identity", []byte(plaintext), "", []byte(plaintext)},
+		{"explicit_identity", []byte(plaintext), "identity", []byte(plaintext)},
+		{"gzip_decoded", gz(plaintext), "gzip", []byte(plaintext)},
+		{"deflate_zlib_decoded", zl(plaintext), "deflate", []byte(plaintext)},
+		{"deflate_raw_decoded", rawFlate(plaintext), "deflate", []byte(plaintext)},
+		{"unsupported_br_passes_through", []byte("opaque-br-bytes"), "br", []byte("opaque-br-bytes")},
+		{"malformed_gzip_passes_through", []byte("not gzip"), "gzip", []byte("not gzip")},
+		{"empty_body", nil, "gzip", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := decodeForAudit(tt.body, tt.encoding, logger)
+			if !bytes.Equal(got, tt.want) {
+				t.Errorf("decodeForAudit(_, %q): got %q want %q", tt.encoding, got, tt.want)
 			}
 		})
 	}

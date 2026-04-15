@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
+	"compress/zlib"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -118,6 +120,10 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, c
 	}
 	auditBody := decodeForAudit(respBody, uresp.Header.Get("Content-Encoding"), log)
 	usage := parseUsage(auditBody, cfg.UpstreamAPI)
+	if usage != nil {
+		metrics.TokensIn.Add(int64(usage.InputTokens))
+		metrics.TokensOut.Add(int64(usage.OutputTokens))
+	}
 
 	recorder.Response(reqID, ResponseMeta{
 		Status:    uresp.StatusCode,
@@ -204,6 +210,10 @@ func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *ht
 	if summary != nil {
 		usage = summary.Usage
 	}
+	if usage != nil {
+		metrics.TokensIn.Add(int64(usage.InputTokens))
+		metrics.TokensOut.Add(int64(usage.OutputTokens))
+	}
 	recorder.Response(reqID, ResponseMeta{
 		Status:    uresp.StatusCode,
 		Outcome:   outcome,
@@ -283,36 +293,55 @@ func isSSEResponse(r *http.Response) bool {
 }
 
 // decodeForAudit returns a plaintext copy of body suitable for the audit log.
-// Upstreams often send Content-Encoding: gzip even for SSE responses (Anthropic
-// does), and the tee captures those raw compressed bytes. We decompress a copy
-// here so the JSONL rows are human-readable while the wire bytes the client
-// saw remain untouched. Unsupported or malformed encodings fall back to the
-// raw bytes with a warning.
+// Upstreams often send Content-Encoding even for SSE responses (Anthropic
+// uses gzip), and the tee captures those raw compressed bytes. We decompress
+// a copy here so the JSONL rows are human-readable while the wire bytes the
+// client saw remain untouched. Unsupported or malformed encodings (br, zstd,
+// or anything that fails to decode) fall back to the raw bytes — the log
+// stays lossless even when not human-readable.
 func decodeForAudit(body []byte, encoding string, log *slog.Logger) []byte {
 	if len(body) == 0 {
 		return body
 	}
-	switch strings.ToLower(strings.TrimSpace(encoding)) {
-	case "", "identity":
+	enc := strings.ToLower(strings.TrimSpace(encoding))
+	if enc == "" || enc == "identity" {
 		return body
+	}
+	if out, ok := decodeCompressed(body, enc, log); ok {
+		return out
+	}
+	return body
+}
+
+func decodeCompressed(body []byte, enc string, log *slog.Logger) ([]byte, bool) {
+	var rdr io.ReadCloser
+	switch enc {
 	case "gzip":
 		zr, err := gzip.NewReader(bytes.NewReader(body))
 		if err != nil {
 			log.Debug("audit gzip reader init failed", "error", err)
-			return body
+			return nil, false
 		}
-		defer func() { _ = zr.Close() }()
-		out, err := io.ReadAll(io.LimitReader(zr, maxAuditBodyBytes))
-		if err != nil {
-			log.Debug("audit gzip decode failed", "error", err)
-			return body
+		rdr = zr
+	case "deflate":
+		// HTTP "deflate" historically means zlib-wrapped flate; some servers
+		// send raw flate. Try zlib first, then raw flate.
+		if zr, err := zlib.NewReader(bytes.NewReader(body)); err == nil {
+			rdr = zr
+		} else {
+			rdr = flate.NewReader(bytes.NewReader(body))
 		}
-		return out
 	default:
-		// deflate/br/zstd: not decoded. The raw bytes are still captured so
-		// the log is lossless even if not human-readable.
-		return body
+		// br / zstd require third-party deps not present in this module.
+		return nil, false
 	}
+	defer func() { _ = rdr.Close() }()
+	out, err := io.ReadAll(io.LimitReader(rdr, maxAuditBodyBytes))
+	if err != nil {
+		log.Debug("audit decode failed", "encoding", enc, "error", err)
+		return nil, false
+	}
+	return out, true
 }
 
 // parseUsage extracts token counts from a non-streaming response body. Returns

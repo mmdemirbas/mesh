@@ -68,7 +68,7 @@ const (
 
 	defaultLogDir         = "~/.mesh/gateway"
 	defaultLogMaxFileSize = "100MB"
-	defaultLogMaxAge      = "720h"
+	defaultLogMaxAge      = "30d"
 )
 
 // Direction is the derived (ClientAPI, UpstreamAPI) pair.
@@ -174,11 +174,36 @@ func (l *LogCfg) validate() error {
 		}
 	}
 	if l.MaxAge != "" {
-		if _, err := time.ParseDuration(l.MaxAge); err != nil {
+		if _, err := parseExtendedDuration(l.MaxAge); err != nil {
 			return fmt.Errorf("invalid max_age %q: %w", l.MaxAge, err)
 		}
 	}
 	return nil
+}
+
+// parseExtendedDuration accepts any stdlib time.ParseDuration input plus
+// "Nd" (days) and "Nw" (weeks). Mixed units ("1w2d") are not supported.
+func parseExtendedDuration(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	switch last := s[len(s)-1]; last {
+	case 'd', 'w':
+		num, err := strconv.ParseInt(strings.TrimSpace(s[:len(s)-1]), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("not a duration: %q", s)
+		}
+		if num < 0 {
+			return 0, fmt.Errorf("negative duration: %q", s)
+		}
+		unit := 24 * time.Hour
+		if last == 'w' {
+			unit = 7 * 24 * time.Hour
+		}
+		return time.Duration(num) * unit, nil
+	}
+	return time.ParseDuration(s)
 }
 
 // ResolvedLevel returns the effective logging level. A fully zero LogCfg
@@ -219,7 +244,7 @@ func (l *LogCfg) ResolvedMaxAge() time.Duration {
 	if v == "" {
 		v = defaultLogMaxAge
 	}
-	d, _ := time.ParseDuration(v)
+	d, _ := parseExtendedDuration(v)
 	return d
 }
 

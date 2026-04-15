@@ -1246,8 +1246,52 @@ func TestMetricsSnapshot_Add(t *testing.T) {
 // TestReadMetrics_NilSafe verifies readMetrics handles nil without panic.
 func TestReadMetrics_NilSafe(t *testing.T) {
 	snap := readMetrics(nil)
-	if snap.tx != 0 || snap.rx != 0 || snap.streams != 0 || snap.uptime != 0 {
+	if snap.tx != 0 || snap.rx != 0 || snap.streams != 0 || snap.uptime != 0 || snap.tokensIn != 0 || snap.tokensOut != 0 {
 		t.Error("readMetrics(nil) should return zero snapshot")
+	}
+}
+
+// TestReadMetrics_TokensSurfaced verifies token atomics are read into the snapshot.
+func TestReadMetrics_TokensSurfaced(t *testing.T) {
+	m := &state.Metrics{}
+	m.TokensIn.Store(123)
+	m.TokensOut.Store(456)
+	snap := readMetrics(m)
+	if snap.tokensIn != 123 || snap.tokensOut != 456 {
+		t.Errorf("tokens = (%d, %d), want (123, 456)", snap.tokensIn, snap.tokensOut)
+	}
+}
+
+// TestFormatMetricsSnap_RendersTokensWhenNonZero verifies the gateway-only
+// token suffix appears in the rendered string.
+func TestFormatMetricsSnap_RendersTokensWhenNonZero(t *testing.T) {
+	snap := metricsSnapshot{uptime: time.Minute, tx: 100, rx: 200, tokensIn: 1500, tokensOut: 700}
+	out := stripANSI(formatMetricsSnap(snap))
+	for _, want := range []string{"tok", "↑1.5k", "↓700"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q: %q", want, out)
+		}
+	}
+	// Non-gateway snapshot (tokens both zero) must not include "tok".
+	bare := metricsSnapshot{uptime: time.Minute, tx: 1, rx: 2}
+	if strings.Contains(stripANSI(formatMetricsSnap(bare)), "tok") {
+		t.Errorf("non-gateway snapshot should not show token suffix")
+	}
+}
+
+// TestFormatTokens_Compact verifies the human-readable token count formatter.
+func TestFormatTokens_Compact(t *testing.T) {
+	tests := map[int64]string{
+		0:         "0",
+		999:       "999",
+		1500:      "1.5k",
+		12345:     "12.3k",
+		1_000_000: "1.0M",
+	}
+	for n, want := range tests {
+		if got := formatTokens(n); got != want {
+			t.Errorf("formatTokens(%d) = %q, want %q", n, got, want)
+		}
 	}
 }
 

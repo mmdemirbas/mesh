@@ -172,6 +172,40 @@ func TestAdminMetricsEndpoint(t *testing.T) {
 	}
 }
 
+func TestAdminMetricsGatewayTokens(t *testing.T) {
+	state.Global.Update("gateway", "metrics-gw-test", state.Listening, "127.0.0.1:9999")
+	m := state.Global.GetMetrics("gateway", "metrics-gw-test")
+	m.TokensIn.Store(1234)
+	m.TokensOut.Store(5678)
+	t.Cleanup(func() {
+		state.Global.Delete("gateway", "metrics-gw-test")
+		state.Global.DeleteMetrics("gateway", "metrics-gw-test")
+	})
+
+	ring := newLogRing(4)
+	srv := httptest.NewServer(buildAdminMux(ring, ""))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/metrics")
+	if err != nil {
+		t.Fatalf("GET /api/metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	text := string(body)
+
+	for _, want := range []string{
+		"# TYPE mesh_gateway_tokens_in_total counter",
+		"# TYPE mesh_gateway_tokens_out_total counter",
+		`mesh_gateway_tokens_in_total{id="metrics-gw-test"} 1234`,
+		`mesh_gateway_tokens_out_total{id="metrics-gw-test"} 5678`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("metrics output missing %q", want)
+		}
+	}
+}
+
 func TestAdminMetricsDownComponent(t *testing.T) {
 	state.Global.Update("server", "admintest-down:9999", state.Failed, "refused")
 	t.Cleanup(func() {

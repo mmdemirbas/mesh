@@ -150,7 +150,7 @@ my-vps-tunnel-service:
         level: full                   # off | metadata | full   (default: metadata)
         # dir: ~/.mesh/gateway        # default
         # max_file_size: 100MB        # default
-        # max_age: 720h               # default (30 days)
+        # max_age: 30d                # default; accepts Nd / Nw / stdlib duration
 
   # ==============================================================================
   # 4. Listeners (Accept incoming connections and requests)

@@ -3,6 +3,7 @@ package gateway
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGatewayCfg_Validate(t *testing.T) {
@@ -147,6 +148,70 @@ func TestLogCfg_Resolved(t *testing.T) {
 			t.Errorf("ResolvedMaxAge = %v, want 24h", got)
 		}
 	})
+}
+
+func TestParseExtendedDuration(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in      string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"30d", 30 * 24 * time.Hour, false},
+		{"1d", 24 * time.Hour, false},
+		{"2w", 14 * 24 * time.Hour, false},
+		{"720h", 720 * time.Hour, false},
+		{"15m", 15 * time.Minute, false},
+		{"0d", 0, false},
+		{" 7d ", 7 * 24 * time.Hour, false},
+		{"", 0, true},
+		{"-3d", 0, true},
+		{"1w2d", 0, true}, // mixed units not supported
+		{"forever", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseExtendedDuration(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("parseExtendedDuration(%q) = %v, want error", tt.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("parseExtendedDuration(%q): %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseExtendedDuration(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLogCfg_MaxAgeAcceptsDaysAndWeeks(t *testing.T) {
+	t.Parallel()
+	cfg := GatewayCfg{
+		Name:        "gw",
+		Bind:        "127.0.0.1:0",
+		ClientAPI:   APIAnthropic,
+		UpstreamAPI: APIAnthropic,
+		Upstream:    "https://api.anthropic.com",
+		Log:         LogCfg{Level: LogLevelFull, MaxAge: "30d"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("30d should validate: %v", err)
+	}
+	if got := cfg.Log.ResolvedMaxAge(); got != 30*24*time.Hour {
+		t.Errorf("ResolvedMaxAge(30d) = %v, want 720h", got)
+	}
+	cfg.Log.MaxAge = "2w"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("2w should validate: %v", err)
+	}
+	if got := cfg.Log.ResolvedMaxAge(); got != 14*24*time.Hour {
+		t.Errorf("ResolvedMaxAge(2w) = %v, want 336h", got)
+	}
 }
 
 func TestParseSize(t *testing.T) {

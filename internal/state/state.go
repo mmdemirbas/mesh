@@ -35,6 +35,8 @@ type Metrics struct {
 	BytesTx   atomic.Int64
 	BytesRx   atomic.Int64
 	Streams   atomic.Int32
+	TokensIn  atomic.Int64 // gateway-only: prompt tokens accumulated across requests
+	TokensOut atomic.Int64 // gateway-only: completion tokens accumulated across requests
 	StartTime atomic.Int64 // unix nanoseconds; reset on each reconnect
 }
 
@@ -43,6 +45,8 @@ func (m *Metrics) Reset() {
 	m.BytesTx.Store(0)
 	m.BytesRx.Store(0)
 	m.Streams.Store(0)
+	m.TokensIn.Store(0)
+	m.TokensOut.Store(0)
 	m.StartTime.Store(time.Now().UnixNano())
 }
 

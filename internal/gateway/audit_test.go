@@ -64,6 +64,42 @@ func readRows(t *testing.T, dir string) []map[string]any {
 	return rows
 }
 
+func TestRecorder_RunIDPresentAndStableWithinProcess(t *testing.T) {
+	t.Parallel()
+	rec := newTestRecorder(t, LogLevelMetadata)
+	id := rec.Request(RequestMeta{Gateway: "gw", StartTime: time.Now()}, []byte("{}"))
+	rec.Response(id, ResponseMeta{Status: 200, Outcome: OutcomeOK, StartTime: time.Now(), EndTime: time.Now()}, nil)
+	_ = rec.Close()
+
+	rows := readRows(t, rec.dir)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	run1, ok1 := rows[0]["run"].(string)
+	run2, ok2 := rows[1]["run"].(string)
+	if !ok1 || !ok2 {
+		t.Fatalf("run id missing on req/resp: %v / %v", rows[0]["run"], rows[1]["run"])
+	}
+	if run1 == "" || run2 == "" {
+		t.Errorf("run id is empty")
+	}
+	if run1 != run2 {
+		t.Errorf("run id mismatch within recorder: %q vs %q", run1, run2)
+	}
+	if len(run1) < 4 {
+		t.Errorf("run id %q is too short", run1)
+	}
+}
+
+func TestRecorder_RunIDDiffersAcrossInstances(t *testing.T) {
+	t.Parallel()
+	rec1 := newTestRecorder(t, LogLevelMetadata)
+	rec2 := newTestRecorder(t, LogLevelMetadata)
+	if rec1.runID == rec2.runID {
+		t.Errorf("run ids collide across recorders: %q", rec1.runID)
+	}
+}
+
 func TestRecorder_OffReturnsNil(t *testing.T) {
 	t.Parallel()
 	cfg := GatewayCfg{Name: "gw", Log: LogCfg{Level: LogLevelOff}}

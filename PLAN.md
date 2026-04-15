@@ -43,45 +43,6 @@ Security hardening, correctness, data integrity, protocol compliance.
 |------|-----------|----------------------------------------------|-------|
 | S1   | clipsync  | No TLS for clipsync HTTP                     | HTTPS only, auto-TLS with self-signed certs if none provided. Zero-config. |
 | FS4  | filesync  | No TLS / auth for filesync HTTP              | Same auto-TLS approach as S1 — share the implementation. |
-| [C3](#c3-thinking-blocks-silently-dropped-in-gateway-translation) | gateway | `thinking` blocks silently dropped | Extended thinking content dropped in both translation directions. Increasingly used feature. Needs design decision. |
-| [C4](#c4-response_format-silently-dropped-in-gateway-translation) | gateway | `response_format` silently dropped | `json_object` mode parsed but dropped. Clients expecting guaranteed JSON get unstructured text. Needs design decision. |
-
-### C3: `thinking` blocks silently dropped in gateway translation
-
-**Goal:** Preserve or faithfully represent extended thinking content when translating between Anthropic and OpenAI formats.
-
-**Approach:**
-- In A2O (`translateAnthropicMessage`): for `thinking` blocks in outbound requests, prepend the thinking text as a `<parameter name="new_string">` XML-style wrapper in the assistant text content rather than dropping it, or drop with a one-time `slog.Warn` per request.
-- In O2A (`translateAnthropicResponse`): `thinking` blocks appear in responses; surface them as an additional text block tagged `[thinking]` or drop with a log line.
-- Add a `preserve_thinking` bool to `GatewayCfg` (default false = current behavior) so operators can opt in.
-- In SSE streaming path, same logic applies per event delta.
-- Add test cases covering thinking-only messages, mixed thinking+text, and thinking in tool_result context.
-
-**Key decisions:** Whether to silently drop (current), log-and-drop, or attempt round-trip preservation. The OpenAI API has no native thinking type; any preservation is a lossy approximation. Decide before implementation.
-
-**Risks/dependencies:** Anthropic extended thinking is gated behind `betas` header; the gateway must pass through `anthropic-beta` headers or add them when `preserve_thinking` is enabled.
-
-**Effort:** S — the drop point is a single `case "thinking":` in two files; adding a log line is trivial. The opt-in preservation adds M work for the config field and streaming path.
-
-### C4: `response_format` silently dropped in gateway translation
-
-**Goal:** Honour `response_format: {type: "json_object"}` from OpenAI clients by instructing the upstream Anthropic model to emit JSON.
-
-**Approach:**
-- Parse `ResponseFormat` in `translateOpenAIRequest` (it is already decoded into `ChatCompletionRequest.ResponseFormat`).
-- If `type == "json_object"`, append a system prompt suffix: `\n\nRespond with valid JSON only. Do not include any explanatory text outside of the JSON object.`
-- If `type == "json_schema"` and a `schema` is present, also inject the schema into the system prompt.
-- If `type == "text"`, no-op (current behavior is already correct).
-- Log a `slog.Warn` for unknown `type` values.
-- Add `response_format` to the dropped-fields comment in `openai.go` only for types we cannot handle.
-- Add table-driven tests for each type variant.
-
-**Key decisions:** Whether injection into the system prompt is the right mechanism vs. returning 400 for unsupported types. System prompt injection is imperfect (model may still deviate) but matches what most proxy gateways do.
-
-**Risks/dependencies:** Anthropic models do not guarantee JSON output without a specific beta header (`computer-use-2024-10-22` is unrelated; no JSON mode beta exists). This is best-effort. Document the limitation in a comment.
-
-**Effort:** S — parsing and system-prompt injection is straightforward. The `json_schema` variant is M if full schema injection is desired.
-
 ---
 
 ## Tier 3 — Improve

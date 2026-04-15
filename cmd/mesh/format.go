@@ -325,9 +325,10 @@ func formatDuration(d time.Duration) string {
 
 // metricsSnapshot holds a point-in-time copy of metrics values.
 type metricsSnapshot struct {
-	uptime  time.Duration
-	tx, rx  int64
-	streams int32
+	uptime              time.Duration
+	tx, rx              int64
+	streams             int32
+	tokensIn, tokensOut int64 // gateway-only; zero everywhere else
 }
 
 // readMetrics reads a single Metrics into a snapshot.
@@ -341,10 +342,12 @@ func readMetrics(m *state.Metrics) metricsSnapshot {
 		uptime = time.Since(time.Unix(0, startNano)).Truncate(time.Second)
 	}
 	return metricsSnapshot{
-		uptime:  uptime,
-		tx:      m.BytesTx.Load(),
-		rx:      m.BytesRx.Load(),
-		streams: m.Streams.Load(),
+		uptime:    uptime,
+		tx:        m.BytesTx.Load(),
+		rx:        m.BytesRx.Load(),
+		streams:   m.Streams.Load(),
+		tokensIn:  m.TokensIn.Load(),
+		tokensOut: m.TokensOut.Load(),
 	}
 }
 
@@ -353,8 +356,22 @@ func (s *metricsSnapshot) add(o metricsSnapshot) {
 	s.tx += o.tx
 	s.rx += o.rx
 	s.streams += o.streams
+	s.tokensIn += o.tokensIn
+	s.tokensOut += o.tokensOut
 	if o.uptime > s.uptime {
 		s.uptime = o.uptime
+	}
+}
+
+// formatTokens returns "Nk" / "M" / etc. for compact token display.
+func formatTokens(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
 	}
 }
 
@@ -371,14 +388,18 @@ func colorBytes(b int64, color string) string {
 
 // formatMetricsSnap returns a compact metrics string.
 // Upload (↑) in cyan, download (↓) in magenta, numbers bold, units non-bold.
+// Token counters (gateway-only) are appended as "tok ↑in ↓out" when nonzero.
 func formatMetricsSnap(s metricsSnapshot) string {
-	if s.uptime <= 0 && s.tx == 0 && s.rx == 0 {
+	if s.uptime <= 0 && s.tx == 0 && s.rx == 0 && s.tokensIn == 0 && s.tokensOut == 0 {
 		return ""
 	}
 	r := cGray + fmt.Sprintf("%-6s ", formatDuration(s.uptime))
 	r += cCyan + "↑" + colorBytes(s.tx, cCyan) + " " + cMagenta + "↓" + colorBytes(s.rx, cMagenta)
 	if s.streams > 0 {
 		r += " " + cBold + cReset + fmt.Sprintf("%d", s.streams) + cGray + "↔"
+	}
+	if s.tokensIn > 0 || s.tokensOut > 0 {
+		r += " " + cGray + "tok " + cCyan + "↑" + cBold + formatTokens(s.tokensIn) + cReset + " " + cMagenta + "↓" + cBold + formatTokens(s.tokensOut) + cReset
 	}
 	r += cReset
 	return r
@@ -387,7 +408,7 @@ func formatMetricsSnap(s metricsSnapshot) string {
 // formatMetricsAligned returns a metrics string with tx and rx padded to
 // the given widths so that ↓ and ↔ columns align across rows.
 func formatMetricsAligned(s metricsSnapshot, txWidth, rxWidth int) string {
-	if s.uptime <= 0 && s.tx == 0 && s.rx == 0 {
+	if s.uptime <= 0 && s.tx == 0 && s.rx == 0 && s.tokensIn == 0 && s.tokensOut == 0 {
 		return ""
 	}
 	r := cGray + fmt.Sprintf("%-6s ", formatDuration(s.uptime))
@@ -403,6 +424,9 @@ func formatMetricsAligned(s metricsSnapshot, txWidth, rxWidth int) string {
 	}
 	if s.streams > 0 {
 		r += " " + cBold + cReset + fmt.Sprintf("%d", s.streams) + cGray + "↔"
+	}
+	if s.tokensIn > 0 || s.tokensOut > 0 {
+		r += " " + cGray + "tok " + cCyan + "↑" + cBold + formatTokens(s.tokensIn) + cReset + " " + cMagenta + "↓" + cBold + formatTokens(s.tokensOut) + cReset
 	}
 	r += cReset
 	return r

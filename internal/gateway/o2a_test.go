@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -579,5 +580,85 @@ func TestTranslateOpenAIRequest_N1Accepted(t *testing.T) {
 	_, err := translateOpenAIRequest(req, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error for n=1: %v", err)
+	}
+}
+
+func TestTranslateOpenAIRequest_ResponseFormat(t *testing.T) {
+	t.Parallel()
+	cfg := &GatewayCfg{}
+
+	build := func(rf string, withSys bool) *ChatCompletionRequest {
+		req := &ChatCompletionRequest{Model: "gpt-4o", Messages: []OpenAIMsg{{Role: "user", Content: json.RawMessage(`"hi"`)}}}
+		if withSys {
+			req.Messages = append([]OpenAIMsg{{Role: "system", Content: json.RawMessage(`"You are concise."`)}}, req.Messages...)
+		}
+		if rf != "" {
+			req.ResponseFormat = json.RawMessage(rf)
+		}
+		return req
+	}
+
+	tests := []struct {
+		name        string
+		req         *ChatCompletionRequest
+		wantSysSubs []string
+		wantNoSys   bool
+	}{
+		{
+			name:        "json_object_no_existing_system",
+			req:         build(`{"type":"json_object"}`, false),
+			wantSysSubs: []string{"valid JSON only"},
+		},
+		{
+			name:        "json_object_appended_to_existing_system",
+			req:         build(`{"type":"json_object"}`, true),
+			wantSysSubs: []string{"You are concise.", "valid JSON only"},
+		},
+		{
+			name:        "json_schema_with_schema_embeds_schema",
+			req:         build(`{"type":"json_schema","json_schema":{"name":"Result","schema":{"type":"object","properties":{"answer":{"type":"string"}}}}}`, false),
+			wantSysSubs: []string{"JSON Schema", `"answer"`},
+		},
+		{
+			name:      "type_text_is_noop",
+			req:       build(`{"type":"text"}`, false),
+			wantNoSys: true,
+		},
+		{
+			name:      "missing_response_format_is_noop",
+			req:       build("", false),
+			wantNoSys: true,
+		},
+		{
+			name:      "unknown_type_is_dropped",
+			req:       build(`{"type":"protobuf"}`, false),
+			wantNoSys: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out, err := translateOpenAIRequest(tt.req, cfg)
+			if err != nil {
+				t.Fatalf("translate: %v", err)
+			}
+			if tt.wantNoSys {
+				if len(out.System) != 0 {
+					var s string
+					_ = json.Unmarshal(out.System, &s)
+					t.Errorf("expected no system prompt, got %q", s)
+				}
+				return
+			}
+			var sys string
+			if err := json.Unmarshal(out.System, &sys); err != nil {
+				t.Fatalf("system not a string: %v", err)
+			}
+			for _, want := range tt.wantSysSubs {
+				if !strings.Contains(sys, want) {
+					t.Errorf("system %q does not contain %q", sys, want)
+				}
+			}
+		})
 	}
 }

@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/mmdemirbas/mesh/internal/state"
 )
 
 // Audit outcome constants recorded in the `outcome` field of response rows.
@@ -81,6 +85,7 @@ type Recorder struct {
 	maxSize int64
 	maxAge  time.Duration
 	log     *slog.Logger
+	runID   string // short random id, unique per Recorder (per mesh process)
 
 	nextID atomic.Uint64
 
@@ -114,6 +119,7 @@ func NewRecorder(cfg GatewayCfg, log *slog.Logger) (*Recorder, error) {
 		maxSize:     cfg.Log.ResolvedMaxFileSize(),
 		maxAge:      cfg.Log.ResolvedMaxAge(),
 		log:         log.With("audit", cfg.Name),
+		runID:       newRunID(),
 		stopCleanup: make(chan struct{}),
 		cleanupDone: make(chan struct{}),
 	}
@@ -133,6 +139,7 @@ func (r *Recorder) Request(meta RequestMeta, body []byte) RequestID {
 	row := map[string]any{
 		"t":         "req",
 		"id":        uint64(id),
+		"run":       r.runID,
 		"ts":        meta.StartTime.UTC().Format(time.RFC3339Nano),
 		"gateway":   meta.Gateway,
 		"direction": meta.Direction,
@@ -161,6 +168,7 @@ func (r *Recorder) Response(id RequestID, meta ResponseMeta, body []byte) {
 	row := map[string]any{
 		"t":          "resp",
 		"id":         uint64(id),
+		"run":        r.runID,
 		"ts":         meta.EndTime.UTC().Format(time.RFC3339Nano),
 		"gateway":    r.gateway,
 		"status":     meta.Status,
@@ -455,6 +463,11 @@ func wrapAuditing(cfg GatewayCfg, recorder *Recorder, clientAPI string, inner ht
 		} else {
 			usage = parseUsage(auditBody, clientAPI)
 		}
+		if usage != nil {
+			metrics := state.Global.GetMetrics("gateway", cfg.Name)
+			metrics.TokensIn.Add(int64(usage.InputTokens))
+			metrics.TokensOut.Add(int64(usage.OutputTokens))
+		}
 
 		recorder.Response(reqID, ResponseMeta{
 			Status:    status,
@@ -466,6 +479,16 @@ func wrapAuditing(cfg GatewayCfg, recorder *Recorder, clientAPI string, inner ht
 			Headers:   aw.Header(),
 		}, auditBody)
 	}
+}
+
+// newRunID returns a short hex token used to disambiguate audit ids across
+// mesh process restarts. nextID resets per-process; runID does not collide.
+func newRunID() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%08x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // expandHome resolves a leading "~/" to the user's home directory. Any other
