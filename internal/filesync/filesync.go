@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -489,7 +490,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	}()
 
 	// Run initial scan.
-	n.runScan()
+	n.runScan(ctx)
 
 	<-ctx.Done()
 
@@ -528,25 +529,30 @@ func (n *Node) scanLoop(ctx context.Context, interval time.Duration, watcher *fo
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			n.runScan()
+			n.runScan(ctx)
 		case <-dirtyCh:
-			n.runScan()
+			n.runScan(ctx)
 		}
 	}
 }
 
 // runScan scans all folders and triggers sync if anything changed.
-func (n *Node) runScan() {
+// Bails out between folders if ctx is cancelled so shutdown doesn't wait for
+// multi-minute WalkDirs over huge folders (m2 repo, build outputs).
+func (n *Node) runScan(ctx context.Context) {
 	anyChanged := false
 	for id, fs := range n.folders {
+		if ctx.Err() != nil {
+			return
+		}
 		if fs.cfg.Direction == "disabled" {
 			continue
 		}
 		fs.indexMu.Lock()
 		state.Global.Update("filesync-folder", id, state.Connecting, "scanning")
 
-		changed, count, dirs, err := fs.index.scan(fs.cfg.Path, fs.ignore)
-		if err != nil {
+		changed, count, dirs, err := fs.index.scan(ctx, fs.cfg.Path, fs.ignore)
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			slog.Warn("scan error", "folder", id, "error", err)
 		}
 		fs.dirCount = dirs

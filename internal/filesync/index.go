@@ -1,6 +1,7 @@
 package filesync
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -148,12 +149,15 @@ func (idx *FileIndex) activeCount() int {
 // scan walks the folder, updates the index, cleans stale temp files, and
 // returns whether any files changed, the active (non-deleted) file count,
 // and the number of directories walked (excluding the root and ignored subtrees).
-func (idx *FileIndex) scan(folderRoot string, ignore *ignoreMatcher) (changed bool, activeCount, dirCount int, err error) {
+func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignoreMatcher) (changed bool, activeCount, dirCount int, err error) {
 	changed = false
 	seen := make(map[string]struct{})
 	tempCutoff := time.Now().Add(-maxTempFileAge)
 
 	err = filepath.WalkDir(folderRoot, func(path string, d fs.DirEntry, walkErr error) error {
+		if ctx.Err() != nil {
+			return ctx.Err() // bail out on shutdown
+		}
 		if walkErr != nil {
 			return nil // skip inaccessible entries
 		}
