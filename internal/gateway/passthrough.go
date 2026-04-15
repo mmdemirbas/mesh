@@ -367,4 +367,3 @@ func writePassthroughError(w http.ResponseWriter, clientAPI string, status int, 
 		http.Error(w, msg, status)
 	}
 }
-

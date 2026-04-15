@@ -1,9 +1,12 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -336,6 +339,133 @@ func rawOrString(body []byte) any {
 		return json.RawMessage(trimmed)
 	}
 	return string(trimmed)
+}
+
+// auditingWriter wraps an http.ResponseWriter to capture a capped copy of the
+// bytes written and the final status code, while preserving streaming Flush
+// behavior. Used by wrapAuditing to tee translation-handler output into the
+// audit log without modifying each handler.
+type auditingWriter struct {
+	http.ResponseWriter
+	status int
+	buf    bytes.Buffer
+	capped bool
+}
+
+func (a *auditingWriter) WriteHeader(code int) {
+	if a.status == 0 {
+		a.status = code
+	}
+	a.ResponseWriter.WriteHeader(code)
+}
+
+func (a *auditingWriter) Write(p []byte) (int, error) {
+	if a.status == 0 {
+		a.status = http.StatusOK
+	}
+	if !a.capped {
+		remain := int64(maxAuditBodyBytes) - int64(a.buf.Len())
+		if remain > 0 {
+			take := int64(len(p))
+			if take > remain {
+				take = remain
+				a.capped = true
+			}
+			a.buf.Write(p[:take])
+		} else {
+			a.capped = true
+		}
+	}
+	return a.ResponseWriter.Write(p)
+}
+
+func (a *auditingWriter) Flush() {
+	if f, ok := a.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// wrapAuditing emits request/response audit rows around an existing handler.
+// It peeks model/stream from the client request body, replays the body into
+// r.Body so the inner handler can parse it, tees the client-facing response
+// bytes, and reassembles SSE when the handler emits text/event-stream.
+// clientAPI controls which SSE grammar to reassemble against (the handler
+// emits in the client's format).
+//
+// When recorder is nil the wrapper is a no-op — callers never need to branch.
+func wrapAuditing(cfg GatewayCfg, recorder *Recorder, clientAPI string, inner http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if recorder == nil {
+			inner(w, r)
+			return
+		}
+		start := time.Now()
+
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodySize+1))
+		if err != nil {
+			http.Error(w, "request body read failed", http.StatusBadRequest)
+			return
+		}
+		if int64(len(body)) > maxRequestBodySize {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+
+		var peek struct {
+			Model  string `json:"model"`
+			Stream bool   `json:"stream"`
+		}
+		_ = json.Unmarshal(body, &peek)
+
+		reqID := recorder.Request(RequestMeta{
+			Gateway:   cfg.Name,
+			Direction: cfg.Direction().String(),
+			Model:     peek.Model,
+			Stream:    peek.Stream,
+			Method:    r.Method,
+			Path:      r.URL.Path,
+			Headers:   r.Header,
+			StartTime: start,
+		}, body)
+
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+
+		aw := &auditingWriter{ResponseWriter: w}
+		inner(aw, r)
+
+		status := aw.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		outcome := OutcomeOK
+		if status >= 400 {
+			outcome = OutcomeError
+		}
+
+		var summary *SSESummary
+		var usage *Usage
+		auditBody := aw.buf.Bytes()
+		ct := aw.Header().Get("Content-Type")
+		if strings.HasPrefix(strings.ToLower(ct), "text/event-stream") {
+			summary = reassembleSSE(auditBody, clientAPI)
+			if summary != nil {
+				usage = summary.Usage
+			}
+		} else {
+			usage = parseUsage(auditBody, clientAPI)
+		}
+
+		recorder.Response(reqID, ResponseMeta{
+			Status:    status,
+			Outcome:   outcome,
+			Usage:     usage,
+			Summary:   summary,
+			StartTime: start,
+			EndTime:   time.Now(),
+			Headers:   aw.Header(),
+		}, auditBody)
+	}
 }
 
 // expandHome resolves a leading "~/" to the user's home directory. Any other

@@ -73,13 +73,13 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 	dir := cfg.Direction()
 	switch dir {
 	case DirA2O:
-		mux.HandleFunc("POST /v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("POST /v1/messages", wrapAuditing(cfg, recorder, APIAnthropic, func(w http.ResponseWriter, r *http.Request) {
 			handleA2O(w, r, cfg, client, apiKey, log)
-		})
+		}))
 	case DirO2A:
-		mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("POST /v1/chat/completions", wrapAuditing(cfg, recorder, APIOpenAI, func(w http.ResponseWriter, r *http.Request) {
 			handleO2A(w, r, cfg, client, apiKey, log)
-		})
+		}))
 	case DirA2A, DirO2O:
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			handlePassthrough(w, r, cfg, client, apiKey, recorder, log)

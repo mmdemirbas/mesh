@@ -181,12 +181,18 @@ func (l *LogCfg) validate() error {
 	return nil
 }
 
-// ResolvedLevel returns the effective logging level, applying the default.
+// ResolvedLevel returns the effective logging level. A fully zero LogCfg
+// (no log: block in YAML) is silent — Level defaults to "metadata" only when
+// the user explicitly configured some other log field. This keeps gateways
+// with no log configuration from writing audit files.
 func (l *LogCfg) ResolvedLevel() string {
-	if l.Level == "" {
+	if l.Level != "" {
+		return l.Level
+	}
+	if l.Dir != "" || l.MaxFileSize != "" || l.MaxAge != "" {
 		return LogLevelMetadata
 	}
-	return l.Level
+	return LogLevelOff
 }
 
 // ResolvedDir returns the effective audit directory, applying the default.

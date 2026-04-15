@@ -104,12 +104,23 @@ func TestGatewayCfg_Direction(t *testing.T) {
 
 func TestLogCfg_Resolved(t *testing.T) {
 	t.Parallel()
-	t.Run("defaults", func(t *testing.T) {
+	t.Run("empty_cfg_is_silent", func(t *testing.T) {
 		t.Parallel()
 		var l LogCfg
-		if got := l.ResolvedLevel(); got != LogLevelMetadata {
-			t.Errorf("ResolvedLevel default = %q, want %q", got, LogLevelMetadata)
+		if got := l.ResolvedLevel(); got != LogLevelOff {
+			t.Errorf("ResolvedLevel on empty LogCfg = %q, want %q (no log: block should be silent)", got, LogLevelOff)
 		}
+	})
+	t.Run("defaults_when_any_field_set", func(t *testing.T) {
+		t.Parallel()
+		l := LogCfg{Dir: "/tmp/gw"}
+		if got := l.ResolvedLevel(); got != LogLevelMetadata {
+			t.Errorf("ResolvedLevel with dir set = %q, want %q (partial log block defaults to metadata)", got, LogLevelMetadata)
+		}
+	})
+	t.Run("resolved_helpers", func(t *testing.T) {
+		t.Parallel()
+		var l LogCfg
 		if got := l.ResolvedDir(); got != defaultLogDir {
 			t.Errorf("ResolvedDir default = %q, want %q", got, defaultLogDir)
 		}
