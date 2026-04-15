@@ -703,6 +703,39 @@ func TestResolveConflict_LocalWins(t *testing.T) {
 	}
 }
 
+// TestResolveConflict_StaleIndexMtime_LocalWritesWinOverRemote verifies that
+// if the caller passes a stale index mtime but the file on disk has been
+// modified after the scan — making it newer than the remote version —
+// resolveConflict consults the disk mtime and declares local the winner
+// rather than clobbering the user's latest edits.
+func TestResolveConflict_StaleIndexMtime_LocalWritesWinOverRemote(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file.txt")
+
+	// Simulate: scan recorded an old mtime, user then edited the file so the
+	// disk mtime is now the newest of the three timestamps.
+	scanTimeMtime := time.Now().Add(-2 * time.Hour).UnixNano()
+	remoteMtime := time.Now().Add(-1 * time.Hour).UnixNano()
+	writeFile(t, dir, "file.txt", "user's latest edit")
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	winner, err := resolveConflict(dir, "file.txt", scanTimeMtime, remoteMtime, "remote123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if winner != "local" {
+		t.Errorf("expected local to win (disk mtime newer than remote), got %q", winner)
+	}
+	// Original file must not be renamed.
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("user's edited file was clobbered: %v", err)
+	}
+}
+
 // --- Transfer tests ---
 
 func TestDownloadFile_PathTraversal(t *testing.T) {

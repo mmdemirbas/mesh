@@ -43,6 +43,10 @@ Security hardening, correctness, data integrity, protocol compliance.
 |------|-----------|----------------------------------------------|-------|
 | S1   | clipsync  | No TLS for clipsync HTTP                     | HTTPS only, auto-TLS with self-signed certs if none provided. Zero-config. |
 | FS4  | filesync  | No TLS / auth for filesync HTTP              | Same auto-TLS approach as S1 — share the implementation. |
+| B4   | filesync  | Conflict downloads bypass MaxConcurrent sem  | `syncFolder` dispatches `ActionDownload` through `sem`, but `ActionConflict` runs the remote download inline in the main loop. With N conflicts the main goroutine serializes N HTTP calls while concurrent `ActionDownload` goroutines also hit the httpClient — effective concurrency exceeds configured cap. Route conflict/delete through the same goroutine+semaphore pattern. |
+| B5   | filesync  | `maxIndexFiles=200000` hard cap per folder   | Evidence run: `code/` has 200k files, scan aborts every cycle (`folder exceeds max tracked files`). Change detection stops past the cap. Either bump default (needs memory analysis: ~400 bytes/entry × 500k = 200 MB), make it configurable per folder, or stream the index instead of loading it fully into memory. |
+| B6   | filesync  | `n.folders` read without `n.mu` in hot paths | `findFolder` takes `n.mu` but `GetFolderStatuses`, `GetConflicts`, `runScan`, `syncAllPeers`, `buildIndexExchange`, `persistFolder` all iterate `n.folders` without it. Safe today because the map is immutable after `Start`, but inconsistent with `findFolder`. Either document immutability and drop `n.mu` from `findFolder`, or take the lock everywhere. Needed before any future hot-reload work (F1). |
+| B7   | filesync  | `safePath` prefix check is incomplete        | `transfer.go:124` uses `strings.HasPrefix(clean, "..")` which does not catch paths like `a/../..`. Not exploitable — the abs-path comparison at line 137 is the real guard — but misleading. Replace with `filepath.Clean` + proper prefix check or drop the early check. |
 ---
 
 ## Tier 3 — Improve

@@ -18,6 +18,15 @@ import (
 func resolveConflict(folderRoot, relPath string, localMtimeNS, remoteMtimeNS int64, remoteDeviceID string) (winner string, err error) {
 	localPath := filepath.Join(folderRoot, filepath.FromSlash(relPath))
 
+	// Use the file's current on-disk mtime rather than the scan-time value —
+	// the user may have edited the file between scan and resolution, and
+	// renaming the (newly-latest) local copy to a conflict file would silently
+	// discard their edits. Fall back to the passed-in index mtime on stat
+	// error so we still make a reasonable decision.
+	if info, statErr := os.Stat(localPath); statErr == nil {
+		localMtimeNS = info.ModTime().UnixNano()
+	}
+
 	// Determine winner by mtime. If equal, remote wins to avoid data loss.
 	if localMtimeNS > remoteMtimeNS {
 		// Local wins — remote copy gets the conflict name.
