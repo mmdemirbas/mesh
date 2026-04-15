@@ -144,7 +144,13 @@ const activityHistorySize = 50
 func GetFolderStatuses() []FolderStatus {
 	var result []FolderStatus
 	activeNodes.ForEach(func(n *Node) {
-		for id, fs := range n.folders {
+		ids := make([]string, 0, len(n.folders))
+		for id := range n.folders {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			fs := n.folders[id]
 			fs.indexMu.RLock()
 			var count int
 			var totalBytes int64
@@ -202,14 +208,23 @@ func GetFolderStatuses() []FolderStatus {
 }
 
 // GetConflicts returns all conflict files across all active filesync folders.
+// Reads from the per-folder cache refreshed during scan — does not walk the
+// filesystem on the API path.
 func GetConflicts() []ConflictInfo {
 	var result []ConflictInfo
 	activeNodes.ForEach(func(n *Node) {
-		for id, fs := range n.folders {
-			conflicts, _ := listConflicts(fs.cfg.Path)
-			for _, c := range conflicts {
+		ids := make([]string, 0, len(n.folders))
+		for id := range n.folders {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			fs := n.folders[id]
+			fs.indexMu.RLock()
+			for _, c := range fs.conflicts {
 				result = append(result, ConflictInfo{FolderID: id, Path: c})
 			}
+			fs.indexMu.RUnlock()
 		}
 	})
 	return result
@@ -248,6 +263,7 @@ type folderState struct {
 	pending       map[string]PendingSummary // peerAddr -> most recent pending plan
 	peerLastError map[string]string         // peerAddr -> last transport error
 	dirCount      int                       // directory count from last scan (dashboard only)
+	conflicts     []string                  // conflict file paths from last scan (sorted)
 	indexMu       sync.RWMutex
 }
 
@@ -534,6 +550,12 @@ func (n *Node) runScan() {
 			slog.Warn("scan error", "folder", id, "error", err)
 		}
 		fs.dirCount = dirs
+
+		// Refresh conflicts cache so the API handler doesn't walk the filesystem.
+		if conf, cerr := listConflicts(fs.cfg.Path); cerr == nil {
+			sort.Strings(conf)
+			fs.conflicts = conf
+		}
 
 		// Purge old tombstones.
 		fs.index.purgeTombstones(tombstoneMaxAge)
