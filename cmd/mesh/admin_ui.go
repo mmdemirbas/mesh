@@ -1221,6 +1221,90 @@ function peerLabel(p) {
   return p.addr || '';
 }
 
+const expandedFolders = new Set();
+function toggleFolder(id) {
+  if (expandedFolders.has(id)) expandedFolders.delete(id);
+  else expandedFolders.add(id);
+  renderFilesync();
+}
+
+function fmtTime(t) {
+  if (!t || (typeof t === 'string' && t.startsWith('0001-01-01'))) {
+    return '<span style="color:var(--text-muted)">never</span>';
+  }
+  return timeAgo(t);
+}
+
+function renderFolderDetail(f) {
+  const ignores = (f.ignore_patterns||[]);
+  const ignoreHtml = ignores.length
+    ? ignores.map(p => '<span class="badge badge-off" style="margin:2px 4px 2px 0;font-family:var(--mono)">'+x(p)+'</span>').join('')
+    : '<span style="color:var(--text-muted)">none</span>';
+
+  const peers = f.peers||[];
+  const peerRowsHtml = peers.length ? peers.map(p => {
+    const pend = p.pending || {};
+    const total = (pend.downloads||0) + (pend.conflicts||0) + (pend.deletes||0);
+    const planParts = [];
+    if (pend.downloads) planParts.push('<span style="color:var(--green)">&#8595; '+pend.downloads+'</span>');
+    if (pend.conflicts) planParts.push('<span style="color:var(--red)">&#9888; '+pend.conflicts+'</span>');
+    if (pend.deletes)   planParts.push('<span style="color:var(--yellow)">&#10007; '+pend.deletes+'</span>');
+    const plan = planParts.length
+      ? planParts.join(' &middot; ') + ' <span style="color:var(--text-muted)">('+fmtBytes(pend.bytes||0)+')</span>'
+      : '<span style="color:var(--green)">in sync</span>';
+    const planAge = pend.updated_at && !pend.updated_at.startsWith('0001-01-01')
+      ? ' <span style="color:var(--text-muted)">&middot; '+timeAgo(pend.updated_at)+'</span>'
+      : '';
+    const errHtml = p.last_error
+      ? '<div style="color:var(--red);font-size:11px;margin-top:2px">'+x(p.last_error)+'</div>'
+      : '';
+    return '<tr>'
+      + '<td>'+x(p.name||'-')+'</td>'
+      + '<td style="font-family:var(--mono)">'+x(p.addr)+'</td>'
+      + '<td>'+fmtTime(p.last_sync)+'</td>'
+      + '<td style="font-family:var(--mono)">'+(p.last_seen_sequence||0)+' / '+(p.last_sent_sequence||0)+'</td>'
+      + '<td>'+plan+planAge+errHtml+'</td>'
+      + '<td>'+(total ? fmtTokens(total) : '0')+'</td>'
+      + '</tr>';
+  }).join('') : '<tr><td colspan="6" style="color:var(--text-muted)">No peers configured</td></tr>';
+
+  // Pending file preview, flattened across peers (label each entry by peer).
+  const previewRows = [];
+  for (const p of peers) {
+    const files = (p.pending && p.pending.files) || [];
+    for (const file of files) {
+      previewRows.push(
+        '<tr>'
+        + '<td><span class="badge badge-'+(file.action==='conflict'?'err':file.action==='delete'?'warn':'ok')+'">'+x(file.action)+'</span></td>'
+        + '<td style="font-family:var(--mono);color:var(--text-dim)">'+x(file.path)+'</td>'
+        + '<td>'+fmtBytes(file.size||0)+'</td>'
+        + '<td style="color:var(--text-muted)">'+x(peerLabel(p))+'</td>'
+        + '</tr>'
+      );
+    }
+  }
+  const previewHtml = previewRows.length
+    ? '<table style="margin-top:8px;width:100%"><thead><tr><th>Action</th><th>Path</th><th>Size</th><th>Peer</th></tr></thead><tbody>'
+      + previewRows.join('') + '</tbody></table>'
+      + '<div style="color:var(--text-muted);font-size:11px;margin-top:4px">Preview capped at 50 entries per peer.</div>'
+    : '<div style="color:var(--text-muted);margin-top:8px">No pending actions across peers.</div>';
+
+  return '<tr><td colspan="8" style="background:var(--bg-alt);padding:12px 16px">'
+    + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px 24px;margin-bottom:12px">'
+    +   '<div><div style="color:var(--text-muted);font-size:11px">PATH</div><div style="font-family:var(--mono)">'+x(f.path)+'</div></div>'
+    +   '<div><div style="color:var(--text-muted);font-size:11px">SEQUENCE</div><div style="font-family:var(--mono)">'+(f.sequence||0)+'</div></div>'
+    +   '<div><div style="color:var(--text-muted);font-size:11px">DIRECTION</div><div>'+x(f.direction)+'</div></div>'
+    +   '<div><div style="color:var(--text-muted);font-size:11px">FILES &middot; DIRS &middot; SIZE</div><div>'+fmtTokens(f.file_count)+' &middot; '+fmtTokens(f.dir_count||0)+' &middot; '+fmtBytes(f.total_bytes||0)+'</div></div>'
+    + '</div>'
+    + '<div style="margin-bottom:12px"><div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">IGNORE PATTERNS ('+ignores.length+')</div>'+ignoreHtml+'</div>'
+    + '<div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">PEERS &amp; SYNC PLAN</div>'
+    + '<table style="width:100%"><thead><tr><th>Name</th><th>Addr</th><th>Last sync</th><th>Seen / Sent seq</th><th>Plan</th><th>Total</th></tr></thead><tbody>'
+    + peerRowsHtml + '</tbody></table>'
+    + '<div style="color:var(--text-muted);font-size:11px;margin-top:12px;margin-bottom:4px">PENDING FILE PREVIEW</div>'
+    + previewHtml
+    + '</td></tr>';
+}
+
 function renderFilesync() {
   const filter = document.getElementById('fs-search').value.toLowerCase();
   let rows = folders.filter(f => {
@@ -1244,22 +1328,42 @@ function renderFilesync() {
   });
   const el = document.getElementById('fs-body');
   if (!rows.length) { el.innerHTML = '<tr><td colspan="8" style="color:var(--text-muted);padding:20px">No folders</td></tr>'; return; }
-  el.innerHTML = rows.map(f => {
+  let html = '';
+  for (const f of rows) {
     const dirBadge = f.direction === 'send-receive' ? 'badge-ok' :
                      f.direction === 'disabled' ? 'badge-off' :
                      f.direction === 'dry-run' ? 'badge-warn' : 'badge-ok';
     const peers = (f.peers||[]).map(peerLabel).map(x).join(', ');
-    const lastSync = f.last_sync && !f.last_sync.startsWith('0001-01-01')
-      ? timeAgo(f.last_sync)
-      : '<span style="color:var(--text-muted)">never</span>';
-    return '<tr><td style="font-weight:600">'+x(f.id)+'</td><td style="color:var(--text-dim)">'+x(f.path)+'</td>' +
-           '<td><span class="badge '+dirBadge+'">'+x(f.direction)+'</span></td>' +
-           '<td>'+fmtTokens(f.file_count)+'</td>' +
-           '<td>'+fmtTokens(f.dir_count||0)+'</td>' +
-           '<td>'+fmtBytes(f.total_bytes||0)+'</td>' +
-           '<td style="color:var(--text-muted)">'+lastSync+'</td>' +
-           '<td style="color:var(--text-dim)">'+peers+'</td></tr>';
-  }).join('');
+    const lastSync = fmtTime(f.last_sync);
+    const expanded = expandedFolders.has(f.id);
+    const arrow = expanded ? '&#9660;' : '&#9654;';
+    // Plan summary badge in the main row (aggregated across peers).
+    let pendDown=0, pendConf=0, pendDel=0;
+    for (const p of (f.peers||[])) {
+      const pp = p.pending||{};
+      pendDown += pp.downloads||0;
+      pendConf += pp.conflicts||0;
+      pendDel  += pp.deletes||0;
+    }
+    const planBits = [];
+    if (pendDown) planBits.push('<span style="color:var(--green)">&#8595;'+pendDown+'</span>');
+    if (pendConf) planBits.push('<span style="color:var(--red)">&#9888;'+pendConf+'</span>');
+    if (pendDel)  planBits.push('<span style="color:var(--yellow)">&#10007;'+pendDel+'</span>');
+    const planBadge = planBits.length
+      ? ' <span style="margin-left:8px;font-family:var(--mono);font-size:11px">'+planBits.join(' ')+'</span>'
+      : '';
+    html += '<tr style="cursor:pointer" onclick="toggleFolder(\''+xj(f.id)+'\')">'
+         +  '<td style="font-weight:600">'+arrow+' '+x(f.id)+planBadge+'</td>'
+         +  '<td style="color:var(--text-dim)">'+x(f.path)+'</td>'
+         +  '<td><span class="badge '+dirBadge+'">'+x(f.direction)+'</span></td>'
+         +  '<td>'+fmtTokens(f.file_count)+'</td>'
+         +  '<td>'+fmtTokens(f.dir_count||0)+'</td>'
+         +  '<td>'+fmtBytes(f.total_bytes||0)+'</td>'
+         +  '<td style="color:var(--text-muted)">'+lastSync+'</td>'
+         +  '<td style="color:var(--text-dim)">'+peers+'</td></tr>';
+    if (expanded) html += renderFolderDetail(f);
+  }
+  el.innerHTML = html;
 }
 
 function renderConflicts() {
