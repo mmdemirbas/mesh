@@ -76,6 +76,10 @@ type auditStatsRow struct {
 	FirstSeen         string `json:"first_seen,omitempty"`
 	LastSeen          string `json:"last_seen,omitempty"`
 	FirstModel        string `json:"first_model,omitempty"`
+	// Paths lists project paths touched by this session (session rows only),
+	// comma-joined. Sessions typically span one project; when a session talks
+	// to multiple, all of them show up so the UI never silently hides a path.
+	Paths string `json:"paths,omitempty"`
 }
 
 // auditStatsBucket is one point of the time series. Bucket boundaries are
@@ -186,6 +190,14 @@ func computeAuditStats(dir string, f statsFilter) (auditStatsResponse, error) {
 		mrow := upsertRow(models, pa.req.model)
 		applyPair(mrow, pa)
 
+		// Prefer a human-readable project name extracted from the system prompt
+		// over the raw URL path. Falls back to the URL path when the body has
+		// no working-directory hint (non-Claude-Code clients, passthrough mode).
+		projectKey := extractProjectPath(pa.req.body)
+		if projectKey == "" {
+			projectKey = pa.req.path
+		}
+
 		if pa.req.sessionID != "" {
 			srow := upsertRow(sessions, pa.req.sessionID)
 			applyPair(srow, pa)
@@ -195,15 +207,15 @@ func computeAuditStats(dir string, f statsFilter) (auditStatsResponse, error) {
 			if pa.req.turnIndex > srow.Turns {
 				srow.Turns = pa.req.turnIndex
 			}
+			if projectKey != "" && !containsCSV(srow.Paths, projectKey) {
+				if srow.Paths == "" {
+					srow.Paths = projectKey
+				} else {
+					srow.Paths += ", " + projectKey
+				}
+			}
 		}
 
-		// Prefer a human-readable project name extracted from the system prompt
-		// over the raw URL path. Falls back to the URL path when the body has
-		// no working-directory hint (non-Claude-Code clients, passthrough mode).
-		projectKey := extractProjectPath(pa.req.body)
-		if projectKey == "" {
-			projectKey = pa.req.path
-		}
 		if projectKey != "" {
 			applyPair(upsertRow(paths, projectKey), pa)
 		}
@@ -397,6 +409,32 @@ func parseStatsRow(line []byte) (auditStatsRowSource, bool) {
 		row.reasoningTokens = minimal.Summary.Usage.ReasoningTokens
 	}
 	return row, true
+}
+
+// containsCSV reports whether needle appears as a comma-joined entry in csv.
+// Exact match only — "foo/bar" does not match "foo/bar/baz".
+func containsCSV(csv, needle string) bool {
+	if csv == "" {
+		return false
+	}
+	for i := 0; i < len(csv); {
+		j := i
+		for j < len(csv) && csv[j] != ',' {
+			j++
+		}
+		entry := csv[i:j]
+		if len(entry) > 0 && entry[0] == ' ' {
+			entry = entry[1:]
+		}
+		if entry == needle {
+			return true
+		}
+		if j < len(csv) {
+			j++
+		}
+		i = j
+	}
+	return false
 }
 
 func upsertRow(m map[string]*auditStatsRow, key string) *auditStatsRow {

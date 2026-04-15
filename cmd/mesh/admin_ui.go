@@ -3126,10 +3126,11 @@ let gwSessSearch = '';
 function renderSessions() {
   const list = document.getElementById('gw-sess-list');
   if (!list) return;
-  const sessions = (gwStats && gwStats.by_session) || [];
+  const sessions = ((gwStats && gwStats.by_session) || []).slice()
+    .sort((a, b) => (b.last_seen||'').localeCompare(a.last_seen||''));
   const term = (gwSessSearch||'').toLowerCase();
   const filtered = term
-    ? sessions.filter(s => (s.key+' '+s.first_model).toLowerCase().includes(term))
+    ? sessions.filter(s => (s.key+' '+s.first_model+' '+(s.paths||'')).toLowerCase().includes(term))
     : sessions;
   if (!filtered.length) {
     list.innerHTML = '<div style="color:var(--text-muted);padding:12px">No sessions in window.</div>';
@@ -3143,6 +3144,7 @@ function renderSessions() {
       '<div class="id">'+x(s.key)+'</div>' +
       '<div class="meta">'+x(s.first_model||'?')+' · '+(s.turns||s.requests)+' turns · ' +
         ((s.input_tokens||0)+(s.output_tokens||0)).toLocaleString()+' tokens</div>' +
+      (s.paths ? '<div class="meta" style="color:var(--cyan)">'+x(s.paths)+'</div>' : '') +
       '<div class="meta">last '+x(timeAgo(s.last_seen||''))+'</div>' +
     '</div>';
   }).join('');
@@ -3211,21 +3213,31 @@ function renderSessionTimeline() {
     p.key = key;
     gwRowsByKey.set(key, p);
   });
-  gwRowsCache = pairs.slice().reverse();
+  // Compute delta-in chronologically (each turn vs the prior turn's input),
+  // then render newest-first so the most recent activity sits at the top.
   let prevIn = 0;
-  wrap.innerHTML = pairs.map((p, i) => {
+  pairs.forEach((p, i) => {
     const u = p.resp.usage || (p.resp.stream_summary||{}).usage || {};
     const totalIn = (u.input_tokens||0) + (u.cache_read_input_tokens||0) + (u.cache_creation_input_tokens||0);
-    const out = u.output_tokens||0;
-    const delta = i === 0 ? 0 : totalIn - prevIn;
+    p._totalIn = totalIn;
+    p._out = u.output_tokens||0;
+    p._delta = i === 0 ? null : totalIn - prevIn;
+    p._chronoIdx = i;
     prevIn = totalIn;
-    const deltaCls = delta > 0 ? 'delta-up' : delta < 0 ? 'delta-down' : '';
-    const deltaLabel = i === 0 ? '' : (delta >= 0 ? '+' : '') + delta.toLocaleString();
+  });
+  const displayPairs = pairs.slice().reverse();
+  gwRowsCache = displayPairs;
+  wrap.innerHTML = displayPairs.map((p) => {
+    const totalIn = p._totalIn;
+    const out = p._out;
+    const delta = p._delta;
+    const deltaCls = delta == null ? '' : delta > 0 ? 'delta-up' : delta < 0 ? 'delta-down' : '';
+    const deltaLabel = delta == null ? '' : (delta >= 0 ? '+' : '') + delta.toLocaleString();
     const stop = (p.resp.stream_summary||{}).stop_reason || '';
     const elapsed = p.resp.elapsed_ms ? p.resp.elapsed_ms+'ms' : '';
     const tools = ((p.resp.stream_summary||{}).tool_calls||[]).length;
     return '<div class="gw-turn" onclick="showGwDetail(\''+xj(p.key)+'\')">' +
-      '<div class="turn-no">#'+(p.req.turn_index||(i+1))+'</div>' +
+      '<div class="turn-no">#'+(p.req.turn_index||(p._chronoIdx+1))+'</div>' +
       '<div>' +
         '<div>'+fmtLocalTime(p.req.ts||'')+'  ·  ' +
           '<span style="color:var(--text-dim)">'+x(p.req.model||'?')+'</span>'+
