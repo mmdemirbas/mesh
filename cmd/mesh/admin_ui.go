@@ -2296,34 +2296,36 @@ function renderPlainText(s) {
     ' <span class="truncate" onclick="_txCollapse(\''+id+'\')">collapse</span></div>';
 }
 
-// splitCustomBlocks scans s for known pseudo-XML wrappers and returns an
-// ordered list of {kind:'text'|<tag>, text}. Tag matching is greedy by name:
-// any of the recognized tag names matches, plus a fallback for any other
-// well-formed <name>...</name> pair so unknown signals are still surfaced.
+// splitCustomBlocks scans s for pseudo-XML wrappers and returns an ordered
+// list of {kind:'text'|'block', name?, body?, text?}. Matches any
+// <name>...</name> pair where name is 3–41 lowercase alphanum+hyphen chars.
 //
-// The regex is intentionally non-DOM (we never trust the body to be HTML)
-// and uses a non-greedy body match to handle adjacent blocks correctly.
-const customTagPatternSrc =
-  '<(system-reminder|command-name|command-message|command-args|command-stdout|command-stderr|local-command-stdout|local-command-stderr|task-notification|user-prompt-submit-hook|stop-hook-feedback)\\b[^>]*>([\\s\\S]*?)<\\/\\1>';
-const customTagFallbackSrc =
-  '<([a-z][a-z0-9-]{2,40})\\b[^>]*>([\\s\\S]*?)<\\/\\1>';
+// A backreference-based combined (A|B) regex is NOT used here because
+// wrapping two /\1/-using patterns in a single outer group shifts \1 to
+// reference the outer group instead of the inner tag-name capture, silently
+// breaking all tag detection. Instead: find open tags with a plain regex,
+// then locate the matching close tag with a case-insensitive indexOf — the
+// same approach as the Go-side scanPreambleTags.
+const customTagOpenRe = /<([a-z][a-z0-9-]{2,40})\b[^>]*>/gi;
 function splitCustomBlocks(s) {
   const out = [];
   let i = 0;
-  // Combined regex: known tags first, then a generic fallback so unknown
-  // <foo>…</foo> blocks still surface as "Custom block".
-  const re = new RegExp('('+customTagPatternSrc+'|'+customTagFallbackSrc+')', 'gi');
+  customTagOpenRe.lastIndex = 0;
   let m;
-  while ((m = re.exec(s)) !== null) {
-    if (m.index > i) out.push({kind: 'text', text: s.slice(i, m.index)});
-    const knownName = m[2];   // capture from known list
-    const knownBody = m[3];
-    const anyName   = m[4];   // capture from fallback
-    const anyBody   = m[5];
-    const name = (knownName || anyName || '').toLowerCase();
-    const body = knownName ? knownBody : anyBody;
-    out.push({kind: 'block', name: name, body: body || ''});
-    i = m.index + m[0].length;
+  while ((m = customTagOpenRe.exec(s)) !== null) {
+    const openStart = m.index;
+    const openEnd   = openStart + m[0].length;
+    const name      = m[1].toLowerCase();
+    const closeTag  = '</' + name + '>';
+    // Case-insensitive close-tag search from just after the open tag.
+    const tail      = s.slice(openEnd);
+    const closeIdx  = tail.toLowerCase().indexOf(closeTag);
+    if (closeIdx < 0) continue; // no matching close tag — treat as plain text
+    // Text before this block.
+    if (openStart > i) out.push({kind: 'text', text: s.slice(i, openStart)});
+    out.push({kind: 'block', name, body: tail.slice(0, closeIdx)});
+    i = openEnd + closeIdx + closeTag.length;
+    customTagOpenRe.lastIndex = i; // skip past the matched block
   }
   if (i < s.length) out.push({kind: 'text', text: s.slice(i)});
   return out;
