@@ -31,24 +31,94 @@ var activeNodes nodeutil.Registry[Node]
 
 // FolderStatus is an exported summary of a folder's sync state for the admin API.
 type FolderStatus struct {
-	ID         string      `json:"id"`
-	Path       string      `json:"path"`
-	Direction  string      `json:"direction"`
-	FileCount  int         `json:"file_count"`
-	DirCount   int         `json:"dir_count"`
-	TotalBytes int64       `json:"total_bytes"`
-	Peers      []FolderPeer `json:"peers"`
+	ID             string       `json:"id"`
+	Path           string       `json:"path"`
+	Direction      string       `json:"direction"`
+	FileCount      int          `json:"file_count"`
+	DirCount       int          `json:"dir_count"`
+	TotalBytes     int64        `json:"total_bytes"`
+	Sequence       int64        `json:"sequence"`
+	IgnorePatterns []string     `json:"ignore_patterns,omitempty"`
+	Peers          []FolderPeer `json:"peers"`
 	// LastSync is the most recent successful sync time across all peers.
 	// Zero value means no peer has synced yet.
 	LastSync time.Time `json:"last_sync"`
 }
 
 // FolderPeer is a resolved peer entry for a folder: the configured nickname
-// plus the address it expanded to. Name may be empty if the address was
-// injected without going through the named-peer map (tests, legacy configs).
+// plus the address it expanded to, per-peer sync progress, and the most
+// recent pending sync plan computed from diffing against that peer.
 type FolderPeer struct {
-	Name string `json:"name"`
-	Addr string `json:"addr"`
+	Name             string          `json:"name"`
+	Addr             string          `json:"addr"`
+	LastSync         time.Time       `json:"last_sync"`
+	LastSeenSequence int64           `json:"last_seen_sequence"`
+	LastSentSequence int64           `json:"last_sent_sequence"`
+	LastError        string          `json:"last_error,omitempty"`
+	Pending          *PendingSummary `json:"pending,omitempty"`
+}
+
+// PendingSummary is the most recent sync plan against a peer: counts, total
+// bytes, and a capped preview of affected files.
+type PendingSummary struct {
+	UpdatedAt time.Time     `json:"updated_at"`
+	Downloads int           `json:"downloads"`
+	Conflicts int           `json:"conflicts"`
+	Deletes   int           `json:"deletes"`
+	Bytes     int64         `json:"bytes"`
+	Files     []PendingFile `json:"files,omitempty"`
+}
+
+// PendingFile is one entry in a pending-plan preview.
+type PendingFile struct {
+	Path   string `json:"path"`
+	Action string `json:"action"`
+	Size   int64  `json:"size"`
+}
+
+const pendingFilePreviewLimit = 50
+
+func actionName(a DiffAction) string {
+	switch a {
+	case ActionDownload:
+		return "download"
+	case ActionConflict:
+		return "conflict"
+	case ActionDelete:
+		return "delete"
+	}
+	return "unknown"
+}
+
+func buildPendingSummary(actions []DiffEntry) PendingSummary {
+	ps := PendingSummary{UpdatedAt: time.Now()}
+	for _, a := range actions {
+		switch a.Action {
+		case ActionDownload:
+			ps.Downloads++
+		case ActionConflict:
+			ps.Conflicts++
+		case ActionDelete:
+			ps.Deletes++
+		}
+		ps.Bytes += a.RemoteSize
+		if len(ps.Files) < pendingFilePreviewLimit {
+			ps.Files = append(ps.Files, PendingFile{
+				Path:   a.Path,
+				Action: actionName(a.Action),
+				Size:   a.RemoteSize,
+			})
+		}
+	}
+	return ps
+}
+
+func clonePendingSummary(p PendingSummary) *PendingSummary {
+	out := p
+	if len(p.Files) > 0 {
+		out.Files = append([]PendingFile(nil), p.Files...)
+	}
+	return &out
 }
 
 // ConflictInfo describes a conflict file found in a synced folder.
@@ -86,6 +156,7 @@ func GetFolderStatuses() []FolderStatus {
 				totalBytes += e.Size
 			}
 			dirs := fs.dirCount
+			seq := fs.index.Sequence
 			var lastSync time.Time
 			peers := make([]FolderPeer, len(fs.cfg.Peers))
 			for i, addr := range fs.cfg.Peers {
@@ -93,22 +164,37 @@ func GetFolderStatuses() []FolderStatus {
 				if i < len(fs.cfg.PeerNames) {
 					name = fs.cfg.PeerNames[i]
 				}
-				peers[i] = FolderPeer{Name: name, Addr: addr}
-				if ps, ok := fs.peers[addr]; ok && ps.LastSync.After(lastSync) {
-					lastSync = ps.LastSync
+				fp := FolderPeer{Name: name, Addr: addr}
+				if ps, ok := fs.peers[addr]; ok {
+					fp.LastSync = ps.LastSync
+					fp.LastSeenSequence = ps.LastSeenSequence
+					fp.LastSentSequence = ps.LastSentSequence
+					if ps.LastSync.After(lastSync) {
+						lastSync = ps.LastSync
+					}
 				}
+				if msg, ok := fs.peerLastError[addr]; ok {
+					fp.LastError = msg
+				}
+				if p, ok := fs.pending[addr]; ok {
+					fp.Pending = clonePendingSummary(p)
+				}
+				peers[i] = fp
 			}
+			ignores := append([]string(nil), fs.cfg.IgnorePatterns...)
 			fs.indexMu.RUnlock()
 
 			result = append(result, FolderStatus{
-				ID:         id,
-				Path:       fs.cfg.Path,
-				Direction:  fs.cfg.Direction,
-				FileCount:  count,
-				DirCount:   dirs,
-				TotalBytes: totalBytes,
-				Peers:      peers,
-				LastSync:   lastSync,
+				ID:             id,
+				Path:           fs.cfg.Path,
+				Direction:      fs.cfg.Direction,
+				FileCount:      count,
+				DirCount:       dirs,
+				TotalBytes:     totalBytes,
+				Sequence:       seq,
+				IgnorePatterns: ignores,
+				Peers:          peers,
+				LastSync:       lastSync,
 			})
 		}
 	})
@@ -155,12 +241,14 @@ func (n *Node) recordActivity(a SyncActivity) {
 
 // folderState holds runtime state for a single synced folder.
 type folderState struct {
-	cfg      config.FolderCfg
-	index    *FileIndex
-	ignore   *ignoreMatcher
-	peers    map[string]PeerState // peerAddr -> state
-	dirCount int                  // directory count from last scan (dashboard only)
-	indexMu  sync.RWMutex
+	cfg           config.FolderCfg
+	index         *FileIndex
+	ignore        *ignoreMatcher
+	peers         map[string]PeerState      // peerAddr -> state
+	pending       map[string]PendingSummary // peerAddr -> most recent pending plan
+	peerLastError map[string]string         // peerAddr -> last transport error
+	dirCount      int                       // directory count from last scan (dashboard only)
+	indexMu       sync.RWMutex
 }
 
 // Node is the runtime instance for a filesync configuration.
@@ -261,10 +349,12 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		ignore := newIgnoreMatcher(fcfg.IgnorePatterns)
 
 		fs := &folderState{
-			cfg:    fcfg,
-			index:  idx,
-			ignore: ignore,
-			peers:  peers,
+			cfg:           fcfg,
+			index:         idx,
+			ignore:        ignore,
+			peers:         peers,
+			pending:       make(map[string]PendingSummary),
+			peerLastError: make(map[string]string),
 		}
 		n.folders[fcfg.ID] = fs
 
@@ -532,8 +622,15 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	if err != nil {
 		slog.Debug("sync failed", "folder", folderID, "peer", peerAddr, "error", err)
 		state.Global.Update("filesync-peer", stateKey, state.Retrying, err.Error())
+		fs.indexMu.Lock()
+		fs.peerLastError[peerAddr] = err.Error()
+		fs.indexMu.Unlock()
 		return
 	}
+
+	fs.indexMu.Lock()
+	delete(fs.peerLastError, peerAddr)
+	fs.indexMu.Unlock()
 
 	state.Global.Update("filesync-peer", stateKey, state.Connected, "")
 
@@ -556,6 +653,14 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	lastSeenSeq := peerLastSeq
 
 	actions := fs.index.diff(remoteFileIndex, lastSeenSeq, fs.cfg.Direction)
+	fs.indexMu.Unlock()
+
+	fs.indexMu.Lock()
+	if len(actions) == 0 {
+		delete(fs.pending, peerAddr)
+	} else {
+		fs.pending[peerAddr] = buildPendingSummary(actions)
+	}
 	fs.indexMu.Unlock()
 
 	if len(actions) == 0 {
