@@ -615,10 +615,29 @@ func TestAdminUIGatewayDetailMarkup(t *testing.T) {
 		`pre-ctx`,
 		`post-ctx`,
 		`ctx-list`,
+		`ctx-preview`,
+		`ctx-summary-meta`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("UI missing %q (regression: detail layout collapsed back to single pane)", want)
 		}
+	}
+}
+
+// TestAdminUICacheControl ensures the SPA is served with Cache-Control: no-store
+// so the browser never shows a stale version after a binary update.
+func TestAdminUICacheControl(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(buildAdminMux(newLogRing(4), ""))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/ui/gateway")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
 	}
 }
 

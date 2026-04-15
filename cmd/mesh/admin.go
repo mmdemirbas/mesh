@@ -322,6 +322,7 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 	// The tab parameter selects the initial view.
 	uiHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
 		_, _ = fmt.Fprint(w, adminUI)
 	})
 	mux.Handle("/ui", uiHandler)
