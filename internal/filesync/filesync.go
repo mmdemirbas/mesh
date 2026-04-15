@@ -31,11 +31,24 @@ var activeNodes nodeutil.Registry[Node]
 
 // FolderStatus is an exported summary of a folder's sync state for the admin API.
 type FolderStatus struct {
-	ID        string   `json:"id"`
-	Path      string   `json:"path"`
-	Direction string   `json:"direction"`
-	FileCount int      `json:"file_count"`
-	Peers     []string `json:"peers"`
+	ID         string      `json:"id"`
+	Path       string      `json:"path"`
+	Direction  string      `json:"direction"`
+	FileCount  int         `json:"file_count"`
+	DirCount   int         `json:"dir_count"`
+	TotalBytes int64       `json:"total_bytes"`
+	Peers      []FolderPeer `json:"peers"`
+	// LastSync is the most recent successful sync time across all peers.
+	// Zero value means no peer has synced yet.
+	LastSync time.Time `json:"last_sync"`
+}
+
+// FolderPeer is a resolved peer entry for a folder: the configured nickname
+// plus the address it expanded to. Name may be empty if the address was
+// injected without going through the named-peer map (tests, legacy configs).
+type FolderPeer struct {
+	Name string `json:"name"`
+	Addr string `json:"addr"`
 }
 
 // ConflictInfo describes a conflict file found in a synced folder.
@@ -63,15 +76,39 @@ func GetFolderStatuses() []FolderStatus {
 	activeNodes.ForEach(func(n *Node) {
 		for id, fs := range n.folders {
 			fs.indexMu.RLock()
-			count := fs.index.activeCount()
+			var count int
+			var totalBytes int64
+			for _, e := range fs.index.Files {
+				if e.Deleted {
+					continue
+				}
+				count++
+				totalBytes += e.Size
+			}
+			dirs := fs.dirCount
+			var lastSync time.Time
+			peers := make([]FolderPeer, len(fs.cfg.Peers))
+			for i, addr := range fs.cfg.Peers {
+				name := ""
+				if i < len(fs.cfg.PeerNames) {
+					name = fs.cfg.PeerNames[i]
+				}
+				peers[i] = FolderPeer{Name: name, Addr: addr}
+				if ps, ok := fs.peers[addr]; ok && ps.LastSync.After(lastSync) {
+					lastSync = ps.LastSync
+				}
+			}
 			fs.indexMu.RUnlock()
 
 			result = append(result, FolderStatus{
-				ID:        id,
-				Path:      fs.cfg.Path,
-				Direction: fs.cfg.Direction,
-				FileCount: count,
-				Peers:     fs.cfg.Peers,
+				ID:         id,
+				Path:       fs.cfg.Path,
+				Direction:  fs.cfg.Direction,
+				FileCount:  count,
+				DirCount:   dirs,
+				TotalBytes: totalBytes,
+				Peers:      peers,
+				LastSync:   lastSync,
 			})
 		}
 	})
@@ -118,11 +155,12 @@ func (n *Node) recordActivity(a SyncActivity) {
 
 // folderState holds runtime state for a single synced folder.
 type folderState struct {
-	cfg     config.FolderCfg
-	index   *FileIndex
-	ignore  *ignoreMatcher
-	peers   map[string]PeerState // peerAddr -> state
-	indexMu sync.RWMutex
+	cfg      config.FolderCfg
+	index    *FileIndex
+	ignore   *ignoreMatcher
+	peers    map[string]PeerState // peerAddr -> state
+	dirCount int                  // directory count from last scan (dashboard only)
+	indexMu  sync.RWMutex
 }
 
 // Node is the runtime instance for a filesync configuration.
@@ -393,10 +431,11 @@ func (n *Node) runScan() {
 		fs.indexMu.Lock()
 		state.Global.Update("filesync-folder", id, state.Connecting, "scanning")
 
-		changed, count, err := fs.index.scan(fs.cfg.Path, fs.ignore)
+		changed, count, dirs, err := fs.index.scan(fs.cfg.Path, fs.ignore)
 		if err != nil {
 			slog.Warn("scan error", "folder", id, "error", err)
 		}
+		fs.dirCount = dirs
 
 		// Purge old tombstones.
 		fs.index.purgeTombstones(tombstoneMaxAge)

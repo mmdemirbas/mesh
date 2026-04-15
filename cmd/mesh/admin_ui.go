@@ -638,6 +638,9 @@ tbody tr:last-child td { border-bottom: none; }
             <th data-sort="path">Path <span class="sort-arrow"></span></th>
             <th data-sort="direction">Direction <span class="sort-arrow"></span></th>
             <th data-sort="file_count">Files <span class="sort-arrow"></span></th>
+            <th data-sort="dir_count">Dirs <span class="sort-arrow"></span></th>
+            <th data-sort="total_bytes">Size <span class="sort-arrow"></span></th>
+            <th data-sort="last_sync">Last sync <span class="sort-arrow"></span></th>
             <th data-sort="peers">Peers <span class="sort-arrow"></span></th>
           </tr></thead>
           <tbody id="fs-body"></tbody>
@@ -1121,6 +1124,7 @@ function renderStats() {
   const down = comps.filter(c => c.status === 'failed').length;
   const pending = comps.length - up - down;
   const totalFiles = folders.reduce((s,f) => s + (f.file_count||0), 0);
+  const totalBytes = folders.reduce((s,f) => s + (f.total_bytes||0), 0);
   document.getElementById('dash-stats').innerHTML =
     stat('Components', comps.length, up+' up') +
     stat('Healthy', up, comps.length ? Math.round(up/comps.length*100)+'%' : '-', up === comps.length ? 'var(--green)' : 'var(--yellow)') +
@@ -1129,6 +1133,7 @@ function renderStats() {
   document.getElementById('fs-stats').innerHTML =
     stat('Folders', folders.length, '') +
     stat('Total Files', totalFiles.toLocaleString(), '') +
+    stat('Total Size', fmtBytes(totalBytes), '') +
     stat('Conflicts', conflicts.length, '', conflicts.length > 0 ? 'var(--red)' : 'var(--green)');
 }
 
@@ -1187,29 +1192,52 @@ function renderDashLogs() {
   el.scrollTop = el.scrollHeight;
 }
 
+function peerLabel(p) {
+  // Backward compat: if peers is an array of strings (old API), fall back.
+  if (typeof p === 'string') return p;
+  if (!p) return '';
+  if (p.name) return p.name + ' (' + p.addr + ')';
+  return p.addr || '';
+}
+
 function renderFilesync() {
   const filter = document.getElementById('fs-search').value.toLowerCase();
   let rows = folders.filter(f => {
     if (!filter) return true;
-    return (f.id+f.path+f.direction+(f.peers||[]).join('')).toLowerCase().includes(filter);
+    const peerText = (f.peers||[]).map(peerLabel).join(' ');
+    return (f.id+f.path+f.direction+peerText).toLowerCase().includes(filter);
   });
   rows.sort((a,b) => {
     let va, vb;
-    if (fsSort.col === 'file_count') { va = a.file_count||0; vb = b.file_count||0; return fsSort.asc ? va-vb : vb-va; }
-    if (fsSort.col === 'peers') { va = (a.peers||[]).join(','); vb = (b.peers||[]).join(','); }
+    if (fsSort.col === 'file_count' || fsSort.col === 'dir_count' || fsSort.col === 'total_bytes') {
+      va = a[fsSort.col]||0; vb = b[fsSort.col]||0; return fsSort.asc ? va-vb : vb-va;
+    }
+    if (fsSort.col === 'last_sync') {
+      va = a.last_sync ? Date.parse(a.last_sync) : 0;
+      vb = b.last_sync ? Date.parse(b.last_sync) : 0;
+      return fsSort.asc ? va-vb : vb-va;
+    }
+    if (fsSort.col === 'peers') { va = (a.peers||[]).map(peerLabel).join(','); vb = (b.peers||[]).map(peerLabel).join(','); }
     else { va = String(a[fsSort.col]||''); vb = String(b[fsSort.col]||''); }
     return fsSort.asc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
   });
   const el = document.getElementById('fs-body');
-  if (!rows.length) { el.innerHTML = '<tr><td colspan="5" style="color:var(--text-muted);padding:20px">No folders</td></tr>'; return; }
+  if (!rows.length) { el.innerHTML = '<tr><td colspan="8" style="color:var(--text-muted);padding:20px">No folders</td></tr>'; return; }
   el.innerHTML = rows.map(f => {
     const dirBadge = f.direction === 'send-receive' ? 'badge-ok' :
                      f.direction === 'disabled' ? 'badge-off' :
                      f.direction === 'dry-run' ? 'badge-warn' : 'badge-ok';
+    const peers = (f.peers||[]).map(peerLabel).map(x).join(', ');
+    const lastSync = f.last_sync && !f.last_sync.startsWith('0001-01-01')
+      ? timeAgo(f.last_sync)
+      : '<span style="color:var(--text-muted)">never</span>';
     return '<tr><td style="font-weight:600">'+x(f.id)+'</td><td style="color:var(--text-dim)">'+x(f.path)+'</td>' +
            '<td><span class="badge '+dirBadge+'">'+x(f.direction)+'</span></td>' +
            '<td>'+fmtTokens(f.file_count)+'</td>' +
-           '<td style="color:var(--text-dim)">'+x((f.peers||[]).join(', '))+'</td></tr>';
+           '<td>'+fmtTokens(f.dir_count||0)+'</td>' +
+           '<td>'+fmtBytes(f.total_bytes||0)+'</td>' +
+           '<td style="color:var(--text-muted)">'+lastSync+'</td>' +
+           '<td style="color:var(--text-dim)">'+peers+'</td></tr>';
   }).join('');
 }
 
@@ -1514,7 +1542,7 @@ const endpoints = [
   {method:'GET', path:'/api/logs', desc:'Recent log lines as a JSON string array. ANSI escape codes are stripped.'},
   {method:'GET', path:'/api/logs/file?offset=0&limit=1048576', desc:'Full log file (plain text). Query params: offset (byte), limit (bytes, default 1MB). Header X-Log-Size gives total file size.'},
   {method:'GET', path:'/api/metrics', desc:'Prometheus text format metrics: mesh_component_up, mesh_bytes_tx_total, mesh_bytes_rx_total, mesh_active_streams, mesh_uptime_seconds, mesh_auth_failures_total.'},
-  {method:'GET', path:'/api/filesync/folders', desc:'Filesync folder statuses as JSON array: id, path, direction, file_count, peers.'},
+  {method:'GET', path:'/api/filesync/folders', desc:'Filesync folder statuses as JSON array: id, path, direction, file_count, dir_count, total_bytes, last_sync, peers (array of {name, addr}).'},
   {method:'GET', path:'/api/filesync/conflicts', desc:'Conflict files as JSON array: folder_id, path.'},
   {method:'GET', path:'/api/gateway/audit?gateway=NAME&limit=N&session=&model=&outcome=&since=&until=&min_tokens=', desc:'Recent audit rows. Filters: session (12-char hex from messages[0] hash), model, outcome (ok|error|truncated|client_cancelled), since/until (RFC3339), min_tokens (req+resp pair total). Returns paired rows.'},
   {method:'GET', path:'/api/gateway/audit/pair?gateway=NAME&id=N&run=HEX', desc:'Full request and response rows for a single audit pair. Required: gateway, id, run. Used by the detail card to fetch bodies on demand.'},

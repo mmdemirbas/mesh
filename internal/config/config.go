@@ -181,6 +181,11 @@ type FolderCfg struct {
 	// Resolved peer addresses (host:port). Used for outgoing sync; DNS
 	// resolution for outgoing connections is left to the http client.
 	Peers []string
+	// PeerNames is parallel to Peers (same length, same index). Each entry is
+	// the short nickname from FilesyncCfg.Peers that produced the address at
+	// the same index — preserved so the UI can display "name (addr)" without
+	// reverse-mapping.
+	PeerNames []string
 	// AllowedPeerHosts is the IP set (one entry per resolved address) used
 	// by filesync.isPeerConfigured to validate incoming HTTP requests.
 	// Populated from Peers at Resolve() time: hostnames are expanded via
@@ -207,12 +212,16 @@ func (c *FilesyncCfg) Resolve() error {
 
 		// Resolve peer names to addresses.
 		var resolvedPeers []string
+		var resolvedPeerNames []string
 		for _, name := range peerNames {
 			addrs, ok := c.Peers[name]
 			if !ok {
 				return fmt.Errorf("folder %q: unknown peer %q", id, name)
 			}
-			resolvedPeers = append(resolvedPeers, addrs...)
+			for _, a := range addrs {
+				resolvedPeers = append(resolvedPeers, a)
+				resolvedPeerNames = append(resolvedPeerNames, name)
+			}
 		}
 
 		// Direction: folder overrides defaults, fallback to "send-receive".
@@ -233,6 +242,7 @@ func (c *FilesyncCfg) Resolve() error {
 			ID:               id,
 			Path:             expandHome(raw.Path),
 			Peers:            resolvedPeers,
+			PeerNames:        resolvedPeerNames,
 			AllowedPeerHosts: resolveAllowedPeerHosts(id, resolvedPeers),
 			Direction:        direction,
 			IgnorePatterns:   patterns,

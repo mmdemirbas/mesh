@@ -146,8 +146,9 @@ func (idx *FileIndex) activeCount() int {
 }
 
 // scan walks the folder, updates the index, cleans stale temp files, and
-// returns whether any files changed and the active (non-deleted) file count.
-func (idx *FileIndex) scan(folderRoot string, ignore *ignoreMatcher) (changed bool, activeCount int, err error) {
+// returns whether any files changed, the active (non-deleted) file count,
+// and the number of directories walked (excluding the root and ignored subtrees).
+func (idx *FileIndex) scan(folderRoot string, ignore *ignoreMatcher) (changed bool, activeCount, dirCount int, err error) {
 	changed = false
 	seen := make(map[string]struct{})
 	tempCutoff := time.Now().Add(-maxTempFileAge)
@@ -186,6 +187,7 @@ func (idx *FileIndex) scan(folderRoot string, ignore *ignoreMatcher) (changed bo
 		}
 
 		if isDir {
+			dirCount++
 			return nil
 		}
 
@@ -237,7 +239,7 @@ func (idx *FileIndex) scan(folderRoot string, ignore *ignoreMatcher) (changed bo
 		return nil
 	})
 	if err != nil {
-		return changed, len(seen), fmt.Errorf("scan %s: %w", folderRoot, err)
+		return changed, len(seen), dirCount, fmt.Errorf("scan %s: %w", folderRoot, err)
 	}
 
 	// Mark deletions: entries in index not seen on disk.
@@ -256,7 +258,7 @@ func (idx *FileIndex) scan(folderRoot string, ignore *ignoreMatcher) (changed bo
 	}
 
 	// P7: len(seen) is the active file count — computed during walk, not a separate loop.
-	return changed, len(seen), nil
+	return changed, len(seen), dirCount, nil
 }
 
 // hashFile computes the SHA-256 hex digest of a file.
