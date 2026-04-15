@@ -1183,7 +1183,7 @@ function fmtTokens(n) {
 function badge(status) {
   const s = String(status);
   if (s === 'listening' || s === 'connected') return '<span class="badge badge-ok">'+x(s)+'</span>';
-  if (s === 'connecting' || s === 'retrying') return '<span class="badge badge-warn">'+x(s)+'</span>';
+  if (s === 'connecting' || s === 'retrying' || s === 'scanning' || s === 'starting') return '<span class="badge badge-warn">'+x(s)+'</span>';
   if (s === 'failed') return '<span class="badge badge-err">'+x(s)+'</span>';
   return '<span class="badge badge-off">'+x(s)+'</span>';
 }

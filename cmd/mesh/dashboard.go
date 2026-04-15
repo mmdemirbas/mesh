@@ -384,7 +384,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		case state.Listening, state.Connected:
 			color = cGreen
 			indicator = "🟢"
-		case state.Connecting, state.Retrying:
+		case state.Connecting, state.Retrying, state.Scanning:
 			color = cYellow
 			indicator = "🟡"
 		case state.Failed:
@@ -594,12 +594,12 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 						fSt = cGray + "[starting]" + cReset
 					case comp.Status == state.Connected:
 						fSt = cGreen + "[idle]" + cReset
+					case comp.Status == state.Scanning:
+						fSt = cYellow + "[scanning]" + cReset
+					case comp.Status == state.Starting:
+						fSt = cYellow + "[loading]" + cReset
 					case comp.Status == state.Connecting:
-						if comp.Message == "scanning" {
-							fSt = cYellow + "[scanning]" + cReset
-						} else {
-							fSt = cYellow + "[syncing]" + cReset
-						}
+						fSt = cYellow + "[syncing]" + cReset
 					case comp.Status == state.Retrying:
 						fSt = cYellow + "[retrying]" + cReset
 					case comp.Status == state.Failed:

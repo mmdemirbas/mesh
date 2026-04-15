@@ -27,21 +27,22 @@ const (
 	Connected  Status = "connected"
 	Failed     Status = "failed"
 	Retrying   Status = "retrying"
+	Scanning   Status = "scanning"
 )
 
 // Metrics tracks live connection activity using lock-free atomic counters.
 // A single Metrics instance is shared across all forwards within a forward set
 // so the dashboard can show aggregate activity per connection.
 type Metrics struct {
-	BytesTx   atomic.Int64
-	BytesRx   atomic.Int64
-	Streams   atomic.Int32
-	TokensIn       atomic.Int64 // gateway-only: prompt tokens accumulated across requests
-	TokensOut      atomic.Int64 // gateway-only: completion tokens accumulated across requests
-	TokensCacheRd  atomic.Int64 // gateway-only: prompt tokens served from prompt cache
-	TokensCacheWr  atomic.Int64 // gateway-only: prompt tokens written to cache (Anthropic)
-	TokensReason   atomic.Int64 // gateway-only: reasoning tokens (OpenAI o-series)
-	StartTime      atomic.Int64 // unix nanoseconds; reset on each reconnect
+	BytesTx       atomic.Int64
+	BytesRx       atomic.Int64
+	Streams       atomic.Int32
+	TokensIn      atomic.Int64 // gateway-only: prompt tokens accumulated across requests
+	TokensOut     atomic.Int64 // gateway-only: completion tokens accumulated across requests
+	TokensCacheRd atomic.Int64 // gateway-only: prompt tokens served from prompt cache
+	TokensCacheWr atomic.Int64 // gateway-only: prompt tokens written to cache (Anthropic)
+	TokensReason  atomic.Int64 // gateway-only: reasoning tokens (OpenAI o-series)
+	StartTime     atomic.Int64 // unix nanoseconds; reset on each reconnect
 }
 
 // Reset zeroes counters and sets StartTime to now. Used on reconnect.
