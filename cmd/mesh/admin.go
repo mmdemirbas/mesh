@@ -399,6 +399,51 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 		_ = json.NewEncoder(w).Encode(out)
 	})
 
+	// GET /api/gateway/audit/stats — aggregated counters for one gateway.
+	// Required: gateway=<name>. Optional: window (1h|24h|7d|30d|all|<dur>),
+	// bucket (minute|hour|day), session, model, since, until.
+	mux.HandleFunc("GET /api/gateway/audit/stats", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		q := r.URL.Query()
+		name := q.Get("gateway")
+		if name == "" {
+			http.Error(w, "missing gateway", http.StatusBadRequest)
+			return
+		}
+		dirs := gateway.AuditDirs()
+		dir, ok := dirs[name]
+		if !ok {
+			http.Error(w, "unknown gateway", http.StatusNotFound)
+			return
+		}
+		now := time.Now()
+		since, until := parseWindowParam(q.Get("window"), now)
+		// Explicit since/until override the canned window.
+		if v := q.Get("since"); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				since = t
+			}
+		}
+		if v := q.Get("until"); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				until = t
+			}
+		}
+		f := statsFilter{
+			session: q.Get("session"),
+			model:   q.Get("model"),
+			since:   since,
+			until:   until,
+			bucket:  parseBucketParam(q.Get("bucket")),
+		}
+		stats, err := computeAuditStats(dir, f)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(stats)
+	})
+
 	// GET /api/gateway/audit/pair — full request+response rows for one pair.
 	// Required: gateway=<name>, id=<uint64>, run=<hex>.
 	mux.HandleFunc("GET /api/gateway/audit/pair", func(w http.ResponseWriter, r *http.Request) {
