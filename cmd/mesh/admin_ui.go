@@ -256,8 +256,18 @@ tbody tr:last-child td { border-bottom: none; }
 .bubble .pre-ctx > summary .ctx-summary-meta,
 .bubble .post-ctx > summary .ctx-summary-meta { margin-left: auto; color: var(--text-dim); font-family: var(--mono); }
 
-/* Block list — one row per injected block, name + size + % of message */
-.ctx-list { margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
+/* Block list — one row per injected block, name + size + % of message.
+   Explicit display rules on both the closed and open states are required
+   because author CSS (display:flex / display:block) overrides the UA
+   stylesheet's display:none for hidden <details> children. Without these
+   rules the ctx-list and ctx-body are always visible even when closed. */
+.pre-ctx > .ctx-list,
+.post-ctx > .ctx-list { display: none; }
+.pre-ctx[open] > .ctx-list,
+.post-ctx[open] > .ctx-list { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+.ctx-item > .ctx-body { display: none; }
+.ctx-item[open] > .ctx-body { display: block; }
+.ctx-list { display: flex; flex-direction: column; gap: 2px; }
 .ctx-item { border: 1px solid var(--border); border-radius: 3px; background: var(--bg); }
 .ctx-item > summary {
   list-style: none; cursor: pointer; user-select: none;
