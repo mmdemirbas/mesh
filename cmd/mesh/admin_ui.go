@@ -182,6 +182,24 @@ tbody tr:last-child td { border-bottom: none; }
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
   color: var(--text-muted); margin: 8px 0 4px;
 }
+/* Sub-view segmented control */
+.gw-sub-btn {
+  padding: 6px 14px; cursor: pointer; font-size: 12px;
+  background: var(--bg-input); color: var(--text-dim);
+  border-right: 1px solid var(--border);
+}
+.gw-sub-btn:last-child { border-right: none; }
+.gw-sub-btn.active { background: var(--bg-card); color: var(--green); }
+.gw-sub-btn:hover { color: var(--text); }
+
+/* Stacked SVG bar chart */
+.gw-series-svg { width: 100%; height: 100%; display: block; }
+.gw-series-svg rect.gx-cache-read   { fill: var(--green); }
+.gw-series-svg rect.gx-cache-create { fill: var(--purple); }
+.gw-series-svg rect.gx-input        { fill: var(--cyan); }
+.gw-series-svg rect.gx-output       { fill: var(--yellow); }
+.gw-series-svg text { fill: var(--text-muted); font-size: 9px; font-family: var(--mono); }
+
 /* Per-pair token bar */
 .token-bar {
   display: flex; height: 18px; border-radius: 4px; overflow: hidden;
@@ -428,11 +446,65 @@ tbody tr:last-child td { border-bottom: none; }
 
   <!-- Gateway panel -->
   <div class="panel" id="p-gateway">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+      <select id="gw-select" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px"></select>
+      <select id="gw-window" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
+        <option value="24h" selected>last 24h</option>
+        <option value="1h">last 1h</option>
+        <option value="7d">last 7d</option>
+        <option value="30d">last 30d</option>
+        <option value="all">all time</option>
+      </select>
+      <div style="display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+        <div class="gw-sub-btn active" data-sub="overview">Overview</div>
+        <div class="gw-sub-btn" data-sub="sessions">Sessions</div>
+        <div class="gw-sub-btn" data-sub="requests">Requests</div>
+      </div>
+    </div>
+
+    <!-- Overview sub-view -->
+    <div id="gw-sub-overview" class="gw-subview">
+      <div class="stats" id="gw-kpi"></div>
+      <div class="card">
+        <div class="card-header"><span>Token usage over time</span></div>
+        <div class="card-body padded">
+          <div id="gw-series-legend" class="token-legend" style="margin-bottom:8px"></div>
+          <div id="gw-series" style="height:160px"></div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div class="card">
+          <div class="card-header"><span>Top sessions by tokens</span></div>
+          <div class="card-body">
+            <table>
+              <thead><tr><th>Session</th><th>Model</th><th>Turns</th><th>Tokens (in/out)</th><th>Last seen</th></tr></thead>
+              <tbody id="gw-top-sessions"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span>Top models by tokens</span></div>
+          <div class="card-body">
+            <table>
+              <thead><tr><th>Model</th><th>Requests</th><th>Tokens (in/out)</th><th>Cache read</th></tr></thead>
+              <tbody id="gw-top-models"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sessions sub-view (filled in step 9) -->
+    <div id="gw-sub-sessions" class="gw-subview" style="display:none">
+      <div class="card"><div class="card-body padded"><span class="json-summary">Sessions list and per-session timeline land in step 9.</span></div></div>
+    </div>
+
+    <!-- Requests sub-view (existing table) -->
+    <div id="gw-sub-requests" class="gw-subview" style="display:none">
     <div class="card">
       <div class="card-header">
-        <span>Gateways</span>
+        <span>Requests</span>
         <div style="display:flex;gap:8px">
-          <select id="gw-select" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px"></select>
           <input class="search-input" id="gw-search" placeholder="Filter rows..." style="width:220px">
           <select id="gw-outcome" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
             <option value="">all outcomes</option>
@@ -461,6 +533,9 @@ tbody tr:last-child td { border-bottom: none; }
         </table>
       </div>
     </div>
+    </div><!-- /#gw-sub-requests -->
+
+    <!-- Detail card is shared across sub-views -->
     <div class="card" id="gw-detail-card" style="display:none">
       <div class="card-header">
         <span id="gw-detail-title">Detail</span>
@@ -581,7 +656,8 @@ tbody tr:last-child td { border-bottom: none; }
 
 <script>
 // --- State ---
-let state = {}, logs = [], folders = [], conflicts = [], clipActivities = [], fsActivities = [], metricsText = '', gatewayAudit = [];
+let state = {}, logs = [], folders = [], conflicts = [], clipActivities = [], fsActivities = [], metricsText = '', gatewayAudit = [], gwStats = null, gwSubview = 'overview', gwWindow = '24h';
+function gwBucket(w) { return w === '1h' ? 'minute' : w === '24h' ? 'hour' : w === '7d' ? 'hour' : 'day'; }
 let compSort = {col:'type', asc:true};
 let fsSort = {col:'id', asc:true};
 let logLevel = 'all';
@@ -629,7 +705,15 @@ async function tick() {
       fetches.push(fetch('/api/filesync/activity').then(r=>r.json()));
     }
     if (needClipsync) fetches.push(fetch('/api/clipsync/activity').then(r=>r.json()));
-    if (needGateway) fetches.push(fetch('/api/gateway/audit?limit=200').then(r=>r.json()));
+    if (needGateway) {
+      fetches.push(fetch('/api/gateway/audit?limit=200').then(r=>r.json()));
+      if (gwSelected) {
+        fetches.push(fetch('/api/gateway/audit/stats?gateway='+encodeURIComponent(gwSelected)+
+          '&window='+encodeURIComponent(gwWindow)+'&bucket='+gwBucket(gwWindow)).then(r=>r.json()).catch(()=>null));
+      } else {
+        fetches.push(Promise.resolve(null));
+      }
+    }
 
     const results = await Promise.all(fetches);
     let i = 0;
@@ -637,7 +721,7 @@ async function tick() {
     if (needLogs) logs = results[i++];
     if (needFilesync) { folders = results[i++]; conflicts = results[i++]; fsActivities = results[i++]; }
     if (needClipsync) clipActivities = results[i++];
-    if (needGateway) gatewayAudit = results[i++];
+    if (needGateway) { gatewayAudit = results[i++]; gwStats = results[i++]; }
 
     // Accumulate chart history from metrics
     const nowTx = sumMetric(metricsText, 'mesh_bytes_tx_total');
@@ -1187,9 +1271,12 @@ function renderGateway() {
   if (!sel) return;
   if (!gatewayAudit || !gatewayAudit.length) {
     sel.innerHTML = '<option value="">(no gateways with audit logging)</option>';
-    document.getElementById('gw-meta').textContent = '';
+    const meta = document.getElementById('gw-meta');
+    if (meta) meta.textContent = '';
     document.getElementById('gw-body').innerHTML =
       '<tr><td colspan="9" style="color:var(--text-muted);padding:20px">No gateways with audit logging configured. Set log.level: full or metadata in the gateway YAML to populate this view.</td></tr>';
+    document.getElementById('gw-kpi').innerHTML =
+      '<div class="stat" style="grid-column:1/-1;color:var(--text-muted)">No gateway audit data yet. Configure log.level to populate this view.</div>';
     return;
   }
   // Populate selector once / on changes.
@@ -1200,6 +1287,7 @@ function renderGateway() {
     sel.value = names.includes(desired) ? desired : names[0];
   }
   gwSelected = sel.value;
+  renderGatewayOverview();
 
   const entry = gatewayAudit.find(g => g.gateway === gwSelected) || gatewayAudit[0];
   const rowsRaw = entry.rows || [];
@@ -1651,7 +1739,139 @@ function _hjTog(togEl) {
 
 document.getElementById('gw-search').addEventListener('input', e => { gwSearchTerm = e.target.value; renderGateway(); });
 document.getElementById('gw-outcome').addEventListener('change', e => { gwOutcomeFilter = e.target.value; renderGateway(); });
-document.getElementById('gw-select').addEventListener('change', e => { gwSelected = e.target.value; renderGateway(); });
+document.getElementById('gw-select').addEventListener('change', e => { gwSelected = e.target.value; gwStats = null; refresh(); });
+document.getElementById('gw-window').addEventListener('change', e => { gwWindow = e.target.value; gwStats = null; refresh(); });
+document.querySelectorAll('.gw-sub-btn').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.gw-sub-btn').forEach(x => x.classList.toggle('active', x === b));
+  gwSubview = b.dataset.sub;
+  document.getElementById('gw-sub-overview').style.display = gwSubview === 'overview' ? '' : 'none';
+  document.getElementById('gw-sub-sessions').style.display = gwSubview === 'sessions' ? '' : 'none';
+  document.getElementById('gw-sub-requests').style.display = gwSubview === 'requests' ? '' : 'none';
+}));
+
+// --- Gateway overview ---
+//
+// Reads gwStats (the response from /api/gateway/audit/stats) and paints the
+// KPI strip, the stacked time-series, and the top-N tables. Renders a clear
+// empty state when stats have not arrived yet so the user sees "loading"
+// rather than a blank pane.
+function renderGatewayOverview() {
+  const kpi = document.getElementById('gw-kpi');
+  if (!kpi) return;
+  if (!gwStats) {
+    kpi.innerHTML = '<div class="stat" style="grid-column:1/-1;color:var(--text-muted)">Loading stats…</div>';
+    document.getElementById('gw-series').innerHTML = '';
+    document.getElementById('gw-top-sessions').innerHTML = '';
+    document.getElementById('gw-top-models').innerHTML = '';
+    return;
+  }
+  const t = gwStats.totals || {};
+  const totalIn = (t.input_tokens||0) + (t.cache_read_tokens||0) + (t.cache_creation_tokens||0);
+  const errPct = t.requests > 0 ? (100*t.errors/t.requests).toFixed(1)+'%' : '0%';
+  const avgMs = t.requests > 0 ? Math.round(t.elapsed_sum_ms/t.requests)+'ms' : '-';
+  const cacheRatio = (100*(t.cache_hit_ratio||0)).toFixed(1)+'%';
+  kpi.innerHTML =
+    statBox('Requests', (t.requests||0).toLocaleString(), gwStats.window) +
+    statBox('Errors', (t.errors||0).toLocaleString()+' ('+errPct+')', '', t.errors > 0 ? 'var(--red)' : '') +
+    statBox('Input tokens', totalIn.toLocaleString(), '(incl. cache)') +
+    statBox('Output tokens', (t.output_tokens||0).toLocaleString(), '') +
+    statBox('Cache hit ratio', cacheRatio, 'reads / total input', t.cache_hit_ratio >= 0.5 ? 'var(--green)' : t.cache_hit_ratio >= 0.2 ? 'var(--yellow)' : 'var(--red)') +
+    statBox('Avg latency', avgMs, 'per request');
+
+  document.getElementById('gw-series').innerHTML = renderSeriesSVG(gwStats.series || []);
+  document.getElementById('gw-series-legend').innerHTML =
+    '<span><i style="background:var(--green)"></i>cache read</span>' +
+    '<span><i style="background:var(--purple)"></i>cache write</span>' +
+    '<span><i style="background:var(--cyan)"></i>fresh input</span>' +
+    '<span><i style="background:var(--yellow)"></i>output</span>';
+
+  // Top sessions and top models (by_session and by_model are sorted by token total server-side).
+  const sessions = (gwStats.by_session || []).slice(0, 10);
+  document.getElementById('gw-top-sessions').innerHTML = sessions.length === 0
+    ? '<tr><td colspan="5" style="color:var(--text-muted);padding:12px">No sessions in window.</td></tr>'
+    : sessions.map(s => '<tr style="cursor:pointer" onclick="jumpToSession(\''+x(s.key)+'\')">' +
+        '<td><code style="color:var(--cyan)">'+x(s.key)+'</code></td>' +
+        '<td style="color:var(--text-dim)">'+x(s.first_model||'-')+'</td>' +
+        '<td>'+(s.turns||s.requests)+'</td>' +
+        '<td>'+(s.input_tokens||0).toLocaleString()+' / '+(s.output_tokens||0).toLocaleString()+'</td>' +
+        '<td style="color:var(--text-muted)">'+x(fmtAgo(s.last_seen||''))+'</td>' +
+      '</tr>').join('');
+
+  const models = (gwStats.by_model || []).slice(0, 10);
+  document.getElementById('gw-top-models').innerHTML = models.length === 0
+    ? '<tr><td colspan="4" style="color:var(--text-muted);padding:12px">No models in window.</td></tr>'
+    : models.map(m => '<tr>' +
+        '<td style="color:var(--text-dim)">'+x(m.key||'-')+'</td>' +
+        '<td>'+m.requests+'</td>' +
+        '<td>'+(m.input_tokens||0).toLocaleString()+' / '+(m.output_tokens||0).toLocaleString()+'</td>' +
+        '<td>'+(m.cache_read_tokens||0).toLocaleString()+'</td>' +
+      '</tr>').join('');
+}
+
+function statBox(label, value, sub, color) {
+  return '<div class="stat">' +
+    '<div class="stat-label">'+x(label)+'</div>' +
+    '<div class="stat-value"'+(color ? ' style="color:'+color+'"' : '')+'>'+x(value)+'</div>' +
+    (sub ? '<div class="stat-sub">'+x(sub)+'</div>' : '') +
+  '</div>';
+}
+
+function fmtAgo(ts) {
+  if (!ts) return '-';
+  return timeAgo(ts);
+}
+
+function jumpToSession(sid) {
+  // Hand-off to the (currently placeholder) Sessions view.
+  gwSubview = 'sessions';
+  document.querySelectorAll('.gw-sub-btn').forEach(x => x.classList.toggle('active', x.dataset.sub === 'sessions'));
+  document.getElementById('gw-sub-overview').style.display = 'none';
+  document.getElementById('gw-sub-requests').style.display = 'none';
+  document.getElementById('gw-sub-sessions').style.display = '';
+  // Step 9 will read this and pre-select the session.
+  window._gwJumpSession = sid;
+}
+
+// renderSeriesSVG draws a stacked bar chart of the four token buckets per
+// time bucket. SVG only — no canvas, no chart libs. Each bar is a vertical
+// stack: cache_read at the bottom, then cache_create, fresh input, output.
+// Bars are equal-width with 1px gap; max value scales the chart height.
+function renderSeriesSVG(series) {
+  if (!series.length) {
+    return '<div style="color:var(--text-muted);padding:20px;text-align:center">No data in window.</div>';
+  }
+  const w = 800, h = 140, pad = 18;
+  const max = Math.max(1, ...series.map(s =>
+    (s.cache_read_tokens||0) + (s.cache_creation_tokens||0) +
+    (s.input_tokens||0) + (s.output_tokens||0)));
+  const barW = Math.max(1, (w - 2*pad) / series.length - 1);
+  const scale = (h - 2*pad) / max;
+  const bars = series.map((s, i) => {
+    const cr = (s.cache_read_tokens||0) * scale;
+    const cw = (s.cache_creation_tokens||0) * scale;
+    const fi = (s.input_tokens||0) * scale;
+    const ou = (s.output_tokens||0) * scale;
+    const x0 = pad + i * (barW + 1);
+    let y = h - pad;
+    const out = [];
+    if (cr > 0) { y -= cr; out.push('<rect class="gx-cache-read" x="'+x0+'" y="'+y+'" width="'+barW+'" height="'+cr+'"></rect>'); }
+    if (cw > 0) { y -= cw; out.push('<rect class="gx-cache-create" x="'+x0+'" y="'+y+'" width="'+barW+'" height="'+cw+'"></rect>'); }
+    if (fi > 0) { y -= fi; out.push('<rect class="gx-input" x="'+x0+'" y="'+y+'" width="'+barW+'" height="'+fi+'"></rect>'); }
+    if (ou > 0) { y -= ou; out.push('<rect class="gx-output" x="'+x0+'" y="'+y+'" width="'+barW+'" height="'+ou+'"></rect>'); }
+    const title = s.t + ' — total ' + (cr+cw+fi+ou)/scale | 0;
+    return '<g><title>'+x(title)+'</title>'+out.join('')+'</g>';
+  }).join('');
+  // X-axis tick labels at first, middle, last.
+  const ticks = [0, Math.floor(series.length/2), series.length-1].filter((v,i,a) => a.indexOf(v) === i);
+  const labels = ticks.map(i => {
+    const t = series[i].t.replace('T',' ').slice(5, 16); // MM-DD HH:MM
+    const tx = pad + i * (barW + 1);
+    return '<text x="'+tx+'" y="'+(h-4)+'">'+x(t)+'</text>';
+  }).join('');
+  return '<svg class="gw-series-svg" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">' +
+    bars + labels + '</svg>';
+}
+
 
 // --- Debug ---
 function renderDebugStats() {
