@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -345,6 +346,76 @@ func TestPassthrough_ClientCancelProducesCancelledOutcome(t *testing.T) {
 	}
 	rows := auditFiles(t, gwName, logDir)
 	t.Fatalf("expected client_cancelled outcome in audit; got rows=%+v", rows)
+}
+
+func TestPassthrough_GzippedResponseDecodedInAuditOnly(t *testing.T) {
+	t.Parallel()
+
+	gzBody := func(s string) []byte {
+		var buf bytes.Buffer
+		w := gzip.NewWriter(&buf)
+		_, _ = w.Write([]byte(s))
+		_ = w.Close()
+		return buf.Bytes()
+	}
+
+	plaintext := `{"id":"msg_xyz","content":[{"type":"text","text":"decoded"}],"usage":{"input_tokens":3,"output_tokens":5}}`
+	compressed := gzBody(plaintext)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(200)
+		_, _ = w.Write(compressed)
+	}))
+	defer upstream.Close()
+
+	var logDir, gwName string
+	base := startPassthroughGateway(t, upstream.URL, func(c *GatewayCfg) {
+		logDir = c.Log.Dir
+		gwName = c.Name
+	})
+
+	// Explicit Accept-Encoding prevents Go's http.Client from silently
+	// auto-decompressing (which only kicks in when Go itself added the header).
+	// This mirrors Claude Code, which sets Accept-Encoding on its own.
+	req, _ := http.NewRequest("POST", base+"/v1/messages", strings.NewReader(`{"model":"claude-opus-4-6"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip")
+	client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// The wire bytes to the client must remain gzip — passthrough is transparent.
+	if enc := resp.Header.Get("Content-Encoding"); enc != "gzip" {
+		t.Errorf("client Content-Encoding = %q, want gzip (wire must stay as upstream sent it)", enc)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, compressed) {
+		t.Errorf("client bytes differ from upstream (got %d bytes, want %d); passthrough must not mutate payload", len(got), len(compressed))
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	rows := auditFiles(t, gwName, logDir)
+	if len(rows) != 2 {
+		t.Fatalf("audit rows = %d, want 2", len(rows))
+	}
+	respRow := rows[1]
+	// full level: body is decoded JSON, not a compressed blob.
+	body, ok := respRow["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("audit body type = %T, want parsed JSON (gzip should be decoded)", respRow["body"])
+	}
+	if body["id"] != "msg_xyz" {
+		t.Errorf("audit body id = %v, want msg_xyz", body["id"])
+	}
+	usage := respRow["usage"].(map[string]any)
+	if usage["input_tokens"].(float64) != 3 || usage["output_tokens"].(float64) != 5 {
+		t.Errorf("usage parsed from decoded body = %v, want in=3 out=5", usage)
+	}
 }
 
 func TestBuildUpstreamURL(t *testing.T) {

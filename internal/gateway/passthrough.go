@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -115,7 +116,8 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, c
 	if uresp.StatusCode >= 400 {
 		outcome = OutcomeError
 	}
-	usage := parseUsage(respBody, cfg.UpstreamAPI)
+	auditBody := decodeForAudit(respBody, uresp.Header.Get("Content-Encoding"), log)
+	usage := parseUsage(auditBody, cfg.UpstreamAPI)
 
 	recorder.Response(reqID, ResponseMeta{
 		Status:    uresp.StatusCode,
@@ -124,7 +126,7 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, c
 		StartTime: start,
 		EndTime:   time.Now(),
 		Headers:   uresp.Header,
-	}, respBody)
+	}, auditBody)
 
 	log.Info("Passthrough completed",
 		"model", peek.Model,
@@ -196,13 +198,14 @@ func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *ht
 	}
 	metrics.BytesTx.Add(totalBytes)
 
+	auditBody := decodeForAudit(buf.Bytes(), uresp.Header.Get("Content-Encoding"), log)
 	recorder.Response(reqID, ResponseMeta{
 		Status:    uresp.StatusCode,
 		Outcome:   outcome,
 		StartTime: start,
 		EndTime:   time.Now(),
 		Headers:   uresp.Header,
-	}, buf.Bytes())
+	}, auditBody)
 
 	log.Info("Passthrough stream completed",
 		"status", uresp.StatusCode,
@@ -270,6 +273,39 @@ func copyPassthroughResponseHeaders(dst, src http.Header) {
 func isSSEResponse(r *http.Response) bool {
 	ct := r.Header.Get("Content-Type")
 	return strings.HasPrefix(strings.ToLower(ct), "text/event-stream")
+}
+
+// decodeForAudit returns a plaintext copy of body suitable for the audit log.
+// Upstreams often send Content-Encoding: gzip even for SSE responses (Anthropic
+// does), and the tee captures those raw compressed bytes. We decompress a copy
+// here so the JSONL rows are human-readable while the wire bytes the client
+// saw remain untouched. Unsupported or malformed encodings fall back to the
+// raw bytes with a warning.
+func decodeForAudit(body []byte, encoding string, log *slog.Logger) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "identity":
+		return body
+	case "gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			log.Debug("audit gzip reader init failed", "error", err)
+			return body
+		}
+		defer func() { _ = zr.Close() }()
+		out, err := io.ReadAll(io.LimitReader(zr, maxAuditBodyBytes))
+		if err != nil {
+			log.Debug("audit gzip decode failed", "error", err)
+			return body
+		}
+		return out
+	default:
+		// deflate/br/zstd: not decoded. The raw bytes are still captured so
+		// the log is lossless even if not human-readable.
+		return body
+	}
 }
 
 // parseUsage extracts token counts from a non-streaming response body. Returns
