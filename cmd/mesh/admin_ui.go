@@ -78,6 +78,10 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); font
 }
 .card-body { padding: 0; }
 .card-body.padded { padding: 16px; }
+/* Scroll wrapper for tables: bounded height + horizontal scroll for
+   long rows. Assigned per-table where we expect many rows or wide content. */
+.table-scroll { max-height: 50vh; overflow: auto; }
+.loading-row td { color: var(--text-muted); padding: 16px; font-style: italic; }
 
 /* Stat grid */
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px; }
@@ -602,6 +606,7 @@ tbody tr:last-child td { border-bottom: none; }
         </div>
       </div>
       <div class="card-body">
+        <div class="table-scroll">
         <table>
           <thead><tr>
             <th data-sort="status">Status <span class="sort-arrow"></span></th>
@@ -609,8 +614,9 @@ tbody tr:last-child td { border-bottom: none; }
             <th data-sort="id">ID <span class="sort-arrow"></span></th>
             <th data-sort="detail">Detail <span class="sort-arrow"></span></th>
           </tr></thead>
-          <tbody id="comp-body"></tbody>
+          <tbody id="comp-body"><tr class="loading-row"><td colspan="4">Loading components…</td></tr></tbody>
         </table>
+        </div>
       </div>
     </div>
     <div class="card">
@@ -627,6 +633,7 @@ tbody tr:last-child td { border-bottom: none; }
     <div class="card">
       <div class="card-header"><span>Recent Activity</span></div>
       <div class="card-body">
+        <div class="table-scroll">
         <table>
           <thead><tr>
             <th>Direction</th>
@@ -635,8 +642,9 @@ tbody tr:last-child td { border-bottom: none; }
             <th>Peer</th>
             <th>Time</th>
           </tr></thead>
-          <tbody id="cs-body"></tbody>
+          <tbody id="cs-body"><tr class="loading-row"><td colspan="5">Loading clipsync activity…</td></tr></tbody>
         </table>
+        </div>
       </div>
     </div>
   </div>
@@ -650,6 +658,7 @@ tbody tr:last-child td { border-bottom: none; }
         <input class="search-input" id="fs-search" placeholder="Filter folders..." style="width:220px">
       </div>
       <div class="card-body">
+        <div class="table-scroll">
         <table>
           <thead><tr>
             <th data-sort="id">ID <span class="sort-arrow"></span></th>
@@ -661,26 +670,31 @@ tbody tr:last-child td { border-bottom: none; }
             <th data-sort="last_sync">Last sync <span class="sort-arrow"></span></th>
             <th data-sort="peers">Peers <span class="sort-arrow"></span></th>
           </tr></thead>
-          <tbody id="fs-body"></tbody>
+          <tbody id="fs-body"><tr class="loading-row"><td colspan="8">Loading folders…</td></tr></tbody>
         </table>
+        </div>
       </div>
     </div>
     <div class="card" id="conflict-card">
       <div class="card-header"><span>Conflicts</span><span class="badge badge-ok" id="conflict-count">0</span></div>
       <div class="card-body">
+        <div class="table-scroll">
         <table>
           <thead><tr><th>Folder</th><th>Path</th></tr></thead>
-          <tbody id="conflict-body"></tbody>
+          <tbody id="conflict-body"><tr class="loading-row"><td colspan="2">Loading conflicts…</td></tr></tbody>
         </table>
+        </div>
       </div>
     </div>
     <div class="card">
       <div class="card-header"><span>Recent Activity</span></div>
       <div class="card-body">
+        <div class="table-scroll">
         <table>
           <thead><tr><th>Direction</th><th>Folder</th><th>Peer</th><th>Files</th><th>Size</th><th>Time</th></tr></thead>
-          <tbody id="fsa-body"></tbody>
+          <tbody id="fsa-body"><tr class="loading-row"><td colspan="6">Loading activity…</td></tr></tbody>
         </table>
+        </div>
       </div>
     </div>
   </div>
@@ -1020,44 +1034,24 @@ window.addEventListener('hashchange', () => { if (activeTab === 'gateway') apply
 showTab(activeTab, {push: false});
 
 // --- Data fetch (gated by active tab) ---
-async function tick() {
-  try {
-    // Always fetch state (needed by dashboard) and metrics (needed by charts).
-    const fetches = [
-      fetch('/api/state').then(r=>r.json()),
-      fetch('/api/metrics').then(r=>r.text()),
-    ];
-    // Only fetch tab-specific APIs when that tab is active.
-    const needLogs = activeTab === 'dashboard' || activeTab === 'logs';
-    const needFilesync = activeTab === 'dashboard' || activeTab === 'filesync';
-    const needClipsync = activeTab === 'dashboard' || activeTab === 'clipsync';
-    const needGateway = activeTab === 'gateway';
-    if (needLogs) fetches.push(fetch('/api/logs').then(r=>r.json()));
-    if (needFilesync) {
-      fetches.push(fetch('/api/filesync/folders').then(r=>r.json()));
-      fetches.push(fetch('/api/filesync/conflicts').then(r=>r.json()));
-      fetches.push(fetch('/api/filesync/activity').then(r=>r.json()));
-    }
-    if (needClipsync) fetches.push(fetch('/api/clipsync/activity').then(r=>r.json()));
-    if (needGateway) {
-      fetches.push(fetch('/api/gateway/audit?limit=200').then(r=>r.json()));
-      if (gwSelected) {
-        fetches.push(fetch('/api/gateway/audit/stats?gateway='+encodeURIComponent(gwSelected)+
-          '&window='+encodeURIComponent(gwWindow)+'&bucket='+gwBucket(gwWindow)).then(r=>r.json()).catch(()=>null));
-      } else {
-        fetches.push(Promise.resolve(null));
-      }
-    }
+// Each endpoint fires independently so a slow one (e.g. filesync on a huge
+// m2 repo) never blocks the dashboard/logs/clipsync panels from rendering.
+// Per-section render() is called as soon as that section's data lands.
+function tick() {
+  const needLogs = activeTab === 'dashboard' || activeTab === 'logs';
+  const needFilesync = activeTab === 'dashboard' || activeTab === 'filesync';
+  const needClipsync = activeTab === 'dashboard' || activeTab === 'clipsync';
+  const needGateway = activeTab === 'gateway';
 
-    const results = await Promise.all(fetches);
-    let i = 0;
-    state = results[i++]; metricsText = results[i++];
-    if (needLogs) logs = results[i++];
-    if (needFilesync) { folders = results[i++]; conflicts = results[i++]; fsActivities = results[i++]; }
-    if (needClipsync) clipActivities = results[i++];
-    if (needGateway) { gatewayAudit = results[i++]; gwStats = results[i++]; }
+  const mark = () => { document.getElementById('hdr-status').textContent = 'updated ' + new Date().toLocaleTimeString(); };
+  const fail = (what) => (e) => { document.getElementById('hdr-status').textContent = 'error('+what+'): ' + e.message; };
 
-    // Accumulate chart history from metrics
+  fetch('/api/state').then(r=>r.json()).then(s => {
+    state = s; renderStats(); renderComponents(); mark();
+  }).catch(fail('state'));
+
+  fetch('/api/metrics').then(r=>r.text()).then(t => {
+    metricsText = t;
     const nowTx = sumMetric(metricsText, 'mesh_bytes_tx_total');
     const nowRx = sumMetric(metricsText, 'mesh_bytes_rx_total');
     if (!firstTick) {
@@ -1069,11 +1063,27 @@ async function tick() {
     pushHist('goroutines', valMetric(metricsText, 'mesh_process_goroutines'));
     const fds = valMetric(metricsText, 'mesh_process_open_fds');
     if (fds !== null) pushHist('fds', fds);
+    renderMetrics(); renderCharts(); renderDebugStats();
+  }).catch(fail('metrics'));
 
-    document.getElementById('hdr-status').textContent = 'updated ' + new Date().toLocaleTimeString();
-    render();
-  } catch(e) {
-    document.getElementById('hdr-status').textContent = 'error: ' + e.message;
+  if (needLogs) {
+    fetch('/api/logs').then(r=>r.json()).then(v => { logs = v; renderDashLogs(); renderLogs(); }).catch(fail('logs'));
+  }
+  if (needFilesync) {
+    fetch('/api/filesync/folders').then(r=>r.json()).then(v => { folders = v; renderFilesync(); }).catch(fail('folders'));
+    fetch('/api/filesync/conflicts').then(r=>r.json()).then(v => { conflicts = v; renderConflicts(); }).catch(fail('conflicts'));
+    fetch('/api/filesync/activity').then(r=>r.json()).then(v => { fsActivities = v; renderFsActivity(); }).catch(fail('fs-activity'));
+  }
+  if (needClipsync) {
+    fetch('/api/clipsync/activity').then(r=>r.json()).then(v => { clipActivities = v; renderClipsync(); }).catch(fail('clipsync'));
+  }
+  if (needGateway) {
+    fetch('/api/gateway/audit?limit=200').then(r=>r.json()).then(v => { gatewayAudit = v; renderGateway(); }).catch(fail('gateway'));
+    if (gwSelected) {
+      fetch('/api/gateway/audit/stats?gateway='+encodeURIComponent(gwSelected)+
+        '&window='+encodeURIComponent(gwWindow)+'&bucket='+gwBucket(gwWindow))
+        .then(r=>r.json()).then(v => { gwStats = v; renderGateway(); }).catch(fail('gw-stats'));
+    }
   }
 }
 
@@ -1753,9 +1763,13 @@ function renderClipsync() {
 }
 
 function fmtBytes(b) {
-  if (b >= 1<<20) return (b/(1<<20)).toFixed(1)+' MB';
-  if (b >= 1<<10) return (b/(1<<10)).toFixed(1)+' KB';
-  return b+' B';
+  const n = Number(b) || 0;
+  const TB = 1024**4, GB = 1024**3, MB = 1024**2, KB = 1024;
+  if (n >= TB) return (n/TB).toFixed(2)+' TB';
+  if (n >= GB) return (n/GB).toFixed(2)+' GB';
+  if (n >= MB) return (n/MB).toFixed(1)+' MB';
+  if (n >= KB) return (n/KB).toFixed(1)+' KB';
+  return n+' B';
 }
 
 function timeAgo(ts) {
