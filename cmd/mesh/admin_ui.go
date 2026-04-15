@@ -251,8 +251,10 @@ tbody tr:last-child td { border-bottom: none; }
 }
 .bubble .pre-ctx[open] > summary::before,
 .bubble .post-ctx[open] > summary::before { transform: rotate(90deg); }
-.bubble .pre-ctx > summary .sec-len,
-.bubble .post-ctx > summary .sec-len { margin-left: auto; }
+.bubble .pre-ctx > summary .ctx-label,
+.bubble .post-ctx > summary .ctx-label { font-weight: 600; color: var(--text); }
+.bubble .pre-ctx > summary .ctx-summary-meta,
+.bubble .post-ctx > summary .ctx-summary-meta { margin-left: auto; color: var(--text-dim); font-family: var(--mono); }
 
 /* Block list — one row per injected block, name + size + % of message */
 .ctx-list { margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
@@ -269,7 +271,8 @@ tbody tr:last-child td { border-bottom: none; }
 }
 .ctx-item[open] > summary::before { transform: rotate(90deg); }
 .ctx-item:hover > summary { background: var(--bg-hover); }
-.ctx-item .ctx-name { font-family: var(--mono); color: var(--text); }
+.ctx-item .ctx-name { font-family: var(--mono); color: var(--text); white-space: nowrap; }
+.ctx-item .ctx-name .ctx-preview { color: var(--text-muted); font-weight: normal; overflow: hidden; text-overflow: ellipsis; }
 .ctx-item .ctx-size { font-family: var(--mono); color: var(--text-muted); min-width: 80px; text-align: right; }
 .ctx-item .ctx-pct  { font-family: var(--mono); color: var(--text-dim); min-width: 52px; text-align: right; }
 .ctx-item.k-system-reminder   > summary .ctx-name { color: var(--yellow); }
@@ -2104,13 +2107,23 @@ function splitUserText(s) {
   return {pre, typed, post};
 }
 
+// ctxBodyPreview extracts the first meaningful line from a block body,
+// collapsed to a single space-run and capped at maxLen chars. Used as the
+// inline hint in collapsed ctx-item rows so the user can tell "Skills
+// available" from "SessionStart hook" without expanding.
+function ctxBodyPreview(body, maxLen) {
+  // Take first non-blank line, collapse whitespace.
+  const firstLine = body.split('\n').find(l => l.trim() !== '') || '';
+  const collapsed = firstLine.replace(/\s+/g, ' ').trim();
+  return collapsed.length > maxLen ? collapsed.slice(0, maxLen) + '…' : collapsed;
+}
+
 // renderContextDrawer emits the pre/post drawer listing injected blocks with
 // per-block chars and percentage of message. Each block is a nested <details>
 // so the user can expand the ones that matter.
 function renderContextDrawer(kind, blocks, messageLen) {
   const total = blocks.reduce((n, b) => n + b.body.length, 0);
-  const label = kind === 'pre' ? 'Pre-context injected before your message'
-                               : 'Post-context injected after your message';
+  const label = kind === 'pre' ? 'Pre-context' : 'Post-context';
   const rows = blocks.map(b => {
     // Determine kind class from block name (same logic as renderCustomBlock)
     let blkKind = 'unknown';
@@ -2122,12 +2135,15 @@ function renderContextDrawer(kind, blocks, messageLen) {
     else if (n === 'user-prompt-submit-hook' || n === 'stop-hook-feedback') blkKind = 'hook';
 
     const pct = messageLen > 0 ? (100 * b.body.length / messageLen).toFixed(1) + '%' : '';
+    const preview = ctxBodyPreview(b.body, 48);
     const inner = (blkKind === 'stdout' || blkKind === 'stderr')
       ? '<pre>'+x(b.body)+'</pre>'
       : '<div>'+renderPlainText(b.body)+'</div>';
     return '<details class="ctx-item k-'+blkKind+'">' +
       '<summary>' +
-        '<span class="ctx-name">&lt;'+x(b.name)+'&gt;</span>' +
+        '<span class="ctx-name">&lt;'+x(b.name)+'&gt;' +
+          (preview ? ' <span class="ctx-preview">'+x(preview)+'</span>' : '') +
+        '</span>' +
         '<span class="ctx-size">'+fmtLen(b.body.length)+' chars</span>' +
         '<span class="ctx-pct">'+pct+'</span>' +
       '</summary>' +
@@ -2136,8 +2152,8 @@ function renderContextDrawer(kind, blocks, messageLen) {
   }).join('');
   return '<details class="'+(kind === 'pre' ? 'pre-ctx' : 'post-ctx')+'">' +
     '<summary>' +
-      '<span>'+x(label)+'</span>' +
-      '<span class="sec-len">'+blocks.length+' blocks · '+fmtLen(total)+' chars</span>' +
+      '<span class="ctx-label">'+x(label)+'</span>' +
+      '<span class="ctx-summary-meta">'+fmtLen(total)+' chars in '+blocks.length+' blocks</span>' +
     '</summary>' +
     '<div class="ctx-list">'+rows+'</div>' +
   '</details>';
