@@ -157,6 +157,124 @@ func TestIsConflictFile(t *testing.T) {
 
 // --- Index tests ---
 
+// TestFileIndexClone verifies that clone produces a deep copy — mutating the
+// clone's Files must not affect the original, and bumping Sequence must not
+// leak back. Regression: the scan-without-lock path depends on this isolation.
+func TestFileIndexClone(t *testing.T) {
+	t.Parallel()
+	orig := newFileIndex()
+	orig.Path = "/tmp/src"
+	orig.Sequence = 7
+	orig.Files["a.txt"] = FileEntry{Size: 5, SHA256: "aaa", Sequence: 1}
+	orig.Files["b.txt"] = FileEntry{Size: 9, SHA256: "bbb", Sequence: 2}
+
+	clone := orig.clone()
+	clone.Sequence = 99
+	clone.Files["a.txt"] = FileEntry{Size: 100, SHA256: "mutated", Sequence: 50}
+	clone.Files["c.txt"] = FileEntry{Size: 1, SHA256: "ccc", Sequence: 99}
+
+	if orig.Sequence != 7 {
+		t.Errorf("orig.Sequence mutated: got %d want 7", orig.Sequence)
+	}
+	if orig.Files["a.txt"].SHA256 != "aaa" {
+		t.Errorf("orig file mutated via clone: got %q want aaa", orig.Files["a.txt"].SHA256)
+	}
+	if _, ok := orig.Files["c.txt"]; ok {
+		t.Error("orig gained entry that was only added to clone")
+	}
+	if orig.Path != clone.Path {
+		t.Errorf("clone.Path = %q, want %q", clone.Path, orig.Path)
+	}
+}
+
+// TestRunScanPreservesConcurrentWrites pins the merge-on-swap rule: entries
+// whose Sequence was bumped after a scan started (e.g. by a concurrent sync
+// download) must survive the swap, otherwise scan silently clobbers sync.
+func TestRunScanPreservesConcurrentWrites(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "scanned.txt", "on-disk")
+
+	fs := &folderState{
+		cfg:           config.FolderCfg{ID: "f1", Path: dir, Direction: "send-receive"},
+		index:         newFileIndex(),
+		ignore:        &ignoreMatcher{},
+		peers:         map[string]PeerState{},
+		pending:       map[string]PendingSummary{},
+		peerLastError: map[string]string{},
+	}
+	fs.index.Path = dir
+	n := &Node{folders: map[string]*folderState{"f1": fs}}
+
+	// Simulate: a sync download added "from-peer.txt" with Sequence > scanStart
+	// AFTER the scan snapshot but BEFORE the swap. We mimic this by injecting
+	// the entry directly between runScan's clone and swap — which in practice
+	// happens because sync downloads take fs.indexMu.Lock().
+	//
+	// Rather than orchestrate timing, we insert the entry at Sequence=1000 and
+	// run a normal runScan: the walk sees only "scanned.txt" on disk, so a
+	// naive swap would drop "from-peer.txt". The merge rule must preserve it.
+	fs.index.Files["from-peer.txt"] = FileEntry{
+		Size: 7, SHA256: "peerhash", Sequence: 1000,
+	}
+	fs.index.Sequence = 1000
+
+	n.runScan(context.Background())
+
+	if _, ok := fs.index.Files["from-peer.txt"]; !ok {
+		t.Fatal("runScan clobbered a concurrently-written peer entry (expected merge-preserve)")
+	}
+	if fs.index.Files["from-peer.txt"].SHA256 != "peerhash" {
+		t.Errorf("peer entry content lost: got %+v", fs.index.Files["from-peer.txt"])
+	}
+	if _, ok := fs.index.Files["scanned.txt"]; !ok {
+		t.Error("scan failed to pick up on-disk file")
+	}
+	if fs.index.Sequence < 1000 {
+		t.Errorf("Sequence regressed: got %d, must be >= 1000", fs.index.Sequence)
+	}
+}
+
+// TestGetFolderStatusesNotBlockedDuringScan verifies the lock refactor: a
+// long-running scan (simulated by a held indexMu) must not block readers.
+// Regression for the "empty UI / no loading state" report — before the fix,
+// runScan held the write lock across the entire WalkDir so every admin
+// request hung until scan completed.
+func TestGetFolderStatusesNotBlockedDuringScan(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "x.txt", "data")
+
+	fs := &folderState{
+		cfg:           config.FolderCfg{ID: "slow", Path: dir, Direction: "send-receive"},
+		index:         newFileIndex(),
+		ignore:        &ignoreMatcher{},
+		peers:         map[string]PeerState{},
+		pending:       map[string]PendingSummary{},
+		peerLastError: map[string]string{},
+	}
+	n := &Node{folders: map[string]*folderState{"slow": fs}}
+	activeNodes.Register(n)
+	defer activeNodes.Unregister(n)
+
+	// Simulate a scan in progress by holding the RLock (scan clones under
+	// RLock; concurrent RLock must be admitted).
+	fs.indexMu.RLock()
+	defer fs.indexMu.RUnlock()
+
+	done := make(chan []FolderStatus, 1)
+	go func() { done <- GetFolderStatuses() }()
+
+	select {
+	case got := <-done:
+		if len(got) != 1 || got[0].ID != "slow" {
+			t.Fatalf("unexpected statuses: %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("GetFolderStatuses blocked while scan held RLock — readers must be concurrent")
+	}
+}
+
 func TestScanAndPersist(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

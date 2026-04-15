@@ -305,10 +305,23 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		dataDir:  dataDir,
 		folders:  make(map[string]*folderState),
 		httpClient: &http.Client{
-			Timeout: 10 * time.Minute,
+			// No client-level Timeout: request lifetime is governed by ctx
+			// (index exchange and delta use short per-call deadlines;
+			// downloads can legitimately stream for long periods and are
+			// cancelled by shutdown via ctx). A fixed Timeout here would
+			// abort large transfers on slow links.
 			Transport: &http.Transport{
-				MaxIdleConnsPerHost: 4,
-				IdleConnTimeout:     90 * time.Second,
+				// Short dial timeout: a blackholed peer should not pin a
+				// goroutine for the kernel's default SYN timeout (~2m).
+				DialContext: (&net.Dialer{
+					Timeout:   5 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				MaxIdleConnsPerHost:   4,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 30 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
 			},
 		},
 		scanTrigger: make(chan struct{}, 1),
@@ -378,7 +391,10 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		if fcfg.Direction == "disabled" {
 			state.Global.Update("filesync-folder", fcfg.ID, state.Connected, "disabled")
 		} else {
-			state.Global.Update("filesync-folder", fcfg.ID, state.Starting, fcfg.Path)
+			// Publish folder as Scanning immediately so the dashboard and
+			// admin UI show a "loading" state from the first paint — before
+			// the initial scan finishes walking the filesystem.
+			state.Global.Update("filesync-folder", fcfg.ID, state.Scanning, "initial scan "+fcfg.Path)
 			for _, peer := range fcfg.Peers {
 				state.Global.Update("filesync-peer", fcfg.ID+"|"+peer, state.Connecting, "")
 			}
@@ -537,6 +553,8 @@ func (n *Node) scanLoop(ctx context.Context, interval time.Duration, watcher *fo
 }
 
 // runScan scans all folders and triggers sync if anything changed.
+// The FS walk runs against a private copy of the index so readers
+// (admin UI, dashboard, syncLoop) are never blocked by a long scan.
 // Bails out between folders if ctx is cancelled so shutdown doesn't wait for
 // multi-minute WalkDirs over huge folders (m2 repo, build outputs).
 func (n *Node) runScan(ctx context.Context) {
@@ -548,26 +566,56 @@ func (n *Node) runScan(ctx context.Context) {
 		if fs.cfg.Direction == "disabled" {
 			continue
 		}
-		fs.indexMu.Lock()
-		state.Global.Update("filesync-folder", id, state.Connecting, "scanning")
 
-		changed, count, dirs, err := fs.index.scan(ctx, fs.cfg.Path, fs.ignore)
+		// Snapshot the current index under a short read lock so the walk
+		// operates on a private copy. Readers (GetFolderStatuses, syncLoop)
+		// see the old index until we swap.
+		fs.indexMu.RLock()
+		idxCopy := fs.index.clone()
+		scanStartSeq := fs.index.Sequence
+		ignore := fs.ignore
+		fs.indexMu.RUnlock()
+
+		state.Global.Update("filesync-folder", id, state.Scanning, "scanning "+fs.cfg.Path)
+
+		changed, count, dirs, err := idxCopy.scan(ctx, fs.cfg.Path, ignore)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			slog.Warn("scan error", "folder", id, "error", err)
 		}
-		fs.dirCount = dirs
+		idxCopy.purgeTombstones(tombstoneMaxAge)
 
-		// Refresh conflicts cache so the API handler doesn't walk the filesystem.
+		// Refresh conflicts cache outside the lock — listConflicts walks the
+		// filesystem and must not block admin reads.
+		var conflicts []string
 		if conf, cerr := listConflicts(fs.cfg.Path); cerr == nil {
 			sort.Strings(conf)
-			fs.conflicts = conf
+			conflicts = conf
 		}
 
-		// Purge old tombstones.
-		fs.index.purgeTombstones(tombstoneMaxAge)
+		// Swap under a short write lock. Merge-preserve any entries that were
+		// written after the scan started (concurrent sync downloads bumped
+		// Sequence past scanStartSeq) so we don't clobber their work.
+		fs.indexMu.Lock()
+		for path, live := range fs.index.Files {
+			if live.Sequence > scanStartSeq {
+				idxCopy.Files[path] = live
+				if live.Sequence > idxCopy.Sequence {
+					idxCopy.Sequence = live.Sequence
+				}
+			}
+		}
+		if fs.index.Sequence > idxCopy.Sequence {
+			idxCopy.Sequence = fs.index.Sequence
+		}
+		fs.index = idxCopy
+		fs.dirCount = dirs
+		if conflicts != nil {
+			fs.conflicts = conflicts
+		}
+		fs.indexMu.Unlock()
+
 		state.Global.Update("filesync-folder", id, state.Connected, "idle")
 		state.Global.UpdateFileCount("filesync-folder", id, count)
-		fs.indexMu.Unlock()
 
 		if changed {
 			anyChanged = true

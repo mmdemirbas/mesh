@@ -48,6 +48,17 @@ func newFileIndex() *FileIndex {
 	return &FileIndex{Files: make(map[string]FileEntry)}
 }
 
+// clone returns a deep copy of the index. Used by the scan path so WalkDir
+// mutates a private copy and readers (admin UI, dashboard) never block on
+// the folder's write lock.
+func (idx *FileIndex) clone() *FileIndex {
+	files := make(map[string]FileEntry, len(idx.Files))
+	for k, v := range idx.Files {
+		files[k] = v
+	}
+	return &FileIndex{Path: idx.Path, Sequence: idx.Sequence, Files: files}
+}
+
 // loadIndex reads a persisted index from disk.
 func loadIndex(path string) (*FileIndex, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed from user cache dir
