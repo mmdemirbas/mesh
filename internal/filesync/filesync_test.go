@@ -1599,8 +1599,9 @@ func TestPeerMatchesAddr_HostnameResolution(t *testing.T) {
 		t.Fatalf("ResolvedFolders = %d, want 1", len(cfg.ResolvedFolders))
 	}
 	folder := cfg.ResolvedFolders[0]
+	folder.AllowedPeerHosts = config.ResolveAllowedPeerHosts(folder.ID, folder.Peers)
 	if len(folder.AllowedPeerHosts) == 0 {
-		t.Fatalf("AllowedPeerHosts is empty after Resolve; hostname %q should expand", hostname)
+		t.Fatalf("AllowedPeerHosts is empty after resolve; hostname %q should expand", hostname)
 	}
 
 	n := &Node{

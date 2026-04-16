@@ -337,6 +337,13 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		}
 	}
 
+	// Resolve peer hostnames to IPs for incoming request validation.
+	// Done here (not at config load) so DNS lookups don't block boot.
+	for i := range cfg.ResolvedFolders {
+		cfg.ResolvedFolders[i].AllowedPeerHosts = config.ResolveAllowedPeerHosts(
+			cfg.ResolvedFolders[i].ID, cfg.ResolvedFolders[i].Peers)
+	}
+
 	// Initialize folders.
 	for _, fcfg := range cfg.ResolvedFolders {
 		// Ensure folder root exists. A missing path (e.g. host-specific mount

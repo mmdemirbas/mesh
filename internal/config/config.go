@@ -243,7 +243,7 @@ func (c *FilesyncCfg) Resolve() error {
 			Path:             expandHome(raw.Path),
 			Peers:            resolvedPeers,
 			PeerNames:        resolvedPeerNames,
-			AllowedPeerHosts: resolveAllowedPeerHosts(id, resolvedPeers),
+			AllowedPeerHosts: nil, // resolved lazily at runtime by filesync.Start
 			Direction:        direction,
 			IgnorePatterns:   patterns,
 		})
@@ -257,7 +257,7 @@ func (c *FilesyncCfg) Resolve() error {
 	return nil
 }
 
-// resolveAllowedPeerHosts expands the host portion of each peer address to
+// ResolveAllowedPeerHosts expands the host portion of each peer address to
 // the IP strings that should be accepted on the incoming HTTP path.
 // Hostnames are resolved via net.LookupHost. IP literals pass through
 // canonicalized via net.ParseIP.String() so that differently formatted but
@@ -265,7 +265,10 @@ func (c *FilesyncCfg) Resolve() error {
 // the literal host is kept and a warning is logged: a misconfigured hostname
 // should not silently drop an otherwise-working peer, and outgoing sends
 // will surface the DNS error on the first connection attempt anyway.
-func resolveAllowedPeerHosts(folderID string, peers []string) []string {
+//
+// Called at filesync runtime (not config load time) so DNS lookups don't
+// block boot.
+func ResolveAllowedPeerHosts(folderID string, peers []string) []string {
 	seen := make(map[string]bool)
 	var out []string
 	add := func(h string) {
