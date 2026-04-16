@@ -177,10 +177,15 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 	_, _ = os.Stdout.WriteString("\033[?1049h") // enter alt screen
 	_, _ = os.Stdout.WriteString("\033[?25l")   // hide cursor
 
-	// Cleanup order (LIFO): restore raw→cooked FIRST, then leave alt screen.
-	// The alt-screen-leave escape must be written while still in raw mode,
-	// and raw mode must be restored before the shell resumes output.
+	// Cleanup order matters: disable mouse tracking first (while still in
+	// raw/VT mode), leave alt screen, then restore cooked mode. On Windows,
+	// ENABLE_VIRTUAL_TERMINAL_INPUT causes the console to send mouse events
+	// as VT sequences; if we restore cooked mode first, buffered mouse
+	// events get echoed as garbage text.
 	defer func() {
+		_, _ = os.Stdout.WriteString("\033[?1003l") // disable any-event mouse tracking
+		_, _ = os.Stdout.WriteString("\033[?1006l") // disable SGR mouse mode
+		_, _ = os.Stdout.WriteString("\033[?1000l") // disable normal mouse tracking
 		_, _ = os.Stdout.WriteString("\033[?25h")   // show cursor
 		_, _ = os.Stdout.WriteString("\033[?1049l") // leave alt screen
 		_ = term.Restore(fd, oldState)              // restore cooked mode last
