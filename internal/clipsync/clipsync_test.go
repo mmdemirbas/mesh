@@ -112,16 +112,20 @@ func TestTruncateRunes(t *testing.T) {
 
 func TestFormatActivitySummaryPreview(t *testing.T) {
 	t.Parallel()
+	ts := time.Date(2025, 3, 15, 14, 30, 45, 0, time.UTC)
 	a := ClipActivity{
 		Direction: "send",
 		Size:      12,
 		Formats:   []string{"text/plain"},
 		Preview:   "hello world this is long",
+		Time:      ts,
 	}
 	got := formatActivitySummary(a)
-	// CLI snippet is truncated to cliPreviewMaxChars (10) and quoted.
-	if !strings.Contains(got, `"hello worl…"`) {
-		t.Errorf("summary missing truncated quoted snippet: %q", got)
+	if !strings.Contains(got, "14:30:45") {
+		t.Errorf("summary missing timestamp: %q", got)
+	}
+	if !strings.Contains(got, `"hello world this is long"`) {
+		t.Errorf("summary missing full preview (under 80 chars): %q", got)
 	}
 	if !strings.Contains(got, "sent") || !strings.Contains(got, "text/plain") {
 		t.Errorf("summary missing base fields: %q", got)
@@ -130,10 +134,14 @@ func TestFormatActivitySummaryPreview(t *testing.T) {
 
 func TestFormatActivitySummaryNoPreview(t *testing.T) {
 	t.Parallel()
-	a := ClipActivity{Direction: "receive", Size: 100, Formats: []string{"image/png"}}
+	ts := time.Date(2025, 3, 15, 9, 5, 0, 0, time.UTC)
+	a := ClipActivity{Direction: "receive", Size: 100, Formats: []string{"image/png"}, Time: ts}
 	got := formatActivitySummary(a)
 	if strings.Contains(got, `"`) {
 		t.Errorf("unexpected quoted snippet when preview empty: %q", got)
+	}
+	if !strings.Contains(got, "09:05:00") {
+		t.Errorf("summary missing timestamp: %q", got)
 	}
 	if !strings.Contains(got, "received") || !strings.Contains(got, "image/png") {
 		t.Errorf("summary missing base fields: %q", got)

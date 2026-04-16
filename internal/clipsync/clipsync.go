@@ -248,7 +248,8 @@ func formatActivitySummary(a ClipActivity) string {
 	if fmts == "" {
 		fmts = "unknown"
 	}
-	base := fmt.Sprintf("%s %s %s", dir, formatBytes(a.Size), fmts)
+	ts := a.Time.Format("15:04:05")
+	base := fmt.Sprintf("%s %s %s %s", ts, dir, formatBytes(a.Size), fmts)
 	if snippet := truncateRunes(a.Preview, cliPreviewMaxChars); snippet != "" {
 		base += " " + strconv.Quote(snippet)
 	}
@@ -256,7 +257,7 @@ func formatActivitySummary(a ClipActivity) string {
 }
 
 // cliPreviewMaxChars caps the preview shown in the CLI dashboard.
-const cliPreviewMaxChars = 10
+const cliPreviewMaxChars = 80
 
 // extractTextPreview returns a sanitized snippet (up to previewMaxChars runes)
 // drawn from the first text/* format in p, or empty string if none found or
