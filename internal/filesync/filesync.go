@@ -481,7 +481,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		ignoreMap[fs.cfg.Path] = fs.ignore
 	}
 
-	watcher, watchErr := newFolderWatcher(roots, ignoreMap)
+	watcher, watchErr := newFolderWatcher(roots, ignoreMap, cfg.MaxWatches)
 	if watchErr != nil {
 		slog.Warn("fsnotify unavailable, relying on periodic scan only", "error", watchErr)
 	} else {

@@ -37,10 +37,10 @@ const (
 	// staleWatchInterval controls how often we clean up watches for deleted directories.
 	staleWatchInterval = 5 * time.Minute
 
-	// maxWatches caps the number of fsnotify watches to prevent FD exhaustion.
+	// defaultMaxWatches caps the number of fsnotify watches to prevent FD exhaustion.
 	// On macOS, kqueue uses one FD per watched directory. When exceeded, the
 	// watcher stops adding new watches and relies on periodic scanning.
-	maxWatches = 4096
+	defaultMaxWatches = 4096
 )
 
 // folderWatcher monitors multiple folder roots for filesystem changes and
@@ -52,6 +52,7 @@ type folderWatcher struct {
 	roots      []string
 	ignore     map[string]*ignoreMatcher // folderRoot -> matcher
 	watchCount int                       // current number of active watches
+	maxWatches int                       // cap on fsnotify watches
 	capped     bool                      // true if maxWatches was reached
 
 	// dirtyRoots accumulates which folder roots had events since the last
@@ -63,7 +64,10 @@ type folderWatcher struct {
 // newFolderWatcher creates a watcher that monitors the given folder roots.
 // Returns nil, error if the directory count exceeds maxWatches, in which
 // case the caller should rely on periodic scanning only.
-func newFolderWatcher(roots []string, ignoreMap map[string]*ignoreMatcher) (*folderWatcher, error) {
+func newFolderWatcher(roots []string, ignoreMap map[string]*ignoreMatcher, maxWatches int) (*folderWatcher, error) {
+	if maxWatches <= 0 {
+		maxWatches = defaultMaxWatches
+	}
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -73,6 +77,7 @@ func newFolderWatcher(roots []string, ignoreMap map[string]*ignoreMatcher) (*fol
 		dirtyCh:    make(chan struct{}, 1),
 		roots:      roots,
 		ignore:     ignoreMap,
+		maxWatches: maxWatches,
 		dirtyRoots: make(map[string]bool),
 	}
 	totalWalked, totalIgnored, totalAdded, totalAddErrors, totalFD := 0, 0, 0, 0, 0
@@ -141,11 +146,11 @@ func (fw *folderWatcher) addRecursive(root string) watchStats {
 			}
 		}
 
-		if fw.watchCount >= maxWatches {
+		if fw.watchCount >= fw.maxWatches {
 			if !fw.capped {
 				fw.capped = true
 				slog.Warn("fsnotify watch limit reached, relying on periodic scan for remaining directories",
-					"limit", maxWatches, "path", path)
+					"limit", fw.maxWatches, "path", path)
 			}
 			return filepath.SkipDir
 		}

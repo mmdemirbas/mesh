@@ -1751,7 +1751,7 @@ func TestFolderWatcher_SignalsDirty(t *testing.T) {
 	dir := t.TempDir()
 	ignore := &ignoreMatcher{}
 
-	fw, err := newFolderWatcher([]string{dir}, map[string]*ignoreMatcher{dir: ignore})
+	fw, err := newFolderWatcher([]string{dir}, map[string]*ignoreMatcher{dir: ignore}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

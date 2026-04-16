@@ -133,6 +133,9 @@ type FilesyncCfg struct {
 	// Maximum bandwidth for file transfers (e.g., "10MB", "100MB", "1GB").
 	// The value is bytes per second. Suffixes: KB, MB, GB (base-10). Default: unlimited.
 	MaxBandwidth string `yaml:"max_bandwidth,omitempty"`
+	// Maximum fsnotify watches across all folders. 0 means default (4096).
+	// On macOS, kqueue uses one FD per watched directory.
+	MaxWatches int `yaml:"max_watches,omitempty"`
 
 	// ResolvedFolders is populated by Resolve(). Runtime code reads this.
 	ResolvedFolders []FolderCfg `yaml:"-"`

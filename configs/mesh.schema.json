@@ -176,6 +176,10 @@
         },
         "max_bandwidth": {
           "type": "string"
+        },
+        "max_watches": {
+          "type": "integer",
+          "description": "Maximum fsnotify watches across all folders. 0 means default (4096)."
         }
       },
       "additionalProperties": false,
