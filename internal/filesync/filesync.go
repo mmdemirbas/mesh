@@ -330,7 +330,30 @@ type folderState struct {
 	firstScanLogged bool                      // true after first scan INFO line emitted
 	indexMu         sync.RWMutex
 	retries         retryTracker
-	metrics         FolderSyncMetrics // lock-free counters for Prometheus
+	// H3: inFlight tracks paths currently being downloaded so concurrent
+	// peer goroutines skip the same path. Protected by inFlightMu.
+	inFlightMu sync.Mutex
+	inFlight   map[string]bool
+	metrics    FolderSyncMetrics // lock-free counters for Prometheus
+}
+
+// claimPath attempts to mark a path as in-flight for download. Returns false
+// if another goroutine is already downloading the same path.
+func (fs *folderState) claimPath(path string) bool {
+	fs.inFlightMu.Lock()
+	defer fs.inFlightMu.Unlock()
+	if fs.inFlight[path] {
+		return false
+	}
+	fs.inFlight[path] = true
+	return true
+}
+
+// releasePath removes a path from the in-flight set.
+func (fs *folderState) releasePath(path string) {
+	fs.inFlightMu.Lock()
+	delete(fs.inFlight, path)
+	fs.inFlightMu.Unlock()
 }
 
 const maxRetries = 3
@@ -529,6 +552,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			peers:         peers,
 			pending:       make(map[string]PendingSummary),
 			peerLastError: make(map[string]string),
+			inFlight:      make(map[string]bool),
 		}
 		n.folders[fcfg.ID] = fs
 
@@ -1001,8 +1025,13 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 	// F5: diff() only reads the index — use RLock to avoid blocking scans
 	// and admin API reads. Upgrade to Lock only for the pending update.
+	// H2: re-read peerLastSeq here (not from the stale pre-exchange snapshot)
+	// so concurrent downloads that bumped Sequence are visible to diff().
 	fs.indexMu.RLock()
-	lastSeenSeq := peerLastSeq
+	lastSeenSeq := int64(0)
+	if ps, ok := fs.peers[peerAddr]; ok {
+		lastSeenSeq = ps.LastSeenSequence
+	}
 	actions := fs.index.diff(remoteFileIndex, lastSeenSeq, fs.cfg.Direction)
 	fs.indexMu.RUnlock()
 
@@ -1081,12 +1110,24 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			continue
 		}
 
+		// H3: skip if another peer goroutine is already downloading
+		// the same path in this sync round. The in-flight set prevents
+		// concurrent writes to the same file and index entry.
+		if !fs.claimPath(action.Path) {
+			slog.Debug("skipping in-flight path", "folder", folderID, "path", action.Path, "peer", peerAddr)
+			failMu.Lock()
+			failedSeqs = append(failedSeqs, action.RemoteSequence)
+			failMu.Unlock()
+			continue
+		}
+
 		switch action.Action {
 		case ActionDownload:
 			wg.Add(1)
 			action := action
 			go func() {
 				defer wg.Done()
+				defer fs.releasePath(action.Path)
 				select {
 				case sem <- struct{}{}:
 				case <-ctx.Done():
@@ -1137,6 +1178,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			lmtime := localMtime(fs, action.Path) // snapshot before goroutine
 			go func() {
 				defer wg.Done()
+				defer fs.releasePath(action.Path)
 				select {
 				case sem <- struct{}{}:
 				case <-ctx.Done():
@@ -1198,13 +1240,23 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					destPath, _ := safePath(fs.cfg.Path, action.Path) // already validated
 					if err := renameReplace(tmpPath, destPath); err != nil {
 						slog.Warn("rename temp to dest failed", "folder", folderID, "path", action.Path, "error", err)
-						// Restore local file from conflict name.
+						// H5: restore local file from conflict name. If restore
+						// also fails, keep tmpPath so the downloaded data is not
+						// lost — the user can recover manually.
 						if restoreErr := os.Rename(conflictPath, localPath); restoreErr != nil {
-							slog.Error("failed to restore local file after conflict rename failure",
+							slog.Error("conflict recovery failed: local file is at conflict path, remote at temp path — manual recovery needed",
 								"folder", folderID, "path", action.Path,
-								"conflict_file", conflictPath, "error", restoreErr)
+								"local_at", conflictPath, "remote_at", tmpPath,
+								"error", restoreErr)
+							// Do NOT remove tmpPath — preserve both copies for
+							// manual recovery. Do NOT update index — scan will
+							// not find the original path but the file is safe
+							// at conflictPath.
+						} else {
+							// Restore succeeded — local is back at localPath.
+							// Safe to clean up the temp file.
+							_ = os.Remove(tmpPath)
 						}
-						_ = os.Remove(tmpPath)
 						fs.indexMu.Lock()
 						fs.retries.record(action.Path, action.RemoteHash)
 						fs.indexMu.Unlock()
@@ -1227,6 +1279,13 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					fs.indexMu.Unlock()
 					fs.metrics.FilesConflicted.Add(1)
 					fs.metrics.BytesDownloaded.Add(action.RemoteSize)
+				} else {
+					// H7: local wins — let lastSeenSeq advance past this
+					// entry. If the remote later modifies the file (new
+					// sequence), it will naturally trigger re-evaluation.
+					// NOT added to failedSeqs: doing so would hold
+					// lastSeenSeq below RemoteSequence, re-triggering
+					// the same conflict every cycle indefinitely.
 				}
 				slog.Info("resolved conflict", "folder", folderID, "path", action.Path, "winner", winner)
 			}()
@@ -1238,6 +1297,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			action := action
 			go func() {
 				defer wg.Done()
+				defer fs.releasePath(action.Path)
 				select {
 				case sem <- struct{}{}:
 				case <-ctx.Done():
