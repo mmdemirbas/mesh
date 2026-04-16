@@ -397,6 +397,7 @@ tbody tr:last-child td { border-bottom: none; }
 .cblock.k-task-notification  { border-left-color: var(--purple); }
 .cblock.k-hook               { border-left-color: var(--purple); }
 .cblock.k-unknown            { border-left-color: var(--blue); }
+.cblock.k-thinking           { border-left-color: var(--purple); }
 .cblock.k-system-reminder .name { color: var(--yellow); }
 .cblock.k-command         .name { color: var(--cyan); }
 .cblock.k-stderr          .name { color: var(--red); }
@@ -527,7 +528,7 @@ tbody tr:last-child td { border-bottom: none; }
   display: inline-block; width: 12px; text-align: center;
 }
 .json-toggle:hover { color: var(--green); }
-.json-collapsed { display: none; }
+.json-collapsed:not(.cblock) { display: none; }
 .json-summary { color: var(--text-muted); font-style: italic; }
 
 /* Logs */
@@ -2898,8 +2899,7 @@ function renderContentBlock(b) {
         '<div style="margin-top:4px">'+renderToolResultContent(b.content)+'</div>' +
       '</div>';
     case 'thinking':
-      return '<div style="border-left:2px solid var(--purple);padding:4px 8px;color:var(--text-dim);font-style:italic">'+
-        renderText(b.thinking || '') + '</div>';
+      return renderCustomBlock({name: 'think', body: b.thinking || ''});
     default:
       return '<div class="tool-block"><span class="tool-name" style="color:var(--text-dim)">'+x(b.type||'unknown')+'</span>' +
         '<pre>'+x(JSON.stringify(b, null, 2))+'</pre></div>';
@@ -3073,9 +3073,10 @@ function renderCustomBlock(p) {
   }
   else if (name === 'task-notification') { kind = 'task-notification'; icon = '🔔'.length===1 ? '🔔' : '*'; }
   else if (name === 'user-prompt-submit-hook' || name === 'stop-hook-feedback') { kind = 'hook'; icon = '◈'; }
+  else if (name === 'think' || name === 'thinking') { kind = 'thinking'; icon = '◆'; }
   const id = 'cb-'+(_hjId++);
   const isLong = body.length > truncateLen;
-  const collapseInitial = name === 'system-reminder' && isLong;
+  const collapseInitial = (name === 'system-reminder' && isLong) || kind === 'thinking';
   const head = '<div class="cblock-head" onclick="document.getElementById(\''+id+'\').classList.toggle(\'json-collapsed\')">' +
     '<span class="icon">'+x(icon)+'</span>' +
     '<span class="name">&lt;'+x(name)+'&gt;</span>' +
