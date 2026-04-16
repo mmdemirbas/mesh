@@ -2225,6 +2225,88 @@ func TestRenderStatus_FilesyncPeerColumnAlignment_EastAsian(t *testing.T) {
 	t.Logf("Rendered output:\n%s", plain)
 }
 
+func TestRenderStatus_FilesyncStatusPaddingWithMetrics(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Filesync: []config.FilesyncCfg{
+			{
+				Bind:  "0.0.0.0:7756",
+				Peers: map[string][]string{"mbp": {"127.0.0.1:27756"}},
+				ResolvedFolders: []config.FolderCfg{
+					{ID: "code", Path: `C:\Users\mwx1313262\code`, Peers: []string{"127.0.0.1:27756"}, PeerNames: []string{"mbp"}, Direction: "dry-run"},
+					{ID: "hw-Desktop", Path: `C:\Users\mwx1313262\Desktop`, Peers: []string{"127.0.0.1:27756"}, PeerNames: []string{"mbp"}, Direction: "dry-run"},
+					{ID: "hw-Documents", Path: `C:\Users\mwx1313262\Documents`, Peers: []string{"127.0.0.1:27756"}, PeerNames: []string{"mbp"}, Direction: "dry-run"},
+					{ID: "hw-Downloads", Path: `C:\Users\mwx1313262\Downloads`, Peers: []string{"127.0.0.1:27756"}, PeerNames: []string{"mbp"}, Direction: "dry-run"},
+					{ID: "hw-OneBox", Path: `C:\Users\mwx1313262\OneBox`, Peers: []string{"127.0.0.1:27756"}, PeerNames: []string{"mbp"}, Direction: "dry-run"},
+					{ID: "hw-Pictures", Path: `C:\Users\mwx1313262\Pictures`, Peers: []string{"127.0.0.1:27756"}, PeerNames: []string{"mbp"}, Direction: "dry-run"},
+					{ID: "m2-repo", Path: `C:\Users\mwx1313262\.m2\repository`, Peers: []string{"127.0.0.1:27756"}, PeerNames: []string{"mbp"}, Direction: "dry-run"},
+					{ID: "mesh-code", Path: `C:\Users\mwx1313262\code-2\mesh`, Peers: []string{"127.0.0.1:27756"}, PeerNames: []string{"mbp"}, Direction: "dry-run"},
+					{ID: "mesh-conf", Path: `C:\Users\mwx1313262\.mesh\conf`, Peers: []string{"127.0.0.1:27756"}, PeerNames: []string{"mbp"}, Direction: "dry-run"},
+					{ID: "mesh-log", Path: `C:\Users\mwx1313262\.mesh\log`, Peers: []string{"127.0.0.1:27756"}, PeerNames: []string{"mbp"}, Direction: "dry-run"},
+					{ID: "spark-kit", Path: `C:\Users\mwx1313262\code\spark-kit`, Peers: []string{"127.0.0.1:27756"}, PeerNames: []string{"mbp"}, Direction: "dry-run"},
+				},
+			},
+		},
+		Listeners: []config.Listener{
+			{Type: "socks", Bind: "127.0.0.1:1080"},
+			{Type: "http", Bind: "127.0.0.1:1081"},
+		},
+		Clipsync: []config.ClipsyncCfg{
+			{Bind: "0.0.0.0:7755"},
+		},
+	}
+	activeState := map[string]state.Component{
+		"filesync:0.0.0.0:7756": {Type: "filesync", ID: "0.0.0.0:7756", Status: state.Listening},
+		"proxy:127.0.0.1:1080":  {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
+		"proxy:127.0.0.1:1081":  {Type: "proxy", ID: "127.0.0.1:1081", Status: state.Listening},
+		"clipsync:0.0.0.0:7755": {Type: "clipsync", ID: "0.0.0.0:7755", Status: state.Listening},
+	}
+	for _, f := range cfg.Filesync[0].ResolvedFolders {
+		activeState["filesync-folder:"+f.ID] = state.Component{Type: "filesync-folder", ID: f.ID, Status: state.Starting}
+		activeState["filesync-peer:"+f.ID+"|127.0.0.1:27756"] = state.Component{Type: "filesync-peer", ID: f.ID + "|127.0.0.1:27756"}
+	}
+	fsM := &state.Metrics{}
+	fsM.StartTime.Store(time.Now().Add(-30 * time.Second).UnixNano())
+	proxyM := &state.Metrics{}
+	proxyM.StartTime.Store(time.Now().Add(-30 * time.Second).UnixNano())
+	metricsMap := map[string]*state.Metrics{
+		"filesync:0.0.0.0:7756": fsM,
+		"proxy:127.0.0.1:1080":  proxyM,
+		"proxy:127.0.0.1:1081":  proxyM,
+	}
+
+	output, _ := renderStatus(cfg, activeState, metricsMap, "server")
+	plain := stripANSI(output)
+
+	// All filesync folder [starting] brackets must be at the same column,
+	// with at least 2 spaces between the path and the bracket.
+	var statusCols []int
+	for _, line := range strings.Split(plain, "\n") {
+		idx := strings.Index(line, "[starting]")
+		if idx < 0 || !strings.Contains(line, `C:\`) {
+			continue
+		}
+		statusCols = append(statusCols, idx)
+		if idx >= 2 && line[idx-1] != ' ' {
+			t.Errorf("no space before [starting]:\n  %q", line)
+		}
+		if idx >= 2 && line[idx-1] == ' ' && line[idx-2] != ' ' {
+			t.Errorf("only 1 space before [starting]:\n  %q", line)
+		}
+	}
+	if len(statusCols) > 1 {
+		for i := 1; i < len(statusCols); i++ {
+			if statusCols[i] != statusCols[0] {
+				t.Errorf("[starting] columns not aligned: %v", statusCols)
+				break
+			}
+		}
+	}
+
+	t.Logf("Rendered output:\n%s", plain)
+}
+
 func TestRenderStatus_FilesyncPeerColumnAlignment(t *testing.T) {
 	t.Parallel()
 

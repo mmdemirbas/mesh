@@ -1204,7 +1204,12 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			statusBlock = r.annotation
 		}
 
-		if anyMetrics && statusBlock != "" {
+		// Filesync folder rows have their own columnar annotation (count,
+		// size, time, peers) — always left-align at statusPadCol so the
+		// annotation columns stay independent of the metrics alignment.
+		fsRow := r.fsPeers != nil || r.fsPeerHeader
+
+		if anyMetrics && statusBlock != "" && !fsRow {
 			// Right-align: status block ends at metricsPadCol - 1.
 			sbWidth := visibleLen(statusBlock)
 			targetStart := metricsPadCol - 1 - sbWidth
