@@ -347,3 +347,19 @@ e2e/
 2. Clipsync has two size caps — `maxClipboardPayload` (100 MB total) and `defaultMaxSyncFileSize` (50 MB per format, strictly enforced at read time). The stricter per-format cap is used even for `text/plain`. The 50 MB figure from the plan had to become 40 MB in the test to fit the actual cap.
 3. Gateway reports upstream parse failures as HTTP 502 with an Anthropic-shaped error body, not 500 as the plan stated. S4 was updated to match reality.
 4. Under the churn workload, rename-delete propagation lags add propagation by a wide margin — a 30-file rename leaves ~20 old names on the peer after a minute of polling. The churn test documents and tolerates this without papering over it.
+
+## Filesync Production Readiness (Phase 0a/0b)
+
+| ID   | Item                                | Notes |
+|------|-------------------------------------|-------|
+| B4   | Conflict downloads bypass MaxConcurrent sem | `ActionConflict` now routes through the same goroutine+semaphore pattern as `ActionDownload`. Also fixed a data race: `ActionDelete`'s `failedSeqs` append was unprotected while download goroutines ran concurrently. |
+| B5   | `maxIndexFiles=200000` hard cap per folder | Raised to 500k default. Configurable per-folder via `max_files` in YAML. When exceeded, scan aborts with `errIndexCapExceeded` and the partial index is never swapped in. Review caught `return` vs `continue` bug — fixed so one folder's cap doesn't abort all others. |
+| B6   | `n.folders` read without `n.mu` in hot paths | Documented `n.folders` immutability (populated once in `Start()` before goroutines), removed vestigial `sync.RWMutex` from `Node` and lock from `findFolder`. |
+| B7   | `safePath` prefix check is incomplete | Added `filepath.Clean` before the `..` prefix check so paths like `a/../..` are normalized and caught by the early guard, not just the abs-path fallback. |
+| B8   | Delete tombstone silently destroys local edits | Added `lastSeenSeq > 0 && lEntry.Sequence > lastSeenSeq` guard in `diff()` to generate `ActionConflict` instead of `ActionDelete` when a locally-modified file has a remote tombstone. First-sync edge case (lastSeenSeq=0) trusts remote. |
+| B9   | `LastSeenSequence` advanced past failed downloads | `syncFolder` now computes `safeSeq = min(failedSeqs) - 1` instead of using `remoteIdx.GetSequence()` unconditionally. `DiffEntry` carries `RemoteSequence` for tracking. |
+| B10  | Scan errors propagate as deletions to peers | `os.Stat(folderRoot)` check before `WalkDir` prevents mass tombstones on inaccessible root. Tombstone generation suppressed when `scanHadErrors` (HashErrors > 0 or StatErrors > 0). |
+| B11  | File modified during scan produces inconsistent hash | Post-hash `os.Stat` re-check; file skipped if mtime/size changed during hashing. `TocTouSkips` counter in `ScanStats`. |
+| SR1  | Per-folder scan trigger | fsnotify events now track which folder root was affected. `scanLoop` passes dirty roots to `runScan`, which skips unaffected folders. Periodic ticker still scans all folders as safety net. |
+| SR2  | Configurable max fsnotify watches | `max_watches` in `FilesyncCfg` (default 4096). Passed through to `newFolderWatcher`. Users with sufficient FD headroom can raise it. |
+| SR12 | Per-file retry limit with quarantine | Files failing 3 times in a row are quarantined — skipped until the remote version changes (new hash resets counter). Quarantine count exposed in folder status API. |
