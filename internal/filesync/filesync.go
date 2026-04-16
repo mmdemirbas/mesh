@@ -925,37 +925,55 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			}()
 
 		case ActionConflict:
-			remoteDeviceID := remoteIdx.GetDeviceId()
-			winner, err := resolveConflict(fs.cfg.Path, action.Path, localMtime(fs, action.Path), action.RemoteMtime, remoteDeviceID)
-			if err != nil {
-				slog.Warn("conflict resolution failed", "folder", folderID, "path", action.Path, "error", err)
-				failedSeqs = append(failedSeqs, action.RemoteSequence)
-				continue
-			}
-			if winner == "remote" {
-				// Download the remote version to replace local.
-				err := downloadFromPeer(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
+			wg.Add(1)
+			action := action
+			go func() {
+				defer wg.Done()
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				defer func() { <-sem }()
+
+				remoteDeviceID := remoteIdx.GetDeviceId()
+				winner, err := resolveConflict(fs.cfg.Path, action.Path, localMtime(fs, action.Path), action.RemoteMtime, remoteDeviceID)
 				if err != nil {
-					slog.Warn("conflict download failed", "folder", folderID, "path", action.Path, "error", err)
+					slog.Warn("conflict resolution failed", "folder", folderID, "path", action.Path, "error", err)
+					failMu.Lock()
 					failedSeqs = append(failedSeqs, action.RemoteSequence)
-					continue
+					failMu.Unlock()
+					return
 				}
-				fs.indexMu.Lock()
-				fs.index.Sequence++
-				fs.index.Files[action.Path] = FileEntry{
-					Size:     action.RemoteSize,
-					MtimeNS:  action.RemoteMtime,
-					SHA256:   action.RemoteHash,
-					Sequence: fs.index.Sequence,
+				if winner == "remote" {
+					// Download the remote version to replace local.
+					err := downloadFromPeer(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
+					if err != nil {
+						slog.Warn("conflict download failed", "folder", folderID, "path", action.Path, "error", err)
+						failMu.Lock()
+						failedSeqs = append(failedSeqs, action.RemoteSequence)
+						failMu.Unlock()
+						return
+					}
+					fs.indexMu.Lock()
+					fs.index.Sequence++
+					fs.index.Files[action.Path] = FileEntry{
+						Size:     action.RemoteSize,
+						MtimeNS:  action.RemoteMtime,
+						SHA256:   action.RemoteHash,
+						Sequence: fs.index.Sequence,
+					}
+					fs.indexMu.Unlock()
 				}
-				fs.indexMu.Unlock()
-			}
-			slog.Info("resolved conflict", "folder", folderID, "path", action.Path, "winner", winner)
+				slog.Info("resolved conflict", "folder", folderID, "path", action.Path, "winner", winner)
+			}()
 
 		case ActionDelete:
 			if err := deleteFile(fs.cfg.Path, action.Path); err != nil {
 				slog.Warn("delete failed", "folder", folderID, "path", action.Path, "error", err)
+				failMu.Lock()
 				failedSeqs = append(failedSeqs, action.RemoteSequence)
+				failMu.Unlock()
 				continue
 			}
 			fs.indexMu.Lock()
