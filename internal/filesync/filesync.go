@@ -591,7 +591,18 @@ func (n *Node) runScan(ctx context.Context) {
 
 		state.Global.Update("filesync-folder", id, state.Scanning, "scanning "+fs.cfg.Path)
 
-		changed, count, dirs, stats, conflicts, err := idxCopy.scanWithStats(ctx, fs.cfg.Path, ignore)
+		maxFiles := fs.cfg.MaxFiles
+		if maxFiles <= 0 {
+			maxFiles = defaultMaxIndexFiles
+		}
+		changed, count, dirs, stats, conflicts, err := idxCopy.scanWithStats(ctx, fs.cfg.Path, ignore, maxFiles)
+		if errors.Is(err, errIndexCapExceeded) {
+			slog.Error("scan aborted: folder exceeds max tracked files",
+				"folder", id, "max_files", maxFiles, "path", fs.cfg.Path)
+			state.Global.Update("filesync-folder", id, state.Retrying,
+				fmt.Sprintf("exceeds %d file limit", maxFiles))
+			return
+		}
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			slog.Warn("scan error", "folder", id, "error", err)
 		}

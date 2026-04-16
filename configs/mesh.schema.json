@@ -201,6 +201,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "max_files": {
+          "type": "integer",
+          "description": "Maximum tracked files. 0 means use the runtime default (500,000)."
         }
       },
       "additionalProperties": false,
@@ -225,6 +229,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "max_files": {
+          "type": "integer",
+          "description": "Maximum tracked files. 0 means use the runtime default (500,000)."
         }
       },
       "additionalProperties": false,

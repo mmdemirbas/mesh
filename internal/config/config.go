@@ -170,6 +170,8 @@ type FolderCfgRaw struct {
 	Direction string `yaml:"direction,omitempty"`
 	// Ignore patterns (gitignore-style), appended to defaults.ignore_patterns.
 	IgnorePatterns []string `yaml:"ignore_patterns,omitempty"`
+	// Maximum tracked files in this folder. 0 means use the runtime default (500,000).
+	MaxFiles int `yaml:"max_files,omitempty"`
 }
 
 // FolderCfg is the resolved runtime type for a synced folder.
@@ -197,6 +199,8 @@ type FolderCfg struct {
 	Direction string
 	// Merged ignore patterns (defaults + folder-specific).
 	IgnorePatterns []string
+	// Maximum tracked files. 0 means use the runtime default.
+	MaxFiles int
 }
 
 // Resolve merges defaults, resolves peer names to addresses, expands paths,
@@ -246,6 +250,7 @@ func (c *FilesyncCfg) Resolve() error {
 			AllowedPeerHosts: nil, // resolved lazily at runtime by filesync.Start
 			Direction:        direction,
 			IgnorePatterns:   patterns,
+			MaxFiles:         raw.MaxFiles,
 		})
 	}
 

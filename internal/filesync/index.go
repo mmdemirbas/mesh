@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -17,9 +18,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// maxIndexFiles caps the number of files tracked in a single folder index
-// to prevent OOM from scanning enormous directory trees.
-const maxIndexFiles = 200_000
+// defaultMaxIndexFiles is the default cap on tracked files per folder.
+// Configurable per-folder via FolderCfg.MaxFiles.
+const defaultMaxIndexFiles = 500_000
+
+// errIndexCapExceeded is returned by scanWithStats when the file count
+// exceeds the configured cap. Callers must not swap a partial index.
+var errIndexCapExceeded = errors.New("folder exceeds max tracked files")
 
 // FileEntry holds metadata for a single tracked file.
 type FileEntry struct {
@@ -191,7 +196,7 @@ type ScanStats struct {
 // returns whether any files changed, the active (non-deleted) file count,
 // and the number of directories walked (excluding the root and ignored subtrees).
 func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignoreMatcher) (changed bool, activeCount, dirCount int, err error) {
-	changed, activeCount, dirCount, _, _, err = idx.scanWithStats(ctx, folderRoot, ignore)
+	changed, activeCount, dirCount, _, _, err = idx.scanWithStats(ctx, folderRoot, ignore, defaultMaxIndexFiles)
 	return
 }
 
@@ -199,7 +204,7 @@ func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignor
 // want evidence (runScan) use this; tests keep the simpler signature.
 //
 //nolint:gocyclo // scan is a single-pass WalkDir; splitting it would hurt locality more than it helps.
-func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, ignore *ignoreMatcher) (changed bool, activeCount, dirCount int, stats ScanStats, conflicts []string, err error) {
+func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, ignore *ignoreMatcher, maxFiles int) (changed bool, activeCount, dirCount int, stats ScanStats, conflicts []string, err error) {
 	changed = false
 
 	// B10: verify the folder root is accessible before scanning. If the
@@ -278,8 +283,8 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			conflicts = append(conflicts, rel)
 		}
 
-		if len(seen) >= maxIndexFiles {
-			return fmt.Errorf("folder exceeds max tracked files (%d)", maxIndexFiles)
+		if len(seen) >= maxFiles {
+			return errIndexCapExceeded
 		}
 		seen[rel] = struct{}{}
 

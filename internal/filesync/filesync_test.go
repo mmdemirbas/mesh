@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -174,7 +175,7 @@ func TestScanWithStatsPopulatesEvidence(t *testing.T) {
 	idx := newFileIndex()
 
 	// First pass: every tracked file must be hashed (no fast-path hits).
-	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, ignore)
+	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +206,7 @@ func TestScanWithStatsPopulatesEvidence(t *testing.T) {
 
 	// Second pass on unchanged tree: every file must hit the fast path,
 	// no rehashing.
-	_, _, _, stats2, _, err := idx.scanWithStats(context.Background(), dir, ignore)
+	_, _, _, stats2, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,7 +601,7 @@ func TestScanTOCTOU_FileModifiedDuringHash(t *testing.T) {
 	// verify the positive case: a stable file is indexed correctly.
 	// The TOCTOU codepath is tested by checking that TocTouSkips is 0
 	// for stable files.
-	changed, _, _, stats, _, scanErr := idx.scanWithStats(context.Background(), dir, ignore)
+	changed, _, _, stats, _, scanErr := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
 	if scanErr != nil {
 		t.Fatal(scanErr)
 	}
@@ -615,6 +616,40 @@ func TestScanTOCTOU_FileModifiedDuringHash(t *testing.T) {
 		t.Error("stable file hash should not change")
 	}
 	_ = changed
+}
+
+func TestScanCapExceeded(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Create 5 files but set cap to 3.
+	for i := range 5 {
+		writeFile(t, dir, fmt.Sprintf("file%d.txt", i), fmt.Sprintf("data%d", i))
+	}
+	idx := newFileIndex()
+	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, &ignoreMatcher{}, 3)
+	if !errors.Is(err, errIndexCapExceeded) {
+		t.Fatalf("expected errIndexCapExceeded, got %v", err)
+	}
+	// Index should have at most 3 entries (the cap).
+	if len(idx.Files) > 3 {
+		t.Errorf("expected at most 3 files in index after cap, got %d", len(idx.Files))
+	}
+}
+
+func TestScanCapNotExceeded(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for i := range 3 {
+		writeFile(t, dir, fmt.Sprintf("file%d.txt", i), fmt.Sprintf("data%d", i))
+	}
+	idx := newFileIndex()
+	_, count, _, _, _, err := idx.scanWithStats(context.Background(), dir, &ignoreMatcher{}, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("expected 3 files, got %d", count)
+	}
 }
 
 func TestDiff(t *testing.T) {
@@ -2189,7 +2224,7 @@ func TestScanCollectsConflicts(t *testing.T) {
 	writeFile(t, dir, "sub/data.sync-conflict-20260101-000000-def456.csv", "conflict2")
 
 	idx := newFileIndex()
-	_, _, _, _, conflicts, err := idx.scanWithStats(context.Background(), dir, &ignoreMatcher{})
+	_, _, _, _, conflicts, err := idx.scanWithStats(context.Background(), dir, &ignoreMatcher{}, defaultMaxIndexFiles)
 	if err != nil {
 		t.Fatal(err)
 	}
