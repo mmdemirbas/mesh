@@ -1185,7 +1185,7 @@ function tick() {
     if (gwSelected) {
       fetch('/api/gateway/audit/stats?gateway='+encodeURIComponent(gwSelected)+
         '&window='+encodeURIComponent(gwWindow)+'&bucket='+gwBucket(gwWindow))
-        .then(r=>r.json()).then(v => { gwStats = v; renderGateway(); }).catch(fail('gw-stats'));
+        .then(r=>r.json()).then(v => { gwStats = v; if (gwSubview === 'overview') renderGatewayOverview(); else if (gwSubview === 'sessions') renderSessions(); }).catch(fail('gw-stats'));
     }
   }
 }
@@ -2161,8 +2161,8 @@ function renderGateway() {
     sel.value = names.includes(desired) ? desired : names[0];
   }
   gwSelected = sel.value;
-  renderGatewayOverview();
-  if (gwSubview === 'sessions') renderSessions();
+  if (gwSubview === 'overview') renderGatewayOverview();
+  else if (gwSubview === 'sessions') renderSessions();
   // If a hash-driven deep restore was queued before data arrived, run it now
   // that gwSelected is known. Guarded by gwHashApplyingDeep so we only retry
   // until the corresponding fetch has been issued.
@@ -2180,8 +2180,8 @@ function renderGateway() {
   const rowsRaw = entry.rows || [];
   // Pair req with resp by id+run. Each pair gets a stable composite key
   // (run|id) so the detail card survives auto-refresh even when the list
-  // reorders. Haystack is precomputed so the search input below can test
-  // in O(1) per row per keystroke instead of re-serializing JSON each time.
+  // reorders. Haystack (hay) is computed lazily on first search so idle
+  // ticks skip the JSON.stringify cost entirely.
   const reqs = new Map();
   const pairs = [];
   for (const r of rowsRaw) {
@@ -2190,12 +2190,7 @@ function renderGateway() {
       reqs.set(key, r);
     } else if (r.t === 'resp') {
       const req = reqs.get(key) || {};
-      // Cap haystack size so one 16 MB row cannot bloat filter RAM into the
-      // hundreds of MB. 200 KB × 2000 rows ≈ 400 MB worst case — still the
-      // hot edge, but far better than unbounded.
-      const hay = (JSON.stringify(req).slice(0, 200000) + ' ' +
-                   JSON.stringify(r).slice(0, 200000)).toLowerCase();
-      pairs.push({req, resp: r, key, hay});
+      pairs.push({req, resp: r, key});
     }
   }
   pairs.reverse(); // newest first
@@ -2208,44 +2203,53 @@ function renderGateway() {
     ' · '+pairs.length+' completed requests'+
     (entry.error ? ' · <span style="color:var(--red)">error: '+x(entry.error)+'</span>' : '');
 
-  const term = (gwSearchTerm||'').toLowerCase();
-  const outcomeFilter = gwOutcomeFilter;
-  const filtered = pairs.filter(p => {
-    if (outcomeFilter && (p.resp.outcome||'') !== outcomeFilter) return false;
-    if (!term) return true;
-    return p.hay.includes(term);
-  });
+  if (gwSubview === 'requests') {
+    const term = (gwSearchTerm||'').toLowerCase();
+    const outcomeFilter = gwOutcomeFilter;
+    const filtered = pairs.filter(p => {
+      if (outcomeFilter && (p.resp.outcome||'') !== outcomeFilter) return false;
+      if (!term) return true;
+      // Lazy haystack: only JSON.stringify when the user is actually searching.
+      // Cached on the pair so subsequent filter passes within the same data set
+      // reuse the result.
+      if (p.hay === undefined) {
+        p.hay = (JSON.stringify(p.req).slice(0, 200000) + ' ' +
+                 JSON.stringify(p.resp).slice(0, 200000)).toLowerCase();
+      }
+      return p.hay.includes(term);
+    });
 
-  const body = document.getElementById('gw-body');
-  if (!filtered.length) {
-    body.innerHTML = '<tr><td colspan="9" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
-    return;
+    const body = document.getElementById('gw-body');
+    if (!filtered.length) {
+      body.innerHTML = '<tr><td colspan="9" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
+    } else {
+    body.innerHTML = filtered.map(p => {
+      const ts = p.resp.ts||p.req.ts||'';
+      const dir = p.req.direction || '-';
+      const model = p.req.model || '-';
+      const stream = p.req.stream ? 'yes' : 'no';
+      const status = p.resp.status || 0;
+      const statusColor = status >= 400 ? 'var(--red)' : status >= 200 ? 'var(--green)' : 'var(--text-dim)';
+      const outcome = p.resp.outcome || '-';
+      const outcomeColor = outcome === 'ok' ? 'var(--green)' : outcome === 'error' ? 'var(--red)' : 'var(--yellow)';
+      const u = p.resp.usage || {};
+      const tokens = fmtTokens(u.input_tokens)+'/'+fmtTokens(u.output_tokens);
+      const elapsed = (p.resp.elapsed_ms||0)+'ms';
+      const summary = renderGwSummaryCell(p.resp);
+      return '<tr style="cursor:pointer" onclick="showGwDetail(\''+xj(p.key)+'\')">'+
+        '<td style="color:var(--text-muted);white-space:nowrap">'+fmtLocalTime(ts)+'</td>'+
+        '<td>'+x(dir)+'</td>'+
+        '<td style="color:var(--text-dim)">'+x(model)+'</td>'+
+        '<td style="color:var(--text-muted)">'+stream+'</td>'+
+        '<td style="color:'+statusColor+'">'+status+'</td>'+
+        '<td style="color:'+outcomeColor+'">'+x(outcome)+'</td>'+
+        '<td style="color:var(--text-dim)">'+tokens+'</td>'+
+        '<td style="color:var(--text-muted)">'+elapsed+'</td>'+
+        '<td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)">'+summary+'</td>'+
+        '</tr>';
+    }).join('');
+    }
   }
-  body.innerHTML = filtered.map(p => {
-    const ts = p.resp.ts||p.req.ts||'';
-    const dir = p.req.direction || '-';
-    const model = p.req.model || '-';
-    const stream = p.req.stream ? 'yes' : 'no';
-    const status = p.resp.status || 0;
-    const statusColor = status >= 400 ? 'var(--red)' : status >= 200 ? 'var(--green)' : 'var(--text-dim)';
-    const outcome = p.resp.outcome || '-';
-    const outcomeColor = outcome === 'ok' ? 'var(--green)' : outcome === 'error' ? 'var(--red)' : 'var(--yellow)';
-    const u = p.resp.usage || {};
-    const tokens = fmtTokens(u.input_tokens)+'/'+fmtTokens(u.output_tokens);
-    const elapsed = (p.resp.elapsed_ms||0)+'ms';
-    const summary = renderGwSummaryCell(p.resp);
-    return '<tr style="cursor:pointer" onclick="showGwDetail(\''+xj(p.key)+'\')">'+
-      '<td style="color:var(--text-muted);white-space:nowrap">'+fmtLocalTime(ts)+'</td>'+
-      '<td>'+x(dir)+'</td>'+
-      '<td style="color:var(--text-dim)">'+x(model)+'</td>'+
-      '<td style="color:var(--text-muted)">'+stream+'</td>'+
-      '<td style="color:'+statusColor+'">'+status+'</td>'+
-      '<td style="color:'+outcomeColor+'">'+x(outcome)+'</td>'+
-      '<td style="color:var(--text-dim)">'+tokens+'</td>'+
-      '<td style="color:var(--text-muted)">'+elapsed+'</td>'+
-      '<td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)">'+summary+'</td>'+
-      '</tr>';
-  }).join('');
   // If a detail card is open, re-resolve it against the new data so the copy
   // buttons reflect the current req/resp and not the stale snapshot from
   // before the last refresh.
