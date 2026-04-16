@@ -275,8 +275,9 @@ type Node struct {
 	deviceID string
 	dataDir  string // ~/.mesh/filesync/
 
-	folders map[string]*folderState // folderID -> state
-	mu      sync.RWMutex
+	// folders is populated once in Start() before any goroutine launches
+	// and is never modified after that — no lock needed for map reads.
+	folders map[string]*folderState
 
 	httpClient *http.Client
 
@@ -1069,9 +1070,8 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 }
 
 // findFolder returns the folder state for the given ID, or nil.
+// n.folders is immutable after Start() — no lock needed.
 func (n *Node) findFolder(folderID string) *folderState {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
 	return n.folders[folderID]
 }
 
