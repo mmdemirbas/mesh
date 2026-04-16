@@ -149,8 +149,13 @@ func resolveNodesForDown(args []string, configPath string) []string {
 		sort.Strings(names)
 		return names
 	}
-	// Fall back to config-based resolution for backward compatibility.
-	return resolveNodes(nil, configPath)
+	// Fall back to config node names — lightweight, no DNS resolution.
+	names, err := config.LoadNodeNames(configPath)
+	if err != nil || len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	return names
 }
 
 func printUsage() {

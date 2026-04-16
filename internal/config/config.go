@@ -412,6 +412,36 @@ func unmarshalConfigs(data []byte) (map[string]*Config, error) {
 	return cfgs, nil
 }
 
+// LoadNodeNames reads a config file and returns only the top-level node names
+// without parsing or resolving anything. Used by commands that need node names
+// but not full config (e.g. mesh down).
+func LoadNodeNames(path string) ([]string, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: user-specified config path
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	expanded := os.ExpandEnv(string(data))
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(expanded), &doc); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return nil, nil
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil, nil
+	}
+	var names []string
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		key := root.Content[i].Value
+		if !strings.HasPrefix(key, "x-") {
+			names = append(names, key)
+		}
+	}
+	return names, nil
+}
+
 // LoadUnvalidated reads and parses a config file without checking for runtime requirements (like file existence).
 func LoadUnvalidated(path string) (map[string]*Config, error) {
 	if err := checkInsecurePermissions(path); err != nil {
