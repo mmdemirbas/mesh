@@ -2105,3 +2105,129 @@ func TestRenderStatus_FilesyncSingleLinePerFolder(t *testing.T) {
 
 	t.Logf("Rendered output:\n%s", plain)
 }
+
+func TestRenderStatus_FilesyncPeerColumnAlignment(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Filesync: []config.FilesyncCfg{
+			{
+				Bind:  "0.0.0.0:7756",
+				Peers: map[string][]string{"hw": {"127.0.0.1:17756"}, "lenovo": {"10.0.0.2:7756"}},
+				ResolvedFolders: []config.FolderCfg{
+					{ID: "code", Path: "/home/user/code", Peers: []string{"127.0.0.1:17756"}, PeerNames: []string{"hw"}, Direction: "dry-run"},
+					{ID: "mesh-code", Path: "/home/user/dev/mesh", Peers: []string{"127.0.0.1:17756", "10.0.0.2:7756"}, PeerNames: []string{"hw", "lenovo"}, Direction: "dry-run"},
+					{ID: "mesh-keys", Path: "/home/user/.mesh/keys", Peers: []string{"10.0.0.2:7756"}, PeerNames: []string{"lenovo"}, Direction: "dry-run"},
+				},
+			},
+		},
+	}
+	activeState := map[string]state.Component{
+		"filesync:0.0.0.0:7756":                   {Type: "filesync", ID: "0.0.0.0:7756", Status: state.Listening},
+		"filesync-folder:code":                    {Type: "filesync-folder", ID: "code", Status: state.Starting},
+		"filesync-folder:mesh-code":               {Type: "filesync-folder", ID: "mesh-code", Status: state.Starting},
+		"filesync-folder:mesh-keys":               {Type: "filesync-folder", ID: "mesh-keys", Status: state.Starting},
+		"filesync-peer:code|127.0.0.1:17756":      {Type: "filesync-peer", ID: "code|127.0.0.1:17756"},
+		"filesync-peer:mesh-code|127.0.0.1:17756": {Type: "filesync-peer", ID: "mesh-code|127.0.0.1:17756"},
+		"filesync-peer:mesh-code|10.0.0.2:7756":   {Type: "filesync-peer", ID: "mesh-code|10.0.0.2:7756"},
+		"filesync-peer:mesh-keys|10.0.0.2:7756":   {Type: "filesync-peer", ID: "mesh-keys|10.0.0.2:7756"},
+	}
+
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
+	plain := stripANSI(output)
+
+	// Find the header row with peer names and extract column positions.
+	lines := strings.Split(plain, "\n")
+	var headerLine string
+	for _, line := range lines {
+		if strings.Contains(line, "hw") && strings.Contains(line, "lenovo") && !strings.Contains(line, "[") {
+			headerLine = line
+			break
+		}
+	}
+	if headerLine == "" {
+		t.Fatalf("peer header line not found\n%s", plain)
+	}
+
+	// visCol returns the visible column index of the first occurrence of sub in s,
+	// counting each rune as 1 column (matching visibleLen's treatment of non-emoji).
+	visCol := func(s, sub string) int {
+		idx := strings.Index(s, sub)
+		if idx < 0 {
+			return -1
+		}
+		col := 0
+		for i := range s {
+			if i == idx {
+				return col
+			}
+			col++
+		}
+		return -1
+	}
+
+	hwCol := visCol(headerLine, "hw")
+	lenovoCol := visCol(headerLine, "lenovo")
+
+	// code folder: has hw peer only → ○ under hw, nothing under lenovo.
+	for _, line := range lines {
+		if !strings.Contains(line, "code") || strings.Contains(line, "mesh-code") {
+			continue
+		}
+		if !strings.Contains(line, "[") {
+			continue
+		}
+		dotCol := visCol(line, "○")
+		if dotCol < 0 {
+			t.Errorf("code folder should have ○ indicator\n%s", plain)
+			break
+		}
+		if dotCol != hwCol {
+			t.Errorf("code ○ at visible column %d, want hw column %d\nheader: %q\n  line: %q", dotCol, hwCol, headerLine, line)
+		}
+		break
+	}
+
+	// mesh-keys folder: has lenovo peer only → ○ under lenovo.
+	for _, line := range lines {
+		if !strings.Contains(line, "mesh-keys") {
+			continue
+		}
+		dotCol := visCol(line, "○")
+		if dotCol < 0 {
+			t.Errorf("mesh-keys folder should have ○ indicator\n%s", plain)
+			break
+		}
+		if dotCol != lenovoCol {
+			t.Errorf("mesh-keys ○ at visible column %d, want lenovo column %d\nheader: %q\n  line: %q", dotCol, lenovoCol, headerLine, line)
+		}
+		break
+	}
+
+	// mesh-code folder: has both → two ○ at hw and lenovo columns.
+	for _, line := range lines {
+		if !strings.Contains(line, "mesh-code") {
+			continue
+		}
+		first := visCol(line, "○")
+		// Find second ○ after the first.
+		rest := line[strings.Index(line, "○")+len("○"):]
+		second := -1
+		if idx := strings.Index(rest, "○"); idx >= 0 {
+			second = first + 1 + visCol(rest, "○")
+		}
+		if first < 0 || second < 0 {
+			t.Errorf("mesh-code folder should have two ○ indicators\n%s", plain)
+			break
+		}
+		if first != hwCol {
+			t.Errorf("mesh-code first ○ at visible column %d, want hw column %d\nheader: %q\n  line: %q", first, hwCol, headerLine, line)
+		}
+		if second != lenovoCol {
+			t.Errorf("mesh-code second ○ at visible column %d, want lenovo column %d\nheader: %q\n  line: %q", second, lenovoCol, headerLine, line)
+		}
+		break
+	}
+
+	t.Logf("Rendered output:\n%s", plain)
+}

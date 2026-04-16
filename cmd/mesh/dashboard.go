@@ -1054,31 +1054,33 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 				}
 			}
 
+			// Build the annotation string for the peer header row so the final
+			// assembly positions it identically to data rows.
+			var peerHdrAnnotation strings.Builder
+			if maxCountWidth > 0 {
+				peerHdrAnnotation.WriteString("  ")
+				peerHdrAnnotation.WriteString(strings.Repeat(" ", maxCountWidth))
+			}
+			if maxSizeWidth > 0 {
+				peerHdrAnnotation.WriteString("  ")
+				peerHdrAnnotation.WriteString(strings.Repeat(" ", maxSizeWidth))
+			}
+			peerHdrAnnotation.WriteString("  ")
+			peerHdrAnnotation.WriteString("        ") // time placeholder
+			for j, name := range fsPeerNames {
+				peerHdrAnnotation.WriteString("  ")
+				peerHdrAnnotation.WriteString(cGray + name + cReset)
+				if pad := peerColWidths[j] - len(name); pad > 0 {
+					peerHdrAnnotation.WriteString(strings.Repeat(" ", pad))
+				}
+			}
+
 			for i, r := range rows {
 				if r.fsPeerHeader {
-					// Build header line: pad to statusPadCol + status width + extra columns.
-					var hdr strings.Builder
-					hdr.WriteString(strings.Repeat(" ", statusPadCol))
-					hdr.WriteString(strings.Repeat(" ", maxFsStatusWidth))
-					if maxCountWidth > 0 {
-						hdr.WriteString("  ")
-						hdr.WriteString(strings.Repeat(" ", maxCountWidth))
-					}
-					if maxSizeWidth > 0 {
-						hdr.WriteString("  ")
-						hdr.WriteString(strings.Repeat(" ", maxSizeWidth))
-					}
-					hdr.WriteString("  ")
-					hdr.WriteString("        ") // time placeholder
-					for j, name := range fsPeerNames {
-						hdr.WriteString("  ")
-						hdr.WriteString(cGray + name + cReset)
-						if pad := peerColWidths[j] - len(name); pad > 0 {
-							hdr.WriteString(strings.Repeat(" ", pad))
-						}
-					}
-					rows[i].isHeader = true
-					rows[i].text = hdr.String()
+					// Use same status width as data rows so final assembly
+					// right-aligns the header identically.
+					rows[i].status = strings.Repeat(" ", maxFsStatusWidth)
+					rows[i].annotation = peerHdrAnnotation.String()
 					continue
 				}
 				if r.fsPeers == nil {
