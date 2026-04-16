@@ -6,6 +6,38 @@ import (
 	"testing"
 )
 
+func TestTranslateOpenAIRequest_GlobModelMap(t *testing.T) {
+	t.Parallel()
+	cfg := &GatewayCfg{ModelMap: map[string]string{
+		"gpt-4o": "claude-opus-4-6",   // exact
+		"gpt-4*": "claude-sonnet-4-6", // glob
+		"*":      "claude-haiku-4-5",  // catch-all
+	}}
+	tests := []struct {
+		input, want string
+	}{
+		{"gpt-4o", "claude-opus-4-6"},        // exact
+		{"gpt-4o-mini", "claude-sonnet-4-6"}, // glob
+		{"gpt-4-turbo", "claude-sonnet-4-6"}, // glob
+		{"gemini-pro", "claude-haiku-4-5"},   // catch-all
+	}
+	for _, tt := range tests {
+		maxTok := 100
+		req := &ChatCompletionRequest{
+			Model:     tt.input,
+			MaxTokens: &maxTok,
+			Messages:  []OpenAIMsg{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+		}
+		out, err := translateOpenAIRequest(req, cfg)
+		if err != nil {
+			t.Fatalf("model %q: %v", tt.input, err)
+		}
+		if out.Model != tt.want {
+			t.Errorf("model %q → %q, want %q", tt.input, out.Model, tt.want)
+		}
+	}
+}
+
 func TestTranslateOpenAIRequest_SimpleText(t *testing.T) {
 	t.Parallel()
 	cfg := &GatewayCfg{ModelMap: map[string]string{"gpt-4o": "claude-sonnet-4-6"}}

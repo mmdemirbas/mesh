@@ -5,6 +5,37 @@ import (
 	"testing"
 )
 
+func TestTranslateAnthropicRequest_GlobModelMap(t *testing.T) {
+	t.Parallel()
+	cfg := &GatewayCfg{ModelMap: map[string]string{
+		"claude-opus-4-6": "gpt-4-turbo", // exact
+		"claude-*":        "gpt-4o",      // glob
+		"*":               "gpt-4o-mini", // catch-all
+	}}
+	tests := []struct {
+		input, want string
+	}{
+		{"claude-opus-4-6", "gpt-4-turbo"}, // exact
+		{"claude-sonnet-4-6", "gpt-4o"},    // glob
+		{"claude-haiku-4-5", "gpt-4o"},     // glob
+		{"gemini-2.5-pro", "gpt-4o-mini"},  // catch-all
+	}
+	for _, tt := range tests {
+		req := &MessagesRequest{
+			Model:     tt.input,
+			MaxTokens: 100,
+			Messages:  []AnthropicMsg{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+		}
+		out, err := translateAnthropicRequest(req, cfg)
+		if err != nil {
+			t.Fatalf("model %q: %v", tt.input, err)
+		}
+		if out.Model != tt.want {
+			t.Errorf("model %q → %q, want %q", tt.input, out.Model, tt.want)
+		}
+	}
+}
+
 func TestTranslateAnthropicRequest_SimpleText(t *testing.T) {
 	t.Parallel()
 	cfg := &GatewayCfg{ModelMap: map[string]string{"claude-sonnet-4-6": "gpt-4o"}}

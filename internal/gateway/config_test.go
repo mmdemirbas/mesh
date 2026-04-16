@@ -340,6 +340,78 @@ func TestGatewayCfg_MapModel(t *testing.T) {
 			input:    "claude-sonnet-4-6",
 			want:     "claude-sonnet-4-6",
 		},
+		{
+			name:     "empty string model passthrough",
+			modelMap: map[string]string{"claude-*": "gpt-4o"},
+			input:    "",
+			want:     "",
+		},
+		{
+			name:     "glob star in middle",
+			modelMap: map[string]string{"claude-*-latest": "mapped"},
+			input:    "claude-sonnet-latest",
+			want:     "mapped",
+		},
+		{
+			name:     "glob star in middle no match",
+			modelMap: map[string]string{"claude-*-latest": "mapped"},
+			input:    "claude-sonnet-4-6",
+			want:     "claude-sonnet-4-6",
+		},
+		{
+			name:     "multiple wildcards",
+			modelMap: map[string]string{"*-*-*": "triple"},
+			input:    "a-b-c",
+			want:     "triple",
+		},
+		{
+			name:     "question mark wrong length",
+			modelMap: map[string]string{"gpt-?o": "mapped"},
+			input:    "gpt-4oo",
+			want:     "gpt-4oo",
+		},
+		{
+			name:     "bracket no match",
+			modelMap: map[string]string{"gpt-[34]o": "mapped"},
+			input:    "gpt-5o",
+			want:     "gpt-5o",
+		},
+		{
+			name:     "exact plus catch-all",
+			modelMap: map[string]string{"claude-sonnet-4-6": "exact", "*": "default"},
+			input:    "claude-sonnet-4-6",
+			want:     "exact",
+		},
+		{
+			name:     "all three tiers",
+			modelMap: map[string]string{"claude-sonnet-4-6": "exact", "claude-*": "glob", "*": "default"},
+			input:    "claude-opus-4-6",
+			want:     "glob",
+		},
+		{
+			name:     "all three tiers fallthrough to default",
+			modelMap: map[string]string{"claude-sonnet-4-6": "exact", "claude-*": "glob", "*": "default"},
+			input:    "gpt-4o",
+			want:     "default",
+		},
+		{
+			name:     "only catch-all in map",
+			modelMap: map[string]string{"*": "fallback"},
+			input:    "any-model-name",
+			want:     "fallback",
+		},
+		{
+			name:     "non-overlapping globs",
+			modelMap: map[string]string{"claude-*": "anthropic", "gpt-*": "openai"},
+			input:    "gpt-4o",
+			want:     "openai",
+		},
+		{
+			name:     "glob matches exact-length string",
+			modelMap: map[string]string{"gpt-*": "mapped"},
+			input:    "gpt-",
+			want:     "mapped",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
