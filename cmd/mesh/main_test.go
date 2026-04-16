@@ -483,6 +483,21 @@ func TestRenderStatus_WithGateway(t *testing.T) {
 	}
 }
 
+func TestRenderStatus_GatewayEmptyAPIKey(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: []gateway.GatewayCfg{
+			{Name: "test-gw", Bind: "127.0.0.1:3457", Upstream: "http://upstream:4000/v1/chat/completions", ClientAPI: gateway.APIAnthropic, UpstreamAPI: gateway.APIOpenAI},
+		},
+	}
+	activeState := map[string]state.Component{
+		"gateway:test-gw": {Type: "gateway", ID: "test-gw", Status: state.Listening, BoundAddr: "127.0.0.1:3457", Message: "MY_API_KEY is empty"},
+	}
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
+	if !strings.Contains(output, "MY_API_KEY is empty") {
+		t.Errorf("output should show API key warning\n--- output ---\n%s", output)
+	}
+}
+
 func TestRenderStatus_WithConnections(t *testing.T) {
 	cfg := &config.Config{
 		Connections: []config.Connection{

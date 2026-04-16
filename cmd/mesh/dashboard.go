@@ -730,6 +730,9 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			bindPad := strings.Repeat(" ", maxGwBind-len(bind))
 			left := cBold + cCyan + gw.Name + cReset + namePad + " " + cGray + gw.Direction().String() + cReset + " " + colorAddr(bind) + bindPad
 			addRow("", indicator, left, arrowRight, cGray+gw.Upstream+cReset, st, "", readMetrics(metricsMap["gateway:"+gw.Name]))
+			if comp.Status == state.Listening && comp.Message != "" {
+				addRow("   ", "⚠️", cYellow+comp.Message+cReset, "", "", "", "", metricsSnapshot{})
+			}
 		}
 		addHeader("")
 	}

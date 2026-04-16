@@ -31,9 +31,11 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 	log = log.With("gateway", cfg.Name)
 
 	apiKey := ""
+	apiKeyEmpty := false
 	if cfg.APIKeyEnv != "" {
 		apiKey = os.Getenv(cfg.APIKeyEnv)
 		if apiKey == "" {
+			apiKeyEmpty = true
 			log.Warn("API key env var is empty", "var", cfg.APIKeyEnv)
 		}
 	}
@@ -93,7 +95,11 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 	}
 	defer func() { _ = ln.Close() }()
 
-	state.Global.Update("gateway", cfg.Name, state.Listening, cfg.Bind)
+	listenMsg := ""
+	if apiKeyEmpty {
+		listenMsg = cfg.APIKeyEnv + " is empty"
+	}
+	state.Global.Update("gateway", cfg.Name, state.Listening, listenMsg)
 	state.Global.UpdateBind("gateway", cfg.Name, ln.Addr().String())
 	metrics := state.Global.GetMetrics("gateway", cfg.Name)
 	metrics.StartTime.Store(time.Now().UnixNano())
