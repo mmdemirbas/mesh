@@ -15,6 +15,7 @@ cover.out
 
 # Secrets
 .env
+*.local.*
 
 # IDE
 .idea/
