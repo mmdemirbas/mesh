@@ -310,7 +310,7 @@ func TestRunScanPreservesConcurrentWrites(t *testing.T) {
 	}
 	fs.index.Sequence = 1000
 
-	n.runScan(context.Background())
+	n.runScan(context.Background(), nil)
 
 	if _, ok := fs.index.Files["from-peer.txt"]; !ok {
 		t.Fatal("runScan clobbered a concurrently-written peer entry (expected merge-preserve)")
@@ -323,6 +323,53 @@ func TestRunScanPreservesConcurrentWrites(t *testing.T) {
 	}
 	if fs.index.Sequence < 1000 {
 		t.Errorf("Sequence regressed: got %d, must be >= 1000", fs.index.Sequence)
+	}
+}
+
+func TestRunScanTargeted(t *testing.T) {
+	t.Parallel()
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	writeFile(t, dir1, "a.txt", "aaa")
+	writeFile(t, dir2, "b.txt", "bbb")
+
+	fs1 := &folderState{
+		cfg:           config.FolderCfg{ID: "f1", Path: dir1, Direction: "send-receive"},
+		index:         newFileIndex(),
+		ignore:        &ignoreMatcher{},
+		peers:         map[string]PeerState{},
+		pending:       map[string]PendingSummary{},
+		peerLastError: map[string]string{},
+	}
+	fs1.index.Path = dir1
+	fs2 := &folderState{
+		cfg:           config.FolderCfg{ID: "f2", Path: dir2, Direction: "send-receive"},
+		index:         newFileIndex(),
+		ignore:        &ignoreMatcher{},
+		peers:         map[string]PeerState{},
+		pending:       map[string]PendingSummary{},
+		peerLastError: map[string]string{},
+	}
+	fs2.index.Path = dir2
+	n := &Node{
+		folders:     map[string]*folderState{"f1": fs1, "f2": fs2},
+		scanTrigger: make(chan struct{}, 1),
+	}
+
+	// Targeted scan: only dir1 is dirty.
+	n.runScan(context.Background(), map[string]bool{dir1: true})
+
+	if _, ok := fs1.index.Files["a.txt"]; !ok {
+		t.Error("targeted scan should have scanned f1")
+	}
+	if len(fs2.index.Files) != 0 {
+		t.Errorf("targeted scan should NOT have scanned f2, but it has %d files", len(fs2.index.Files))
+	}
+
+	// Full scan (nil): both folders scanned.
+	n.runScan(context.Background(), nil)
+	if _, ok := fs2.index.Files["b.txt"]; !ok {
+		t.Error("full scan should have scanned f2")
 	}
 }
 
@@ -2166,7 +2213,7 @@ func TestDisabledFolderSkippedInScan(t *testing.T) {
 		ignore: &ignoreMatcher{},
 	}
 
-	n.runScan(context.Background())
+	n.runScan(context.Background(), nil)
 
 	// Active folder should have scanned files.
 	if len(n.folders["active"].index.Files) == 0 {

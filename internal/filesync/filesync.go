@@ -514,8 +514,8 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		n.syncLoop(ctx)
 	}()
 
-	// Run initial scan.
-	n.runScan(ctx)
+	// Run initial scan (all folders).
+	n.runScan(ctx, nil)
 
 	<-ctx.Done()
 
@@ -554,25 +554,35 @@ func (n *Node) scanLoop(ctx context.Context, interval time.Duration, watcher *fo
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			n.runScan(ctx)
+			// Periodic: scan all folders as a safety net.
+			n.runScan(ctx, nil)
 		case <-dirtyCh:
-			n.runScan(ctx)
+			// Targeted: only scan the folders whose roots received events.
+			dirtyRoots := watcher.drainDirtyRoots()
+			n.runScan(ctx, dirtyRoots)
 		}
 	}
 }
 
-// runScan scans all folders and triggers sync if anything changed.
+// runScan scans folders and triggers sync if anything changed.
+// When dirtyRoots is non-nil, only folders whose path is in the set are
+// scanned (targeted fsnotify trigger).  When nil, all folders are scanned
+// (periodic safety-net).
 // The FS walk runs against a private copy of the index so readers
 // (admin UI, dashboard, syncLoop) are never blocked by a long scan.
 // Bails out between folders if ctx is cancelled so shutdown doesn't wait for
 // multi-minute WalkDirs over huge folders (m2 repo, build outputs).
-func (n *Node) runScan(ctx context.Context) {
+func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 	anyChanged := false
 	for id, fs := range n.folders {
 		if ctx.Err() != nil {
 			return
 		}
 		if fs.cfg.Direction == "disabled" {
+			continue
+		}
+		// When dirtyRoots is set, skip folders not affected by fsnotify events.
+		if dirtyRoots != nil && !dirtyRoots[fs.cfg.Path] {
 			continue
 		}
 

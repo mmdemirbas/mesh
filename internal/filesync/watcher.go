@@ -3,6 +3,7 @@ package filesync
 import (
 	"context"
 	"errors"
+	"sync"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -52,6 +53,11 @@ type folderWatcher struct {
 	ignore     map[string]*ignoreMatcher // folderRoot -> matcher
 	watchCount int                       // current number of active watches
 	capped     bool                      // true if maxWatches was reached
+
+	// dirtyRoots accumulates which folder roots had events since the last
+	// drain.  Protected by dirtyMu.  Drained by drainDirtyRoots().
+	dirtyMu    sync.Mutex
+	dirtyRoots map[string]bool
 }
 
 // newFolderWatcher creates a watcher that monitors the given folder roots.
@@ -63,10 +69,11 @@ func newFolderWatcher(roots []string, ignoreMap map[string]*ignoreMatcher) (*fol
 		return nil, err
 	}
 	fw := &folderWatcher{
-		watcher: w,
-		dirtyCh: make(chan struct{}, 1),
-		roots:   roots,
-		ignore:  ignoreMap,
+		watcher:    w,
+		dirtyCh:    make(chan struct{}, 1),
+		roots:      roots,
+		ignore:     ignoreMap,
+		dirtyRoots: make(map[string]bool),
 	}
 	totalWalked, totalIgnored, totalAdded, totalAddErrors, totalFD := 0, 0, 0, 0, 0
 	for _, root := range roots {
@@ -229,6 +236,13 @@ func (fw *folderWatcher) run(ctx context.Context) {
 				}
 			}
 
+			// Record which root was affected so scanLoop can target it.
+			if root := fw.rootFor(event.Name); root != event.Name || fw.isRoot(event.Name) {
+				fw.dirtyMu.Lock()
+				fw.dirtyRoots[root] = true
+				fw.dirtyMu.Unlock()
+			}
+
 			// Signal dirty with debounce.
 			if debounceTimer == nil {
 				debounceTimer = time.NewTimer(debounceInterval)
@@ -280,6 +294,29 @@ func (fw *folderWatcher) removeStaleWatches() {
 func isTempFile(path string) bool {
 	base := filepath.Base(path)
 	return strings.HasPrefix(base, ".mesh-tmp-") || strings.HasSuffix(base, ".mesh-delta-tmp")
+}
+
+// drainDirtyRoots returns the set of folder roots that received events since
+// the last drain and resets the internal set.  Returns nil when nothing changed.
+func (fw *folderWatcher) drainDirtyRoots() map[string]bool {
+	fw.dirtyMu.Lock()
+	defer fw.dirtyMu.Unlock()
+	if len(fw.dirtyRoots) == 0 {
+		return nil
+	}
+	out := fw.dirtyRoots
+	fw.dirtyRoots = make(map[string]bool)
+	return out
+}
+
+// isRoot reports whether path is one of the configured folder roots.
+func (fw *folderWatcher) isRoot(path string) bool {
+	for _, root := range fw.roots {
+		if path == root {
+			return true
+		}
+	}
+	return false
 }
 
 // close shuts down the fsnotify watcher.
