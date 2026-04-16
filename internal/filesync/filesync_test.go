@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -862,7 +863,9 @@ func TestDiffDeleteTombstone(t *testing.T) {
 	remote := newFileIndex()
 	remote.Files["a.txt"] = FileEntry{Deleted: true, Sequence: 5}
 
-	actions := local.diff(remote, 0, "send-receive")
+	// H8: lastSeenSeq > 0 means we've synced before — remote tombstone
+	// should delete the unchanged local file.
+	actions := local.diff(remote, 1, "send-receive")
 	if len(actions) != 1 || actions[0].Action != ActionDelete {
 		t.Errorf("expected delete action, got %v", actions)
 	}
@@ -940,7 +943,9 @@ func TestDiffDeleteTombstone_LocalUnchanged(t *testing.T) {
 	}
 }
 
-// B8: on first sync (lastSeenSeq=0), remote deletions should go through.
+// H8: on first sync (lastSeenSeq=0), remote tombstones must NOT delete
+// locally-existing files. The local file was never shared with this peer,
+// so the tombstone refers to a deletion from a third party.
 func TestDiffDeleteTombstone_FirstSync(t *testing.T) {
 	t.Parallel()
 	local := newFileIndex()
@@ -949,10 +954,10 @@ func TestDiffDeleteTombstone_FirstSync(t *testing.T) {
 	remote := newFileIndex()
 	remote.Files["a.txt"] = FileEntry{Deleted: true, Sequence: 5}
 
-	// lastSeenSeq=0 means we've never synced — trust remote tombstones.
+	// lastSeenSeq=0 means we've never synced — guard protects local files.
 	actions := local.diff(remote, 0, "send-receive")
-	if len(actions) != 1 || actions[0].Action != ActionDelete {
-		t.Errorf("expected delete on first sync, got %v", actions)
+	if len(actions) != 0 {
+		t.Errorf("H8: first-sync tombstone should not delete local file, got %v", actions)
 	}
 }
 
@@ -2325,7 +2330,9 @@ func TestDownloadFile_Resume(t *testing.T) {
 	destDir := t.TempDir()
 
 	// Pre-create a partial temp file (first 5 bytes).
-	tmpName := ".mesh-tmp-" + expectedHash[:16]
+	// H1: temp name includes peer suffix for per-peer isolation.
+	peerAddr := srv.Listener.Addr().String()
+	tmpName := ".mesh-tmp-" + expectedHash[:16] + "-" + peerSuffix(peerAddr)
 	tmpPath := filepath.Join(destDir, tmpName)
 	if err := os.WriteFile(tmpPath, []byte(content[:5]), 0600); err != nil {
 		t.Fatal(err)
@@ -2334,7 +2341,7 @@ func TestDownloadFile_Resume(t *testing.T) {
 	// Download should resume from offset 5.
 	path, err := downloadFile(t.Context(),
 		&http.Client{},
-		srv.Listener.Addr().String(),
+		peerAddr,
 		"test",
 		"data.txt",
 		expectedHash,
@@ -3092,6 +3099,173 @@ func TestGetFolderMetrics_Roundtrip(t *testing.T) {
 	}
 	if snap.PeerSyncNS != int64(2*time.Second) {
 		t.Errorf("PeerSyncNS=%d, want %d", snap.PeerSyncNS, int64(2*time.Second))
+	}
+}
+
+// --- Hardening tests (H1-H8) ---
+
+// H1: temp file names include a peer-derived suffix so concurrent downloads
+// from different peers get separate temp files.
+func TestPeerSuffix_DifferentPeers(t *testing.T) {
+	t.Parallel()
+	s1 := peerSuffix("192.168.1.1:7756")
+	s2 := peerSuffix("192.168.1.2:7756")
+	if s1 == s2 {
+		t.Errorf("different peers should produce different suffixes: %s == %s", s1, s2)
+	}
+	if len(s1) != 8 {
+		t.Errorf("suffix length should be 8 hex chars, got %d", len(s1))
+	}
+}
+
+func TestPeerSuffix_Deterministic(t *testing.T) {
+	t.Parallel()
+	s1 := peerSuffix("10.0.0.1:7756")
+	s2 := peerSuffix("10.0.0.1:7756")
+	if s1 != s2 {
+		t.Errorf("same peer should produce same suffix: %s != %s", s1, s2)
+	}
+}
+
+// H3: claimPath/releasePath dedup prevents concurrent downloads of the same path.
+func TestClaimPath_Dedup(t *testing.T) {
+	t.Parallel()
+	fs := &folderState{inFlight: make(map[string]bool)}
+
+	if !fs.claimPath("a.txt") {
+		t.Fatal("first claim should succeed")
+	}
+	if fs.claimPath("a.txt") {
+		t.Fatal("second claim of same path should fail")
+	}
+	// Different path should succeed.
+	if !fs.claimPath("b.txt") {
+		t.Fatal("claim of different path should succeed")
+	}
+
+	fs.releasePath("a.txt")
+	// After release, claim should succeed again.
+	if !fs.claimPath("a.txt") {
+		t.Fatal("claim after release should succeed")
+	}
+}
+
+func TestClaimPath_Concurrent(t *testing.T) {
+	t.Parallel()
+	fs := &folderState{inFlight: make(map[string]bool)}
+
+	const goroutines = 100
+	claimed := make(chan bool, goroutines)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			claimed <- fs.claimPath("race.txt")
+		}()
+	}
+	wg.Wait()
+	close(claimed)
+
+	wins := 0
+	for ok := range claimed {
+		if ok {
+			wins++
+		}
+	}
+	if wins != 1 {
+		t.Errorf("exactly 1 goroutine should win the claim, got %d", wins)
+	}
+}
+
+// H4: safePath rejects symlinks that escape the folder root.
+func TestSafePath_SymlinkEscape(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test requires Unix")
+	}
+
+	root := t.TempDir()
+	outside := t.TempDir()
+
+	// Create a symlink inside root that points outside.
+	outsideFile := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideFile, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := safePath(root, "escape")
+	if err == nil {
+		t.Error("safePath should reject symlink pointing outside root")
+	}
+	if err != nil && !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("error should mention symlink, got: %v", err)
+	}
+}
+
+func TestSafePath_TraversalBlocked(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+
+	for _, path := range []string{"../etc/passwd", "/etc/passwd", "foo/../../etc/passwd"} {
+		_, err := safePath(root, path)
+		if err == nil {
+			t.Errorf("safePath(%q) should be rejected", path)
+		}
+	}
+}
+
+func TestSafePath_ValidPaths(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+
+	for _, path := range []string{"a.txt", "sub/dir/file.txt", "a/b/c"} {
+		result, err := safePath(root, path)
+		if err != nil {
+			t.Errorf("safePath(%q) should succeed: %v", path, err)
+		}
+		if !strings.HasPrefix(result, root) {
+			t.Errorf("safePath(%q) = %q, should be under %q", path, result, root)
+		}
+	}
+}
+
+// H8: first-sync tombstone guard — remote tombstones for files that exist
+// locally are skipped when lastSeenSeq=0. Files NOT present locally are
+// unaffected (no local entry to protect).
+func TestDiffFirstSyncTombstone_RemoteOnly(t *testing.T) {
+	t.Parallel()
+	local := newFileIndex()
+	// No local entry for "gone.txt".
+
+	remote := newFileIndex()
+	remote.Files["gone.txt"] = FileEntry{Deleted: true, Sequence: 5}
+
+	// Even on first sync, if local doesn't have the file, no action expected
+	// (can't delete what doesn't exist locally).
+	actions := local.diff(remote, 0, "send-receive")
+	if len(actions) != 0 {
+		t.Errorf("no action expected for remote-only tombstone, got %v", actions)
+	}
+}
+
+// H8: after first sync (lastSeenSeq > 0), tombstones should delete
+// unchanged local files normally.
+func TestDiffTombstone_AfterFirstSync(t *testing.T) {
+	t.Parallel()
+	local := newFileIndex()
+	local.Files["a.txt"] = FileEntry{SHA256: "aaa", Sequence: 1}
+
+	remote := newFileIndex()
+	remote.Files["a.txt"] = FileEntry{Deleted: true, Sequence: 5}
+
+	actions := local.diff(remote, 3, "send-receive")
+	if len(actions) != 1 || actions[0].Action != ActionDelete {
+		t.Errorf("expected delete after first sync, got %v", actions)
 	}
 }
 
