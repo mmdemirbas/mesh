@@ -706,13 +706,29 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 
 	if len(cfg.Gateway) > 0 {
 		addHeader(sectionTitle("gateway"))
+		maxGwName := 0
+		maxGwBind := 0
+		for _, gw := range cfg.Gateway {
+			if n := len(gw.Name); n > maxGwName {
+				maxGwName = n
+			}
+			bind := gw.Bind
+			if _, _, comp := getComponentInfo("gateway", gw.Name); comp.BoundAddr != "" {
+				bind = comp.BoundAddr
+			}
+			if n := len(bind); n > maxGwBind {
+				maxGwBind = n
+			}
+		}
 		for _, gw := range cfg.Gateway {
 			indicator, st, comp := getComponentInfo("gateway", gw.Name)
 			bind := gw.Bind
 			if comp.BoundAddr != "" {
 				bind = comp.BoundAddr
 			}
-			left := cBold + cCyan + gw.Name + cReset + " " + cGray + gw.Direction().String() + cReset + " " + colorAddr(bind)
+			namePad := strings.Repeat(" ", maxGwName-len(gw.Name))
+			bindPad := strings.Repeat(" ", maxGwBind-len(bind))
+			left := cBold + cCyan + gw.Name + cReset + namePad + " " + cGray + gw.Direction().String() + cReset + " " + colorAddr(bind) + bindPad
 			addRow("", indicator, left, arrowRight, cGray+gw.Upstream+cReset, st, "", readMetrics(metricsMap["gateway:"+gw.Name]))
 		}
 		addHeader("")

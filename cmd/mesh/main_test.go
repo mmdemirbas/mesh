@@ -452,6 +452,35 @@ func TestRenderStatus_WithGateway(t *testing.T) {
 	if !strings.Contains(output, "https://api.anthropic.com") {
 		t.Errorf("output missing upstream URL\n--- output ---\n%s", output)
 	}
+	// Verify column alignment: direction tags and bind addresses must start at the same column.
+	var dirCols, bindCols []int
+	for _, line := range strings.Split(output, "\n") {
+		plain := stripANSI(line)
+		for _, dir := range []string{" a2a ", " a2o ", " o2a ", " o2o "} {
+			if idx := strings.Index(plain, dir); idx >= 0 {
+				dirCols = append(dirCols, idx)
+				// Bind address follows direction: "a2o 127.0.0.1:..."
+				addrStart := idx + len(dir)
+				bindCols = append(bindCols, addrStart)
+			}
+		}
+	}
+	if len(dirCols) >= 2 {
+		for i := 1; i < len(dirCols); i++ {
+			if dirCols[i] != dirCols[0] {
+				t.Errorf("gateway direction columns misaligned: %v\n--- output ---\n%s", dirCols, output)
+				break
+			}
+		}
+	}
+	if len(bindCols) >= 2 {
+		for i := 1; i < len(bindCols); i++ {
+			if bindCols[i] != bindCols[0] {
+				t.Errorf("gateway bind address columns misaligned: %v\n--- output ---\n%s", bindCols, output)
+				break
+			}
+		}
+	}
 }
 
 func TestRenderStatus_WithConnections(t *testing.T) {
