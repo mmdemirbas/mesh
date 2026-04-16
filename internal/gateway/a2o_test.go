@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -627,5 +628,106 @@ func TestTranslateAnthropicRequest_EmptyMessages(t *testing.T) {
 	}
 	if len(out.Messages) != 0 {
 		t.Errorf("messages = %d, want 0", len(out.Messages))
+	}
+}
+
+func TestExtractThinkTag(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		in            string
+		wantThinking  string
+		wantRemaining string
+	}{
+		{"no think tag", "Hello there", "", "Hello there"},
+		{"basic", "<think>reasoning</think>Hello", "reasoning", "Hello"},
+		{"with whitespace before", "  \n<think>reasoning</think>Hello", "reasoning", "Hello"},
+		{"newlines after close", "<think>reasoning</think>\n\nHello", "reasoning", "Hello"},
+		{"case insensitive", "<THINK>reasoning</THINK>Hello", "reasoning", "Hello"},
+		{"mixed case", "<Think>reasoning</think>Hello", "reasoning", "Hello"},
+		{"unclosed tag", "<think>reasoning without close", "", "<think>reasoning without close"},
+		{"empty think", "<think></think>Hello", "", "Hello"},
+		{"think only", "<think>reasoning</think>", "reasoning", ""},
+		{"not at start", "Hello<think>reasoning</think>world", "", "Hello<think>reasoning</think>world"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotThinking, gotRemaining := extractThinkTag(tt.in)
+			if gotThinking != tt.wantThinking {
+				t.Errorf("thinking = %q, want %q", gotThinking, tt.wantThinking)
+			}
+			if gotRemaining != tt.wantRemaining {
+				t.Errorf("remaining = %q, want %q", gotRemaining, tt.wantRemaining)
+			}
+		})
+	}
+}
+
+func TestThinkTagFilter(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		chunks       []string
+		wantText     string
+		wantThinking string
+	}{
+		{"no think tag", []string{"Hello world"}, "Hello world", ""},
+		{"think in one chunk", []string{"<think>reasoning</think>Hello"}, "Hello", "reasoning"},
+		{"think split across chunks", []string{"<thi", "nk>reason", "ing</think>Hello"}, "Hello", "reasoning"},
+		{"partial then not", []string{"<th", "is is normal text"}, "<this is normal text", ""},
+		{"empty after think", []string{"<think>reasoning</think>"}, "", "reasoning"},
+		{"whitespace before think", []string{"  ", "<think>reasoning</think>Hello"}, "Hello", "reasoning"},
+		{"normal text multiple chunks", []string{"Hello", " ", "world"}, "Hello world", ""},
+		{"thinking emitted incrementally", []string{"<think>part1", "part2</think>Hello"}, "Hello", "part1part2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var f thinkTagFilter
+			var gotText, gotThinking strings.Builder
+			for _, chunk := range tt.chunks {
+				f.process(chunk,
+					func(s string) { gotText.WriteString(s) },
+					func(s string) { gotThinking.WriteString(s) },
+				)
+			}
+			f.flush(func(s string) { gotText.WriteString(s) })
+			if gotText.String() != tt.wantText {
+				t.Errorf("text = %q, want %q", gotText.String(), tt.wantText)
+			}
+			if gotThinking.String() != tt.wantThinking {
+				t.Errorf("thinking = %q, want %q", gotThinking.String(), tt.wantThinking)
+			}
+		})
+	}
+}
+
+func TestTranslateOpenAIResponse_ThinkTagTranslated(t *testing.T) {
+	t.Parallel()
+	resp := &ChatCompletionResponse{
+		ID:    "chatcmpl-123",
+		Model: "gpt-4o",
+		Choices: []OpenAIChoice{
+			{
+				Message:      OpenAIMsg{Role: "assistant", Content: json.RawMessage(`"<think>I should greet them</think>\n\nHello!"`)},
+				FinishReason: "stop",
+			},
+		},
+	}
+
+	out, err := translateOpenAIResponse(resp, "claude-sonnet-4-6")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(out.Content) != 2 {
+		t.Fatalf("content blocks = %d, want 2 (thinking + text)", len(out.Content))
+	}
+	if out.Content[0].Type != "thinking" || out.Content[0].Thinking != "I should greet them" {
+		t.Errorf("content[0] = {type:%q thinking:%q}, want thinking block", out.Content[0].Type, out.Content[0].Thinking)
+	}
+	if out.Content[1].Type != "text" || out.Content[1].Text != "Hello!" {
+		t.Errorf("content[1] = {type:%q text:%q}, want text 'Hello!'", out.Content[1].Type, out.Content[1].Text)
 	}
 }

@@ -350,6 +350,125 @@ func TestO2AStream_ThinkingDropped(t *testing.T) {
 	}
 }
 
+func TestA2OStream_ThinkTagTranslated(t *testing.T) {
+	t.Parallel()
+	// Upstream returns text with <think>...</think> wrapper (common with
+	// OpenAI-compatible endpoints proxying Claude).
+	chunks := []string{
+		makeOpenAIChunk("chatcmpl-5", "gpt-4o", &OpenAIChunkChoice{
+			Index: 0,
+			Delta: OpenAIChunkDelta{Role: "assistant", Content: strPtr("")},
+		}),
+		makeOpenAIChunk("chatcmpl-5", "gpt-4o", &OpenAIChunkChoice{
+			Index: 0,
+			Delta: OpenAIChunkDelta{Content: strPtr("<think>")},
+		}),
+		makeOpenAIChunk("chatcmpl-5", "gpt-4o", &OpenAIChunkChoice{
+			Index: 0,
+			Delta: OpenAIChunkDelta{Content: strPtr("I should greet them")},
+		}),
+		makeOpenAIChunk("chatcmpl-5", "gpt-4o", &OpenAIChunkChoice{
+			Index: 0,
+			Delta: OpenAIChunkDelta{Content: strPtr("</think>\n\nHello!")},
+		}),
+		makeOpenAIChunkWithFinish("chatcmpl-5", "gpt-4o", "stop", nil),
+	}
+
+	upstream := makeSSEServer(chunks)
+	defer upstream.Close()
+
+	events := runA2OStreamTest(t, upstream.URL, "claude-sonnet-4-6", nil)
+
+	// Should get native thinking block + text "Hello!".
+	var allText, allThinking strings.Builder
+	var hasThinkingBlock bool
+	for _, e := range events {
+		if e.eventType == "content_block_start" {
+			var data struct {
+				ContentBlock struct{ Type string } `json:"content_block"`
+			}
+			json.Unmarshal([]byte(e.data), &data)
+			if data.ContentBlock.Type == "thinking" {
+				hasThinkingBlock = true
+			}
+		}
+		if e.eventType != "content_block_delta" {
+			continue
+		}
+		var data struct {
+			Delta struct {
+				Type     string `json:"type"`
+				Text     string `json:"text"`
+				Thinking string `json:"thinking"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(e.data), &data); err != nil {
+			continue
+		}
+		switch data.Delta.Type {
+		case "text_delta":
+			allText.WriteString(data.Delta.Text)
+		case "thinking_delta":
+			allThinking.WriteString(data.Delta.Thinking)
+		}
+	}
+	if !hasThinkingBlock {
+		t.Error("expected a thinking content_block_start event")
+	}
+	if !strings.Contains(allThinking.String(), "greet") {
+		t.Errorf("thinking = %q, expected to contain 'greet'", allThinking.String())
+	}
+	if !strings.Contains(allText.String(), "Hello!") {
+		t.Errorf("text = %q, expected 'Hello!'", allText.String())
+	}
+	if strings.Contains(allText.String(), "think") {
+		t.Errorf("thinking leaked into text: %q", allText.String())
+	}
+}
+
+func TestA2OStream_NoThinkTag(t *testing.T) {
+	t.Parallel()
+	// Text that does NOT start with <think> should pass through unchanged.
+	chunks := []string{
+		makeOpenAIChunk("chatcmpl-6", "gpt-4o", &OpenAIChunkChoice{
+			Index: 0,
+			Delta: OpenAIChunkDelta{Role: "assistant", Content: strPtr("")},
+		}),
+		makeOpenAIChunk("chatcmpl-6", "gpt-4o", &OpenAIChunkChoice{
+			Index: 0,
+			Delta: OpenAIChunkDelta{Content: strPtr("Just a normal response")},
+		}),
+		makeOpenAIChunkWithFinish("chatcmpl-6", "gpt-4o", "stop", nil),
+	}
+
+	upstream := makeSSEServer(chunks)
+	defer upstream.Close()
+
+	events := runA2OStreamTest(t, upstream.URL, "claude-sonnet-4-6", nil)
+
+	var allText strings.Builder
+	for _, e := range events {
+		if e.eventType != "content_block_delta" {
+			continue
+		}
+		var data struct {
+			Delta struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(e.data), &data); err != nil {
+			continue
+		}
+		if data.Delta.Type == "text_delta" {
+			allText.WriteString(data.Delta.Text)
+		}
+	}
+	if got := allText.String(); got != "Just a normal response" {
+		t.Errorf("text = %q, want 'Just a normal response'", got)
+	}
+}
+
 func TestA2OStream_ToolNameAndArgsInSameChunk(t *testing.T) {
 	t.Parallel()
 	// Edge case: tool name + arguments arrive in the same SSE chunk.

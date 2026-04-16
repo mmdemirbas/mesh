@@ -119,14 +119,102 @@ type a2oStreamState struct {
 	flusher     http.Flusher
 	metrics     *state.Metrics
 
-	blockIndex  int
-	inTextBlock bool
-	inToolBlock bool
-	usage       AnthropicUsage
-	stopReason  string
-	hasBlock    bool
-	jsonBuf     bytes.Buffer  // reused across emit calls to avoid per-chunk allocation
-	jsonEnc     *json.Encoder // writes to jsonBuf, reuses internal encode state
+	blockIndex      int
+	inTextBlock     bool
+	inToolBlock     bool
+	inThinkingBlock bool
+	usage           AnthropicUsage
+	stopReason      string
+	hasBlock        bool
+	jsonBuf         bytes.Buffer  // reused across emit calls to avoid per-chunk allocation
+	jsonEnc         *json.Encoder // writes to jsonBuf, reuses internal encode state
+	thinkFilter     thinkTagFilter
+}
+
+// thinkTagFilter translates leading <think>...</think> XML wrappers in
+// streamed text into native Anthropic thinking content. Some OpenAI-compatible
+// upstreams embed model thinking as XML tags in text; Anthropic uses native
+// thinking content blocks instead.
+//
+// States: 0=scanning (buffering to detect <think>), 1=inside <think> (emit
+// as thinking), 2=done (passthrough as text).
+type thinkTagFilter struct {
+	state int
+	buf   strings.Builder
+}
+
+func (f *thinkTagFilter) process(text string, emitText, emitThinking func(string)) {
+	if f.state == 2 {
+		emitText(text)
+		return
+	}
+	f.buf.WriteString(text)
+	f.drain(emitText, emitThinking)
+}
+
+func (f *thinkTagFilter) drain(emitText, emitThinking func(string)) {
+	buf := f.buf.String()
+	switch f.state {
+	case 0: // scanning — haven't determined if there's a <think> yet
+		trimmed := strings.TrimLeft(buf, " \t\n\r")
+		if len(trimmed) == 0 {
+			return
+		}
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "<think>") {
+			// Found opening tag — extract content after it and switch to thinking state.
+			idx := strings.Index(strings.ToLower(buf), "<think>")
+			rest := buf[idx+7:]
+			f.buf.Reset()
+			f.buf.WriteString(rest)
+			f.state = 1
+			f.drain(emitText, emitThinking) // re-check for immediate </think>
+			return
+		}
+		if len(trimmed) < 7 && strings.HasPrefix("<think>", lower) {
+			return // partial match, keep buffering
+		}
+		// Not a <think> tag — flush buffer as text and passthrough.
+		f.state = 2
+		f.buf.Reset()
+		emitText(buf)
+
+	case 1: // inside <think> — emit as thinking until </think>
+		closeIdx := strings.Index(strings.ToLower(buf), "</think>")
+		if closeIdx < 0 {
+			// Still inside — flush buffer as thinking content.
+			f.buf.Reset()
+			if len(buf) > 0 {
+				emitThinking(buf)
+			}
+			return
+		}
+		// Found close tag. Emit thinking before it, text after it.
+		before := buf[:closeIdx]
+		after := strings.TrimLeft(buf[closeIdx+8:], "\n\r")
+		f.state = 2
+		f.buf.Reset()
+		if len(before) > 0 {
+			emitThinking(before)
+		}
+		if len(after) > 0 {
+			emitText(after)
+		}
+	}
+}
+
+func (f *thinkTagFilter) flush(emitText func(string)) {
+	if f.buf.Len() == 0 {
+		return
+	}
+	buf := f.buf.String()
+	f.buf.Reset()
+	if f.state == 0 {
+		// Never found <think>, emit buffered content as text.
+		emitText(buf)
+	}
+	// state 1: stream ended inside <think> without </think> — already emitted
+	// incrementally, nothing more to flush.
 }
 
 func (s *a2oStreamState) processChunk(chunk *ChatCompletionChunk) {
@@ -156,12 +244,20 @@ func (s *a2oStreamState) processChunk(chunk *ChatCompletionChunk) {
 		}
 	}
 
-	// Text content delta.
+	// Text content delta. Filter through thinkTagFilter to translate
+	// <think>...</think> wrappers into native Anthropic thinking blocks.
 	if choice.Delta.Content != nil && *choice.Delta.Content != "" {
-		if !s.inTextBlock {
-			s.startTextBlock()
-		}
-		s.emitTextDelta(*choice.Delta.Content)
+		s.thinkFilter.process(*choice.Delta.Content,
+			func(text string) {
+				if !s.inTextBlock {
+					s.startTextBlock()
+				}
+				s.emitTextDelta(text)
+			},
+			func(thinking string) {
+				s.emitThinking(thinking)
+			},
+		)
 	}
 
 	// Tool call deltas.
@@ -211,6 +307,7 @@ type a2oBlockDelta struct {
 type a2oDeltaInner struct {
 	Type        string `json:"type"`
 	Text        string `json:"text,omitempty"`
+	Thinking    string `json:"thinking,omitempty"`
 	PartialJSON string `json:"partial_json,omitempty"`
 }
 
@@ -266,6 +363,24 @@ func (s *a2oStreamState) emitTextDelta(text string) {
 	})
 }
 
+func (s *a2oStreamState) emitThinking(thinking string) {
+	if !s.inThinkingBlock {
+		s.closeCurrentBlock()
+		s.emit("content_block_start", a2oBlockStart{
+			Type:         "content_block_start",
+			Index:        s.blockIndex,
+			ContentBlock: a2oBlockDef{Type: "thinking"},
+		})
+		s.inThinkingBlock = true
+		s.hasBlock = true
+	}
+	s.emit("content_block_delta", a2oBlockDelta{
+		Type:  "content_block_delta",
+		Index: s.blockIndex,
+		Delta: a2oDeltaInner{Type: "thinking_delta", Thinking: thinking},
+	})
+}
+
 func (s *a2oStreamState) startToolBlock(id, name string) {
 	s.emit("content_block_start", a2oBlockStart{
 		Type:  "content_block_start",
@@ -290,7 +405,7 @@ func (s *a2oStreamState) emitInputJSONDelta(partial string) {
 }
 
 func (s *a2oStreamState) closeCurrentBlock() {
-	if s.inTextBlock || s.inToolBlock {
+	if s.inTextBlock || s.inToolBlock || s.inThinkingBlock {
 		s.emit("content_block_stop", a2oBlockStop{
 			Type:  "content_block_stop",
 			Index: s.blockIndex,
@@ -298,6 +413,7 @@ func (s *a2oStreamState) closeCurrentBlock() {
 		s.blockIndex++
 		s.inTextBlock = false
 		s.inToolBlock = false
+		s.inThinkingBlock = false
 	}
 }
 
@@ -315,6 +431,14 @@ func (s *a2oStreamState) emitMessageStart() {
 }
 
 func (s *a2oStreamState) finalize() {
+	// Flush any remaining buffered text from think tag filter.
+	s.thinkFilter.flush(func(text string) {
+		if !s.inTextBlock {
+			s.startTextBlock()
+		}
+		s.emitTextDelta(text)
+	})
+
 	s.closeCurrentBlock()
 
 	if s.stopReason == "" {

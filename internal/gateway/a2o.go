@@ -365,14 +365,25 @@ func translateOpenAIResponse(resp *ChatCompletionResponse, clientModel string) (
 		// Map finish_reason -> stop_reason.
 		out.StopReason = mapOpenAIFinishReason(choice.FinishReason)
 
-		// Text content.
+		// Text content. Translate leading <think>...</think> wrapper
+		// (used by some OpenAI-compatible upstreams) into a native
+		// Anthropic thinking content block.
 		if len(choice.Message.Content) > 0 {
 			var text string
 			if err := json.Unmarshal(choice.Message.Content, &text); err == nil && text != "" {
-				out.Content = append(out.Content, ContentBlock{
-					Type: "text",
-					Text: text,
-				})
+				thinking, remaining := extractThinkTag(text)
+				if thinking != "" {
+					out.Content = append(out.Content, ContentBlock{
+						Type:     "thinking",
+						Thinking: thinking,
+					})
+				}
+				if remaining != "" {
+					out.Content = append(out.Content, ContentBlock{
+						Type: "text",
+						Text: remaining,
+					})
+				}
 			}
 		}
 
@@ -422,6 +433,26 @@ func mapOpenAIFinishReason(reason string) string {
 	default:
 		return "end_turn"
 	}
+}
+
+// extractThinkTag extracts a leading <think>...</think> XML wrapper from text,
+// returning (thinking, remaining). Some OpenAI-compatible upstreams embed model
+// thinking as XML tags in response text; the Anthropic Messages format uses
+// native thinking content blocks instead. If no <think> wrapper is found,
+// thinking is empty and remaining is the original text.
+func extractThinkTag(s string) (thinking, remaining string) {
+	trimmed := strings.TrimLeft(s, " \t\n\r")
+	lower := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lower, "<think>") {
+		return "", s
+	}
+	closeIdx := strings.Index(lower, "</think>")
+	if closeIdx < 0 {
+		return "", s // unclosed tag, leave unchanged
+	}
+	thinking = trimmed[7:closeIdx]
+	remaining = strings.TrimLeft(trimmed[closeIdx+8:], "\n\r")
+	return thinking, remaining
 }
 
 func ensurePrefix(s, prefix string) string {
