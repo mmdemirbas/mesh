@@ -327,13 +327,14 @@ type folderState struct {
 	peerLastError   map[string]string         // peerAddr -> last transport error
 	dirCount        int                       // directory count from last scan (dashboard only)
 	conflicts       []string                  // conflict file paths from last scan (sorted)
-	firstScanLogged bool                      // true after first scan INFO line emitted
+	firstScanLogged atomic.Bool               // N8: true after first scan INFO line emitted
 	indexMu         sync.RWMutex
 	retries         retryTracker
 	// H3: inFlight tracks paths currently being downloaded so concurrent
 	// peer goroutines skip the same path. Protected by inFlightMu.
 	inFlightMu sync.Mutex
 	inFlight   map[string]bool
+	persistMu  sync.Mutex        // N10: serializes persistFolder calls
 	metrics    FolderSyncMetrics // lock-free counters for Prometheus
 }
 
@@ -857,7 +858,7 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		// without requiring DEBUG. Subsequent scans only log INFO when
 		// pathological: >2s, >100 MB hashed, or >1000 files rehashed.
 		slow := total > 2*time.Second || stats.BytesHashed > 100<<20 || stats.FilesHashed > 1000
-		if !fs.firstScanLogged || slow {
+		if !fs.firstScanLogged.Load() || slow {
 			reason := "first"
 			if slow {
 				reason = "slow"
@@ -883,7 +884,7 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 				"toctou_skips", stats.TocTouSkips,
 				"active_files", count,
 			)
-			fs.firstScanLogged = true
+			fs.firstScanLogged.Store(true)
 		}
 
 		// Update scan metrics.
@@ -972,11 +973,14 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		peerLastSeq = ps.LastSeenSequence
 		ourLastSentSeq = ps.LastSentSequence
 	}
-	ourCurrentSeq := fs.index.Sequence
 	fs.indexMu.RUnlock()
 
 	exchange := n.buildIndexExchange(folderID, ourLastSentSeq) // send only entries newer than last sent
-	exchange.Since = peerLastSeq                               // ask peer to send only entries newer than this
+	// N2: capture sequence from the exchange (which reads the live index under
+	// its own RLock) rather than from a stale pre-exchange snapshot. This
+	// ensures LastSentSequence accurately reflects what was actually sent.
+	ourCurrentSeq := exchange.GetSequence()
+	exchange.Since = peerLastSeq // ask peer to send only entries newer than this
 	slog.Debug("index exchange prepared",
 		"folder", folderID, "peer", peerAddr,
 		"our_seq", ourCurrentSeq, "peer_last_seen", peerLastSeq,
@@ -1317,15 +1321,22 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					return
 				}
 				fs.indexMu.Lock()
-				fs.index.Sequence++
-				if entry, ok := fs.index.Files[action.Path]; ok {
+				// N3: always write a tombstone, even if the file wasn't in the
+				// local index. Without a tombstone, the file can resurrect from
+				// a third peer that still has it in their index.
+				entry := fs.index.Files[action.Path] // zero value if absent
+				if entry.Deleted {
+					// N12: already a tombstone — skip sequence bump, mtime reset, and metric.
+					fs.indexMu.Unlock()
+				} else {
+					fs.index.Sequence++
 					entry.Deleted = true
-					entry.MtimeNS = time.Now().UnixNano() // deletion time for tombstone age
+					entry.MtimeNS = time.Now().UnixNano()
 					entry.Sequence = fs.index.Sequence
 					fs.index.Files[action.Path] = entry
+					fs.indexMu.Unlock()
+					fs.metrics.FilesDeleted.Add(1)
 				}
-				fs.indexMu.Unlock()
-				fs.metrics.FilesDeleted.Add(1)
 				slog.Info("deleted file", "folder", folderID, "path", action.Path, "peer", peerAddr)
 			}()
 		}
@@ -1353,9 +1364,11 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 	// B9: compute safe LastSeenSequence — do not advance past entries
 	// that failed to process, so they are re-evaluated next round.
+	// N6: skip fseq=0 — subtracting 1 would produce -1, causing a full
+	// re-diff every cycle.
 	safeSeq := remoteIdx.GetSequence()
 	for _, fseq := range failedSeqs {
-		if fseq-1 < safeSeq {
+		if fseq > 0 && fseq-1 < safeSeq {
 			safeSeq = fseq - 1
 		}
 	}
@@ -1451,11 +1464,16 @@ func (n *Node) persistAll() {
 }
 
 // persistFolder saves a single folder's index and peer state.
+// N10: serialized via persistMu to prevent concurrent syncFolder
+// goroutines from racing on the same .tmp file.
 func (n *Node) persistFolder(folderID string) {
 	fs, ok := n.folders[folderID]
 	if !ok {
 		return
 	}
+
+	fs.persistMu.Lock()
+	defer fs.persistMu.Unlock()
 
 	fs.indexMu.RLock()
 	defer fs.indexMu.RUnlock()
