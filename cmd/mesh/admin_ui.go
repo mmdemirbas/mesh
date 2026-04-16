@@ -29,6 +29,7 @@ var adminUI = `<!DOCTYPE html>
   --blue: #60a5fa;
   --cyan: #22d3ee;
   --purple: #a78bfa;
+  --bg-alt: #1a1d28;
   --radius: 8px;
   --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
@@ -59,6 +60,7 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); font
 }
 .tab:hover { color: var(--text); background: var(--bg-hover); }
 .tab.active { color: var(--green); border-bottom-color: var(--green); }
+.tab-sep { width: 1px; background: var(--border); margin: 8px 4px; flex-shrink: 0; }
 
 /* Content */
 .content { padding: 20px 24px; max-width: 1400px; }
@@ -109,6 +111,18 @@ tbody td {
 }
 tbody tr:hover { background: var(--bg-hover); }
 tbody tr:last-child td { border-bottom: none; }
+
+/* Tree table */
+.tree-group td { background: var(--bg-alt); font-weight: 600; cursor: pointer; user-select: none; }
+.tree-l1 td:first-child { padding-left: 24px; }
+.tree-l2 td:first-child { padding-left: 44px; }
+.tree-l3 td:first-child { padding-left: 64px; }
+.met-tag {
+  display: inline-block; padding: 1px 6px; margin: 0 2px;
+  background: var(--bg); border-radius: 3px;
+  font-size: 11px; color: var(--text-dim); font-family: var(--mono);
+  white-space: nowrap;
+}
 
 /* Status badges */
 .badge {
@@ -607,6 +621,7 @@ tbody tr:last-child td { border-bottom: none; }
   <div class="tab" data-tab="clipsync">Clipsync</div>
   <div class="tab" data-tab="filesync">Filesync</div>
   <div class="tab" data-tab="gateway">Gateway</div>
+  <div class="tab-sep"></div>
   <div class="tab" data-tab="logs">Logs</div>
   <div class="tab" data-tab="metrics">Metrics</div>
   <div class="tab" data-tab="api">API</div>
@@ -629,10 +644,10 @@ tbody tr:last-child td { border-bottom: none; }
         <div class="table-scroll">
         <table>
           <thead><tr>
-            <th data-sort="status">Status <span class="sort-arrow"></span></th>
-            <th data-sort="type">Type <span class="sort-arrow"></span></th>
-            <th data-sort="id">ID <span class="sort-arrow"></span></th>
-            <th data-sort="detail">Detail <span class="sort-arrow"></span></th>
+            <th>Status</th>
+            <th>Name</th>
+            <th>Detail</th>
+            <th>Metrics</th>
           </tr></thead>
           <tbody id="comp-body"><tr class="loading-row"><td colspan="4">Loading components…</td></tr></tbody>
         </table>
@@ -954,6 +969,38 @@ tbody tr:last-child td { border-bottom: none; }
         <div class="chart-value" id="chart-fds-val" style="margin-bottom:8px">0</div>
         <canvas class="chart-canvas" id="chart-fds"></canvas>
       </div>
+      <div class="chart-card" id="chart-tokens-card" style="display:none">
+        <div class="chart-title">Gateway Token Throughput</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--cyan)"><span id="chart-tokin-val">0</span> <span style="font-size:11px;color:var(--text-muted)">in/s</span></div>
+          <div class="chart-value" style="color:var(--yellow)"><span id="chart-tokout-val">0</span> <span style="font-size:11px;color:var(--text-muted)">out/s</span></div>
+        </div>
+        <canvas class="chart-canvas" id="chart-tokens"></canvas>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Component Health</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--green)"><span id="chart-health-up">0</span> <span style="font-size:11px;color:var(--text-muted)">up</span></div>
+          <div class="chart-value" style="color:var(--red)"><span id="chart-health-down">0</span> <span style="font-size:11px;color:var(--text-muted)">down</span></div>
+          <div class="chart-value" style="color:var(--yellow)"><span id="chart-health-pend">0</span> <span style="font-size:11px;color:var(--text-muted)">pending</span></div>
+        </div>
+        <canvas class="chart-canvas" id="chart-health"></canvas>
+      </div>
+    </div>
+    <div class="card" id="met-comp-card">
+      <div class="card-header">
+        <span>Per-Component Traffic</span>
+      </div>
+      <div class="card-body">
+        <div class="table-scroll">
+        <table>
+          <thead><tr>
+            <th>Type</th><th>ID</th><th>TX</th><th>RX</th><th>Streams</th><th>Uptime</th>
+          </tr></thead>
+          <tbody id="met-comp-body"></tbody>
+        </table>
+        </div>
+      </div>
     </div>
     <div class="card">
       <div class="card-header">
@@ -1006,14 +1053,14 @@ tbody tr:last-child td { border-bottom: none; }
 // --- State ---
 let state = {}, logs = [], folders = [], conflicts = [], clipActivities = [], fsActivities = [], metricsText = '', gatewayAudit = [], gwStats = null, gwSubview = 'overview', gwWindow = '24h';
 function gwBucket(w) { return w === '1h' ? 'minute' : w === '24h' ? 'hour' : w === '7d' ? 'hour' : 'day'; }
-let compSort = {col:'type', asc:true};
 let fsSort = {col:'id', asc:true};
 let logLevel = 'all';
 let logMode = 'recent'; // 'recent' (ring buffer) or 'file' (full log file)
 let fileLogLines = [], fileLogSize = 0, fileLogLoaded = false;
 const HIST_LEN = 60;
-const chartHist = {tx:[], rx:[], streams:[], goroutines:[], fds:[]};
-let prevTotalTx = 0, prevTotalRx = 0, firstTick = true;
+const chartHist = {tx:[], rx:[], streams:[], goroutines:[], fds:[], tokensIn:[], tokensOut:[], healthUp:[], healthDown:[], healthPending:[]};
+let prevTotalTx = 0, prevTotalRx = 0, prevTotalTokIn = 0, prevTotalTokOut = 0, firstTick = true;
+let compMetrics = {};
 
 // --- Tabs ---
 const tabMap = {'/ui':'dashboard','/ui/clipsync':'clipsync','/ui/filesync':'filesync','/ui/gateway':'gateway','/ui/logs':'logs','/ui/metrics':'metrics','/ui/api':'api','/ui/debug':'debug'};
@@ -1072,18 +1119,28 @@ function tick() {
 
   fetch('/api/metrics').then(r=>r.text()).then(t => {
     metricsText = t;
+    compMetrics = extractCompMetrics(t);
     const nowTx = sumMetric(metricsText, 'mesh_bytes_tx_total');
     const nowRx = sumMetric(metricsText, 'mesh_bytes_rx_total');
+    const nowTokIn = sumMetric(metricsText, 'mesh_gateway_tokens_in_total');
+    const nowTokOut = sumMetric(metricsText, 'mesh_gateway_tokens_out_total');
     if (!firstTick) {
       pushHist('tx', Math.max(0, nowTx - prevTotalTx));
       pushHist('rx', Math.max(0, nowRx - prevTotalRx));
+      pushHist('tokensIn', Math.max(0, nowTokIn - prevTotalTokIn));
+      pushHist('tokensOut', Math.max(0, nowTokOut - prevTotalTokOut));
     } else { firstTick = false; }
     prevTotalTx = nowTx; prevTotalRx = nowRx;
+    prevTotalTokIn = nowTokIn; prevTotalTokOut = nowTokOut;
     pushHist('streams', sumMetric(metricsText, 'mesh_active_streams'));
     pushHist('goroutines', valMetric(metricsText, 'mesh_process_goroutines'));
     const fds = valMetric(metricsText, 'mesh_process_open_fds');
     if (fds !== null) pushHist('fds', fds);
-    renderMetrics(); renderCharts(); renderDebugStats();
+    const comps = Object.values(state);
+    pushHist('healthUp', comps.filter(c => c.status === 'listening' || c.status === 'connected').length);
+    pushHist('healthDown', comps.filter(c => c.status === 'failed').length);
+    pushHist('healthPending', comps.filter(c => c.status !== 'listening' && c.status !== 'connected' && c.status !== 'failed').length);
+    renderMetrics(); renderCharts(); renderDebugStats(); renderComponents();
   }).catch(fail('metrics'));
 
   if (needLogs) {
@@ -1212,45 +1269,245 @@ function stat(label, value, sub, color) {
   return '<div class="stat"><div class="stat-label">'+x(label)+'</div><div class="stat-value"'+c+'>'+x(String(value))+'</div>'+(sub?'<div class="stat-sub">'+x(sub)+'</div>':'')+'</div>';
 }
 
-const collapsedGroups = new Set();
+const collapsedNodes = new Set();
+
+function extractCompMetrics(text) {
+  const cm = {};
+  const labeled = /^(mesh_(?:bytes_tx_total|bytes_rx_total|active_streams|uptime_seconds|gateway_tokens_in_total|gateway_tokens_out_total|gateway_tokens_cache_read_total|gateway_tokens_cache_creation_total))\{([^}]*)\}\s+(\S+)/gm;
+  let m;
+  while ((m = labeled.exec(text)) !== null) {
+    const name = m[1], labelsStr = m[2], val = parseFloat(m[3]) || 0;
+    const labels = {};
+    for (const part of labelsStr.split(',')) {
+      const eq = part.indexOf('=');
+      if (eq > 0) labels[part.slice(0, eq)] = part.slice(eq+1).replace(/^"|"$/g, '');
+    }
+    const key = (labels.type ? labels.type + ':' : 'gateway:') + (labels.id || '');
+    if (!cm[key]) cm[key] = {};
+    if (name === 'mesh_bytes_tx_total') cm[key].tx = val;
+    else if (name === 'mesh_bytes_rx_total') cm[key].rx = val;
+    else if (name === 'mesh_active_streams') cm[key].streams = val;
+    else if (name === 'mesh_uptime_seconds') cm[key].uptime = val;
+    else if (name === 'mesh_gateway_tokens_in_total') cm[key].tokensIn = val;
+    else if (name === 'mesh_gateway_tokens_out_total') cm[key].tokensOut = val;
+    else if (name === 'mesh_gateway_tokens_cache_read_total') cm[key].cacheRd = val;
+    else if (name === 'mesh_gateway_tokens_cache_creation_total') cm[key].cacheWr = val;
+  }
+  return cm;
+}
+
+function fmtUptime(secs) {
+  if (!secs || secs <= 0) return '';
+  if (secs < 60) return Math.floor(secs) + 's';
+  if (secs < 3600) return Math.floor(secs/60) + 'm';
+  if (secs < 86400) { const h = Math.floor(secs/3600); const m = Math.floor((secs%3600)/60); return h + 'h' + (m ? ' ' + m + 'm' : ''); }
+  const d = Math.floor(secs/86400); const h = Math.floor((secs%86400)/3600);
+  return d + 'd' + (h ? ' ' + h + 'h' : '');
+}
+
+function metTags(c) {
+  const key = c.type + ':' + c.id;
+  const m = compMetrics[key];
+  let tags = '';
+  if (m) {
+    if (m.uptime) tags += '<span class="met-tag" title="uptime">&#9650; ' + x(fmtUptime(m.uptime)) + '</span>';
+    if (m.tx || m.rx) tags += '<span class="met-tag" title="traffic &#8593;/&#8595;">&#8693; ' + x(fmtBytes((m.tx||0)+(m.rx||0))) + '</span>';
+    if (m.streams) tags += '<span class="met-tag" title="active streams">' + m.streams + ' stream' + (m.streams !== 1 ? 's' : '') + '</span>';
+    if (m.tokensIn || m.tokensOut) tags += '<span class="met-tag" title="tokens in/out">' + fmtTokens(m.tokensIn||0) + ' in / ' + fmtTokens(m.tokensOut||0) + ' out</span>';
+    if (m.cacheRd) tags += '<span class="met-tag" title="cache read">' + fmtTokens(m.cacheRd) + ' cached</span>';
+  }
+  if (c.type === 'filesync-folder' && c.file_count) {
+    tags += '<span class="met-tag">' + c.file_count.toLocaleString() + ' files (' + fmtBytes(c.total_size||0) + ')</span>';
+  }
+  if (c.type === 'filesync-folder' && c.last_sync && !c.last_sync.startsWith('0001')) {
+    tags += '<span class="met-tag" title="last sync">sync ' + timeAgo(c.last_sync) + '</span>';
+  }
+  if (c.type === 'filesync-peer' && c.last_sync && !c.last_sync.startsWith('0001')) {
+    tags += '<span class="met-tag" title="last sync">sync ' + timeAgo(c.last_sync) + '</span>';
+  }
+  return tags;
+}
+
+function buildComponentTree() {
+  const comps = Object.values(state);
+  const byType = {};
+  for (const c of comps) (byType[c.type] = byType[c.type] || []).push(c);
+  const sortById = arr => arr.sort((a,b) => a.id.localeCompare(b.id));
+  const groups = [];
+
+  // Connections → forwards
+  const connections = sortById(byType['connection'] || []);
+  const forwards = sortById(byType['forward'] || []);
+  if (connections.length || forwards.length) {
+    const claimed = new Set();
+    const items = connections.map(conn => {
+      const children = forwards.filter(f => {
+        const bi = f.id.indexOf(' [');
+        return bi > 0 && f.id.substring(0, bi) === conn.id;
+      });
+      children.forEach(c => claimed.add(c.id));
+      return { comp: conn, children: children.map(f => ({ comp: f, children: [] })) };
+    });
+    forwards.filter(f => !claimed.has(f.id)).forEach(f => items.push({ comp: f, children: [] }));
+    groups.push({ label: 'Connections', items });
+  }
+
+  // Servers → dynamic sessions
+  const servers = sortById(byType['server'] || []);
+  const dynamics = sortById(byType['dynamic'] || []);
+  if (servers.length || dynamics.length) {
+    const claimed = new Set();
+    const items = servers.map(srv => {
+      const children = dynamics.filter(d => {
+        const pi = d.id.lastIndexOf('|');
+        return pi > 0 && d.id.substring(pi + 1) === srv.id;
+      });
+      children.forEach(c => claimed.add(c.id));
+      return { comp: srv, children: children.map(d => ({ comp: d, children: [] })) };
+    });
+    dynamics.filter(d => !claimed.has(d.id)).forEach(d => items.push({ comp: d, children: [] }));
+    groups.push({ label: 'Servers', items });
+  }
+
+  // Proxies
+  if (byType['proxy']?.length) groups.push({ label: 'Proxies', items: sortById(byType['proxy']).map(c => ({ comp: c, children: [] })) });
+
+  // Relays
+  if (byType['relay']?.length) groups.push({ label: 'Relays', items: sortById(byType['relay']).map(c => ({ comp: c, children: [] })) });
+
+  // Filesync → folders → peers
+  const fsyncs = sortById(byType['filesync'] || []);
+  const ffolders = sortById(byType['filesync-folder'] || []);
+  const fpeers = sortById(byType['filesync-peer'] || []);
+  if (fsyncs.length || ffolders.length) {
+    const claimedPeers = new Set();
+    const buildFolderNodes = () => ffolders.map(ff => {
+      const peers = fpeers.filter(fp => { const pi = fp.id.indexOf('|'); return pi > 0 && fp.id.substring(0, pi) === ff.id; });
+      peers.forEach(p => claimedPeers.add(p.id));
+      return { comp: ff, children: peers.map(p => ({ comp: p, children: [] })) };
+    });
+    if (fsyncs.length) {
+      const items = fsyncs.map(fs => ({ comp: fs, children: buildFolderNodes() }));
+      const orphanPeers = fpeers.filter(p => !claimedPeers.has(p.id));
+      orphanPeers.forEach(p => items.push({ comp: p, children: [] }));
+      groups.push({ label: 'Filesync', items });
+    } else {
+      const folderNodes = buildFolderNodes();
+      const orphanPeers = fpeers.filter(p => !claimedPeers.has(p.id));
+      orphanPeers.forEach(p => folderNodes.push({ comp: p, children: [] }));
+      groups.push({ label: 'Filesync', items: folderNodes });
+    }
+  }
+
+  // Clipsync → peers
+  const csyncs = sortById(byType['clipsync'] || []);
+  const cpeers = sortById(byType['clipsync-peer'] || []);
+  if (csyncs.length || cpeers.length) {
+    const claimed = new Set();
+    const items = csyncs.map(cs => {
+      const peers = cpeers.filter(cp => { const pi = cp.id.indexOf('|'); return pi > 0 && cp.id.substring(0, pi) === cs.id; });
+      peers.forEach(p => claimed.add(p.id));
+      return { comp: cs, children: peers.map(p => ({ comp: p, children: [] })) };
+    });
+    cpeers.filter(p => !claimed.has(p.id)).forEach(p => items.push({ comp: p, children: [] }));
+    groups.push({ label: 'Clipsync', items });
+  }
+
+  // Gateways
+  if (byType['gateway']?.length) groups.push({ label: 'Gateways', items: sortById(byType['gateway']).map(c => ({ comp: c, children: [] })) });
+
+  return groups;
+}
+
+function childDisplayName(c, parentId) {
+  if (c.type === 'forward') {
+    const bi = c.id.indexOf(' [');
+    return bi > 0 ? c.id.substring(bi) : c.id;
+  }
+  if (c.type === 'dynamic' || c.type === 'filesync-peer' || c.type === 'clipsync-peer') {
+    const pi = c.id.indexOf('|');
+    return pi > 0 ? c.id.substring(0, pi) : c.id;
+  }
+  return c.id;
+}
+
 function renderComponents() {
   const filter = document.getElementById('comp-search').value.toLowerCase();
-  let rows = Object.values(state).filter(c => {
-    if (!filter) return true;
-    return (c.type+c.id+c.status+(c.message||'')+(c.peer_addr||'')).toLowerCase().includes(filter);
-  });
-  rows.sort((a,b) => {
-    const va = String(a[compSort.col]||''), vb = String(b[compSort.col]||'');
-    return compSort.asc ? va.localeCompare(vb) : vb.localeCompare(va);
-  });
+  const groups = buildComponentTree();
   const el = document.getElementById('comp-body');
-  if (!rows.length) { el.innerHTML = '<tr><td colspan="4" style="color:var(--text-muted);padding:20px">No components</td></tr>'; return; }
-  // Group by type for tree-table display.
-  const groups = {};
-  for (const c of rows) { (groups[c.type] = groups[c.type] || []).push(c); }
-  const types = Object.keys(groups).sort();
+  if (!groups.length) { el.innerHTML = '<tr><td colspan="4" style="color:var(--text-muted);padding:20px">No components</td></tr>'; return; }
+
+  function matchFilter(node) {
+    const c = node.comp;
+    const txt = (c.type+c.id+c.status+(c.message||'')+(c.peer_addr||'')+(c.bound_addr||'')).toLowerCase();
+    if (txt.includes(filter)) return true;
+    return node.children.some(ch => matchFilter(ch));
+  }
+
+  function countHealth(items) {
+    let total = 0, ok = 0;
+    function walk(nodes) {
+      for (const n of nodes) { total++; if (n.comp.status === 'connected' || n.comp.status === 'listening') ok++; walk(n.children); }
+    }
+    walk(items);
+    return { total, ok };
+  }
+
   let html = '';
-  for (const typ of types) {
-    const items = groups[typ];
-    const collapsed = collapsedGroups.has(typ);
+  for (const g of groups) {
+    const filtered = filter ? g.items.filter(n => matchFilter(n)) : g.items;
+    if (!filtered.length) continue;
+    const h = countHealth(filtered);
+    const gKey = 'g:' + g.label;
+    const collapsed = collapsedNodes.has(gKey);
     const arrow = collapsed ? '&#9654;' : '&#9660;';
-    const count = items.length;
-    const okCount = items.filter(c => c.status === 'connected' || c.status === 'listening').length;
-    html += '<tr class="tree-group" onclick="toggleGroup(\''+xj(typ)+'\')" style="cursor:pointer;background:var(--bg-alt)">';
-    html += '<td colspan="2" style="font-weight:600">'+arrow+' '+x(typ)+' <span style="color:var(--text-muted);font-weight:400">('+okCount+'/'+count+')</span></td>';
-    html += '<td colspan="2"></td></tr>';
-    if (!collapsed) {
-      for (const c of items) {
-        const detail = c.message || c.peer_addr || c.bound_addr || '';
-        html += '<tr><td style="padding-left:24px">'+badge(c.status)+'</td><td>'+x(c.id)+'</td><td colspan="2" style="color:var(--text-dim)">'+x(detail)+'</td></tr>';
-      }
+    html += '<tr class="tree-group" onclick="toggleNode(\''+xj(gKey)+'\')">';
+    html += '<td colspan="3">'+arrow+' '+x(g.label)+' <span style="color:var(--text-muted);font-weight:400">('+h.ok+'/'+h.total+')</span></td>';
+    html += '<td></td></tr>';
+    if (collapsed) continue;
+    for (const node of filtered) {
+      html += renderTreeNode(node, 1, filter);
     }
   }
   el.innerHTML = html;
 }
-function toggleGroup(typ) {
-  if (collapsedGroups.has(typ)) collapsedGroups.delete(typ);
-  else collapsedGroups.add(typ);
+
+function renderTreeNode(node, depth, filter) {
+  const c = node.comp;
+  const cls = 'tree-l' + depth;
+  const hasChildren = node.children.length > 0;
+  const nKey = c.type + ':' + c.id;
+  const collapsed = collapsedNodes.has(nKey);
+  const detail = c.message || c.peer_addr || c.bound_addr || '';
+  const tags = metTags(c);
+  let displayName = depth > 1 ? childDisplayName(c) : c.id;
+  let html = '';
+
+  if (hasChildren) {
+    const arrow = collapsed ? '&#9654; ' : '&#9660; ';
+    html += '<tr class="'+cls+'" onclick="toggleNode(\''+xj(nKey)+'\')" style="cursor:pointer">';
+    html += '<td>'+badge(c.status)+'</td>';
+    html += '<td>'+arrow+x(displayName)+'</td>';
+    html += '<td style="color:var(--text-dim)">'+x(detail)+'</td>';
+    html += '<td>'+tags+'</td></tr>';
+    if (!collapsed) {
+      for (const ch of node.children) {
+        html += renderTreeNode(ch, depth + 1, filter);
+      }
+    }
+  } else {
+    html += '<tr class="'+cls+'">';
+    html += '<td>'+badge(c.status)+'</td>';
+    html += '<td>'+x(displayName)+'</td>';
+    html += '<td style="color:var(--text-dim)">'+x(detail)+'</td>';
+    html += '<td>'+tags+'</td></tr>';
+  }
+  return html;
+}
+
+function toggleNode(key) {
+  if (collapsedNodes.has(key)) collapsedNodes.delete(key);
+  else collapsedNodes.add(key);
   renderComponents();
 }
 
@@ -1562,6 +1819,40 @@ function renderCharts() {
   } else {
     fdsCard.style.display = 'none';
   }
+  // Gateway Tokens (hidden when no gateway traffic)
+  const tokCard = document.getElementById('chart-tokens-card');
+  if (chartHist.tokensIn.some(v => v > 0) || chartHist.tokensOut.some(v => v > 0)) {
+    tokCard.style.display = '';
+    document.getElementById('chart-tokin-val').textContent = last(chartHist.tokensIn).toLocaleString();
+    document.getElementById('chart-tokout-val').textContent = last(chartHist.tokensOut).toLocaleString();
+    drawChart('chart-tokens', [chartHist.tokensIn, chartHist.tokensOut], ['#22d3ee', '#fbbf24']);
+  } else {
+    tokCard.style.display = 'none';
+  }
+  // Component Health
+  document.getElementById('chart-health-up').textContent = last(chartHist.healthUp);
+  document.getElementById('chart-health-down').textContent = last(chartHist.healthDown);
+  document.getElementById('chart-health-pend').textContent = last(chartHist.healthPending);
+  drawChart('chart-health', [chartHist.healthUp, chartHist.healthDown, chartHist.healthPending], ['#34d399', '#f87171', '#fbbf24']);
+  // Per-component traffic table
+  renderCompTraffic();
+}
+
+function renderCompTraffic() {
+  const el = document.getElementById('met-comp-body');
+  if (!el) return;
+  const entries = Object.entries(compMetrics).filter(([,m]) => m.tx || m.rx || m.streams);
+  if (!entries.length) { el.innerHTML = '<tr><td colspan="6" style="color:var(--text-muted);padding:16px">No traffic data</td></tr>'; return; }
+  entries.sort((a,b) => ((b[1].tx||0)+(b[1].rx||0)) - ((a[1].tx||0)+(a[1].rx||0)));
+  el.innerHTML = entries.map(([key, m]) => {
+    const sep = key.indexOf(':');
+    const typ = key.substring(0, sep), id = key.substring(sep+1);
+    return '<tr><td>'+x(typ)+'</td><td>'+x(id)+'</td>'
+      + '<td style="color:var(--green)">'+fmtBytes(m.tx||0)+'</td>'
+      + '<td style="color:var(--purple)">'+fmtBytes(m.rx||0)+'</td>'
+      + '<td>'+(m.streams||0)+'</td>'
+      + '<td>'+(m.uptime ? fmtUptime(m.uptime) : '-')+'</td></tr>';
+  }).join('');
 }
 
 // --- Metrics ---
@@ -1683,13 +1974,6 @@ document.getElementById('met-body').addEventListener('click', e => {
 document.getElementById('met-search').addEventListener('input', renderMetrics);
 
 // --- Sorting ---
-document.querySelectorAll('#p-dashboard th[data-sort]').forEach(th => {
-  th.addEventListener('click', () => {
-    if (compSort.col === th.dataset.sort) compSort.asc = !compSort.asc;
-    else { compSort.col = th.dataset.sort; compSort.asc = true; }
-    renderComponents();
-  });
-});
 document.querySelectorAll('#p-filesync th[data-sort]').forEach(th => {
   th.addEventListener('click', () => {
     if (fsSort.col === th.dataset.sort) fsSort.asc = !fsSort.asc;
