@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/text/unicode/norm"
 	"golang.org/x/time/rate"
 
 	"github.com/mmdemirbas/mesh/internal/config"
@@ -429,9 +430,11 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		// Load or create index.
 		idxPath := filepath.Join(dataDir, fcfg.ID, "index.yaml")
 		idx, err := loadIndex(idxPath)
+		indexReset := false
 		if err != nil {
 			slog.Warn("failed to load index, starting fresh", "folder", fcfg.ID, "error", err)
 			idx = newFileIndex()
+			indexReset = true
 		}
 
 		// Load peer states.
@@ -439,6 +442,13 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		peers, err := loadPeerStates(peersPath)
 		if err != nil {
 			slog.Warn("failed to load peer states, starting fresh", "folder", fcfg.ID, "error", err)
+			peers = make(map[string]PeerState)
+		}
+
+		// B15: if index was recreated from scratch, reset peer state so stale
+		// LastSentSequence doesn't suppress the full index on outbound sync.
+		if indexReset && len(peers) > 0 {
+			slog.Warn("resetting peer state after index recreation", "folder", fcfg.ID)
 			peers = make(map[string]PeerState)
 		}
 
@@ -663,6 +673,10 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		scanStartSeq := fs.index.Sequence
 		ignore := fs.ignore
 		existingFiles := len(fs.index.Files)
+		peersCopy := make(map[string]PeerState, len(fs.peers))
+		for k, v := range fs.peers {
+			peersCopy[k] = v
+		}
 		fs.indexMu.RUnlock()
 		snapDuration := time.Since(snapStart)
 
@@ -685,7 +699,7 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		}
 
 		purgeStart := time.Now()
-		purged := idxCopy.purgeTombstones(tombstoneMaxAge)
+		purged := idxCopy.purgeTombstones(tombstoneMaxAge, peersCopy)
 		purgeDuration := time.Since(purgeStart)
 
 		// Swap under a short write lock. Merge-preserve any entries that were
@@ -1032,20 +1046,12 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				defer func() { <-sem }()
 
 				remoteDeviceID := remoteIdx.GetDeviceId()
-				winner, err := resolveConflict(fs.cfg.Path, action.Path, lmtime, action.RemoteMtime, remoteDeviceID)
-				if err != nil {
-					slog.Warn("conflict resolution failed", "folder", folderID, "path", action.Path, "error", err)
-					fs.indexMu.Lock()
-					fs.retries.record(action.Path, action.RemoteHash)
-					fs.indexMu.Unlock()
-					failMu.Lock()
-					failedSeqs = append(failedSeqs, action.RemoteSequence)
-					failMu.Unlock()
-					return
-				}
+				winner, conflictPath := resolveConflict(fs.cfg.Path, action.Path, lmtime, action.RemoteMtime, remoteDeviceID)
 				if winner == "remote" {
-					// Download the remote version to replace local.
-					err := downloadFromPeer(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
+					// B13: download remote to verified temp FIRST — local file
+					// stays intact until the download succeeds. If the download
+					// fails, the local file is untouched.
+					tmpPath, err := downloadToVerifiedTemp(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
 					if err != nil {
 						slog.Warn("conflict download failed", "folder", folderID, "path", action.Path, "error", err)
 						fs.indexMu.Lock()
@@ -1056,6 +1062,52 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						failMu.Unlock()
 						return
 					}
+
+					// Download verified — now safe to rename local to conflict.
+					if err := os.MkdirAll(filepath.Dir(conflictPath), 0750); err != nil {
+						slog.Warn("create conflict dir failed", "folder", folderID, "path", action.Path, "error", err)
+						_ = os.Remove(tmpPath)
+						fs.indexMu.Lock()
+						fs.retries.record(action.Path, action.RemoteHash)
+						fs.indexMu.Unlock()
+						failMu.Lock()
+						failedSeqs = append(failedSeqs, action.RemoteSequence)
+						failMu.Unlock()
+						return
+					}
+					localPath := filepath.Join(fs.cfg.Path, filepath.FromSlash(action.Path))
+					if err := os.Rename(localPath, conflictPath); err != nil {
+						slog.Warn("rename local to conflict failed", "folder", folderID, "path", action.Path, "error", err)
+						_ = os.Remove(tmpPath)
+						fs.indexMu.Lock()
+						fs.retries.record(action.Path, action.RemoteHash)
+						fs.indexMu.Unlock()
+						failMu.Lock()
+						failedSeqs = append(failedSeqs, action.RemoteSequence)
+						failMu.Unlock()
+						return
+					}
+
+					// Move verified temp to final destination.
+					destPath, _ := safePath(fs.cfg.Path, action.Path) // already validated
+					if err := renameReplace(tmpPath, destPath); err != nil {
+						slog.Warn("rename temp to dest failed", "folder", folderID, "path", action.Path, "error", err)
+						// Restore local file from conflict name.
+						if restoreErr := os.Rename(conflictPath, localPath); restoreErr != nil {
+							slog.Error("failed to restore local file after conflict rename failure",
+								"folder", folderID, "path", action.Path,
+								"conflict_file", conflictPath, "error", restoreErr)
+						}
+						_ = os.Remove(tmpPath)
+						fs.indexMu.Lock()
+						fs.retries.record(action.Path, action.RemoteHash)
+						fs.indexMu.Unlock()
+						failMu.Lock()
+						failedSeqs = append(failedSeqs, action.RemoteSequence)
+						failMu.Unlock()
+						return
+					}
+
 					fs.indexMu.Lock()
 					fs.index.Sequence++
 					fs.index.Files[action.Path] = FileEntry{
@@ -1234,7 +1286,9 @@ func protoToFileIndex(idx *pb.IndexExchange) *FileIndex {
 		Files:    make(map[string]FileEntry, len(idx.GetFiles())),
 	}
 	for _, f := range idx.GetFiles() {
-		fi.Files[f.GetPath()] = FileEntry{
+		// B17: normalize remote paths to NFC for cross-platform consistency.
+		path := norm.NFC.String(f.GetPath())
+		fi.Files[path] = FileEntry{
 			Size:     f.GetSize(),
 			MtimeNS:  f.GetMtimeNs(),
 			SHA256:   bytesToHex(f.GetSha256()),

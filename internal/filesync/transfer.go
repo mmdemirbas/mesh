@@ -23,10 +23,11 @@ const (
 	maxSyncFileSize = 4 * 1024 * 1024 * 1024 // 4 GB per file
 )
 
-// downloadFile fetches a file from a peer and writes it to the folder,
-// resuming from an existing temp file if present.
-// Returns the local path of the completed file.
-func downloadFile(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash string, folderRoot string, limiter *rate.Limiter) (string, error) {
+// downloadToVerifiedTemp fetches a file from a peer, writes it to a temp file,
+// and verifies the hash. Returns the temp file path without renaming to the
+// final destination. Used by conflict resolution (B13) to ensure the download
+// succeeds before moving the local file aside.
+func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash string, folderRoot string, limiter *rate.Limiter) (string, error) {
 	destPath, err := safePath(folderRoot, relPath)
 	if err != nil {
 		return "", err
@@ -109,7 +110,18 @@ func downloadFile(ctx context.Context, client *http.Client, peerAddr, folderID, 
 		return "", fmt.Errorf("hash mismatch for %s: expected %s, got %s", relPath, expectedHash, actualHash)
 	}
 
-	// Atomic rename to final destination.
+	return tmpPath, nil
+}
+
+// downloadFile fetches a file from a peer and writes it to the folder.
+// Returns the local path of the completed file.
+func downloadFile(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash string, folderRoot string, limiter *rate.Limiter) (string, error) {
+	tmpPath, err := downloadToVerifiedTemp(ctx, client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
+	if err != nil {
+		return "", err
+	}
+
+	destPath, _ := safePath(folderRoot, relPath) // already validated in downloadToVerifiedTemp
 	if err := renameReplace(tmpPath, destPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return "", fmt.Errorf("rename to final path: %w", err)

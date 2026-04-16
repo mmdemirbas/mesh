@@ -445,6 +445,16 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 	if blockSize <= 0 {
 		blockSize = defaultBlockSize
 	}
+	// B18: cap to prevent a malicious peer from requesting 1-byte blocks,
+	// which would compute one SHA-256 per byte (OOM + CPU exhaustion).
+	const minBlockSize = 1024        // 1 KB
+	const maxBlockSizeCap = 16 << 20 // 16 MB
+	if blockSize < minBlockSize {
+		blockSize = minBlockSize
+	}
+	if blockSize > maxBlockSizeCap {
+		blockSize = maxBlockSizeCap
+	}
 
 	// Compute delta between our file and the peer's block hashes.
 	delta, err := computeDeltaBlocks(fullPath, blockSize, req.GetBlockHashes())

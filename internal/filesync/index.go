@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 )
 
@@ -98,19 +99,6 @@ func (idx *FileIndex) save(path string) error {
 	if err := renameReplace(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename index: %w", err)
-	}
-	return nil
-}
-
-// renameReplace atomically renames src to dst.
-// On Windows, os.Rename fails if dst exists. This helper removes the
-// destination first when needed.
-func renameReplace(src, dst string) error {
-	if err := os.Rename(src, dst); err != nil {
-		if os.Remove(dst) == nil {
-			return os.Rename(src, dst)
-		}
-		return err
 	}
 	return nil
 }
@@ -245,6 +233,8 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		}
 		// Normalize to forward slashes for cross-platform consistency.
 		rel = filepath.ToSlash(rel)
+		// B17: normalize to NFC so macOS NFD paths match Windows NFC paths.
+		rel = norm.NFC.String(rel)
 		if rel == "." {
 			return nil
 		}
@@ -503,13 +493,26 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, direction strin
 	return actions
 }
 
-// purgeTombstones removes deleted entries older than maxAge and returns the
-// number removed (useful for debug telemetry).
-func (idx *FileIndex) purgeTombstones(maxAge time.Duration) int {
+// purgeTombstones removes deleted entries older than maxAge, but only when
+// ALL configured peers have acknowledged them (LastSeenSequence >= tombstone
+// Sequence). This prevents file resurrection when a peer reconnects after
+// extended offline (B14).
+func (idx *FileIndex) purgeTombstones(maxAge time.Duration, peers map[string]PeerState) int {
 	cutoff := time.Now().Add(-maxAge).UnixNano()
 	purged := 0
 	for path, entry := range idx.Files {
-		if entry.Deleted && entry.MtimeNS < cutoff {
+		if !entry.Deleted || entry.MtimeNS >= cutoff {
+			continue
+		}
+		// B14: only purge if every configured peer has seen this tombstone.
+		allAcked := true
+		for _, ps := range peers {
+			if ps.LastSeenSequence < entry.Sequence {
+				allAcked = false
+				break
+			}
+		}
+		if allAcked {
 			delete(idx.Files, path)
 			purged++
 		}

@@ -8,14 +8,15 @@ import (
 	"time"
 )
 
-// resolveConflict handles a file that was modified on both the local and remote
-// sides. It downloads the remote version and renames the losing copy using
-// Syncthing-style conflict naming.
+// resolveConflict determines which version of a file wins (local vs remote)
+// and returns the winner ("local" or "remote") along with the conflict file
+// path for the loser. Does NOT rename or modify any files — the caller handles
+// the file operations (B13: download must succeed before any rename).
 //
 // Strategy: newer mtime wins. The loser is saved as:
 //
 //	<name>.sync-conflict-<YYYYMMDD-HHMMSS>-<deviceShort>.<ext>
-func resolveConflict(folderRoot, relPath string, localMtimeNS, remoteMtimeNS int64, remoteDeviceID string) (winner string, err error) {
+func resolveConflict(folderRoot, relPath string, localMtimeNS, remoteMtimeNS int64, remoteDeviceID string) (winner, conflictPath string) {
 	localPath := filepath.Join(folderRoot, filepath.FromSlash(relPath))
 
 	// Use the file's current on-disk mtime rather than the scan-time value —
@@ -29,23 +30,14 @@ func resolveConflict(folderRoot, relPath string, localMtimeNS, remoteMtimeNS int
 
 	// Determine winner by mtime. If equal, remote wins to avoid data loss.
 	if localMtimeNS > remoteMtimeNS {
-		// Local wins — remote copy gets the conflict name.
-		return "local", nil
+		return "local", ""
 	}
 
-	// Remote wins — rename local to conflict name.
+	// Remote wins — compute conflict name for the local file.
 	conflictName := conflictFileName(relPath, remoteDeviceID)
-	conflictPath := filepath.Join(folderRoot, filepath.FromSlash(conflictName))
+	cPath := filepath.Join(folderRoot, filepath.FromSlash(conflictName))
 
-	if err := os.MkdirAll(filepath.Dir(conflictPath), 0750); err != nil {
-		return "", fmt.Errorf("create conflict dir: %w", err)
-	}
-
-	if err := os.Rename(localPath, conflictPath); err != nil {
-		return "", fmt.Errorf("rename local to conflict: %w", err)
-	}
-
-	return "remote", nil
+	return "remote", cPath
 }
 
 // conflictFileName generates a Syncthing-style conflict file name.

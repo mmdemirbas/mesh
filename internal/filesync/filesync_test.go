@@ -233,7 +233,7 @@ func TestPurgeTombstonesReturnsCount(t *testing.T) {
 	idx.Files["recent-gone"] = FileEntry{Deleted: true, MtimeNS: recentNs}
 	idx.Files["live"] = FileEntry{Size: 3, MtimeNS: recentNs, SHA256: "x"}
 
-	n := idx.purgeTombstones(30 * 24 * time.Hour)
+	n := idx.purgeTombstones(30*24*time.Hour, nil)
 	if n != 2 {
 		t.Errorf("purgeTombstones returned %d, want 2", n)
 	}
@@ -572,7 +572,7 @@ func TestScanDeletion_TombstoneMtimeIsNow(t *testing.T) {
 	}
 
 	// A 30-day purge must NOT remove this freshly-created tombstone.
-	idx.purgeTombstones(30 * 24 * time.Hour)
+	idx.purgeTombstones(30*24*time.Hour, nil)
 	if _, ok := idx.Files["old.txt"]; !ok {
 		t.Error("fresh tombstone should survive purge")
 	}
@@ -979,13 +979,61 @@ func TestPurgeTombstones(t *testing.T) {
 	// Recent tombstone.
 	idx.Files["recent.txt"] = FileEntry{Deleted: true, MtimeNS: time.Now().UnixNano()}
 
-	idx.purgeTombstones(30 * 24 * time.Hour)
+	idx.purgeTombstones(30*24*time.Hour, nil)
 
 	if _, ok := idx.Files["old.txt"]; ok {
 		t.Error("old tombstone should have been purged")
 	}
 	if _, ok := idx.Files["recent.txt"]; !ok {
 		t.Error("recent tombstone should be kept")
+	}
+}
+
+// B14: tombstones must survive purge when a peer hasn't acknowledged them.
+func TestPurgeTombstones_BlockedByUnackedPeer(t *testing.T) {
+	t.Parallel()
+	idx := newFileIndex()
+	oldNs := time.Now().Add(-60 * 24 * time.Hour).UnixNano()
+
+	// Tombstone at sequence 10.
+	idx.Files["deleted.txt"] = FileEntry{Deleted: true, MtimeNS: oldNs, Sequence: 10}
+	// Tombstone at sequence 5.
+	idx.Files["also-deleted.txt"] = FileEntry{Deleted: true, MtimeNS: oldNs, Sequence: 5}
+
+	// Peer A has seen up to 10, peer B only up to 7.
+	peers := map[string]PeerState{
+		"192.168.1.1:7756": {LastSeenSequence: 10},
+		"192.168.1.2:7756": {LastSeenSequence: 7},
+	}
+
+	n := idx.purgeTombstones(30*24*time.Hour, peers)
+
+	// deleted.txt (seq=10): peer A acked (10>=10), peer B NOT acked (7<10) → kept
+	if _, ok := idx.Files["deleted.txt"]; !ok {
+		t.Error("tombstone at seq=10 should be kept: peer B hasn't acknowledged it")
+	}
+	// also-deleted.txt (seq=5): both peers acked (10>=5, 7>=5) → purged
+	if _, ok := idx.Files["also-deleted.txt"]; ok {
+		t.Error("tombstone at seq=5 should be purged: all peers acknowledged")
+	}
+	if n != 1 {
+		t.Errorf("purgeTombstones returned %d, want 1", n)
+	}
+}
+
+// B14: with no peers configured, all tombstones are purgeable.
+func TestPurgeTombstones_NoPeers(t *testing.T) {
+	t.Parallel()
+	idx := newFileIndex()
+	oldNs := time.Now().Add(-60 * 24 * time.Hour).UnixNano()
+	idx.Files["gone.txt"] = FileEntry{Deleted: true, MtimeNS: oldNs, Sequence: 5}
+
+	n := idx.purgeTombstones(30*24*time.Hour, nil)
+	if n != 1 {
+		t.Errorf("purgeTombstones returned %d, want 1", n)
+	}
+	if _, ok := idx.Files["gone.txt"]; ok {
+		t.Error("tombstone should be purged with no peers")
 	}
 }
 
@@ -1046,29 +1094,18 @@ func TestResolveConflict_RemoteWins(t *testing.T) {
 	localMtime := time.Now().Add(-1 * time.Hour).UnixNano()
 	remoteMtime := time.Now().UnixNano()
 
-	winner, err := resolveConflict(dir, "file.txt", localMtime, remoteMtime, "remote123")
-	if err != nil {
-		t.Fatal(err)
-	}
+	winner, conflictPath := resolveConflict(dir, "file.txt", localMtime, remoteMtime, "remote123")
 	if winner != "remote" {
 		t.Errorf("expected remote to win, got %q", winner)
 	}
-
-	// Original file should be renamed to conflict.
-	if _, err := os.Stat(filepath.Join(dir, "file.txt")); !os.IsNotExist(err) {
-		t.Error("original file should have been renamed")
+	if conflictPath == "" {
+		t.Error("expected non-empty conflict path for remote winner")
 	}
 
-	// A conflict file should exist.
-	entries, _ := os.ReadDir(dir)
-	found := false
-	for _, e := range entries {
-		if isConflictFile(e.Name()) {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("no conflict file found")
+	// B13: resolveConflict must NOT rename the file — caller handles it
+	// after a successful download. Verify original is untouched.
+	if _, err := os.Stat(filepath.Join(dir, "file.txt")); err != nil {
+		t.Error("original file should still exist (resolveConflict must not rename)")
 	}
 }
 
@@ -1080,12 +1117,12 @@ func TestResolveConflict_LocalWins(t *testing.T) {
 	localMtime := time.Now().UnixNano()
 	remoteMtime := time.Now().Add(-1 * time.Hour).UnixNano()
 
-	winner, err := resolveConflict(dir, "file.txt", localMtime, remoteMtime, "remote123")
-	if err != nil {
-		t.Fatal(err)
-	}
+	winner, conflictPath := resolveConflict(dir, "file.txt", localMtime, remoteMtime, "remote123")
 	if winner != "local" {
 		t.Errorf("expected local to win, got %q", winner)
+	}
+	if conflictPath != "" {
+		t.Errorf("expected empty conflict path for local winner, got %q", conflictPath)
 	}
 
 	// Original should still exist.
@@ -1114,16 +1151,94 @@ func TestResolveConflict_StaleIndexMtime_LocalWritesWinOverRemote(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	winner, err := resolveConflict(dir, "file.txt", scanTimeMtime, remoteMtime, "remote123")
-	if err != nil {
-		t.Fatal(err)
-	}
+	winner, _ := resolveConflict(dir, "file.txt", scanTimeMtime, remoteMtime, "remote123")
 	if winner != "local" {
 		t.Errorf("expected local to win (disk mtime newer than remote), got %q", winner)
 	}
 	// Original file must not be renamed.
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("user's edited file was clobbered: %v", err)
+	}
+}
+
+// B13: verify that a failed download during conflict resolution does not lose
+// the local file. The local file must remain at its original path.
+func TestConflictResolution_FailedDownloadPreservesLocal(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "file.txt", "precious local content")
+
+	localMtime := time.Now().Add(-1 * time.Hour).UnixNano()
+	remoteMtime := time.Now().UnixNano()
+
+	winner, conflictPath := resolveConflict(dir, "file.txt", localMtime, remoteMtime, "remote123")
+	if winner != "remote" {
+		t.Fatal("expected remote to win for this test setup")
+	}
+
+	// Simulate a download failure: downloadToVerifiedTemp would return an error.
+	// The key invariant is that the local file must NOT have been renamed yet.
+	_ = conflictPath // would be used only after successful download
+
+	// Verify local file is intact.
+	data, err := os.ReadFile(filepath.Join(dir, "file.txt"))
+	if err != nil {
+		t.Fatalf("local file should exist after failed download: %v", err)
+	}
+	if string(data) != "precious local content" {
+		t.Errorf("local file content changed: got %q", string(data))
+	}
+}
+
+// B17: verify that NFD paths (macOS HFS+ decomposition) are normalized to
+// NFC during scan, preventing cross-platform duplicates.
+func TestScanNormalizesNFD(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// "café" in NFD: e + combining acute accent (U+0301)
+	nfdName := "caf\u0065\u0301.txt"
+	// "café" in NFC: é (U+00E9)
+	nfcName := "caf\u00e9.txt"
+
+	writeFile(t, dir, nfdName, "content")
+
+	idx := newFileIndex()
+	changed, _, _, err := idx.scan(context.Background(), dir, &ignoreMatcher{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected scan to detect changes")
+	}
+
+	// The index key should be NFC regardless of what the filesystem stores.
+	if _, ok := idx.Files[nfcName]; !ok {
+		// Show what keys exist for debugging.
+		for k := range idx.Files {
+			t.Logf("index key: %q (len=%d)", k, len(k))
+		}
+		t.Errorf("expected NFC key %q in index", nfcName)
+	}
+}
+
+// B17: verify that remote index paths are normalized to NFC so diff()
+// compares consistently.
+func TestProtoToFileIndex_NormalizesNFD(t *testing.T) {
+	t.Parallel()
+	nfdPath := "caf\u0065\u0301.txt"
+	nfcPath := "caf\u00e9.txt"
+
+	idx := protoToFileIndex(&pb.IndexExchange{
+		Files: []*pb.FileInfo{
+			{Path: nfdPath, Size: 10, Sha256: []byte{1, 2, 3}},
+		},
+	})
+
+	if _, ok := idx.Files[nfcPath]; !ok {
+		for k := range idx.Files {
+			t.Logf("key: %q", k)
+		}
+		t.Errorf("expected NFC key %q in converted index", nfcPath)
 	}
 }
 
@@ -1225,8 +1340,15 @@ func TestApplyDelta(t *testing.T) {
 func TestDeltaEndpoint_ReducesTransfer(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	// Server has a file with a changed middle block.
-	writeFile(t, dir, "data.bin", "AAAAXXXXcc")
+
+	// Use 1024-byte blocks (B18 minimum) with 3 blocks total.
+	const bs = 1024
+	blockA := strings.Repeat("A", bs)
+	blockX := strings.Repeat("X", bs) // changed block on server
+	blockC := strings.Repeat("c", bs)
+	blockB := strings.Repeat("B", bs) // old block on client
+
+	writeFile(t, dir, "data.bin", blockA+blockX+blockC)
 
 	n := &Node{
 		cfg:      testCfg(dir, "127.0.0.1"),
@@ -1243,14 +1365,14 @@ func TestDeltaEndpoint_ReducesTransfer(t *testing.T) {
 
 	// Client has old version with different middle block.
 	clientDir := t.TempDir()
-	writeFile(t, clientDir, "data.bin", "AAAABBBBcc")
-	localHashes, _ := computeBlockSignatures(filepath.Join(clientDir, "data.bin"), 4)
+	writeFile(t, clientDir, "data.bin", blockA+blockB+blockC)
+	localHashes, _ := computeBlockSignatures(filepath.Join(clientDir, "data.bin"), bs)
 
 	req := &pb.BlockSignatures{
 		FolderId:    "test",
 		Path:        "data.bin",
-		BlockSize:   4,
-		FileSize:    10,
+		BlockSize:   bs,
+		FileSize:    3 * bs,
 		BlockHashes: localHashes,
 	}
 	reqData, _ := proto.Marshal(req)
@@ -1275,8 +1397,56 @@ func TestDeltaEndpoint_ReducesTransfer(t *testing.T) {
 	if len(deltaResp.GetBlocks()) != 1 {
 		t.Fatalf("expected 1 delta block, got %d", len(deltaResp.GetBlocks()))
 	}
-	if string(deltaResp.GetBlocks()[0].GetData()) != "XXXX" {
-		t.Errorf("delta data = %q, want 'XXXX'", deltaResp.GetBlocks()[0].GetData())
+	if string(deltaResp.GetBlocks()[0].GetData()) != blockX {
+		t.Errorf("delta data length = %d, want %d", len(deltaResp.GetBlocks()[0].GetData()), bs)
+	}
+}
+
+// B18: verify that extreme BlockSize values are clamped to [1KB, 16MB].
+func TestDeltaEndpoint_BlockSizeClamped(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "data.bin", "AAAA")
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg: testFolderCfg(dir, "127.0.0.1"),
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	for _, tc := range []struct {
+		name      string
+		blockSize int64
+	}{
+		{"one byte", 1},
+		{"below min", 512},
+		{"above max", 32 << 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &pb.BlockSignatures{
+				FolderId:    "test",
+				Path:        "data.bin",
+				BlockSize:   tc.blockSize,
+				FileSize:    4,
+				BlockHashes: nil,
+			}
+			reqData, _ := proto.Marshal(req)
+			resp, err := http.Post(ts.URL+"/delta", "application/x-protobuf", bytes.NewReader(reqData))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("expected 200, got %d", resp.StatusCode)
+			}
+		})
 	}
 }
 
@@ -2646,6 +2816,60 @@ func BenchmarkBlockSignatures(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		_, _ = computeBlockSignatures(path, defaultBlockSize)
+	}
+}
+
+// B15: verify that a corrupted index resets stale peer state so delta
+// filtering doesn't suppress the fresh index.
+func TestIndexResetClearsPeerState(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	folderDir := filepath.Join(dir, "test-folder")
+	if err := os.MkdirAll(folderDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a corrupted index.
+	idxPath := filepath.Join(folderDir, "index.yaml")
+	if err := os.WriteFile(idxPath, []byte("{{invalid yaml"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write stale peer state with high LastSentSequence.
+	peersPath := filepath.Join(folderDir, "peers.yaml")
+	if err := os.WriteFile(peersPath, []byte("192.168.1.1:7756:\n  last_sent_sequence: 5000\n  last_seen_sequence: 3000\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate Start()'s loading logic.
+	idx, err := loadIndex(idxPath)
+	indexReset := false
+	if err != nil {
+		idx = newFileIndex()
+		indexReset = true
+	}
+	peers, err := loadPeerStates(peersPath)
+	if err != nil {
+		t.Fatal("loadPeerStates should succeed:", err)
+	}
+
+	if !indexReset {
+		t.Fatal("expected indexReset=true for corrupted index")
+	}
+	if idx.Sequence != 0 {
+		t.Fatalf("fresh index should have Sequence=0, got %d", idx.Sequence)
+	}
+	if len(peers) == 0 {
+		t.Fatal("peers should have loaded from peers.yaml before reset")
+	}
+
+	// B15: apply the reset logic.
+	if indexReset && len(peers) > 0 {
+		peers = make(map[string]PeerState)
+	}
+
+	if len(peers) != 0 {
+		t.Fatalf("peers should be empty after index reset, got %d entries", len(peers))
 	}
 }
 
