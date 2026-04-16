@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -182,6 +183,7 @@ type ScanStats struct {
 	BytesHashed     int64 // sum of sizes of hashed files
 	StatErrors      int
 	HashErrors      int
+	TocTouSkips     int // files skipped because stat changed during hashing
 	Deletions       int // tombstones created in this pass
 }
 
@@ -199,6 +201,15 @@ func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignor
 //nolint:gocyclo // scan is a single-pass WalkDir; splitting it would hurt locality more than it helps.
 func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, ignore *ignoreMatcher) (changed bool, activeCount, dirCount int, stats ScanStats, conflicts []string, err error) {
 	changed = false
+
+	// B10: verify the folder root is accessible before scanning. If the
+	// root is temporarily unmounted or missing, WalkDir returns immediately
+	// and the empty `seen` map would cause every tracked file to be
+	// tombstoned, propagating mass deletion to all peers.
+	if _, statErr := os.Stat(folderRoot); statErr != nil {
+		return false, 0, 0, stats, nil, fmt.Errorf("folder root inaccessible: %w", statErr)
+	}
+
 	seen := make(map[string]struct{})
 	tempCutoff := time.Now().Add(-maxTempFileAge)
 
@@ -300,6 +311,15 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		stats.FilesHashed++
 		stats.BytesHashed += size
 
+		// B11: TOCTOU guard — if the file was modified during hashing,
+		// the hash corresponds to a partially-modified file. Discard it;
+		// the next scan will re-hash the stable version.
+		postInfo, postErr := os.Stat(path)
+		if postErr != nil || postInfo.ModTime().UnixNano() != mtimeNS || postInfo.Size() != size {
+			stats.TocTouSkips++
+			return nil
+		}
+
 		if exists && !existing.Deleted && existing.SHA256 == hash {
 			// Content identical despite stat change (e.g., touch). Update stat only.
 			existing.MtimeNS = mtimeNS
@@ -324,19 +344,31 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	}
 
 	delStart := time.Now()
-	// Mark deletions: entries in index not seen on disk.
-	for rel, entry := range idx.Files {
-		if entry.Deleted {
-			continue
-		}
-		if _, ok := seen[rel]; !ok {
-			idx.Sequence++
-			entry.Deleted = true
-			entry.MtimeNS = time.Now().UnixNano() // deletion time, not last-modification time
-			entry.Sequence = idx.Sequence
-			idx.Files[rel] = entry
-			changed = true
-			stats.Deletions++
+	// B10: suppress tombstone generation when the scan had errors.
+	// A file that couldn't be hashed (permission error, locked) appears
+	// absent from `seen` but isn't actually deleted. Creating a tombstone
+	// would propagate a false deletion to all peers.
+	scanHadErrors := stats.HashErrors > 0 || stats.StatErrors > 0
+	if scanHadErrors {
+		slog.Warn("scan had errors, suppressing deletion detection",
+			"folder", folderRoot,
+			"hash_errors", stats.HashErrors,
+			"stat_errors", stats.StatErrors)
+	} else {
+		// Mark deletions: entries in index not seen on disk.
+		for rel, entry := range idx.Files {
+			if entry.Deleted {
+				continue
+			}
+			if _, ok := seen[rel]; !ok {
+				idx.Sequence++
+				entry.Deleted = true
+				entry.MtimeNS = time.Now().UnixNano() // deletion time, not last-modification time
+				entry.Sequence = idx.Sequence
+				idx.Files[rel] = entry
+				changed = true
+				stats.Deletions++
+			}
 		}
 	}
 	stats.DeletionScan = time.Since(delStart)
@@ -371,11 +403,12 @@ const (
 
 // DiffEntry describes a single file that needs action during sync.
 type DiffEntry struct {
-	Path        string
-	Action      DiffAction
-	RemoteHash  string
-	RemoteSize  int64
-	RemoteMtime int64
+	Path           string
+	Action         DiffAction
+	RemoteHash     string
+	RemoteSize     int64
+	RemoteMtime    int64
+	RemoteSequence int64 // B9: track for safe LastSeenSequence advancement
 }
 
 // diff compares the local index with a remote index and produces a list of
@@ -399,9 +432,17 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, direction strin
 		if rEntry.Deleted {
 			// Remote deleted the file.
 			if localExists && !lEntry.Deleted {
+				// B8: if we have a prior sync baseline (lastSeenSeq > 0)
+				// and the local file was modified after that baseline,
+				// local wins over remote delete. The local version will
+				// propagate back to the peer on the next outbound sync.
+				if lastSeenSeq > 0 && lEntry.Sequence > lastSeenSeq {
+					continue
+				}
 				actions = append(actions, DiffEntry{
-					Path:   path,
-					Action: ActionDelete,
+					Path:           path,
+					Action:         ActionDelete,
+					RemoteSequence: rEntry.Sequence,
 				})
 			}
 			continue
@@ -410,11 +451,12 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, direction strin
 		if !localExists || lEntry.Deleted {
 			// Remote has a file we don't have.
 			actions = append(actions, DiffEntry{
-				Path:        path,
-				Action:      ActionDownload,
-				RemoteHash:  rEntry.SHA256,
-				RemoteSize:  rEntry.Size,
-				RemoteMtime: rEntry.MtimeNS,
+				Path:           path,
+				Action:         ActionDownload,
+				RemoteHash:     rEntry.SHA256,
+				RemoteSize:     rEntry.Size,
+				RemoteMtime:    rEntry.MtimeNS,
+				RemoteSequence: rEntry.Sequence,
 			})
 			continue
 		}
@@ -428,20 +470,22 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, direction strin
 		if lEntry.Sequence <= lastSeenSeq {
 			// Only remote changed.
 			actions = append(actions, DiffEntry{
-				Path:        path,
-				Action:      ActionDownload,
-				RemoteHash:  rEntry.SHA256,
-				RemoteSize:  rEntry.Size,
-				RemoteMtime: rEntry.MtimeNS,
+				Path:           path,
+				Action:         ActionDownload,
+				RemoteHash:     rEntry.SHA256,
+				RemoteSize:     rEntry.Size,
+				RemoteMtime:    rEntry.MtimeNS,
+				RemoteSequence: rEntry.Sequence,
 			})
 		} else {
 			// Both sides changed → conflict.
 			actions = append(actions, DiffEntry{
-				Path:        path,
-				Action:      ActionConflict,
-				RemoteHash:  rEntry.SHA256,
-				RemoteSize:  rEntry.Size,
-				RemoteMtime: rEntry.MtimeNS,
+				Path:           path,
+				Action:         ActionConflict,
+				RemoteHash:     rEntry.SHA256,
+				RemoteSize:     rEntry.Size,
+				RemoteMtime:    rEntry.MtimeNS,
+				RemoteSequence: rEntry.Sequence,
 			})
 		}
 	}

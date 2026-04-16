@@ -658,6 +658,7 @@ func (n *Node) runScan(ctx context.Context) {
 			"bytes_hashed", stats.BytesHashed,
 			"stat_errors", stats.StatErrors,
 			"hash_errors", stats.HashErrors,
+			"toctou_skips", stats.TocTouSkips,
 			"deletions", stats.Deletions,
 			"tombstones_purged", purged,
 			"merged_back", mergedBack,
@@ -694,6 +695,7 @@ func (n *Node) runScan(ctx context.Context) {
 				"bytes_hashed", stats.BytesHashed,
 				"stat_errors", stats.StatErrors,
 				"hash_errors", stats.HashErrors,
+				"toctou_skips", stats.TocTouSkips,
 				"active_files", count,
 			)
 			fs.firstScanLogged = true
@@ -860,6 +862,11 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 	state.Global.Update("filesync-folder", folderID, state.Connecting, fmt.Sprintf("syncing %d files", len(actions)))
 
+	// B9: track failed remote sequences so we don't advance
+	// LastSeenSequence past entries that failed to process.
+	var failMu sync.Mutex
+	var failedSeqs []int64
+
 	var wg sync.WaitGroup
 	for _, action := range actions {
 		if ctx.Err() != nil {
@@ -882,6 +889,9 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				err := downloadFromPeer(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
 				if err != nil {
 					slog.Warn("download failed", "folder", folderID, "path", action.Path, "peer", peerAddr, "error", err)
+					failMu.Lock()
+					failedSeqs = append(failedSeqs, action.RemoteSequence)
+					failMu.Unlock()
 					return
 				}
 
@@ -908,6 +918,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			winner, err := resolveConflict(fs.cfg.Path, action.Path, localMtime(fs, action.Path), action.RemoteMtime, remoteDeviceID)
 			if err != nil {
 				slog.Warn("conflict resolution failed", "folder", folderID, "path", action.Path, "error", err)
+				failedSeqs = append(failedSeqs, action.RemoteSequence)
 				continue
 			}
 			if winner == "remote" {
@@ -915,6 +926,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				err := downloadFromPeer(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
 				if err != nil {
 					slog.Warn("conflict download failed", "folder", folderID, "path", action.Path, "error", err)
+					failedSeqs = append(failedSeqs, action.RemoteSequence)
 					continue
 				}
 				fs.indexMu.Lock()
@@ -932,6 +944,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		case ActionDelete:
 			if err := deleteFile(fs.cfg.Path, action.Path); err != nil {
 				slog.Warn("delete failed", "folder", folderID, "path", action.Path, "error", err)
+				failedSeqs = append(failedSeqs, action.RemoteSequence)
 				continue
 			}
 			fs.indexMu.Lock()
@@ -962,10 +975,19 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		Bytes:     totalBytes,
 	})
 
+	// B9: compute safe LastSeenSequence — do not advance past entries
+	// that failed to process, so they are re-evaluated next round.
+	safeSeq := remoteIdx.GetSequence()
+	for _, fseq := range failedSeqs {
+		if fseq-1 < safeSeq {
+			safeSeq = fseq - 1
+		}
+	}
+
 	// Update peer state.
 	fs.indexMu.Lock()
 	fs.peers[peerAddr] = PeerState{
-		LastSeenSequence: remoteIdx.GetSequence(),
+		LastSeenSequence: safeSeq,
 		LastSentSequence: ourCurrentSeq,
 		LastSync:         time.Now(),
 	}
