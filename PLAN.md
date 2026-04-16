@@ -47,6 +47,10 @@ Security hardening, correctness, data integrity, protocol compliance.
 | B5   | filesync  | `maxIndexFiles=200000` hard cap per folder   | Evidence run: `code/` has 200k files, scan aborts every cycle (`folder exceeds max tracked files`). Change detection stops past the cap. Either bump default (needs memory analysis: ~400 bytes/entry × 500k = 200 MB), make it configurable per folder, or stream the index instead of loading it fully into memory. |
 | B6   | filesync  | `n.folders` read without `n.mu` in hot paths | `findFolder` takes `n.mu` but `GetFolderStatuses`, `GetConflicts`, `runScan`, `syncAllPeers`, `buildIndexExchange`, `persistFolder` all iterate `n.folders` without it. Safe today because the map is immutable after `Start`, but inconsistent with `findFolder`. Either document immutability and drop `n.mu` from `findFolder`, or take the lock everywhere. Needed before any future hot-reload work (F1). |
 | B7   | filesync  | `safePath` prefix check is incomplete        | `transfer.go:124` uses `strings.HasPrefix(clean, "..")` which does not catch paths like `a/../..`. Not exploitable — the abs-path comparison at line 137 is the real guard — but misleading. Replace with `filepath.Clean` + proper prefix check or drop the early check. |
+| [B8](#b8-delete-tombstone-silently-destroys-local-edits)   | filesync  | Delete tombstone silently destroys local edits | `index.go` `diff()`: when remote sends a `Deleted` tombstone, `ActionDelete` is generated unconditionally — no check for `lEntry.Sequence > lastSeenSeq`. A locally modified file is silently deleted with no conflict file and no recovery. Fix: generate `ActionConflict` when local sequence exceeds lastSeenSeq. |
+| [B9](#b9-lastseensequence-advanced-past-failed-downloads)   | filesync  | `LastSeenSequence` advanced past failed downloads | `syncFolder` sets `PeerState.LastSeenSequence` to `remoteIdx.GetSequence()` unconditionally. Failed downloads are permanently skipped in future rounds. Fix: advance only to the minimum sequence of failed entries minus 1. |
+| [B10](#b10-scan-errors-propagate-as-deletions-to-peers)  | filesync  | Scan errors propagate as deletions to peers   | `hashFile` errors cause the file to be absent from `seen`, triggering tombstone creation. Transient permission errors or locked files cascade as deletions to all peers. Also: folder root unavailability causes mass tombstones. Fix: suppress tombstone generation when scan has errors. |
+| [B11](#b11-file-modified-during-scan-produces-inconsistent-hash)  | filesync  | File modified during scan produces inconsistent hash | TOCTOU between `d.Info()` stat and `hashFile()` read — hash of partially-modified file is stored and propagated. Peers download corrupted intermediate. Fix: re-stat after hashing, skip if changed. |
 ---
 
 ## Tier 3 — Improve
@@ -479,6 +483,8 @@ All hunt tasks (H1–H34) completed. See DONE.md.
 ## Done
 
 See [DONE.md](DONE.md).
+
+---
 
 ---
 
