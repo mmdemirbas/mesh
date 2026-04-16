@@ -1,6 +1,8 @@
 package filesync
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,8 +36,31 @@ func resolveConflict(folderRoot, relPath string, localMtimeNS, remoteMtimeNS int
 	}
 
 	// Remote wins — compute conflict name for the local file.
+	// N7: check for collision and append a counter if needed, since
+	// second-granularity timestamps can collide under rapid edits.
 	conflictName := conflictFileName(relPath, remoteDeviceID)
 	cPath := filepath.Join(folderRoot, filepath.FromSlash(conflictName))
+	if _, err := os.Stat(cPath); err == nil {
+		// Collision — try up to 99 suffixed names.
+		base := cPath
+		ext := filepath.Ext(base)
+		stem := strings.TrimSuffix(base, ext)
+		found := false
+		for i := 2; i <= 100; i++ {
+			candidate := fmt.Sprintf("%s-%d%s", stem, i, ext)
+			if _, err := os.Stat(candidate); os.IsNotExist(err) {
+				cPath = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			// All 99 counter names taken — fall back to random suffix.
+			b := make([]byte, 4)
+			_, _ = rand.Read(b)
+			cPath = stem + "-" + hex.EncodeToString(b) + ext
+		}
+	}
 
 	return "remote", cPath
 }
