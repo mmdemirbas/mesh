@@ -2255,12 +2255,16 @@ func TestRenderStatus_FilesyncStatusPaddingWithMetrics(t *testing.T) {
 		Clipsync: []config.ClipsyncCfg{
 			{Bind: "0.0.0.0:7755"},
 		},
+		Gateway: []gateway.GatewayCfg{
+			{Name: "claude-audit", Bind: "127.0.0.1:8082", Upstream: "https://api.anthropic.com", ClientAPI: "anthropic", UpstreamAPI: "openai"},
+		},
 	}
 	activeState := map[string]state.Component{
 		"filesync:0.0.0.0:7756": {Type: "filesync", ID: "0.0.0.0:7756", Status: state.Listening},
 		"proxy:127.0.0.1:1080":  {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
 		"proxy:127.0.0.1:1081":  {Type: "proxy", ID: "127.0.0.1:1081", Status: state.Listening},
 		"clipsync:0.0.0.0:7755": {Type: "clipsync", ID: "0.0.0.0:7755", Status: state.Listening},
+		"gateway:claude-audit":  {Type: "gateway", ID: "claude-audit", Status: state.Listening},
 	}
 	for _, f := range cfg.Filesync[0].ResolvedFolders {
 		activeState["filesync-folder:"+f.ID] = state.Component{Type: "filesync-folder", ID: f.ID, Status: state.Starting}
@@ -2270,36 +2274,42 @@ func TestRenderStatus_FilesyncStatusPaddingWithMetrics(t *testing.T) {
 	fsM.StartTime.Store(time.Now().Add(-30 * time.Second).UnixNano())
 	proxyM := &state.Metrics{}
 	proxyM.StartTime.Store(time.Now().Add(-30 * time.Second).UnixNano())
+	gwM := &state.Metrics{}
+	gwM.StartTime.Store(time.Now().Add(-30 * time.Second).UnixNano())
 	metricsMap := map[string]*state.Metrics{
 		"filesync:0.0.0.0:7756": fsM,
 		"proxy:127.0.0.1:1080":  proxyM,
 		"proxy:127.0.0.1:1081":  proxyM,
+		"gateway:claude-audit":  gwM,
 	}
 
 	output, _ := renderStatus(cfg, activeState, metricsMap, "server")
 	plain := stripANSI(output)
 
-	// All filesync folder [starting] brackets must be at the same column,
-	// with at least 2 spaces between the path and the bracket.
-	var statusCols []int
+	// All status ']' brackets must be at the same visual column across all
+	// sections. Use visibleLen (not byte offset) because multi-byte characters
+	// like emoji and box-drawing shift byte positions.
+	var bracketCols []int
+	var bracketLines []string
 	for _, line := range strings.Split(plain, "\n") {
-		idx := strings.Index(line, "[starting]")
-		if idx < 0 || !strings.Contains(line, `C:\`) {
-			continue
-		}
-		statusCols = append(statusCols, idx)
-		if idx >= 2 && line[idx-1] != ' ' {
-			t.Errorf("no space before [starting]:\n  %q", line)
-		}
-		if idx >= 2 && line[idx-1] == ' ' && line[idx-2] != ' ' {
-			t.Errorf("only 1 space before [starting]:\n  %q", line)
+		for _, tag := range []string{"[listening]", "[loading]", "[starting]", "[connected]", "[scanning]", "[idle]"} {
+			idx := strings.Index(line, tag)
+			if idx < 0 {
+				continue
+			}
+			visualCol := visibleLen(line[:idx+len(tag)])
+			bracketCols = append(bracketCols, visualCol)
+			bracketLines = append(bracketLines, line)
+			if idx >= 2 && line[idx-1] != ' ' {
+				t.Errorf("no space before %s:\n  %q", tag, line)
+			}
 		}
 	}
-	if len(statusCols) > 1 {
-		for i := 1; i < len(statusCols); i++ {
-			if statusCols[i] != statusCols[0] {
-				t.Errorf("[starting] columns not aligned: %v", statusCols)
-				break
+	if len(bracketCols) > 1 {
+		for i := 1; i < len(bracketCols); i++ {
+			if bracketCols[i] != bracketCols[0] {
+				t.Errorf("status ']' visual columns not aligned: col[0]=%d vs col[%d]=%d\n  line[0]: %q\n  line[%d]: %q",
+					bracketCols[0], i, bracketCols[i], bracketLines[0], i, bracketLines[i])
 			}
 		}
 	}

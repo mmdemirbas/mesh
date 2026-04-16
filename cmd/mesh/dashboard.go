@@ -966,7 +966,24 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 
 	statusPadCol := min(maxLineLen+1, 60)
 
-	// Compute metrics column: based on content + status + annotation width.
+	// Compute the column where every status ']' bracket aligns across all sections.
+	statusRightCol := 0
+	for _, r := range rows {
+		if r.isHeader || r.status == "" {
+			continue
+		}
+		lineLen := visibleLen(r.text)
+		minStart := statusPadCol
+		if lineLen >= minStart {
+			minStart = lineLen + 1
+		}
+		rightEdge := minStart + visibleLen(r.status) - 1
+		if rightEdge > statusRightCol {
+			statusRightCol = rightEdge
+		}
+	}
+
+	// Compute metrics column: starts after status + annotation for metric-having rows.
 	hasSnap := func(s metricsSnapshot) bool {
 		return s.uptime > 0 || s.tx > 0 || s.rx > 0
 	}
@@ -975,14 +992,21 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		if r.isHeader || !hasSnap(r.snap) {
 			continue
 		}
-		lineLen := visibleLen(r.text)
-		statusStart := statusPadCol
-		if lineLen >= statusStart {
-			statusStart = lineLen + 1
-		}
-		col := statusStart + visibleLen(r.status)
-		if r.annotation != "" {
-			col += 1 + visibleLen(r.annotation) // space + annotation
+		var col int
+		if r.status != "" {
+			col = statusRightCol + 1
+			if r.annotation != "" {
+				col += 1 + visibleLen(r.annotation)
+			}
+		} else {
+			lineLen := visibleLen(r.text)
+			col = statusPadCol
+			if lineLen >= col {
+				col = lineLen + 1
+			}
+			if r.annotation != "" {
+				col += 1 + visibleLen(r.annotation)
+			}
 		}
 		if col > metricsPadCol {
 			metricsPadCol = col
@@ -1048,17 +1072,6 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 				}
 			}
 
-			// Width of the status bracket (e.g. "[scanning]") for alignment.
-			maxFsStatusWidth := 0
-			for _, r := range rows {
-				if r.fsPeers == nil {
-					continue
-				}
-				if w := visibleLen(r.status); w > maxFsStatusWidth {
-					maxFsStatusWidth = w
-				}
-			}
-
 			// Build the annotation string for the peer header row so the final
 			// assembly positions it identically to data rows.
 			var peerHdrAnnotation strings.Builder
@@ -1082,19 +1095,11 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 
 			for i, r := range rows {
 				if r.fsPeerHeader {
-					// Use same status width as data rows so final assembly
-					// right-aligns the header identically.
-					rows[i].status = strings.Repeat(" ", maxFsStatusWidth)
 					rows[i].annotation = peerHdrAnnotation.String()
 					continue
 				}
 				if r.fsPeers == nil {
 					continue
-				}
-
-				// Pad status to fixed width for column alignment.
-				if pad := maxFsStatusWidth - visibleLen(r.status); pad > 0 {
-					rows[i].status = r.status + strings.Repeat(" ", pad)
 				}
 
 				var extra strings.Builder
@@ -1178,11 +1183,6 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 	}
 	builtLines = append(builtLines, titleLine)
 
-	// When metrics are present, right-align status+annotation so they end
-	// exactly one space before the metrics column. This keeps the gap between
-	// status and metrics consistent across rows with different status widths.
-	anyMetrics := metricsPadCol > 1
-
 	for _, r := range rows {
 		if r.isHeader {
 			builtLines = append(builtLines, r.text)
@@ -1190,49 +1190,36 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		}
 		line := r.text
 
-		// Build status block: status + optional annotation (when either status
-		// or annotation should be right-aligned alongside metrics).
-		statusBlock := ""
-		switch {
-		case r.status != "" && r.annotation != "":
-			statusBlock = r.status + " " + r.annotation
-		case r.status != "":
-			statusBlock = r.status
-		case r.annotation != "" && r.metrics != "":
-			// Annotation without status, but with metrics: treat annotation as
-			// part of the right-aligned block so it stays close to metrics.
-			statusBlock = r.annotation
-		}
-
-		// Filesync folder rows have their own columnar annotation (count,
-		// size, time, peers) — always left-align at statusPadCol so the
-		// annotation columns stay independent of the metrics alignment.
-		fsRow := r.fsPeers != nil || r.fsPeerHeader
-
-		if anyMetrics && statusBlock != "" && !fsRow {
-			// Right-align: status block ends at metricsPadCol - 1.
-			sbWidth := visibleLen(statusBlock)
-			targetStart := metricsPadCol - 1 - sbWidth
+		if r.fsPeerHeader {
+			// Peer column header: align annotation with data rows (which
+			// start annotation right after the aligned status area).
+			padTo := statusRightCol + 2
+			lineLen := visibleLen(line)
+			if padTo > lineLen {
+				line += strings.Repeat(" ", padTo-lineLen)
+			} else {
+				line += " "
+			}
+			line += r.annotation
+		} else if r.status != "" {
+			// Right-align status so ']' is at statusRightCol.
+			statusWidth := visibleLen(r.status)
+			targetStart := statusRightCol + 1 - statusWidth
 			lineLen := visibleLen(line)
 			if targetStart > lineLen {
 				line += strings.Repeat(" ", targetStart-lineLen)
 			} else {
 				line += " "
 			}
-			line += statusBlock
-		} else if statusBlock != "" {
-			// No metrics context — left-align status at statusPadCol.
-			lineLen := visibleLen(line)
-			if lineLen < statusPadCol {
-				line += strings.Repeat(" ", statusPadCol-lineLen)
-			} else {
-				line += " "
+			line += r.status
+			if r.annotation != "" {
+				line += " " + r.annotation
 			}
-			line += statusBlock
+		} else if r.annotation != "" {
+			line += " " + r.annotation
 		}
 
-		switch {
-		case r.metrics != "":
+		if r.metrics != "" {
 			currentLen := visibleLen(line)
 			if currentLen < metricsPadCol {
 				line += strings.Repeat(" ", metricsPadCol-currentLen)
@@ -1240,13 +1227,6 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 				line += " "
 			}
 			line += r.metrics
-		case r.annotation != "" && r.status == "" && !anyMetrics:
-			// Annotation-only row without metrics context: append inline.
-			line += " " + r.annotation
-		case r.annotation != "" && r.status == "" && statusBlock == "":
-			// Annotation-only row (no metrics on this row, but metrics elsewhere):
-			// still append inline since it's not part of a right-aligned block.
-			line += " " + r.annotation
 		}
 
 		builtLines = append(builtLines, strings.TrimRight(line, " "))
