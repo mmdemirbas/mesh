@@ -434,6 +434,15 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, direction strin
 				if lastSeenSeq > 0 && lEntry.Sequence > lastSeenSeq {
 					continue
 				}
+				// H8: on first sync (lastSeenSeq=0), never delete a
+				// locally-existing file based on a remote tombstone. The
+				// local file was never shared with this peer, so the
+				// tombstone refers to a deletion the peer saw from a
+				// third party. The local file will propagate back on
+				// the next outbound cycle.
+				if lastSeenSeq == 0 {
+					continue
+				}
 				actions = append(actions, DiffEntry{
 					Path:           path,
 					Action:         ActionDelete,
