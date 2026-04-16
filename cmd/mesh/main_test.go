@@ -331,6 +331,43 @@ func TestStripANSI(t *testing.T) {
 	}
 }
 
+func TestRuneWidth(t *testing.T) {
+	tests := []struct {
+		name    string
+		r       rune
+		wantNon int // width when eastAsianWidth=false
+		wantEA  int // width when eastAsianWidth=true
+	}{
+		{"ASCII", 'A', 1, 1},
+		{"emoji", 0x1F7E2, 2, 2},        // 🟢
+		{"CJK ideograph", 0x4E2D, 2, 2}, // 中
+		{"circle white", '○', 1, 2},     // U+25CB Ambiguous
+		{"circle black", '●', 1, 2},     // U+25CF Ambiguous
+		{"bullseye", '◎', 1, 2},         // U+25CE Ambiguous
+		{"arrow up-down", '↕', 1, 2},    // U+2195 Ambiguous
+		{"VS16", 0xFE0F, 0, 0},
+		{"VS15", 0xFE0E, 0, 0},
+		{"medium white circle", 0x26AA, 2, 2}, // ⚪ Wide (W), always 2
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			old := eastAsianWidth
+
+			eastAsianWidth = false
+			if got := runeWidth(tt.r); got != tt.wantNon {
+				t.Errorf("runeWidth(%U) [non-EA] = %d, want %d", tt.r, got, tt.wantNon)
+			}
+
+			eastAsianWidth = true
+			if got := runeWidth(tt.r); got != tt.wantEA {
+				t.Errorf("runeWidth(%U) [EA] = %d, want %d", tt.r, got, tt.wantEA)
+			}
+
+			eastAsianWidth = old
+		})
+	}
+}
+
 func TestVisibleLen(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -345,6 +382,8 @@ func TestVisibleLen(t *testing.T) {
 		{"multiple escapes", "\033[1m\033[36mAB\033[0m", 2},
 		{"no content", "\033[31m\033[0m", 0},
 		{"multibyte non-emoji", "café", 4}, // 'é' is 2 bytes but 1 column
+		{"CJK ideograph", "中", 2},
+		{"emoji with VS16", "⚪\uFE0F", 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2101,6 +2140,86 @@ func TestRenderStatus_FilesyncSingleLinePerFolder(t *testing.T) {
 		if strings.Contains(line, "archive") && strings.Contains(line, "●") {
 			t.Errorf("disabled folder 'archive' should not have peer indicators: %q", line)
 		}
+	}
+
+	t.Logf("Rendered output:\n%s", plain)
+}
+
+func TestRenderStatus_FilesyncPeerColumnAlignment_EastAsian(t *testing.T) {
+	old := eastAsianWidth
+	eastAsianWidth = true
+	defer func() { eastAsianWidth = old }()
+
+	cfg := &config.Config{
+		Filesync: []config.FilesyncCfg{
+			{
+				Bind:  "0.0.0.0:7756",
+				Peers: map[string][]string{"mbp": {"10.0.0.1:7756"}},
+				ResolvedFolders: []config.FolderCfg{
+					{ID: "code", Path: `C:\Users\user\code`, Peers: []string{"10.0.0.1:7756"}, PeerNames: []string{"mbp"}, Direction: "send-receive"},
+					{ID: "documents", Path: `C:\Users\user\Documents`, Peers: []string{"10.0.0.1:7756"}, PeerNames: []string{"mbp"}, Direction: "send-receive"},
+				},
+			},
+		},
+	}
+	activeState := map[string]state.Component{
+		"filesync:0.0.0.0:7756":                 {Type: "filesync", ID: "0.0.0.0:7756", Status: state.Listening},
+		"filesync-folder:code":                  {Type: "filesync-folder", ID: "code", Status: state.Starting},
+		"filesync-folder:documents":             {Type: "filesync-folder", ID: "documents", Status: state.Starting},
+		"filesync-peer:code|10.0.0.1:7756":      {Type: "filesync-peer", ID: "code|10.0.0.1:7756"},
+		"filesync-peer:documents|10.0.0.1:7756": {Type: "filesync-peer", ID: "documents|10.0.0.1:7756"},
+	}
+
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
+	plain := stripANSI(output)
+
+	// visCol counts visible columns using runeWidth so ambiguous chars (◎, ○)
+	// count as 2 columns when eastAsianWidth is true.
+	visCol := func(s, sub string) int {
+		idx := strings.Index(s, sub)
+		if idx < 0 {
+			return -1
+		}
+		col := 0
+		for i, r := range s {
+			if i >= idx {
+				return col
+			}
+			col += runeWidth(r)
+		}
+		return -1
+	}
+
+	lines := strings.Split(plain, "\n")
+	var headerLine string
+	for _, line := range lines {
+		if strings.Contains(line, "mbp") && !strings.Contains(line, "[") {
+			headerLine = line
+			break
+		}
+	}
+	if headerLine == "" {
+		t.Fatalf("peer header line not found\n%s", plain)
+	}
+
+	mbpCol := visCol(headerLine, "mbp")
+
+	for _, line := range lines {
+		if !strings.Contains(line, "code") || strings.Contains(line, "documents") {
+			continue
+		}
+		if !strings.Contains(line, "[") {
+			continue
+		}
+		dotCol := visCol(line, "○")
+		if dotCol < 0 {
+			t.Errorf("code folder should have ○ indicator\n%s", plain)
+			break
+		}
+		if dotCol != mbpCol {
+			t.Errorf("code ○ at visible column %d, want mbp column %d\nheader: %q\n  line: %q", dotCol, mbpCol, headerLine, line)
+		}
+		break
 	}
 
 	t.Logf("Rendered output:\n%s", plain)

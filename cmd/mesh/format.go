@@ -12,9 +12,10 @@ import (
 )
 
 // visibleLen returns the terminal display width of s, skipping ANSI CSI escape
-// sequences and counting emoji (U+1F000+) as double-width.
+// sequences and using runeWidth for character width classification.
 func visibleLen(s string) int {
 	n := 0
+	prevWidth := 0
 	for i := 0; i < len(s); {
 		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
 			// Try to find CSI final byte (0x40-0x7E).
@@ -29,11 +30,12 @@ func visibleLen(s string) int {
 			// Incomplete CSI: treat ESC as a regular character.
 		}
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if r >= 0x1F000 {
-			n += 2
-		} else {
-			n++
+		w := runeWidth(r)
+		if r == 0xFE0F && prevWidth == 1 {
+			w = 1 // VS16 upgrades a 1-wide char to 2-wide emoji presentation
 		}
+		n += w
+		prevWidth = w
 		i += size
 	}
 	return n
