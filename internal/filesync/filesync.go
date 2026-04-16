@@ -43,7 +43,8 @@ type FolderStatus struct {
 	Peers          []FolderPeer `json:"peers"`
 	// LastSync is the most recent successful sync time across all peers.
 	// Zero value means no peer has synced yet.
-	LastSync time.Time `json:"last_sync"`
+	LastSync        time.Time `json:"last_sync"`
+	QuarantineCount int       `json:"quarantine_count,omitempty"`
 }
 
 // FolderPeer is a resolved peer entry for a folder: the configured nickname
@@ -189,19 +190,21 @@ func GetFolderStatuses() []FolderStatus {
 				peers[i] = fp
 			}
 			ignores := append([]string(nil), fs.cfg.IgnorePatterns...)
+			qcount := len(fs.retries.quarantinedPaths())
 			fs.indexMu.RUnlock()
 
 			result = append(result, FolderStatus{
-				ID:             id,
-				Path:           fs.cfg.Path,
-				Direction:      fs.cfg.Direction,
-				FileCount:      count,
-				DirCount:       dirs,
-				TotalBytes:     totalBytes,
-				Sequence:       seq,
-				IgnorePatterns: ignores,
-				Peers:          peers,
-				LastSync:       lastSync,
+				ID:              id,
+				Path:            fs.cfg.Path,
+				Direction:       fs.cfg.Direction,
+				FileCount:       count,
+				DirCount:        dirs,
+				TotalBytes:      totalBytes,
+				Sequence:        seq,
+				IgnorePatterns:  ignores,
+				Peers:           peers,
+				LastSync:        lastSync,
+				QuarantineCount: qcount,
 			})
 		}
 	})
@@ -267,6 +270,69 @@ type folderState struct {
 	conflicts       []string                  // conflict file paths from last scan (sorted)
 	firstScanLogged bool                      // true after first scan INFO line emitted
 	indexMu         sync.RWMutex
+	retries         retryTracker
+}
+
+const maxRetries = 3
+
+// retryTracker tracks per-file failure counts to quarantine files that
+// repeatedly fail.  Protected by folderState.indexMu.
+type retryTracker struct {
+	counts map[string]retryEntry // path -> entry
+}
+
+type retryEntry struct {
+	failures   int
+	lastHash   string // remote hash at last failure — reset when it changes
+	lastFailed time.Time
+}
+
+// record increments the failure count for path.  If the remote hash changed
+// since the last failure, the counter resets (the file was updated upstream).
+func (rt *retryTracker) record(path, remoteHash string) {
+	if rt.counts == nil {
+		rt.counts = make(map[string]retryEntry)
+	}
+	e := rt.counts[path]
+	if e.lastHash != remoteHash {
+		e = retryEntry{lastHash: remoteHash}
+	}
+	e.failures++
+	e.lastFailed = time.Now()
+	rt.counts[path] = e
+}
+
+// quarantined reports whether the file has exceeded maxRetries.
+func (rt *retryTracker) quarantined(path, remoteHash string) bool {
+	if rt.counts == nil {
+		return false
+	}
+	e, ok := rt.counts[path]
+	if !ok {
+		return false
+	}
+	// New remote version — not quarantined.
+	if e.lastHash != remoteHash {
+		return false
+	}
+	return e.failures >= maxRetries
+}
+
+// clear removes a path from tracking (e.g., after a successful sync).
+func (rt *retryTracker) clear(path string) {
+	delete(rt.counts, path)
+}
+
+// quarantinedPaths returns all currently quarantined file paths.
+func (rt *retryTracker) quarantinedPaths() []string {
+	var out []string
+	for path, e := range rt.counts {
+		if e.failures >= maxRetries {
+			out = append(out, path)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Node is the runtime instance for a filesync configuration.
@@ -890,9 +956,22 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	var failedSeqs []int64
 
 	var wg sync.WaitGroup
+	var skippedQuarantine int
 	for _, action := range actions {
 		if ctx.Err() != nil {
 			break
+		}
+
+		// SR12: skip files quarantined after repeated failures.
+		fs.indexMu.RLock()
+		q := fs.retries.quarantined(action.Path, action.RemoteHash)
+		fs.indexMu.RUnlock()
+		if q {
+			skippedQuarantine++
+			failMu.Lock()
+			failedSeqs = append(failedSeqs, action.RemoteSequence)
+			failMu.Unlock()
+			continue
 		}
 
 		switch action.Action {
@@ -911,6 +990,9 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				err := downloadFromPeer(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
 				if err != nil {
 					slog.Warn("download failed", "folder", folderID, "path", action.Path, "peer", peerAddr, "error", err)
+					fs.indexMu.Lock()
+					fs.retries.record(action.Path, action.RemoteHash)
+					fs.indexMu.Unlock()
 					failMu.Lock()
 					failedSeqs = append(failedSeqs, action.RemoteSequence)
 					failMu.Unlock()
@@ -921,7 +1003,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				m := state.Global.GetMetrics("filesync", n.cfg.Bind)
 				m.BytesRx.Add(action.RemoteSize)
 
-				// Update local index.
+				// Update local index and clear retry tracking on success.
 				fs.indexMu.Lock()
 				fs.index.Sequence++
 				fs.index.Files[action.Path] = FileEntry{
@@ -930,6 +1012,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					SHA256:   action.RemoteHash,
 					Sequence: fs.index.Sequence,
 				}
+				fs.retries.clear(action.Path)
 				fs.indexMu.Unlock()
 
 				slog.Info("synced file", "folder", folderID, "path", action.Path, "peer", peerAddr)
@@ -951,6 +1034,9 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				winner, err := resolveConflict(fs.cfg.Path, action.Path, localMtime(fs, action.Path), action.RemoteMtime, remoteDeviceID)
 				if err != nil {
 					slog.Warn("conflict resolution failed", "folder", folderID, "path", action.Path, "error", err)
+					fs.indexMu.Lock()
+					fs.retries.record(action.Path, action.RemoteHash)
+					fs.indexMu.Unlock()
 					failMu.Lock()
 					failedSeqs = append(failedSeqs, action.RemoteSequence)
 					failMu.Unlock()
@@ -961,6 +1047,9 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					err := downloadFromPeer(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
 					if err != nil {
 						slog.Warn("conflict download failed", "folder", folderID, "path", action.Path, "error", err)
+						fs.indexMu.Lock()
+						fs.retries.record(action.Path, action.RemoteHash)
+						fs.indexMu.Unlock()
 						failMu.Lock()
 						failedSeqs = append(failedSeqs, action.RemoteSequence)
 						failMu.Unlock()
@@ -974,6 +1063,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						SHA256:   action.RemoteHash,
 						Sequence: fs.index.Sequence,
 					}
+					fs.retries.clear(action.Path)
 					fs.indexMu.Unlock()
 				}
 				slog.Info("resolved conflict", "folder", folderID, "path", action.Path, "winner", winner)
@@ -982,6 +1072,9 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		case ActionDelete:
 			if err := deleteFile(fs.cfg.Path, action.Path); err != nil {
 				slog.Warn("delete failed", "folder", folderID, "path", action.Path, "error", err)
+				fs.indexMu.Lock()
+				fs.retries.record(action.Path, action.RemoteHash)
+				fs.indexMu.Unlock()
 				failMu.Lock()
 				failedSeqs = append(failedSeqs, action.RemoteSequence)
 				failMu.Unlock()
@@ -1000,6 +1093,11 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		}
 	}
 	wg.Wait()
+
+	if skippedQuarantine > 0 {
+		slog.Warn("skipped quarantined files",
+			"folder", folderID, "peer", peerAddr, "count", skippedQuarantine)
+	}
 
 	// Record sync activity.
 	direction := "download"

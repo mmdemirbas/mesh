@@ -699,6 +699,54 @@ func TestScanCapNotExceeded(t *testing.T) {
 	}
 }
 
+func TestRetryTracker(t *testing.T) {
+	t.Parallel()
+	var rt retryTracker
+
+	// Not quarantined initially.
+	if rt.quarantined("a.txt", "hash1") {
+		t.Fatal("should not be quarantined before any failure")
+	}
+
+	// Record failures up to maxRetries.
+	for i := range maxRetries - 1 {
+		rt.record("a.txt", "hash1")
+		if rt.quarantined("a.txt", "hash1") {
+			t.Fatalf("should not be quarantined after %d failures", i+1)
+		}
+	}
+	rt.record("a.txt", "hash1")
+	if !rt.quarantined("a.txt", "hash1") {
+		t.Fatal("should be quarantined after maxRetries failures")
+	}
+
+	// New remote hash resets quarantine.
+	if rt.quarantined("a.txt", "hash2") {
+		t.Fatal("new remote hash should not be quarantined")
+	}
+
+	// Recording with new hash resets counter.
+	rt.record("a.txt", "hash2")
+	if rt.quarantined("a.txt", "hash2") {
+		t.Fatal("should not be quarantined after 1 failure with new hash")
+	}
+
+	// Clear removes tracking.
+	rt.clear("a.txt")
+	if rt.quarantined("a.txt", "hash2") {
+		t.Fatal("should not be quarantined after clear")
+	}
+
+	// quarantinedPaths lists quarantined files.
+	for range maxRetries {
+		rt.record("x.txt", "xhash")
+	}
+	paths := rt.quarantinedPaths()
+	if len(paths) != 1 || paths[0] != "x.txt" {
+		t.Errorf("quarantinedPaths = %v, want [x.txt]", paths)
+	}
+}
+
 func TestDiff(t *testing.T) {
 	t.Parallel()
 	local := newFileIndex()

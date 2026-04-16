@@ -3,13 +3,13 @@ package filesync
 import (
 	"context"
 	"errors"
-	"sync"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
