@@ -616,11 +616,12 @@ func (n *Node) runScan(ctx context.Context) {
 		if conflicts != nil {
 			fs.conflicts = conflicts
 		}
+		countAfterSwap, totalSize := fs.index.activeCountAndSize()
 		fs.indexMu.Unlock()
 		swapDuration := time.Since(swapStart)
 
 		state.Global.Update("filesync-folder", id, state.Connected, "idle")
-		state.Global.UpdateFileCount("filesync-folder", id, count)
+		state.Global.UpdateFileCount("filesync-folder", id, countAfterSwap, totalSize)
 
 		total := time.Since(folderStart)
 		// Emit at DEBUG: volume-sensitive, but every field is evidence for
@@ -824,11 +825,11 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		fs.indexMu.Unlock()
 
 		fs.indexMu.RLock()
-		count := fs.index.activeCount()
+		count, totalSize := fs.index.activeCountAndSize()
 		fs.indexMu.RUnlock()
 		now := time.Now()
 		state.Global.Update("filesync-folder", folderID, state.Connected, "idle")
-		state.Global.UpdateFileCount("filesync-folder", folderID, count)
+		state.Global.UpdateFileCount("filesync-folder", folderID, count, totalSize)
 		state.Global.UpdateLastSync("filesync-folder", folderID, now)
 		return
 	}
@@ -967,10 +968,10 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	n.persistFolder(folderID)
 
 	fs.indexMu.RLock()
-	count := fs.index.activeCount()
+	count, totalSize := fs.index.activeCountAndSize()
 	fs.indexMu.RUnlock()
 	state.Global.Update("filesync-folder", folderID, state.Connected, "idle")
-	state.Global.UpdateFileCount("filesync-folder", folderID, count)
+	state.Global.UpdateFileCount("filesync-folder", folderID, count, totalSize)
 	state.Global.UpdateLastSync("filesync-folder", folderID, time.Now())
 }
 

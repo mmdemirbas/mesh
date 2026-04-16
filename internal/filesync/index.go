@@ -146,15 +146,17 @@ func savePeerStates(path string, peers map[string]PeerState) error {
 	return nil
 }
 
-// activeCount returns the number of non-deleted files in the index.
-func (idx *FileIndex) activeCount() int {
-	count := 0
+// activeCountAndSize returns the number of non-deleted files and their total size.
+func (idx *FileIndex) activeCountAndSize() (int, int64) {
+	var count int
+	var size int64
 	for _, e := range idx.Files {
 		if !e.Deleted {
 			count++
+			size += e.Size
 		}
 	}
-	return count
+	return count, size
 }
 
 // ScanStats captures measurable work performed by a single scan pass so

@@ -2012,3 +2012,96 @@ func TestRenderDashboardHeaderOnly_NoBodyRegion(t *testing.T) {
 		t.Errorf("header-only output should contain exactly 4 \\r\\n, got %d\noutput: %q", got, stripANSI(out))
 	}
 }
+
+func TestRenderStatus_FilesyncSingleLinePerFolder(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	cfg := &config.Config{
+		Filesync: []config.FilesyncCfg{
+			{
+				Bind:  "0.0.0.0:7756",
+				Peers: map[string][]string{"mbp": {"192.168.68.134:7756"}, "hw": {"192.168.68.111:7756"}},
+				ResolvedFolders: []config.FolderCfg{
+					{ID: "code", Path: "/home/user/code", Peers: []string{"192.168.68.134:7756", "192.168.68.111:7756"}, PeerNames: []string{"mbp", "hw"}, Direction: "send-receive"},
+					{ID: "docs", Path: "/home/user/docs", Peers: []string{"192.168.68.134:7756"}, PeerNames: []string{"mbp"}, Direction: "send-only"},
+					{ID: "archive", Path: "/home/user/archive", Peers: []string{"192.168.68.111:7756"}, PeerNames: []string{"hw"}, Direction: "disabled"},
+				},
+			},
+		},
+	}
+	activeState := map[string]state.Component{
+		"filesync:0.0.0.0:7756":                  {Type: "filesync", ID: "0.0.0.0:7756", Status: state.Listening},
+		"filesync-folder:code":                   {Type: "filesync-folder", ID: "code", Status: state.Connected, FileCount: 12345, TotalSize: 1536 * 1024 * 1024, LastSync: now.Add(-30 * time.Second)},
+		"filesync-folder:docs":                   {Type: "filesync-folder", ID: "docs", Status: state.Scanning, FileCount: 89, TotalSize: 2 * 1024 * 1024, LastSync: now.Add(-5 * time.Minute)},
+		"filesync-folder:archive":                {Type: "filesync-folder", ID: "archive", Status: state.Connected},
+		"filesync-peer:code|192.168.68.134:7756": {Type: "filesync-peer", ID: "code|192.168.68.134:7756", Status: state.Connected},
+		"filesync-peer:code|192.168.68.111:7756": {Type: "filesync-peer", ID: "code|192.168.68.111:7756", Status: state.Retrying},
+		"filesync-peer:docs|192.168.68.134:7756": {Type: "filesync-peer", ID: "docs|192.168.68.134:7756", Status: state.Connecting},
+	}
+
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
+	plain := stripANSI(output)
+
+	// Single line per folder — no peer sub-rows.
+	for _, want := range []string{"code", "docs", "archive"} {
+		count := 0
+		for _, line := range strings.Split(plain, "\n") {
+			if strings.Contains(line, want) && (strings.Contains(line, "[idle]") || strings.Contains(line, "[scanning]") || strings.Contains(line, "[disabled]")) {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("folder %q: want exactly 1 status line, got %d\n%s", want, count, plain)
+		}
+	}
+
+	// File counts present.
+	if !strings.Contains(plain, "12345") {
+		t.Errorf("output missing file count 12345\n%s", plain)
+	}
+	if !strings.Contains(plain, "89") {
+		t.Errorf("output missing file count 89\n%s", plain)
+	}
+
+	// Total size present.
+	if !strings.Contains(plain, "1.5G") {
+		t.Errorf("output missing total size 1.5G\n%s", plain)
+	}
+	if !strings.Contains(plain, "2.0M") {
+		t.Errorf("output missing total size 2.0M\n%s", plain)
+	}
+
+	// Sync time (HH:MM:SS format, no "synced ... ago").
+	if strings.Contains(plain, "synced") {
+		t.Errorf("output should not contain 'synced' text\n%s", plain)
+	}
+
+	// Peer column header with names.
+	if !strings.Contains(plain, "mbp") {
+		t.Errorf("output missing peer name 'mbp'\n%s", plain)
+	}
+	if !strings.Contains(plain, "hw") {
+		t.Errorf("output missing peer name 'hw'\n%s", plain)
+	}
+
+	// No old-style per-peer sub-rows.
+	if strings.Contains(plain, "synced") || strings.Contains(plain, "waiting") || strings.Contains(plain, "retrying") {
+		// Check that these are not peer sub-row statuses.
+		for _, line := range strings.Split(plain, "\n") {
+			stripped := strings.TrimSpace(line)
+			if strings.HasPrefix(stripped, "●") || strings.HasPrefix(stripped, "○") {
+				t.Errorf("found old-style peer sub-row: %q", stripped)
+			}
+		}
+	}
+
+	// Disabled folder should not show peer indicators.
+	for _, line := range strings.Split(plain, "\n") {
+		if strings.Contains(line, "archive") && strings.Contains(line, "●") {
+			t.Errorf("disabled folder 'archive' should not have peer indicators: %q", line)
+		}
+	}
+
+	t.Logf("Rendered output:\n%s", plain)
+}

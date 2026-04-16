@@ -66,6 +66,7 @@ type Component struct {
 	BoundAddr   string    `json:"bound_addr"`           // active resolved listener address
 	PeerAddr    string    `json:"peer_addr"`            // resolved remote peer address (connections)
 	FileCount   int       `json:"file_count,omitempty"` // tracked file count (filesync folders)
+	TotalSize   int64     `json:"total_size,omitempty"` // total bytes of tracked files (filesync)
 	LastSync    time.Time `json:"last_sync"`            // last successful sync time (filesync)
 	LastUpdated time.Time `json:"last_updated"`         // used by TTL eviction
 }
@@ -113,12 +114,13 @@ func (s *State) UpdatePeer(compType, id, peerAddr string) {
 	s.components[key] = comp
 }
 
-func (s *State) UpdateFileCount(compType, id string, count int) {
+func (s *State) UpdateFileCount(compType, id string, count int, totalSize int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := compType + ":" + id
 	comp := s.components[key]
 	comp.FileCount = count
+	comp.TotalSize = totalSize
 	comp.LastUpdated = time.Now()
 	s.components[key] = comp
 }

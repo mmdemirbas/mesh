@@ -434,8 +434,17 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		annotation string          // gray info like (server/tunnel/fwd) or (peer addr)
 		metrics    string          // formatted counters (populated during layout)
 		snap       metricsSnapshot // raw metrics for deferred formatting
+
+		// filesync folder extra columns (populated during data collection,
+		// formatted during layout for cross-row alignment)
+		fsFileCount  int
+		fsTotalSize  int64
+		fsSyncTime   string            // HH:MM:SS or empty
+		fsPeers      map[string]string // peer name → colored indicator
+		fsPeerHeader bool              // true for the peer column header row
 	}
 	var rows []row
+	var fsPeerNames []string // unique peer names across all filesync folders, stable order
 
 	addHeader := func(text string) {
 		rows = append(rows, row{isHeader: true, text: text})
@@ -573,13 +582,42 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 				}
 			}
 
-			// Folders with inline peer status.
+			// Collect unique peer names in stable order for column alignment.
+			peerNameSeen := make(map[string]bool)
+			for _, name := range fsPeerNames {
+				peerNameSeen[name] = true
+			}
+			for _, folder := range fs.ResolvedFolders {
+				for i, addr := range folder.Peers {
+					name := ""
+					if i < len(folder.PeerNames) {
+						name = folder.PeerNames[i]
+					}
+					if name == "" {
+						name = addrToName[addr]
+					}
+					if name == "" {
+						name = addr
+					}
+					if !peerNameSeen[name] {
+						peerNameSeen[name] = true
+						fsPeerNames = append(fsPeerNames, name)
+					}
+				}
+			}
+
+			// Folders: single line per folder with peer status columns.
 			if len(fs.ResolvedFolders) > 0 {
 				maxIDLen := 0
 				for _, folder := range fs.ResolvedFolders {
 					if len(folder.ID) > maxIDLen {
 						maxIDLen = len(folder.ID)
 					}
+				}
+
+				// Peer column header (formatted during layout).
+				if len(fsPeerNames) > 0 {
+					rows = append(rows, row{fsPeerHeader: true})
 				}
 
 				for _, folder := range fs.ResolvedFolders {
@@ -608,47 +646,53 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 						fSt = cGray + "[starting]" + cReset
 					}
 
-					if comp.FileCount > 0 {
-						fSt += "  " + cGray + fmt.Sprintf("%d files", comp.FileCount) + cReset
-					}
+					// Last sync time (HH:MM:SS only).
+					var syncTime string
 					if !comp.LastSync.IsZero() {
-						ago := time.Since(comp.LastSync).Truncate(time.Second)
-						fSt += "  " + cGray + "synced " + formatDuration(ago) + " ago" + cReset
+						syncTime = comp.LastSync.Format("15:04:05")
+					}
+
+					// Peer status indicators keyed by peer name.
+					peers := make(map[string]string)
+					if folder.Direction != "disabled" {
+						for i, peerAddr := range folder.Peers {
+							_, _, pComp := getComponentInfo("filesync-peer", folder.ID+"|"+peerAddr)
+							name := ""
+							if i < len(folder.PeerNames) {
+								name = folder.PeerNames[i]
+							}
+							if name == "" {
+								name = addrToName[peerAddr]
+							}
+							if name == "" {
+								name = peerAddr
+							}
+							switch pComp.Status {
+							case state.Connected:
+								peers[name] = cGreen + "●" + cReset
+							case state.Retrying:
+								peers[name] = cYellow + "●" + cReset
+							case state.Connecting:
+								peers[name] = cBlink + cYellow + "●" + cReset
+							default:
+								peers[name] = "○"
+							}
+						}
 					}
 
 					paddedID := cBold + folder.ID + cReset + strings.Repeat(" ", maxIDLen-len(folder.ID))
 					left := paddedID + "  " + cGray + folder.Path + cReset
-					addRow("  ", dirSym, left, "", "", fSt, "", metricsSnapshot{})
-
-					// Per-peer status under each folder (one line per peer).
-					if folder.Direction != "disabled" {
-						for _, peerAddr := range folder.Peers {
-							_, _, pComp := getComponentInfo("filesync-peer", folder.ID+"|"+peerAddr)
-							name := addrToName[peerAddr]
-
-							var pInd, pSt string
-							switch pComp.Status {
-							case state.Connected:
-								pInd = cGreen + "●" + cReset
-								pSt = cGreen + "synced" + cReset
-							case state.Retrying:
-								pInd = cYellow + "●" + cReset
-								pSt = cYellow + "retrying" + cReset
-							case state.Connecting:
-								pInd = cBlink + cYellow + "●" + cReset
-								pSt = cYellow + "syncing" + cReset
-							default:
-								pInd = "○"
-								pSt = cGray + "waiting" + cReset
-							}
-
-							peerLabel := peerAddr
-							if name != "" {
-								peerLabel = name + " " + cGray + peerAddr + cReset
-							}
-							addRow("      ", pInd, peerLabel, "", "", pSt, "", metricsSnapshot{})
-						}
+					r := row{
+						indent:      "  ",
+						indicator:   dirSym,
+						left:        left,
+						status:      fSt,
+						fsFileCount: comp.FileCount,
+						fsTotalSize: comp.TotalSize,
+						fsSyncTime:  syncTime,
+						fsPeers:     peers,
 					}
+					rows = append(rows, r)
 				}
 			}
 		}
@@ -969,6 +1013,139 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			continue
 		}
 		rows[i].metrics = formatMetricsAligned(r.snap, maxTxWidth, maxRxWidth)
+	}
+
+	// Format filesync folder extra columns with cross-row alignment.
+	{
+		hasFsRows := false
+		maxCountWidth := 0
+		maxSizeWidth := 0
+		for _, r := range rows {
+			if r.fsPeers == nil && !r.fsPeerHeader {
+				continue
+			}
+			hasFsRows = true
+			if w := len(fmt.Sprintf("%d", r.fsFileCount)); r.fsFileCount > 0 && w > maxCountWidth {
+				maxCountWidth = w
+			}
+			if w := len(formatBytes(r.fsTotalSize)); r.fsTotalSize > 0 && w > maxSizeWidth {
+				maxSizeWidth = w
+			}
+		}
+
+		if hasFsRows {
+			// Peer name column widths (min 1 for the indicator dot).
+			peerColWidths := make([]int, len(fsPeerNames))
+			for i, name := range fsPeerNames {
+				peerColWidths[i] = len(name)
+				if peerColWidths[i] < 1 {
+					peerColWidths[i] = 1
+				}
+			}
+
+			// Width of the status bracket (e.g. "[scanning]") for alignment.
+			maxFsStatusWidth := 0
+			for _, r := range rows {
+				if r.fsPeers == nil {
+					continue
+				}
+				if w := visibleLen(r.status); w > maxFsStatusWidth {
+					maxFsStatusWidth = w
+				}
+			}
+
+			for i, r := range rows {
+				if r.fsPeerHeader {
+					// Build header line: pad to statusPadCol + status width + extra columns.
+					var hdr strings.Builder
+					hdr.WriteString(strings.Repeat(" ", statusPadCol))
+					hdr.WriteString(strings.Repeat(" ", maxFsStatusWidth))
+					if maxCountWidth > 0 {
+						hdr.WriteString("  ")
+						hdr.WriteString(strings.Repeat(" ", maxCountWidth))
+					}
+					if maxSizeWidth > 0 {
+						hdr.WriteString("  ")
+						hdr.WriteString(strings.Repeat(" ", maxSizeWidth))
+					}
+					hdr.WriteString("  ")
+					hdr.WriteString("        ") // time placeholder
+					for j, name := range fsPeerNames {
+						hdr.WriteString("  ")
+						hdr.WriteString(cGray + name + cReset)
+						if pad := peerColWidths[j] - len(name); pad > 0 {
+							hdr.WriteString(strings.Repeat(" ", pad))
+						}
+					}
+					rows[i].isHeader = true
+					rows[i].text = hdr.String()
+					continue
+				}
+				if r.fsPeers == nil {
+					continue
+				}
+
+				// Pad status to fixed width for column alignment.
+				if pad := maxFsStatusWidth - visibleLen(r.status); pad > 0 {
+					rows[i].status = r.status + strings.Repeat(" ", pad)
+				}
+
+				var extra strings.Builder
+
+				// File count (right-aligned numeric).
+				if maxCountWidth > 0 {
+					extra.WriteString("  ")
+					if r.fsFileCount > 0 {
+						s := fmt.Sprintf("%d", r.fsFileCount)
+						extra.WriteString(strings.Repeat(" ", maxCountWidth-len(s)))
+						extra.WriteString(cGray)
+						extra.WriteString(s)
+						extra.WriteString(cReset)
+					} else {
+						extra.WriteString(strings.Repeat(" ", maxCountWidth))
+					}
+				}
+
+				// Total size (right-aligned).
+				if maxSizeWidth > 0 {
+					extra.WriteString("  ")
+					if r.fsTotalSize > 0 {
+						s := formatBytes(r.fsTotalSize)
+						extra.WriteString(strings.Repeat(" ", maxSizeWidth-len(s)))
+						extra.WriteString(cGray)
+						extra.WriteString(s)
+						extra.WriteString(cReset)
+					} else {
+						extra.WriteString(strings.Repeat(" ", maxSizeWidth))
+					}
+				}
+
+				// Sync time (fixed width HH:MM:SS).
+				extra.WriteString("  ")
+				if r.fsSyncTime != "" {
+					extra.WriteString(cGray)
+					extra.WriteString(r.fsSyncTime)
+					extra.WriteString(cReset)
+				} else {
+					extra.WriteString("        ")
+				}
+
+				// Peer status columns.
+				for j, name := range fsPeerNames {
+					extra.WriteString("  ")
+					if ind, ok := r.fsPeers[name]; ok {
+						extra.WriteString(ind)
+						if pad := peerColWidths[j] - 1; pad > 0 {
+							extra.WriteString(strings.Repeat(" ", pad))
+						}
+					} else {
+						extra.WriteString(strings.Repeat(" ", peerColWidths[j]))
+					}
+				}
+
+				rows[i].annotation = extra.String()
+			}
+		}
 	}
 
 	// Build final lines, then compute separator width from actual content.
