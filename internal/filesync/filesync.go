@@ -678,7 +678,7 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 				"folder", id, "max_files", maxFiles, "path", fs.cfg.Path)
 			state.Global.Update("filesync-folder", id, state.Retrying,
 				fmt.Sprintf("exceeds %d file limit", maxFiles))
-			return
+			continue
 		}
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			slog.Warn("scan error", "folder", id, "error", err)
@@ -1021,6 +1021,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		case ActionConflict:
 			wg.Add(1)
 			action := action
+			lmtime := localMtime(fs, action.Path) // snapshot before goroutine
 			go func() {
 				defer wg.Done()
 				select {
@@ -1031,7 +1032,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				defer func() { <-sem }()
 
 				remoteDeviceID := remoteIdx.GetDeviceId()
-				winner, err := resolveConflict(fs.cfg.Path, action.Path, localMtime(fs, action.Path), action.RemoteMtime, remoteDeviceID)
+				winner, err := resolveConflict(fs.cfg.Path, action.Path, lmtime, action.RemoteMtime, remoteDeviceID)
 				if err != nil {
 					slog.Warn("conflict resolution failed", "folder", folderID, "path", action.Path, "error", err)
 					fs.indexMu.Lock()

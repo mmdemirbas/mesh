@@ -373,6 +373,51 @@ func TestRunScanTargeted(t *testing.T) {
 	}
 }
 
+// TestRunScanCapExceededDoesNotAbortOtherFolders verifies that one folder
+// hitting its max_files cap does not prevent remaining folders from scanning.
+func TestRunScanCapExceededDoesNotAbortOtherFolders(t *testing.T) {
+	t.Parallel()
+	// dir1: 5 files, cap=3 → exceeds cap
+	dir1 := t.TempDir()
+	for i := range 5 {
+		writeFile(t, dir1, fmt.Sprintf("f%d.txt", i), fmt.Sprintf("d%d", i))
+	}
+	// dir2: 2 files, cap=default → fine
+	dir2 := t.TempDir()
+	writeFile(t, dir2, "ok.txt", "ok")
+
+	fs1 := &folderState{
+		cfg:           config.FolderCfg{ID: "capped", Path: dir1, Direction: "send-receive", MaxFiles: 3},
+		index:         newFileIndex(),
+		ignore:        &ignoreMatcher{},
+		peers:         map[string]PeerState{},
+		pending:       map[string]PendingSummary{},
+		peerLastError: map[string]string{},
+	}
+	fs1.index.Path = dir1
+	fs2 := &folderState{
+		cfg:           config.FolderCfg{ID: "normal", Path: dir2, Direction: "send-receive"},
+		index:         newFileIndex(),
+		ignore:        &ignoreMatcher{},
+		peers:         map[string]PeerState{},
+		pending:       map[string]PendingSummary{},
+		peerLastError: map[string]string{},
+	}
+	fs2.index.Path = dir2
+	n := &Node{
+		folders:     map[string]*folderState{"capped": fs1, "normal": fs2},
+		scanTrigger: make(chan struct{}, 1),
+	}
+
+	n.runScan(context.Background(), nil)
+
+	// The capped folder should NOT have been swapped (partial index).
+	// The normal folder MUST have been scanned despite the other folder's error.
+	if _, ok := fs2.index.Files["ok.txt"]; !ok {
+		t.Fatal("runScan aborted all folders when one exceeded cap — must continue to remaining folders")
+	}
+}
+
 // TestGetFolderStatusesNotBlockedDuringScan verifies the lock refactor: a
 // long-running scan (simulated by a held indexMu) must not block readers.
 // Regression for the "empty UI / no loading state" report — before the fix,
