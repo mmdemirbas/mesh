@@ -1295,6 +1295,8 @@ func TestSafePath(t *testing.T) {
 		{"nested file", "sub/nested.txt", false},
 		{"dotdot prefix", "../escape.txt", true},
 		{"dotdot mid", "sub/../../escape.txt", true},
+		{"dotdot collapsed", "a/../..", true},
+		{"deep dotdot", "a/b/c/../../../../escape.txt", true},
 		{"absolute unix path", "/etc/passwd", runtime.GOOS != "windows"},
 		{"absolute windows path", `C:\Windows\System32`, runtime.GOOS == "windows"},
 		{"null byte", "file\x00.txt", true},

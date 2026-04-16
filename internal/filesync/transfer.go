@@ -121,7 +121,7 @@ func downloadFile(ctx context.Context, client *http.Client, peerAddr, folderID, 
 // safePath validates a relative path against traversal and resolves it within
 // folderRoot. Returns the absolute path or an error.
 func safePath(folderRoot, relPath string) (string, error) {
-	clean := filepath.FromSlash(relPath)
+	clean := filepath.Clean(filepath.FromSlash(relPath))
 	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || strings.Contains(clean, "\x00") {
 		return "", fmt.Errorf("invalid file path: %q", relPath)
 	}
