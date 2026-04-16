@@ -3,6 +3,8 @@ package gateway
 import (
 	"fmt"
 	"net"
+	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -154,6 +156,13 @@ func (c *GatewayCfg) Validate() error {
 	if c.DefaultMaxTokens < 0 {
 		return fmt.Errorf("default_max_tokens must be non-negative")
 	}
+	for pattern := range c.ModelMap {
+		if strings.ContainsAny(pattern, "*?[") && pattern != "*" {
+			if _, err := path.Match(pattern, ""); err != nil {
+				return fmt.Errorf("model_map: invalid glob pattern %q: %w", pattern, err)
+			}
+		}
+	}
 	if err := c.Log.validate(); err != nil {
 		return fmt.Errorf("log: %w", err)
 	}
@@ -266,10 +275,40 @@ func (c *GatewayCfg) MaxTokens() int {
 }
 
 // MapModel applies the model_map to a client-provided model name.
-// Returns the mapped name, or the original if no mapping exists.
+// Matching order: exact literal → glob patterns (longest first) → "*" catch-all → passthrough.
+// Glob patterns use path.Match semantics (* matches any sequence, ? matches one char, [...] brackets).
 func (c *GatewayCfg) MapModel(model string) string {
+	// Exact literal match (O(1)).
 	if mapped, ok := c.ModelMap[model]; ok {
-		return mapped
+		if !strings.ContainsAny(model, "*?[") {
+			return mapped
+		}
+	}
+
+	// Collect glob patterns, longest first (more specific wins).
+	type entry struct {
+		pattern, target string
+	}
+	var globs []entry
+	var catchAll string
+	var hasCatchAll bool
+	for k, v := range c.ModelMap {
+		if k == "*" {
+			catchAll, hasCatchAll = v, true
+		} else if strings.ContainsAny(k, "*?[") {
+			globs = append(globs, entry{k, v})
+		}
+	}
+	sort.Slice(globs, func(i, j int) bool {
+		return len(globs[i].pattern) > len(globs[j].pattern)
+	})
+	for _, g := range globs {
+		if matched, _ := path.Match(g.pattern, model); matched {
+			return g.target
+		}
+	}
+	if hasCatchAll {
+		return catchAll
 	}
 	return model
 }

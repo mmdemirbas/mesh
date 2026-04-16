@@ -50,6 +50,12 @@ func TestGatewayCfg_Validate(t *testing.T) {
 			c.Log.MaxFileSize = "50MB"
 			c.Log.MaxAge = "168h"
 		}, ""},
+		{"valid_model_map_glob", func(c *GatewayCfg) {
+			c.ModelMap = map[string]string{"claude-*": "gpt-4o", "*": "default"}
+		}, ""},
+		{"invalid_model_map_glob", func(c *GatewayCfg) {
+			c.ModelMap = map[string]string{"claude-[": "bad"}
+		}, "invalid glob pattern"},
 	}
 
 	for _, tt := range tests {
@@ -256,12 +262,93 @@ func TestParseSize(t *testing.T) {
 
 func TestGatewayCfg_MapModel(t *testing.T) {
 	t.Parallel()
-	cfg := GatewayCfg{ModelMap: map[string]string{"a": "b"}}
-	if got := cfg.MapModel("a"); got != "b" {
-		t.Errorf("MapModel(a) = %q, want b", got)
+	tests := []struct {
+		name     string
+		modelMap map[string]string
+		input    string
+		want     string
+	}{
+		{
+			name:     "exact match",
+			modelMap: map[string]string{"claude-sonnet-4-6": "gpt-4o"},
+			input:    "claude-sonnet-4-6",
+			want:     "gpt-4o",
+		},
+		{
+			name:     "no match passthrough",
+			modelMap: map[string]string{"claude-sonnet-4-6": "gpt-4o"},
+			input:    "gpt-4o-mini",
+			want:     "gpt-4o-mini",
+		},
+		{
+			name:     "glob star prefix",
+			modelMap: map[string]string{"claude-*": "gpt-4o"},
+			input:    "claude-sonnet-4-6",
+			want:     "gpt-4o",
+		},
+		{
+			name:     "glob no match",
+			modelMap: map[string]string{"claude-*": "gpt-4o"},
+			input:    "gpt-4o-mini",
+			want:     "gpt-4o-mini",
+		},
+		{
+			name:     "glob question mark",
+			modelMap: map[string]string{"gpt-?o": "mapped"},
+			input:    "gpt-4o",
+			want:     "mapped",
+		},
+		{
+			name:     "glob bracket",
+			modelMap: map[string]string{"gpt-[34]o": "mapped"},
+			input:    "gpt-4o",
+			want:     "mapped",
+		},
+		{
+			name:     "catch-all star",
+			modelMap: map[string]string{"*": "default-model"},
+			input:    "anything",
+			want:     "default-model",
+		},
+		{
+			name:     "exact wins over glob",
+			modelMap: map[string]string{"claude-sonnet-4-6": "exact", "claude-*": "glob"},
+			input:    "claude-sonnet-4-6",
+			want:     "exact",
+		},
+		{
+			name:     "glob wins over catch-all",
+			modelMap: map[string]string{"claude-*": "glob", "*": "default"},
+			input:    "claude-sonnet-4-6",
+			want:     "glob",
+		},
+		{
+			name:     "longer glob wins over shorter",
+			modelMap: map[string]string{"claude-sonnet-*": "specific", "claude-*": "general"},
+			input:    "claude-sonnet-4-6",
+			want:     "specific",
+		},
+		{
+			name:     "catch-all when no glob matches",
+			modelMap: map[string]string{"claude-*": "glob", "*": "default"},
+			input:    "gpt-4o",
+			want:     "default",
+		},
+		{
+			name:     "empty map passthrough",
+			modelMap: nil,
+			input:    "claude-sonnet-4-6",
+			want:     "claude-sonnet-4-6",
+		},
 	}
-	if got := cfg.MapModel("c"); got != "c" {
-		t.Errorf("MapModel(c) = %q, want c (passthrough)", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := GatewayCfg{ModelMap: tt.modelMap}
+			if got := cfg.MapModel(tt.input); got != tt.want {
+				t.Errorf("MapModel(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
 	}
 }
 

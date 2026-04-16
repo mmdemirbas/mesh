@@ -121,9 +121,10 @@ my-vps-tunnel-service:
       # proxy: socks5://127.0.0.1:1081  # optional outbound proxy
       timeout: 600s
       default_max_tokens: 32768       # used when client omits max_tokens
-      model_map:                      # client model name -> upstream model name
-        claude-opus-4-6: glm-4.7
-        claude-sonnet-4-6: glm-4.7
+      model_map:                      # supports exact, glob (*, ?, [...]), and "*" catch-all
+        claude-opus-4-6: glm-4.7     # exact match (highest priority)
+        claude-sonnet-*: glm-4.7     # glob pattern (longer patterns match first)
+        # "*": glm-4.7              # catch-all default (lowest priority)
 
     # OpenAI-only tools (Cursor, Aider) -> Anthropic
     - name: claude-for-cursor
@@ -135,8 +136,7 @@ my-vps-tunnel-service:
       timeout: 600s
       default_max_tokens: 32768
       model_map:
-        gpt-4o: claude-sonnet-4-6
-        gpt-4: claude-sonnet-4-6
+        gpt-*: claude-sonnet-4-6     # glob: all gpt models -> claude
 
     # Transparent passthrough: Claude Code against Anthropic with full audit log.
     # api_key_env omitted so Claude Code's OAuth auth is forwarded verbatim.
