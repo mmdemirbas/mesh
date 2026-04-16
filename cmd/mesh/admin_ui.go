@@ -1128,13 +1128,14 @@ function tick() {
   const needGateway = activeTab === 'gateway';
 
   const mark = () => { document.getElementById('hdr-status').textContent = 'updated ' + new Date().toLocaleTimeString(); };
-  const fail = (what) => (e) => { document.getElementById('hdr-status').textContent = 'error('+what+'): ' + e.message; };
+  const fail = (what) => (e) => { document.getElementById('hdr-status').textContent = 'error('+what+'): ' + (e.message||e); };
+  const ok = (r, what) => { if (!r.ok) throw 'HTTP ' + r.status; return r; };
 
-  fetch('/api/state').then(r=>r.json()).then(s => {
-    state = s; renderStats(); renderComponents(); mark();
+  fetch('/api/state').then(r=>ok(r)).then(r=>r.json()).then(s => {
+    state = s; renderStats(); if (activeTab === 'dashboard') renderComponents(); mark();
   }).catch(fail('state'));
 
-  fetch('/api/metrics').then(r=>r.text()).then(t => {
+  fetch('/api/metrics').then(r=>ok(r)).then(r=>r.text()).then(t => {
     metricsText = t;
     compMetrics = extractCompMetrics(t);
     const nowTx = sumMetric(metricsText, 'mesh_bytes_tx_total');
@@ -1166,26 +1167,28 @@ function tick() {
     pushHist('healthUp', comps.filter(c => c.status === 'listening' || c.status === 'connected').length);
     pushHist('healthDown', comps.filter(c => c.status === 'failed').length);
     pushHist('healthPending', comps.filter(c => c.status !== 'listening' && c.status !== 'connected' && c.status !== 'failed').length);
-    renderMetrics(); renderCharts(); renderDebugStats(); renderComponents();
+    if (activeTab === 'metrics') renderMetrics();
+    if (activeTab === 'dashboard') { renderCharts(); renderComponents(); }
+    if (activeTab === 'debug') renderDebugStats();
   }).catch(fail('metrics'));
 
   if (needLogs) {
-    fetch('/api/logs').then(r=>r.json()).then(v => { logs = v; renderDashLogs(); renderLogs(); }).catch(fail('logs'));
+    fetch('/api/logs').then(r=>ok(r)).then(r=>r.json()).then(v => { logs = v; renderDashLogs(); renderLogs(); }).catch(fail('logs'));
   }
   if (needFilesync) {
-    fetch('/api/filesync/folders').then(r=>r.json()).then(v => { folders = v; renderFilesync(); }).catch(fail('folders'));
-    fetch('/api/filesync/conflicts').then(r=>r.json()).then(v => { conflicts = v; renderConflicts(); }).catch(fail('conflicts'));
-    fetch('/api/filesync/activity').then(r=>r.json()).then(v => { fsActivities = v; renderFsActivity(); }).catch(fail('fs-activity'));
+    fetch('/api/filesync/folders').then(r=>ok(r)).then(r=>r.json()).then(v => { folders = v; renderFilesync(); }).catch(fail('folders'));
+    fetch('/api/filesync/conflicts').then(r=>ok(r)).then(r=>r.json()).then(v => { conflicts = v; renderConflicts(); }).catch(fail('conflicts'));
+    fetch('/api/filesync/activity').then(r=>ok(r)).then(r=>r.json()).then(v => { fsActivities = v; renderFsActivity(); }).catch(fail('fs-activity'));
   }
   if (needClipsync) {
-    fetch('/api/clipsync/activity').then(r=>r.json()).then(v => { clipActivities = v; renderClipsync(); }).catch(fail('clipsync'));
+    fetch('/api/clipsync/activity').then(r=>ok(r)).then(r=>r.json()).then(v => { clipActivities = v; renderClipsync(); }).catch(fail('clipsync'));
   }
   if (needGateway) {
-    fetch('/api/gateway/audit?limit=200').then(r=>r.json()).then(v => { gatewayAudit = v; renderGateway(); }).catch(fail('gateway'));
+    fetch('/api/gateway/audit?limit=200').then(r=>ok(r)).then(r=>r.json()).then(v => { gatewayAudit = v; renderGateway(); }).catch(fail('gateway'));
     if (gwSelected) {
       fetch('/api/gateway/audit/stats?gateway='+encodeURIComponent(gwSelected)+
         '&window='+encodeURIComponent(gwWindow)+'&bucket='+gwBucket(gwWindow))
-        .then(r=>r.json()).then(v => { gwStats = v; if (gwSubview === 'overview') renderGatewayOverview(); else if (gwSubview === 'sessions') renderSessions(); }).catch(fail('gw-stats'));
+        .then(r=>ok(r)).then(r=>r.json()).then(v => { gwStats = v; if (gwSubview === 'overview') renderGatewayOverview(); else if (gwSubview === 'sessions') renderSessions(); }).catch(fail('gw-stats'));
     }
   }
 }
@@ -1210,21 +1213,6 @@ async function loadFileLogs() {
 }
 
 // --- Render ---
-function render() {
-  renderStats();
-  renderComponents();
-  renderDashLogs();
-  renderClipsync();
-  renderFilesync();
-  renderConflicts();
-  renderFsActivity();
-  renderLogs();
-  renderMetrics();
-  renderCharts();
-  renderDebugStats();
-  renderGateway();
-}
-
 function x(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 // xa: HTML-attribute-safe escape. Use whenever an interpolation lands inside
 // attr="..." (title, data-*, href, src, style). x() alone leaves " and '
@@ -1937,10 +1925,16 @@ function parseMetrics(text) {
 }
 
 let metOpenFamilies = new Set();
+let metParsedText = '';   // last metricsText that was parsed
+let metParsedResult = []; // cached parseMetrics() result
 
 function renderMetrics() {
   const filter = document.getElementById('met-search').value.toLowerCase();
-  const families = parseMetrics(metricsText);
+  if (metricsText !== metParsedText) {
+    metParsedText = metricsText;
+    metParsedResult = parseMetrics(metricsText);
+  }
+  const families = metParsedResult;
   const filtered = families.filter(f => {
     if (!filter) return true;
     if (f.name.toLowerCase().includes(filter)) return true;
@@ -2017,7 +2011,11 @@ document.getElementById('met-body').addEventListener('click', e => {
   if (metOpenFamilies.has(name)) { metOpenFamilies.delete(name); fam.classList.remove('open'); }
   else { metOpenFamilies.add(name); fam.classList.add('open'); }
 });
-document.getElementById('met-search').addEventListener('input', renderMetrics);
+let metSearchTimer = 0;
+document.getElementById('met-search').addEventListener('input', () => {
+  if (metSearchTimer) clearTimeout(metSearchTimer);
+  metSearchTimer = setTimeout(() => { metSearchTimer = 0; renderMetrics(); }, 150);
+});
 
 // --- Sorting ---
 document.querySelectorAll('#p-filesync th[data-sort]').forEach(th => {
@@ -2128,7 +2126,8 @@ function timeAgo(ts) {
   if (d < 1000) return 'just now';
   if (d < 60000) return Math.floor(d/1000)+'s ago';
   if (d < 3600000) return Math.floor(d/60000)+'m ago';
-  return Math.floor(d/3600000)+'h ago';
+  if (d < 86400000) return Math.floor(d/3600000)+'h ago';
+  return Math.floor(d/86400000)+'d ago';
 }
 
 // --- Gateway audit ---
@@ -2429,14 +2428,6 @@ function renderResponseStructured(resp) {
     const totalChars = msgChars(assistantMsg);
     html += sec('Assistant reply', fmtLen(totalChars)+' chars',
       '<div class="chat">'+renderBubble(assistantMsg, 0)+'</div>', true);
-  }
-
-  // Mid-stream errors (Anthropic event:error) — show in red, prominent.
-  if (Array.isArray(summary.errors) && summary.errors.length) {
-    html += sec('Stream errors ('+summary.errors.length+')', summary.errors.length+' errors',
-      summary.errors.map(e =>
-        '<div style="border-left:2px solid var(--red);padding:4px 8px;color:var(--red)">'+x(e)+'</div>'
-      ).join(''), true);
   }
 
   if (summary.thinking) {
@@ -3229,8 +3220,8 @@ document.getElementById('gw-search').addEventListener('input', e => {
   gwSearchTimer = setTimeout(() => { gwSearchTimer = 0; renderGateway(); }, 150);
 });
 document.getElementById('gw-outcome').addEventListener('change', e => { gwOutcomeFilter = e.target.value; renderGateway(); });
-document.getElementById('gw-select').addEventListener('change', e => { gwSelected = e.target.value; gwStats = null; refresh(); });
-document.getElementById('gw-window').addEventListener('change', e => { gwWindow = e.target.value; gwStats = null; refresh(); });
+document.getElementById('gw-select').addEventListener('change', e => { gwSelected = e.target.value; gwStats = null; tick(); });
+document.getElementById('gw-window').addEventListener('change', e => { gwWindow = e.target.value; gwStats = null; tick(); });
 document.querySelectorAll('.gw-sub-btn').forEach(b => b.addEventListener('click', () => {
   setGwSub(b.dataset.sub);
   // User changed sub-view; drop any previous deep state from the URL.
@@ -3716,6 +3707,16 @@ async function dbgTrace() {
     el.textContent = 'Trace downloaded.\nAnalyze with:\n  go tool trace trace.out';
   } catch(e) { el.textContent = 'Error: ' + e.message; }
 }
+
+// --- Keyboard shortcuts ---
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    const gw = document.getElementById('gw-detail-card');
+    if (gw && gw.style.display === 'block') { gw.style.display = 'none'; gwDetailKey = ''; writeGwHash(); return; }
+    const dbg = document.getElementById('dbg-result-card');
+    if (dbg && dbg.style.display === 'block') { dbg.style.display = 'none'; return; }
+  }
+});
 
 // --- Start ---
 tick();
