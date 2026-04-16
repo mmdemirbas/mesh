@@ -261,6 +261,12 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 		return "", fmt.Errorf("unmarshal delta: %w", err)
 	}
 
+	// N4: validate remote file size before allocating loops/memory.
+	remoteFileSize := deltaResp.GetFileSize()
+	if remoteFileSize <= 0 || remoteFileSize > maxSyncFileSize {
+		return "", fmt.Errorf("delta file size out of range for %s: %d", relPath, remoteFileSize)
+	}
+
 	// Convert proto blocks to internal format.
 	blocks := make([]deltaBlock, len(deltaResp.GetBlocks()))
 	for i, b := range deltaResp.GetBlocks() {
@@ -268,7 +274,7 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 	}
 
 	// Apply delta to reconstruct the file.
-	tmpPath, err := applyDelta(destPath, destPath, blockSize, deltaResp.GetFileSize(), blocks)
+	tmpPath, err := applyDelta(destPath, destPath, blockSize, remoteFileSize, blocks)
 	if err != nil {
 		return "", fmt.Errorf("apply delta: %w", err)
 	}

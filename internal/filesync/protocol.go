@@ -232,7 +232,18 @@ func (s *server) handleMultiPageIndex(w http.ResponseWriter, req *pb.IndexExchan
 	pe.mu.Lock()
 	defer pe.mu.Unlock()
 
-	pe.files = append(pe.files, req.GetFiles()...)
+	// N11: cap total accumulated files to prevent OOM from a peer
+	// sending maxTotalPages × indexPageSize entries.
+	const maxTotalFiles = 500_000
+	incoming := req.GetFiles()
+	if len(pe.files)+len(incoming) > maxTotalFiles {
+		s.pending.Delete(key) // sync.Map is safe to call under pe.mu
+		slog.Warn("rejecting index exchange: total file count exceeds cap",
+			"peer", req.GetDeviceId(), "folder", folderID, "total", len(pe.files)+len(incoming), "max", maxTotalFiles)
+		http.Error(w, "total file count exceeds limit", http.StatusBadRequest)
+		return
+	}
+	pe.files = append(pe.files, incoming...)
 	pe.received[req.GetPage()] = true
 
 	slog.Debug("received index page", "folder", folderID, "page", req.GetPage(),
@@ -459,8 +470,27 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 		blockSize = maxBlockSizeCap
 	}
 
+	// N5: cap the number of peer-supplied block hashes to what the local
+	// file actually needs. Without this, a peer can claim a tiny blockSize
+	// and send millions of hashes, forcing the server to read the entire
+	// file as 1 KB blocks.
+	fi, err := os.Stat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "stat: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	maxBlocks := (fi.Size() + blockSize - 1) / blockSize
+	peerHashes := req.GetBlockHashes()
+	if int64(len(peerHashes)) > maxBlocks {
+		peerHashes = peerHashes[:maxBlocks]
+	}
+
 	// Compute delta between our file and the peer's block hashes.
-	delta, err := computeDeltaBlocks(fullPath, blockSize, req.GetBlockHashes())
+	delta, err := computeDeltaBlocks(fullPath, blockSize, peerHashes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -470,15 +500,10 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get full-file hash and size for verification.
+	// Get full-file hash for verification (fi already from stat above).
 	fileHash, err := hashFile(fullPath)
 	if err != nil {
 		http.Error(w, "hash file: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	fi, err := os.Stat(fullPath)
-	if err != nil {
-		http.Error(w, "stat: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 

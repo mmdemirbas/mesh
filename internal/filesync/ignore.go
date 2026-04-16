@@ -8,6 +8,7 @@ import (
 // builtinIgnores are always excluded from sync and scanning.
 var builtinIgnores = []string{
 	".mesh-tmp-*",
+	"*.mesh-delta-tmp",
 }
 
 // ignoreMatcher evaluates whether a file path should be excluded from sync.
