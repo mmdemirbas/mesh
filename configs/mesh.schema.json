@@ -1,7 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/mmdemirbas/mesh/internal/config/config",
-  "$ref": "#/$defs/Config",
   "$defs": {
     "AuthCfg": {
       "properties": {
@@ -421,5 +420,12 @@
       "additionalProperties": false,
       "type": "object"
     }
-  }
+  },
+  "patternProperties": {
+    "^x-": true
+  },
+  "additionalProperties": {
+    "$ref": "#/$defs/Config"
+  },
+  "type": "object"
 }

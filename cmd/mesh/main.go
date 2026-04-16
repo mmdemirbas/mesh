@@ -987,7 +987,7 @@ _mesh_completions() {
         fi
 
         if [[ -n "$config_file" && -f "$config_file" ]]; then
-            grep -E '^[a-zA-Z_][a-zA-Z0-9_-]*:' "$config_file" 2>/dev/null | sed 's/:.*//'
+            grep -E '^[a-zA-Z_][a-zA-Z0-9_-]*:' "$config_file" 2>/dev/null | grep -v '^x-' | sed 's/:.*//'
         fi
     }
 
