@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -48,12 +49,13 @@ const (
 type folderWatcher struct {
 	watcher *fsnotify.Watcher
 	// dirtyCh is signaled (non-blocking) when any watched file changes.
-	dirtyCh    chan struct{}
-	roots      []string
-	ignore     map[string]*ignoreMatcher // folderRoot -> matcher
-	watchCount int                       // current number of active watches
-	maxWatches int                       // cap on fsnotify watches
-	capped     bool                      // true if maxWatches was reached
+	dirtyCh chan struct{}
+	roots   []string
+	ignore  map[string]*ignoreMatcher // folderRoot -> matcher
+	// H6: atomic to prevent data race between init and event goroutine.
+	watchCount atomic.Int32 // current number of active watches
+	maxWatches int32        // cap on fsnotify watches
+	capped     atomic.Bool  // true if maxWatches was reached
 
 	// dirtyRoots accumulates which folder roots had events since the last
 	// drain.  Protected by dirtyMu.  Drained by drainDirtyRoots().
@@ -77,7 +79,7 @@ func newFolderWatcher(roots []string, ignoreMap map[string]*ignoreMatcher, maxWa
 		dirtyCh:    make(chan struct{}, 1),
 		roots:      roots,
 		ignore:     ignoreMap,
-		maxWatches: maxWatches,
+		maxWatches: int32(maxWatches),
 		dirtyRoots: make(map[string]bool),
 	}
 	totalWalked, totalIgnored, totalAdded, totalAddErrors, totalFD := 0, 0, 0, 0, 0
@@ -103,13 +105,13 @@ func newFolderWatcher(roots []string, ignoreMap map[string]*ignoreMatcher, maxWa
 		}
 		slog.Info("fsnotify watch setup", attrs...)
 	}
-	if fw.capped {
+	if fw.capped.Load() {
 		// Too many directories — close the watcher and fall back to periodic scan.
 		_ = w.Close()
 		return nil, fmt.Errorf("directory count exceeds fsnotify limit (%d), using periodic scan only", maxWatches)
 	}
 	slog.Info("fsnotify watching directories",
-		"total_watches", fw.watchCount,
+		"total_watches", fw.watchCount.Load(),
 		"dirs_walked", totalWalked,
 		"dirs_ignored", totalIgnored,
 		"dirs_added", totalAdded,
@@ -146,9 +148,9 @@ func (fw *folderWatcher) addRecursive(root string) watchStats {
 			}
 		}
 
-		if fw.watchCount >= fw.maxWatches {
-			if !fw.capped {
-				fw.capped = true
+		if fw.watchCount.Load() >= fw.maxWatches {
+			if !fw.capped.Load() {
+				fw.capped.Store(true)
 				slog.Warn("fsnotify watch limit reached, relying on periodic scan for remaining directories",
 					"limit", fw.maxWatches, "path", path)
 			}
@@ -165,7 +167,7 @@ func (fw *folderWatcher) addRecursive(root string) watchStats {
 				s.firstErrPath = path
 			}
 		} else {
-			fw.watchCount++
+			fw.watchCount.Add(1)
 			s.dirsAdded++
 		}
 		return nil
@@ -228,7 +230,7 @@ func (fw *folderWatcher) run(ctx context.Context) {
 			}
 
 			// Add watcher for new directories (if under the cap).
-			if event.Has(fsnotify.Create) && !fw.capped {
+			if event.Has(fsnotify.Create) && !fw.capped.Load() {
 				if info, err := os.Lstat(event.Name); err == nil && info.IsDir() {
 					fw.addRecursive(event.Name)
 				}
@@ -237,7 +239,7 @@ func (fw *folderWatcher) run(ctx context.Context) {
 			// Remove watcher for deleted/renamed directories to free kqueue FDs.
 			if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
 				if fw.watcher.Remove(event.Name) == nil {
-					fw.watchCount--
+					fw.watchCount.Add(-1)
 				}
 			}
 
@@ -284,7 +286,7 @@ func (fw *folderWatcher) removeStaleWatches() {
 	for _, path := range fw.watcher.WatchList() {
 		if _, err := os.Lstat(path); os.IsNotExist(err) {
 			if fw.watcher.Remove(path) == nil {
-				fw.watchCount--
+				fw.watchCount.Add(-1)
 				removed++
 			}
 		}
