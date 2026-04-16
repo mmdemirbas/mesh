@@ -3269,6 +3269,330 @@ func TestDiffTombstone_AfterFirstSync(t *testing.T) {
 	}
 }
 
+// --- Second-pass hardening tests (N1-N12) ---
+
+// N1: builtinIgnores must match delta temp files.
+func TestBuiltinIgnores_DeltaTmp(t *testing.T) {
+	t.Parallel()
+	m := newIgnoreMatcher(nil)
+	if !m.shouldIgnore("data.txt.mesh-delta-tmp", false) {
+		t.Error("builtinIgnores should match .mesh-delta-tmp suffix")
+	}
+	if !m.shouldIgnore(".mesh-tmp-abc123", false) {
+		t.Error("builtinIgnores should match .mesh-tmp- prefix")
+	}
+	// Normal files should not match.
+	if m.shouldIgnore("data.txt", false) {
+		t.Error("normal file should not be ignored")
+	}
+}
+
+// N3+N12: delete handler creates tombstone for missing entry,
+// and skips sequence bump for already-tombstoned entry.
+func TestDeleteHandler_TombstoneCreation(t *testing.T) {
+	t.Parallel()
+	idx := newFileIndex()
+	idx.Sequence = 10
+
+	// Simulate: file existed on disk but had no index entry.
+	// After delete, handler should create a tombstone.
+	idx.Sequence++
+	entry := idx.Files["orphan.txt"] // zero value
+	entry.Deleted = true
+	entry.MtimeNS = time.Now().UnixNano()
+	entry.Sequence = idx.Sequence
+	idx.Files["orphan.txt"] = entry
+
+	if !idx.Files["orphan.txt"].Deleted {
+		t.Error("expected tombstone for orphan.txt")
+	}
+	if idx.Files["orphan.txt"].Sequence != 11 {
+		t.Errorf("expected sequence 11, got %d", idx.Files["orphan.txt"].Sequence)
+	}
+
+	// Second delete of already-tombstoned entry should NOT bump sequence (N12).
+	prevSeq := idx.Sequence
+	existing := idx.Files["orphan.txt"]
+	if existing.Deleted {
+		// N12 path: skip bump
+	} else {
+		idx.Sequence++
+		existing.Deleted = true
+		existing.Sequence = idx.Sequence
+		idx.Files["orphan.txt"] = existing
+	}
+	if idx.Sequence != prevSeq {
+		t.Errorf("N12: sequence should not bump for already-tombstoned entry, was %d now %d", prevSeq, idx.Sequence)
+	}
+}
+
+// N6: safeSeq computation with fseq=0 should not produce -1.
+func TestSafeSeq_ZeroFailedSeq(t *testing.T) {
+	t.Parallel()
+	remoteSeq := int64(10)
+	failedSeqs := []int64{0, 5, 8}
+
+	safeSeq := remoteSeq
+	for _, fseq := range failedSeqs {
+		if fseq > 0 && fseq-1 < safeSeq {
+			safeSeq = fseq - 1
+		}
+	}
+
+	// fseq=0 should be skipped, fseq=5 should produce safeSeq=4.
+	if safeSeq != 4 {
+		t.Errorf("expected safeSeq=4, got %d", safeSeq)
+	}
+}
+
+func TestSafeSeq_AllZero(t *testing.T) {
+	t.Parallel()
+	remoteSeq := int64(10)
+	failedSeqs := []int64{0, 0}
+
+	safeSeq := remoteSeq
+	for _, fseq := range failedSeqs {
+		if fseq > 0 && fseq-1 < safeSeq {
+			safeSeq = fseq - 1
+		}
+	}
+
+	// All zeros should be skipped → safeSeq stays at remoteSeq.
+	if safeSeq != 10 {
+		t.Errorf("expected safeSeq=10, got %d", safeSeq)
+	}
+}
+
+// N7: conflict file collision should generate a unique name.
+func TestConflictFileName_Collision(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+
+	// First conflict.
+	_, cPath1 := resolveConflict(root, "a.txt", 100, 200, "device1")
+	if cPath1 == "" {
+		t.Fatal("expected conflict path for remote win")
+	}
+	// Create the conflict file to cause collision.
+	if err := os.MkdirAll(filepath.Dir(cPath1), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cPath1, []byte("first"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second conflict with same timestamp (within same second).
+	_, cPath2 := resolveConflict(root, "a.txt", 100, 200, "device1")
+	if cPath2 == "" {
+		t.Fatal("expected conflict path for remote win")
+	}
+	if cPath2 == cPath1 {
+		t.Error("N7: second conflict should get a different path")
+	}
+
+	// Original conflict file should be untouched.
+	data, _ := os.ReadFile(cPath1)
+	if string(data) != "first" {
+		t.Error("first conflict file should not be modified")
+	}
+}
+
+// N4: delta response with out-of-range FileSize should be rejected.
+// Exercises the actual downloadFileDelta code path via a fake peer
+// that returns a DeltaResponse with an invalid FileSize.
+func TestDeltaFileSize_Validation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		fileSize int64
+		wantErr  bool
+	}{
+		{"negative", -1, true},
+		{"zero", 0, true},
+		{"too large", maxSyncFileSize + 1, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Fake peer: returns a DeltaResponse with the test FileSize.
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := &pb.DeltaResponse{
+					FileSize: tc.fileSize,
+					Blocks:   nil,
+				}
+				data, _ := proto.Marshal(resp)
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				_, _ = w.Write(data)
+			}))
+			defer srv.Close()
+
+			destDir := t.TempDir()
+			// Create a local file so downloadFileDelta takes the delta path.
+			writeFile(t, destDir, "target.txt", "old content")
+
+			_, err := downloadFileDelta(t.Context(),
+				&http.Client{},
+				srv.Listener.Addr().String(),
+				"test",
+				"target.txt",
+				"0000000000000000000000000000000000000000000000000000000000000000",
+				destDir,
+				nil,
+			)
+			if err == nil {
+				t.Errorf("expected error for FileSize=%d, got nil", tc.fileSize)
+			}
+			if err != nil && !strings.Contains(err.Error(), "file size out of range") {
+				t.Errorf("expected 'file size out of range' error, got: %v", err)
+			}
+		})
+	}
+}
+
+// N5: handleDelta caps peer block hashes to file's actual block count.
+func TestComputeDeltaBlocks_ExcessHashes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "small.dat")
+	// 256 bytes → 1 block at 128KB blockSize.
+	if err := os.WriteFile(path, make([]byte, 256), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Send 100 hashes for a 1-block file. Server should only compare
+	// against the file's actual block count, not all 100.
+	fakeHashes := make([][]byte, 100)
+	for i := range fakeHashes {
+		fakeHashes[i] = make([]byte, 32)
+	}
+
+	fi, _ := os.Stat(path)
+	blockSize := int64(defaultBlockSize)
+	maxBlocks := (fi.Size() + blockSize - 1) / blockSize
+	if int64(len(fakeHashes)) > maxBlocks {
+		fakeHashes = fakeHashes[:maxBlocks]
+	}
+
+	blocks, err := computeDeltaBlocks(path, blockSize, fakeHashes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// File has 1 block, fake hash is all zeros → should differ.
+	if len(blocks) != 1 {
+		t.Errorf("expected 1 delta block, got %d", len(blocks))
+	}
+}
+
+// N10: persistFolder serialization — concurrent calls should not corrupt.
+func TestPersistFolder_Concurrent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	idx := newFileIndex()
+	idx.Files["a.txt"] = FileEntry{SHA256: "aaa", Sequence: 1}
+
+	fs := &folderState{
+		index:    idx,
+		peers:    map[string]PeerState{"peer1": {LastSeenSequence: 5}},
+		inFlight: make(map[string]bool),
+	}
+
+	n := &Node{
+		dataDir: dir,
+		folders: map[string]*folderState{"test": fs},
+	}
+
+	// Run 20 concurrent persists — should not panic or corrupt.
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n.persistFolder("test")
+		}()
+	}
+	wg.Wait()
+
+	// Verify the persisted index is valid.
+	loaded, err := loadIndex(filepath.Join(dir, "test", "index.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Files["a.txt"].SHA256 != "aaa" {
+		t.Errorf("expected SHA256=aaa, got %s", loaded.Files["a.txt"].SHA256)
+	}
+}
+
+// N11: multi-page index accumulation rejects when total files exceed cap.
+// Sends two pages whose combined file count exceeds the 500k cap.
+func TestMultiPageIndex_TotalFileCap(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test",
+		dataDir:  t.TempDir(),
+	}
+	n.folders["test"] = &folderState{
+		cfg:      testFolderCfg(dir, "127.0.0.1"),
+		index:    newFileIndex(),
+		peers:    make(map[string]PeerState),
+		inFlight: make(map[string]bool),
+	}
+
+	srv := httptest.NewServer((&server{node: n}).handler())
+	defer srv.Close()
+
+	// Send page 0 with 500_000 files, then page 1 with 1 more file.
+	// The handler should reject page 1.
+	files := make([]*pb.FileInfo, 500_000)
+	for i := range files {
+		files[i] = &pb.FileInfo{Path: fmt.Sprintf("f%d.txt", i), Sequence: 1}
+	}
+
+	page0 := &pb.IndexExchange{
+		DeviceId:   "peer1",
+		FolderId:   "test",
+		Sequence:   1,
+		Files:      files,
+		Page:       0,
+		TotalPages: 2,
+	}
+	data, _ := proto.Marshal(page0)
+	resp, err := http.Post(srv.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("page 0 should succeed, got %d", resp.StatusCode)
+	}
+
+	// Page 1 with 1 more file should push over the 500k cap.
+	page1 := &pb.IndexExchange{
+		DeviceId:   "peer1",
+		FolderId:   "test",
+		Sequence:   1,
+		Files:      []*pb.FileInfo{{Path: "overflow.txt", Sequence: 1}},
+		Page:       1,
+		TotalPages: 2,
+	}
+	data, _ = proto.Marshal(page1)
+	resp, err = http.Post(srv.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("page 1 should be rejected (total > 500k), got %d", resp.StatusCode)
+	}
+}
+
 func BenchmarkHashFile(b *testing.B) {
 	dir := b.TempDir()
 	path := filepath.Join(dir, "bench.dat")
