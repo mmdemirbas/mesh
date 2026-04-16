@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/mmdemirbas/mesh/internal/config"
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
 	"google.golang.org/protobuf/proto"
@@ -2870,6 +2872,226 @@ func TestIndexResetClearsPeerState(t *testing.T) {
 
 	if len(peers) != 0 {
 		t.Fatalf("peers should be empty after index reset, got %d entries", len(peers))
+	}
+}
+
+// --- Rate limiter tests ---
+
+func TestRateLimitedReader_BurstCap(t *testing.T) {
+	t.Parallel()
+	// Create a limiter with a burst of 100 bytes. The reader should cap
+	// reads to 100 bytes even when the caller provides a larger buffer,
+	// preventing rate.ErrExceedsBurst.
+	limiter := newTestLimiter(100)
+	data := bytes.Repeat([]byte("x"), 500)
+	r := newRateLimitedReader(context.Background(), bytes.NewReader(data), limiter)
+
+	buf := make([]byte, 500)
+	n, err := r.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The underlying reader may return fewer bytes, but the buffer
+	// presented to it must be capped at burst (100).
+	if n > 100 {
+		t.Errorf("read %d bytes, expected at most 100 (burst)", n)
+	}
+}
+
+func TestRateLimitedReader_NilPassthrough(t *testing.T) {
+	t.Parallel()
+	data := []byte("hello")
+	r := newRateLimitedReader(context.Background(), bytes.NewReader(data), nil)
+	buf := make([]byte, 10)
+	n, err := r.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != "hello" {
+		t.Errorf("got %q, want %q", buf[:n], "hello")
+	}
+}
+
+func TestRateLimitedWriter_BurstChunking(t *testing.T) {
+	t.Parallel()
+	// Burst of 64 bytes. Writing 200 bytes should succeed by chunking.
+	limiter := newTestLimiter(64)
+	var buf bytes.Buffer
+	w := newRateLimitedWriter(context.Background(), &buf, limiter)
+
+	data := bytes.Repeat([]byte("a"), 200)
+	n, err := w.Write(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 200 {
+		t.Errorf("wrote %d bytes, want 200", n)
+	}
+	if buf.Len() != 200 {
+		t.Errorf("buffer has %d bytes, want 200", buf.Len())
+	}
+}
+
+func TestRateLimitedWriter_NilPassthrough(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	w := newRateLimitedWriter(context.Background(), &buf, nil)
+	data := []byte("hello")
+	n, err := w.Write(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 5 || buf.String() != "hello" {
+		t.Errorf("got n=%d buf=%q, want 5 and %q", n, buf.String(), "hello")
+	}
+}
+
+func TestRateLimitedWriter_ContextCancel(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+	limiter := newTestLimiter(64)
+	var buf bytes.Buffer
+	w := newRateLimitedWriter(ctx, &buf, limiter)
+
+	_, err := w.Write(bytes.Repeat([]byte("x"), 100))
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+}
+
+func TestRateLimitedReader_ContextCancel(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+	limiter := newTestLimiter(64)
+	data := bytes.Repeat([]byte("x"), 100)
+	r := newRateLimitedReader(ctx, bytes.NewReader(data), limiter)
+
+	buf := make([]byte, 100)
+	_, err := r.Read(buf)
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+}
+
+func newTestLimiter(burst int) *rate.Limiter {
+	// High rate so tests don't actually wait, but burst is constrained.
+	return rate.NewLimiter(rate.Limit(1<<30), burst)
+}
+
+// --- HandleFile BytesUploaded metric test ---
+
+func TestHandleFile_TracksBytesUploaded(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	content := "metric tracking test content"
+	writeFile(t, dir, "tracked.txt", content)
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	fs := &folderState{
+		cfg: testFolderCfg(dir, "127.0.0.1"),
+	}
+	n.folders["test"] = fs
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	before := fs.metrics.BytesUploaded.Load()
+	resp, err := http.Get(ts.URL + "/file?folder=test&path=tracked.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	after := fs.metrics.BytesUploaded.Load()
+	uploaded := after - before
+	if uploaded != int64(len(content)) {
+		t.Errorf("BytesUploaded=%d, want %d", uploaded, len(content))
+	}
+}
+
+// --- GetFolderMetrics round-trip test ---
+
+func TestGetFolderMetrics_Roundtrip(t *testing.T) {
+	t.Parallel()
+	fs := &folderState{
+		cfg: config.FolderCfg{ID: "snap-test"},
+	}
+	fs.metrics.PeerSyncs.Store(10)
+	fs.metrics.FilesDownloaded.Store(50)
+	fs.metrics.FilesDeleted.Store(3)
+	fs.metrics.FilesConflicted.Store(2)
+	fs.metrics.SyncErrors.Store(1)
+	fs.metrics.BytesDownloaded.Store(1024 * 1024)
+	fs.metrics.BytesUploaded.Store(512 * 1024)
+	fs.metrics.IndexExchanges.Store(20)
+	fs.metrics.ScanCount.Store(15)
+	fs.metrics.ScanDurationNS.Store(int64(500 * time.Millisecond))
+	fs.metrics.PeerSyncNS.Store(int64(2 * time.Second))
+
+	n := &Node{folders: map[string]*folderState{"snap-test": fs}}
+	activeNodes.Register(n)
+	defer activeNodes.Unregister(n)
+
+	result := GetFolderMetrics()
+	if len(result) == 0 {
+		t.Fatal("GetFolderMetrics returned 0 entries")
+	}
+	// Find our test entry (other tests may register nodes concurrently).
+	var snap *FolderMetricsSnapshot
+	for i := range result {
+		if result[i].FolderID == "snap-test" {
+			snap = &result[i]
+			break
+		}
+	}
+	if snap == nil {
+		t.Fatal("snap-test folder not found in GetFolderMetrics result")
+	}
+
+	if snap.PeerSyncs != 10 {
+		t.Errorf("PeerSyncs=%d, want 10", snap.PeerSyncs)
+	}
+	if snap.FilesDownloaded != 50 {
+		t.Errorf("FilesDownloaded=%d, want 50", snap.FilesDownloaded)
+	}
+	if snap.FilesDeleted != 3 {
+		t.Errorf("FilesDeleted=%d, want 3", snap.FilesDeleted)
+	}
+	if snap.FilesConflicted != 2 {
+		t.Errorf("FilesConflicted=%d, want 2", snap.FilesConflicted)
+	}
+	if snap.SyncErrors != 1 {
+		t.Errorf("SyncErrors=%d, want 1", snap.SyncErrors)
+	}
+	if snap.BytesDownloaded != 1024*1024 {
+		t.Errorf("BytesDownloaded=%d, want %d", snap.BytesDownloaded, 1024*1024)
+	}
+	if snap.BytesUploaded != 512*1024 {
+		t.Errorf("BytesUploaded=%d, want %d", snap.BytesUploaded, 512*1024)
+	}
+	if snap.IndexExchanges != 20 {
+		t.Errorf("IndexExchanges=%d, want 20", snap.IndexExchanges)
+	}
+	if snap.ScanCount != 15 {
+		t.Errorf("ScanCount=%d, want 15", snap.ScanCount)
+	}
+	if snap.ScanDurationNS != int64(500*time.Millisecond) {
+		t.Errorf("ScanDurationNS=%d, want %d", snap.ScanDurationNS, int64(500*time.Millisecond))
+	}
+	if snap.PeerSyncNS != int64(2*time.Second) {
+		t.Errorf("PeerSyncNS=%d, want %d", snap.PeerSyncNS, int64(2*time.Second))
 	}
 }
 

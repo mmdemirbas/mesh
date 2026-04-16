@@ -321,6 +321,66 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 			fmt.Fprintf(&b, "mesh_auth_failures_total{remote_ip=%q} %d\n", ip, count)
 		}
 
+		// mesh_filesync_* per-folder metrics
+		fsMetrics := filesync.GetFolderMetrics()
+		if len(fsMetrics) > 0 {
+			b.WriteString("# HELP mesh_filesync_peer_syncs_total Completed peer sync round trips per folder.\n")
+			b.WriteString("# TYPE mesh_filesync_peer_syncs_total counter\n")
+			for _, m := range fsMetrics {
+				fmt.Fprintf(&b, "mesh_filesync_peer_syncs_total{folder=%q} %d\n", m.FolderID, m.PeerSyncs)
+			}
+			b.WriteString("# HELP mesh_filesync_files_downloaded_total Files downloaded per folder.\n")
+			b.WriteString("# TYPE mesh_filesync_files_downloaded_total counter\n")
+			for _, m := range fsMetrics {
+				fmt.Fprintf(&b, "mesh_filesync_files_downloaded_total{folder=%q} %d\n", m.FolderID, m.FilesDownloaded)
+			}
+			b.WriteString("# HELP mesh_filesync_files_deleted_total Files deleted by remote tombstones per folder.\n")
+			b.WriteString("# TYPE mesh_filesync_files_deleted_total counter\n")
+			for _, m := range fsMetrics {
+				fmt.Fprintf(&b, "mesh_filesync_files_deleted_total{folder=%q} %d\n", m.FolderID, m.FilesDeleted)
+			}
+			b.WriteString("# HELP mesh_filesync_files_conflicted_total Conflict resolutions per folder.\n")
+			b.WriteString("# TYPE mesh_filesync_files_conflicted_total counter\n")
+			for _, m := range fsMetrics {
+				fmt.Fprintf(&b, "mesh_filesync_files_conflicted_total{folder=%q} %d\n", m.FolderID, m.FilesConflicted)
+			}
+			b.WriteString("# HELP mesh_filesync_sync_errors_total Per-file sync failures per folder.\n")
+			b.WriteString("# TYPE mesh_filesync_sync_errors_total counter\n")
+			for _, m := range fsMetrics {
+				fmt.Fprintf(&b, "mesh_filesync_sync_errors_total{folder=%q} %d\n", m.FolderID, m.SyncErrors)
+			}
+			b.WriteString("# HELP mesh_filesync_bytes_downloaded_total Bytes downloaded per folder.\n")
+			b.WriteString("# TYPE mesh_filesync_bytes_downloaded_total counter\n")
+			for _, m := range fsMetrics {
+				fmt.Fprintf(&b, "mesh_filesync_bytes_downloaded_total{folder=%q} %d\n", m.FolderID, m.BytesDownloaded)
+			}
+			b.WriteString("# HELP mesh_filesync_bytes_uploaded_total Bytes served to peers per folder.\n")
+			b.WriteString("# TYPE mesh_filesync_bytes_uploaded_total counter\n")
+			for _, m := range fsMetrics {
+				fmt.Fprintf(&b, "mesh_filesync_bytes_uploaded_total{folder=%q} %d\n", m.FolderID, m.BytesUploaded)
+			}
+			b.WriteString("# HELP mesh_filesync_index_exchanges_total Index exchange round trips per folder.\n")
+			b.WriteString("# TYPE mesh_filesync_index_exchanges_total counter\n")
+			for _, m := range fsMetrics {
+				fmt.Fprintf(&b, "mesh_filesync_index_exchanges_total{folder=%q} %d\n", m.FolderID, m.IndexExchanges)
+			}
+			b.WriteString("# HELP mesh_filesync_scans_total Scan cycles completed per folder.\n")
+			b.WriteString("# TYPE mesh_filesync_scans_total counter\n")
+			for _, m := range fsMetrics {
+				fmt.Fprintf(&b, "mesh_filesync_scans_total{folder=%q} %d\n", m.FolderID, m.ScanCount)
+			}
+			b.WriteString("# HELP mesh_filesync_scan_duration_seconds Last scan duration per folder.\n")
+			b.WriteString("# TYPE mesh_filesync_scan_duration_seconds gauge\n")
+			for _, m := range fsMetrics {
+				fmt.Fprintf(&b, "mesh_filesync_scan_duration_seconds{folder=%q} %.6f\n", m.FolderID, float64(m.ScanDurationNS)/1e9)
+			}
+			b.WriteString("# HELP mesh_filesync_peer_sync_duration_seconds Last peer sync duration per folder (last writer wins).\n")
+			b.WriteString("# TYPE mesh_filesync_peer_sync_duration_seconds gauge\n")
+			for _, m := range fsMetrics {
+				fmt.Fprintf(&b, "mesh_filesync_peer_sync_duration_seconds{folder=%q} %.6f\n", m.FolderID, float64(m.PeerSyncNS)/1e9)
+			}
+		}
+
 		// mesh_process_goroutines
 		b.WriteString("# HELP mesh_process_goroutines Current number of goroutines.\n")
 		b.WriteString("# TYPE mesh_process_goroutines gauge\n")

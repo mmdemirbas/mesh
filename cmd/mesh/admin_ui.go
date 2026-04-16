@@ -986,6 +986,22 @@ tbody tr:last-child td { border-bottom: none; }
         </div>
         <canvas class="chart-canvas" id="chart-health"></canvas>
       </div>
+      <div class="chart-card" id="chart-fs-traffic-card" style="display:none">
+        <div class="chart-title">Filesync Traffic</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--green)"><span id="chart-fs-dl-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">dl</span></div>
+          <div class="chart-value" style="color:var(--purple)"><span id="chart-fs-ul-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">ul</span></div>
+        </div>
+        <canvas class="chart-canvas" id="chart-fs-traffic"></canvas>
+      </div>
+      <div class="chart-card" id="chart-fs-sync-card" style="display:none">
+        <div class="chart-title">Filesync Activity</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--cyan)"><span id="chart-fs-cycles-val">0</span> <span style="font-size:11px;color:var(--text-muted)">syncs</span></div>
+          <div class="chart-value" style="color:var(--red)"><span id="chart-fs-errors-val">0</span> <span style="font-size:11px;color:var(--text-muted)">errors</span></div>
+        </div>
+        <canvas class="chart-canvas" id="chart-fs-sync"></canvas>
+      </div>
     </div>
     <div class="card" id="met-comp-card">
       <div class="card-header">
@@ -1058,8 +1074,9 @@ let logLevel = 'all';
 let logMode = 'recent'; // 'recent' (ring buffer) or 'file' (full log file)
 let fileLogLines = [], fileLogSize = 0, fileLogLoaded = false;
 const HIST_LEN = 60;
-const chartHist = {tx:[], rx:[], streams:[], goroutines:[], fds:[], tokensIn:[], tokensOut:[], healthUp:[], healthDown:[], healthPending:[]};
+const chartHist = {tx:[], rx:[], streams:[], goroutines:[], fds:[], tokensIn:[], tokensOut:[], healthUp:[], healthDown:[], healthPending:[], fsDlRate:[], fsUlRate:[], fsSyncErrors:[], fsSyncCycles:[]};
 let prevTotalTx = 0, prevTotalRx = 0, prevTotalTokIn = 0, prevTotalTokOut = 0, firstTick = true;
+let prevFsDl = 0, prevFsUl = 0, prevFsErrors = 0, prevFsCycles = 0;
 let compMetrics = {};
 
 // --- Tabs ---
@@ -1124,14 +1141,23 @@ function tick() {
     const nowRx = sumMetric(metricsText, 'mesh_bytes_rx_total');
     const nowTokIn = sumMetric(metricsText, 'mesh_gateway_tokens_in_total');
     const nowTokOut = sumMetric(metricsText, 'mesh_gateway_tokens_out_total');
+    const nowFsDl = sumMetric(metricsText, 'mesh_filesync_bytes_downloaded_total');
+    const nowFsUl = sumMetric(metricsText, 'mesh_filesync_bytes_uploaded_total');
+    const nowFsErrors = sumMetric(metricsText, 'mesh_filesync_sync_errors_total');
+    const nowFsCycles = sumMetric(metricsText, 'mesh_filesync_peer_syncs_total');
     if (!firstTick) {
       pushHist('tx', Math.max(0, nowTx - prevTotalTx));
       pushHist('rx', Math.max(0, nowRx - prevTotalRx));
       pushHist('tokensIn', Math.max(0, nowTokIn - prevTotalTokIn));
       pushHist('tokensOut', Math.max(0, nowTokOut - prevTotalTokOut));
+      pushHist('fsDlRate', Math.max(0, nowFsDl - prevFsDl));
+      pushHist('fsUlRate', Math.max(0, nowFsUl - prevFsUl));
+      pushHist('fsSyncErrors', Math.max(0, nowFsErrors - prevFsErrors));
+      pushHist('fsSyncCycles', Math.max(0, nowFsCycles - prevFsCycles));
     } else { firstTick = false; }
     prevTotalTx = nowTx; prevTotalRx = nowRx;
     prevTotalTokIn = nowTokIn; prevTotalTokOut = nowTokOut;
+    prevFsDl = nowFsDl; prevFsUl = nowFsUl; prevFsErrors = nowFsErrors; prevFsCycles = nowFsCycles;
     pushHist('streams', sumMetric(metricsText, 'mesh_active_streams'));
     pushHist('goroutines', valMetric(metricsText, 'mesh_process_goroutines'));
     const fds = valMetric(metricsText, 'mesh_process_open_fds');
@@ -1834,6 +1860,26 @@ function renderCharts() {
   document.getElementById('chart-health-down').textContent = last(chartHist.healthDown);
   document.getElementById('chart-health-pend').textContent = last(chartHist.healthPending);
   drawChart('chart-health', [chartHist.healthUp, chartHist.healthDown, chartHist.healthPending], ['#34d399', '#f87171', '#fbbf24']);
+  // Filesync Traffic (hidden when no filesync data)
+  const fsTrafficCard = document.getElementById('chart-fs-traffic-card');
+  if (chartHist.fsDlRate.some(v => v > 0) || chartHist.fsUlRate.some(v => v > 0)) {
+    fsTrafficCard.style.display = '';
+    document.getElementById('chart-fs-dl-val').textContent = fmtRate(last(chartHist.fsDlRate));
+    document.getElementById('chart-fs-ul-val').textContent = fmtRate(last(chartHist.fsUlRate));
+    drawChart('chart-fs-traffic', [chartHist.fsDlRate, chartHist.fsUlRate], ['#34d399', '#a78bfa']);
+  } else {
+    fsTrafficCard.style.display = 'none';
+  }
+  // Filesync Activity (hidden when no filesync data)
+  const fsSyncCard = document.getElementById('chart-fs-sync-card');
+  if (chartHist.fsSyncCycles.some(v => v > 0) || chartHist.fsSyncErrors.some(v => v > 0)) {
+    fsSyncCard.style.display = '';
+    document.getElementById('chart-fs-cycles-val').textContent = last(chartHist.fsSyncCycles);
+    document.getElementById('chart-fs-errors-val').textContent = last(chartHist.fsSyncErrors);
+    drawChart('chart-fs-sync', [chartHist.fsSyncCycles, chartHist.fsSyncErrors], ['#22d3ee', '#f87171']);
+  } else {
+    fsSyncCard.style.display = 'none';
+  }
   // Per-component traffic table
   renderCompTraffic();
 }

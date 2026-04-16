@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/text/unicode/norm"
@@ -259,6 +260,63 @@ func (n *Node) recordActivity(a SyncActivity) {
 	n.activityMu.Unlock()
 }
 
+// FolderMetricsSnapshot is a point-in-time read of a folder's sync counters.
+type FolderMetricsSnapshot struct {
+	FolderID        string
+	PeerSyncs       int64
+	FilesDownloaded int64
+	FilesDeleted    int64
+	FilesConflicted int64
+	SyncErrors      int64
+	BytesDownloaded int64
+	BytesUploaded   int64
+	IndexExchanges  int64
+	ScanCount       int64
+	ScanDurationNS  int64
+	PeerSyncNS      int64
+}
+
+// GetFolderMetrics returns a snapshot of sync metrics for all active folders.
+func GetFolderMetrics() []FolderMetricsSnapshot {
+	var result []FolderMetricsSnapshot
+	activeNodes.ForEach(func(n *Node) {
+		for id, fs := range n.folders {
+			result = append(result, FolderMetricsSnapshot{
+				FolderID:        id,
+				PeerSyncs:       fs.metrics.PeerSyncs.Load(),
+				FilesDownloaded: fs.metrics.FilesDownloaded.Load(),
+				FilesDeleted:    fs.metrics.FilesDeleted.Load(),
+				FilesConflicted: fs.metrics.FilesConflicted.Load(),
+				SyncErrors:      fs.metrics.SyncErrors.Load(),
+				BytesDownloaded: fs.metrics.BytesDownloaded.Load(),
+				BytesUploaded:   fs.metrics.BytesUploaded.Load(),
+				IndexExchanges:  fs.metrics.IndexExchanges.Load(),
+				ScanCount:       fs.metrics.ScanCount.Load(),
+				ScanDurationNS:  fs.metrics.ScanDurationNS.Load(),
+				PeerSyncNS:      fs.metrics.PeerSyncNS.Load(),
+			})
+		}
+	})
+	sort.Slice(result, func(i, j int) bool { return result[i].FolderID < result[j].FolderID })
+	return result
+}
+
+// FolderSyncMetrics holds per-folder sync counters for Prometheus export.
+// All fields are atomic — safe for concurrent reads from the metrics handler.
+type FolderSyncMetrics struct {
+	PeerSyncs       atomic.Int64 // completed peer sync completions (one per folder×peer pair)
+	FilesDownloaded atomic.Int64 // files successfully downloaded
+	FilesDeleted    atomic.Int64 // files deleted by remote tombstones
+	FilesConflicted atomic.Int64 // conflict resolutions performed
+	SyncErrors      atomic.Int64 // per-file sync failures (download, delete, conflict)
+	BytesDownloaded atomic.Int64 // bytes downloaded from peers
+	BytesUploaded   atomic.Int64 // bytes served to peers (file + delta endpoints)
+	IndexExchanges  atomic.Int64 // index exchange round trips
+	ScanCount       atomic.Int64 // scan cycles completed
+	ScanDurationNS  atomic.Int64 // last scan duration in nanoseconds
+	PeerSyncNS      atomic.Int64 // last peer sync duration in nanoseconds (last-writer-wins)
+}
+
 // folderState holds runtime state for a single synced folder.
 type folderState struct {
 	cfg             config.FolderCfg
@@ -272,6 +330,7 @@ type folderState struct {
 	firstScanLogged bool                      // true after first scan INFO line emitted
 	indexMu         sync.RWMutex
 	retries         retryTracker
+	metrics         FolderSyncMetrics // lock-free counters for Prometheus
 }
 
 const maxRetries = 3
@@ -803,6 +862,10 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 			fs.firstScanLogged = true
 		}
 
+		// Update scan metrics.
+		fs.metrics.ScanCount.Add(1)
+		fs.metrics.ScanDurationNS.Store(total.Nanoseconds())
+
 		if changed {
 			anyChanged = true
 		}
@@ -844,20 +907,29 @@ func (n *Node) syncLoop(ctx context.Context) {
 }
 
 // syncAllPeers runs one sync cycle against all peers for all folders.
+// F1: folder×peer pairs run concurrently so a slow/dead peer doesn't
+// block other folders. The shared sem still limits total concurrent
+// file transfers across all pairs.
 func (n *Node) syncAllPeers(ctx context.Context) {
 	sem := make(chan struct{}, n.cfg.MaxConcurrent)
 
+	var wg sync.WaitGroup
 	for _, fs := range n.folders {
 		if fs.cfg.Direction == "disabled" {
 			continue
 		}
 		for _, peer := range fs.cfg.Peers {
 			if ctx.Err() != nil {
-				return
+				break
 			}
-			n.syncFolder(ctx, fs, peer, sem)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				n.syncFolder(ctx, fs, peer, sem)
+			}()
 		}
 	}
+	wg.Wait()
 }
 
 // syncFolder exchanges indices with a peer and downloads missing/newer files.
@@ -865,6 +937,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	folderID := fs.cfg.ID
 	stateKey := folderID + "|" + peerAddr
 
+	syncStart := time.Now()
 	state.Global.Update("filesync-folder", folderID, state.Connecting, "syncing with "+peerAddr)
 
 	// Build and send our index, requesting only entries newer than what we've seen.
@@ -880,7 +953,17 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 	exchange := n.buildIndexExchange(folderID, ourLastSentSeq) // send only entries newer than last sent
 	exchange.Since = peerLastSeq                               // ask peer to send only entries newer than this
-	remoteIdx, err := sendIndex(ctx, n.httpClient, peerAddr, exchange)
+	slog.Debug("index exchange prepared",
+		"folder", folderID, "peer", peerAddr,
+		"our_seq", ourCurrentSeq, "peer_last_seen", peerLastSeq,
+		"our_last_sent", ourLastSentSeq, "entries_out", len(exchange.GetFiles()))
+
+	// Per-peer timeout prevents a hung peer from pinning this goroutine
+	// for the node's entire lifetime. Index exchanges are small; 2 minutes
+	// is generous even for paginated multi-page exchanges over slow links.
+	indexCtx, indexCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer indexCancel()
+	remoteIdx, err := sendIndex(indexCtx, n.httpClient, peerAddr, exchange)
 	if err != nil {
 		slog.Debug("sync failed", "folder", folderID, "peer", peerAddr, "error", err)
 		state.Global.Update("filesync-peer", stateKey, state.Retrying, err.Error())
@@ -893,6 +976,11 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	fs.indexMu.Lock()
 	delete(fs.peerLastError, peerAddr)
 	fs.indexMu.Unlock()
+	fs.metrics.IndexExchanges.Add(1)
+	slog.Debug("index exchange complete",
+		"folder", folderID, "peer", peerAddr,
+		"remote_seq", remoteIdx.GetSequence(), "remote_entries", len(remoteIdx.GetFiles()),
+		"duration", time.Since(syncStart))
 
 	state.Global.Update("filesync-peer", stateKey, state.Connected, "")
 
@@ -911,13 +999,18 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	// Convert remote protobuf index to our internal format for diffing.
 	remoteFileIndex := protoToFileIndex(remoteIdx)
 
-	// Hold the lock across both diff and pending update so `pending` always
-	// reflects the same `actions` — releasing between lets a concurrent
-	// download update the index, leaving the UI summary out of sync with
-	// what's actually about to run.
-	fs.indexMu.Lock()
+	// F5: diff() only reads the index — use RLock to avoid blocking scans
+	// and admin API reads. Upgrade to Lock only for the pending update.
+	fs.indexMu.RLock()
 	lastSeenSeq := peerLastSeq
 	actions := fs.index.diff(remoteFileIndex, lastSeenSeq, fs.cfg.Direction)
+	fs.indexMu.RUnlock()
+
+	slog.Debug("diff computed",
+		"folder", folderID, "peer", peerAddr, "actions", len(actions),
+		"direction", fs.cfg.Direction)
+
+	fs.indexMu.Lock()
 	if len(actions) == 0 {
 		delete(fs.pending, peerAddr)
 	} else {
@@ -1001,6 +1094,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				}
 				defer func() { <-sem }()
 
+				dlStart := time.Now()
 				err := downloadFromPeer(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
 				if err != nil {
 					slog.Warn("download failed", "folder", folderID, "path", action.Path, "peer", peerAddr, "error", err)
@@ -1010,12 +1104,17 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					failMu.Lock()
 					failedSeqs = append(failedSeqs, action.RemoteSequence)
 					failMu.Unlock()
+					fs.metrics.SyncErrors.Add(1)
 					return
 				}
+				slog.Debug("file downloaded", "folder", folderID, "path", action.Path,
+					"peer", peerAddr, "size", action.RemoteSize, "duration", time.Since(dlStart))
 
 				// Update metrics.
 				m := state.Global.GetMetrics("filesync", n.cfg.Bind)
 				m.BytesRx.Add(action.RemoteSize)
+				fs.metrics.FilesDownloaded.Add(1)
+				fs.metrics.BytesDownloaded.Add(action.RemoteSize)
 
 				// Update local index and clear retry tracking on success.
 				fs.indexMu.Lock()
@@ -1047,6 +1146,10 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 				remoteDeviceID := remoteIdx.GetDeviceId()
 				winner, conflictPath := resolveConflict(fs.cfg.Path, action.Path, lmtime, action.RemoteMtime, remoteDeviceID)
+				slog.Debug("conflict resolved",
+					"folder", folderID, "path", action.Path, "winner", winner,
+					"local_mtime", lmtime, "remote_mtime", action.RemoteMtime,
+					"remote_device", remoteDeviceID)
 				if winner == "remote" {
 					// B13: download remote to verified temp FIRST — local file
 					// stays intact until the download succeeds. If the download
@@ -1060,6 +1163,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						failMu.Lock()
 						failedSeqs = append(failedSeqs, action.RemoteSequence)
 						failMu.Unlock()
+						fs.metrics.SyncErrors.Add(1)
 						return
 					}
 
@@ -1073,6 +1177,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						failMu.Lock()
 						failedSeqs = append(failedSeqs, action.RemoteSequence)
 						failMu.Unlock()
+						fs.metrics.SyncErrors.Add(1)
 						return
 					}
 					localPath := filepath.Join(fs.cfg.Path, filepath.FromSlash(action.Path))
@@ -1085,6 +1190,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						failMu.Lock()
 						failedSeqs = append(failedSeqs, action.RemoteSequence)
 						failMu.Unlock()
+						fs.metrics.SyncErrors.Add(1)
 						return
 					}
 
@@ -1105,6 +1211,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						failMu.Lock()
 						failedSeqs = append(failedSeqs, action.RemoteSequence)
 						failMu.Unlock()
+						fs.metrics.SyncErrors.Add(1)
 						return
 					}
 
@@ -1118,31 +1225,49 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					}
 					fs.retries.clear(action.Path)
 					fs.indexMu.Unlock()
+					fs.metrics.FilesConflicted.Add(1)
+					fs.metrics.BytesDownloaded.Add(action.RemoteSize)
 				}
 				slog.Info("resolved conflict", "folder", folderID, "path", action.Path, "winner", winner)
 			}()
 
 		case ActionDelete:
-			if err := deleteFile(fs.cfg.Path, action.Path); err != nil {
-				slog.Warn("delete failed", "folder", folderID, "path", action.Path, "error", err)
+			// F10: run deletes through the semaphore like downloads so
+			// high-latency filesystems (NFS, FUSE) don't block dispatch.
+			wg.Add(1)
+			action := action
+			go func() {
+				defer wg.Done()
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				defer func() { <-sem }()
+
+				if err := deleteFile(fs.cfg.Path, action.Path); err != nil {
+					slog.Warn("delete failed", "folder", folderID, "path", action.Path, "error", err)
+					fs.indexMu.Lock()
+					fs.retries.record(action.Path, action.RemoteHash)
+					fs.indexMu.Unlock()
+					failMu.Lock()
+					failedSeqs = append(failedSeqs, action.RemoteSequence)
+					failMu.Unlock()
+					fs.metrics.SyncErrors.Add(1)
+					return
+				}
 				fs.indexMu.Lock()
-				fs.retries.record(action.Path, action.RemoteHash)
+				fs.index.Sequence++
+				if entry, ok := fs.index.Files[action.Path]; ok {
+					entry.Deleted = true
+					entry.MtimeNS = time.Now().UnixNano() // deletion time for tombstone age
+					entry.Sequence = fs.index.Sequence
+					fs.index.Files[action.Path] = entry
+				}
 				fs.indexMu.Unlock()
-				failMu.Lock()
-				failedSeqs = append(failedSeqs, action.RemoteSequence)
-				failMu.Unlock()
-				continue
-			}
-			fs.indexMu.Lock()
-			fs.index.Sequence++
-			if entry, ok := fs.index.Files[action.Path]; ok {
-				entry.Deleted = true
-				entry.MtimeNS = time.Now().UnixNano() // deletion time for tombstone age
-				entry.Sequence = fs.index.Sequence
-				fs.index.Files[action.Path] = entry
-			}
-			fs.indexMu.Unlock()
-			slog.Info("deleted file", "folder", folderID, "path", action.Path, "peer", peerAddr)
+				fs.metrics.FilesDeleted.Add(1)
+				slog.Info("deleted file", "folder", folderID, "path", action.Path, "peer", peerAddr)
+			}()
 		}
 	}
 	wg.Wait()
@@ -1193,6 +1318,13 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	state.Global.Update("filesync-folder", folderID, state.Connected, "idle")
 	state.Global.UpdateFileCount("filesync-folder", folderID, count, totalSize)
 	state.Global.UpdateLastSync("filesync-folder", folderID, time.Now())
+
+	syncDuration := time.Since(syncStart)
+	fs.metrics.PeerSyncs.Add(1)
+	fs.metrics.PeerSyncNS.Store(syncDuration.Nanoseconds())
+	slog.Debug("sync cycle complete", "folder", folderID, "peer", peerAddr,
+		"duration", syncDuration, "downloads", downloads, "conflicts", conflicts,
+		"deletes", deletes, "errors", len(failedSeqs), "bytes", totalBytes)
 }
 
 // buildIndexExchange creates a protobuf IndexExchange from the local index.

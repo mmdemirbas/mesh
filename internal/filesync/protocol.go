@@ -393,7 +393,10 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	writer := newRateLimitedWriter(r.Context(), w, s.node.rateLimiter)
-	_, _ = io.Copy(writer, f)
+	n, _ := io.Copy(writer, f)
+	if n > 0 {
+		folder.metrics.BytesUploaded.Add(n)
+	}
 }
 
 // handleDelta receives block signatures from a peer and responds with only
@@ -497,7 +500,10 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/x-protobuf")
-	_, _ = w.Write(data)
+	n, _ := w.Write(data)
+	if n > 0 {
+		folder.metrics.BytesUploaded.Add(int64(n))
+	}
 }
 
 // handleStatus returns a JSON summary of the filesync state.

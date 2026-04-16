@@ -25,6 +25,13 @@ func newRateLimitedReader(ctx context.Context, r io.Reader, limiter *rate.Limite
 }
 
 func (r *rateLimitedReader) Read(p []byte) (int, error) {
+	// Cap the read size to the limiter's burst so WaitN never receives a
+	// token count larger than the bucket can hold. Without this, low
+	// bandwidth configs (burst < default io.Copy buffer of 32 KB) would
+	// fail every read with rate.ErrExceedsBurst.
+	if burst := r.limiter.Burst(); len(p) > burst {
+		p = p[:burst]
+	}
 	n, err := r.r.Read(p)
 	if n > 0 {
 		if waitErr := r.limiter.WaitN(r.ctx, n); waitErr != nil {
@@ -51,8 +58,24 @@ func newRateLimitedWriter(ctx context.Context, w io.Writer, limiter *rate.Limite
 }
 
 func (w *rateLimitedWriter) Write(p []byte) (int, error) {
-	if err := w.limiter.WaitN(w.ctx, len(p)); err != nil {
-		return 0, err
+	// Write in chunks no larger than the limiter's burst to avoid
+	// rate.ErrExceedsBurst on low bandwidth configs.
+	burst := w.limiter.Burst()
+	written := 0
+	for len(p) > 0 {
+		chunk := p
+		if len(chunk) > burst {
+			chunk = chunk[:burst]
+		}
+		if err := w.limiter.WaitN(w.ctx, len(chunk)); err != nil {
+			return written, err
+		}
+		n, err := w.w.Write(chunk)
+		written += n
+		if err != nil {
+			return written, err
+		}
+		p = p[n:]
 	}
-	return w.w.Write(p)
+	return written, nil
 }
