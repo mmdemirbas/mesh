@@ -22,7 +22,7 @@ design notes that informed the change — kept for context.
 | E2   | Gateway marshal error handling      | `json.Marshal` errors return 500 instead of empty 200. |
 | W1   | Cross-platform `password_command`   | Build-tagged `shellCommand()`: `sh -c` on Unix, `pwsh.exe`/`cmd.exe` on Windows. |
 | W2   | Cross-platform ignore matching      | `filepath.Match` → `path.Match` for forward-slash consistency. |
-| W3   | Cross-platform atomic rename        | `renameReplace()` helper: remove-then-rename fallback for Windows. |
+| W3   | Cross-platform atomic rename        | Platform-specific `renameReplace()`: `os.Rename` on Unix (`rename.go`), `windows.MoveFileEx` with `MOVEFILE_REPLACE_EXISTING\|MOVEFILE_WRITE_THROUGH` on Windows (`rename_windows.go`). Supersedes the old remove-then-rename fallback (B16). |
 | S12  | Windows port hijacking defense      | `SO_REUSEADDR` → `SO_EXCLUSIVEADDRUSE` on Windows. |
 | S4   | Admin loopback-only bind            | Config validation rejects non-loopback `admin_addr`. |
 | S5   | Per-connection channel limit        | `atomic.Int64` counter, reject above 1000 with `ssh.ResourceShortage`. |
@@ -139,6 +139,12 @@ design notes that informed the change — kept for context.
 | H32  | State machine invariants            | No findings. `state.Status` is open enum with no enforced transitions — components write whatever string they like at any time. This is intentional; the dashboard displays the current state and the eviction goroutine cleans up transient orphans. There is no "must transition through Connecting before Connected" invariant to enforce. |
 | H33  | Clock / monotonic time audit        | No findings. Every duration measurement uses `time.Since(start)` (which is monotonic) or `time.Now().UnixNano()` stored once and compared to itself (StartTime atomics for uptime display). Wall-clock `time.Now()` is used only for ring-buffer timestamps and component LastUpdated, where wall-clock drift is tolerated. |
 | H34  | Environment variable audit          | No findings. The few env-var consumers (`SSH_AUTH_SOCK`, `NO_COLOR`, `COMSPEC`, etc.) all check for non-empty before using and have explicit fallbacks. `os.ExpandEnv` is applied during config load with the standard "missing var becomes empty string" semantic, which is documented behavior; the validator catches resulting empty bind addresses, etc. |
+| B13  | Conflict rename-before-download loses file on failure | `resolveConflict` no longer renames files — returns `(winner, conflictPath)`. `ActionConflict` handler downloads to verified temp first (`downloadToVerifiedTemp`), then renames local→conflict, then temp→dest. Failed download leaves local file untouched. Restore logic on final rename failure. |
+| B14  | Tombstones purged before all peers acknowledge | `purgeTombstones` now takes `peers map[string]PeerState` and only purges tombstones where all configured peers have `LastSeenSequence >= entry.Sequence`. No peers = all purgeable (backward compatible). |
+| B15  | Index reset + stale peer state stops sync | When `loadIndex` fails and falls back to `newFileIndex()`, peer state is also reset to prevent stale `LastSentSequence` from suppressing the fresh index via the delta filter. |
+| B16  | Windows `renameReplace` crash window | Replaced non-atomic remove+rename with platform-specific files: `rename.go` (`os.Rename` on Unix), `rename_windows.go` (`windows.MoveFileEx` with `MOVEFILE_REPLACE_EXISTING\|MOVEFILE_WRITE_THROUGH`). See also W3 update. |
+| B17  | Unicode NFD/NFC mismatch causes duplicates | All paths normalized to NFC via `golang.org/x/text/unicode/norm` at two insertion points: `scan()` and `protoToFileIndex()`. Prevents macOS NFD / Windows NFC divergence from creating duplicate index entries. |
+| B18  | Unbounded `BlockSize` in delta request | `handleDelta` clamps `BlockSize` to `[1 KB, 16 MB]` range, preventing a peer from causing one-block-per-byte allocation. |
 | P15  | DNS result cache for target probes  | DNS-first, cache-as-fallback. `resolvedAddrCache` in `internal/tunnel` stores hostname→IP from successful connections (5 min TTL). `probeTarget`: DNS → mDNS retry → cache. `runForwardSetForTarget`: DNS → cache. Evicts on cached-IP failure. Skips link-local, normalizes IPv4-mapped. Commit `384423c`. |
 
 ## Historical Notes

@@ -41,9 +41,55 @@ Security hardening, correctness, data integrity, protocol compliance.
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
-| S1   | clipsync  | No TLS for clipsync HTTP                     | HTTPS only, auto-TLS with self-signed certs if none provided. Zero-config. |
-| FS4  | filesync  | No TLS / auth for filesync HTTP              | Same auto-TLS approach as S1 — share the implementation. |
-| [B8–B11, B4–B7, SR1, SR2, SR12] | filesync | Filesync production readiness (Phase 0a/0b) | All completed — see DONE.md. |
+| [S1/FS4](#s1fs4-auto-tls-for-filesync-and-clipsync-http) | filesync, clipsync | Auto-TLS for filesync and clipsync HTTP | Shared `internal/tlsutil` package. See design below. |
+
+### S1/FS4: Auto-TLS for filesync and clipsync HTTP
+
+**Status:** Not needed for LAN-over-SSH-tunnel use. Required for production/untrusted-network use.
+
+**Architecture:**
+
+A shared `internal/tlsutil` package provides cert generation, persistence, and `tls.Config` construction. Both filesync and clipsync embed a `TLS` config block. TLS is opt-in (`enabled: false` default) for backward compatibility.
+
+**Config:**
+```yaml
+filesync:
+  bind: "0.0.0.0:7756"
+  tls:
+    enabled: true
+    cert_file: ""    # optional; auto-generated ECDSA P-256 if empty
+    key_file: ""     # optional; paired with cert_file
+    insecure: true   # client skips CA chain (relies on IP allowlist)
+```
+
+**Server path:** `net.Listen("tcp", bind)` → `tls.NewListener(ln, serverCfg)` → `httpSrv.Serve(tlsLn)`. Clipsync requires refactoring from `ListenAndServe` to explicit listener.
+
+**Client path:** `http.Transport.TLSClientConfig` gets a client `tls.Config`. Outbound URLs switch from `http://` to `https://` via a `scheme` field on the Node.
+
+**Auto-cert:** ECDSA P-256, 10-year validity, stored at `~/.mesh/tls/<bind>.pem` and `.key`. Regenerated if within 30 days of expiry. Permissions: `0600` for key.
+
+**Design decisions needing human input:**
+1. **InsecureSkipVerify (default) vs cert pinning:** InsecureSkipVerify + IP allowlist is simpler (no fingerprint distribution). Pinning is stronger but requires manual setup. Proposed default: insecure (encrypt wire, rely on IP allowlist for auth).
+2. **Cert-per-bind vs cert-per-node:** Per-bind is simpler (no node topology knowledge). Per-node shares one cert for filesync+clipsync. Proposed: per-bind.
+3. **Scope:** Both components together, or filesync first? Together shares the implementation; separately is lower risk.
+
+**Files:**
+
+| File | Type | Est. lines |
+|------|------|------------|
+| `internal/tlsutil/tlsutil.go` | New | ~150 |
+| `internal/tlsutil/tlsutil_test.go` | New | ~120 |
+| `internal/config/config.go` | Modify | +30 |
+| `internal/filesync/filesync.go` | Modify | +25 |
+| `internal/filesync/protocol.go` | Modify | ~20 |
+| `internal/filesync/transfer.go` | Modify | ~10 |
+| `internal/clipsync/clipsync.go` | Modify | ~40 |
+| Config examples + JSON schema | Modify | ~20 |
+
+**Total:** ~270 new lines, ~165 modified. 6 build phases, each with its own test gate.
+
+**Effort:** M — 2 new files, 6 modified, shared implementation across two components.
+
 ---
 
 ## Tier 3 — Improve
