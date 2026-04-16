@@ -3,6 +3,8 @@ package filesync
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,10 +25,21 @@ const (
 	maxSyncFileSize = 4 * 1024 * 1024 * 1024 // 4 GB per file
 )
 
+// peerSuffix returns a short deterministic suffix for a peer address, used
+// to isolate per-peer temp files and prevent concurrent download corruption.
+func peerSuffix(peerAddr string) string {
+	// Use last 8 chars of the address hash for brevity + uniqueness.
+	h := sha256.Sum256([]byte(peerAddr))
+	return hex.EncodeToString(h[:4])
+}
+
 // downloadToVerifiedTemp fetches a file from a peer, writes it to a temp file,
 // and verifies the hash. Returns the temp file path without renaming to the
 // final destination. Used by conflict resolution (B13) to ensure the download
 // succeeds before moving the local file aside.
+//
+// H1: temp file name includes a peer-derived suffix so concurrent downloads
+// of the same file from different peers get separate temp files.
 func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash string, folderRoot string, limiter *rate.Limiter) (string, error) {
 	destPath, err := safePath(folderRoot, relPath)
 	if err != nil {
@@ -43,7 +56,9 @@ func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, 
 	}
 
 	// Temp file for atomic write + resume.
-	tmpName := ".mesh-tmp-" + expectedHash[:16]
+	// H1: include peer suffix to prevent concurrent download collision
+	// when multiple peers serve the same file.
+	tmpName := ".mesh-tmp-" + expectedHash[:16] + "-" + peerSuffix(peerAddr)
 	tmpPath := filepath.Join(filepath.Dir(destPath), tmpName)
 
 	// Check if we can resume from an existing temp file.
@@ -132,16 +147,27 @@ func downloadFile(ctx context.Context, client *http.Client, peerAddr, folderID, 
 
 // safePath validates a relative path against traversal and resolves it within
 // folderRoot. Returns the absolute path or an error.
+//
+// H4: uses EvalSymlinks on both root and path so a symlink inside the folder
+// pointing outside the root is caught by the prefix check.
 func safePath(folderRoot, relPath string) (string, error) {
 	clean := filepath.Clean(filepath.FromSlash(relPath))
 	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || strings.Contains(clean, "\x00") {
 		return "", fmt.Errorf("invalid file path: %q", relPath)
 	}
 	full := filepath.Join(folderRoot, clean)
+
+	// Resolve the root through symlinks for a canonical prefix.
 	absRoot, err := filepath.Abs(folderRoot)
 	if err != nil {
 		return "", fmt.Errorf("resolve root: %w", err)
 	}
+	evalRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return "", fmt.Errorf("eval symlinks root: %w", err)
+	}
+
+	// First check: lexical prefix before the file exists (for new file creation).
 	absPath, err := filepath.Abs(full)
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
@@ -149,6 +175,16 @@ func safePath(folderRoot, relPath string) (string, error) {
 	if absPath != absRoot && !strings.HasPrefix(absPath, absRoot+string(filepath.Separator)) {
 		return "", fmt.Errorf("path traversal: %q resolves outside root", relPath)
 	}
+
+	// Second check: if the path exists on disk, resolve symlinks and
+	// verify the real path is still inside the real root. This catches
+	// symlinks inside the folder that point outside the root.
+	if evalPath, evalErr := filepath.EvalSymlinks(absPath); evalErr == nil {
+		if evalPath != evalRoot && !strings.HasPrefix(evalPath, evalRoot+string(filepath.Separator)) {
+			return "", fmt.Errorf("path traversal via symlink: %q resolves to %q outside root", relPath, evalPath)
+		}
+	}
+
 	return full, nil
 }
 
