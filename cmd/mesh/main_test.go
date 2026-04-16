@@ -444,7 +444,7 @@ func TestRenderStatus_WithGateway(t *testing.T) {
 		"gateway:oneapi-bridge": {Type: "gateway", ID: "oneapi-bridge", Status: state.Failed, Message: "listen 127.0.0.1:3457: address already in use"},
 	}
 	output, _ := renderStatus(cfg, activeState, nil, "testnode")
-	for _, want := range []string{"gateway", "claude-audit", "3459", "oneapi-bridge", "3457", "anthropic→anthropic", "anthropic→openai", "listening", "failed"} {
+	for _, want := range []string{"gateway", "claude-audit", "3459", "oneapi-bridge", "3457", "a2a", "a2o", "listening", "failed"} {
 		if !strings.Contains(output, want) {
 			t.Errorf("output missing %q\n--- output ---\n%s", want, output)
 		}

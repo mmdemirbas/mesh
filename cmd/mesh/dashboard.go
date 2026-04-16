@@ -712,9 +712,8 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			if comp.BoundAddr != "" {
 				bind = comp.BoundAddr
 			}
-			left := cBold + cCyan + gw.Name + cReset + " " + colorAddr(bind)
-			annotation := cGray + gw.ClientAPI + "→" + gw.UpstreamAPI + cReset
-			addRow("", indicator, left, arrowRight, cGray+gw.Upstream+cReset, st, annotation, readMetrics(metricsMap["gateway:"+gw.Name]))
+			left := cBold + cCyan + gw.Name + cReset + " " + cGray + gw.Direction().String() + cReset + " " + colorAddr(bind)
+			addRow("", indicator, left, arrowRight, cGray+gw.Upstream+cReset, st, "", readMetrics(metricsMap["gateway:"+gw.Name]))
 		}
 		addHeader("")
 	}
