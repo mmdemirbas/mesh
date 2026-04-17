@@ -119,12 +119,12 @@ func TestBuiltinIgnoresNonNegatable(t *testing.T) {
 		path   string
 		ignore bool
 	}{
-		{".mesh-tmp-abc123", true},        // builtin must win over config negation
-		{"foo.mesh-delta-tmp", true},       // builtin must win over config negation
-		{"sub/.mesh-tmp-xyz", true},        // nested path, builtin still wins
-		{"sub/bar.mesh-delta-tmp", true},   // nested path, builtin still wins
-		{"normal.txt", false},              // non-builtin unaffected
-		{"important.log", false},           // non-builtin unaffected
+		{".mesh-tmp-abc123", true},       // builtin must win over config negation
+		{"foo.mesh-delta-tmp", true},     // builtin must win over config negation
+		{"sub/.mesh-tmp-xyz", true},      // nested path, builtin still wins
+		{"sub/bar.mesh-delta-tmp", true}, // nested path, builtin still wins
+		{"normal.txt", false},            // non-builtin unaffected
+		{"important.log", false},         // non-builtin unaffected
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
