@@ -46,8 +46,8 @@ type FolderStatus struct {
 	// LastSync is the most recent successful sync time across all peers.
 	// Zero value means no peer has synced yet.
 	LastSync        time.Time `json:"last_sync"`
-	QuarantineCount int      `json:"quarantine_count,omitempty"`
-	QuarantinePaths []string `json:"quarantine_paths,omitempty"`
+	QuarantineCount int       `json:"quarantine_count,omitempty"`
+	QuarantinePaths []string  `json:"quarantine_paths,omitempty"`
 }
 
 // FolderPeer is a resolved peer entry for a folder: the configured nickname

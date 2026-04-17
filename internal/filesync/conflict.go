@@ -167,7 +167,7 @@ type FileMeta struct {
 
 // DiffLine represents one line in a unified-style diff.
 type DiffLine struct {
-	Op   string `json:"op"`   // "equal", "add", "delete"
+	Op   string `json:"op"` // "equal", "add", "delete"
 	Text string `json:"text"`
 }
 
@@ -384,7 +384,6 @@ func myersDiff(a, b []uint64) []byte {
 	size := 2*max + 1
 	v := make([]int, size)
 	// Parent trace for backtracking.
-	type point struct{ x, y int }
 	trace := make([][]int, 0, max+1)
 
 	for d := 0; d <= max; d++ {
