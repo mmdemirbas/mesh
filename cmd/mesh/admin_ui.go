@@ -506,6 +506,7 @@ tbody tr:last-child td { border-bottom: none; }
 #gw-detail-card .card-body { scroll-behavior: smooth; }
 .gw-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 1100px) { .gw-detail-grid { grid-template-columns: 1fr; } }
+.gw-detail-pane { max-height: 50vh; overflow: auto; }
 .gw-detail-pane {
   background: var(--bg-card); border: 1px solid var(--border);
   border-radius: 6px; display: flex; flex-direction: column;
@@ -913,55 +914,61 @@ tbody tr:last-child td { border-bottom: none; }
       </div>
       <div class="card-body padded">
         <div class="gw-detail-grid">
-          <div class="gw-detail-pane">
-            <h4>
-              <span>Client request <span id="gw-req-len" class="sec-len" style="margin-left:6px"></span></span>
-              <span style="display:flex;gap:6px">
-                <button class="copy-btn" onclick="bulkSec('req', true)">expand all</button>
-                <button class="copy-btn" onclick="bulkSec('req', false)">collapse all</button>
-                <button class="copy-btn" onclick="copyDetail('req')">copy</button>
-              </span>
-            </h4>
-            <details class="sec" id="gw-req-json-sec">
-              <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-req-json-len"></span></summary>
-              <div class="sec-body"><div class="gw-detail-raw" id="gw-req-raw"></div></div>
-            </details>
-            <div class="gw-detail-structured" id="gw-req-structured"></div>
-            <div id="gw-upstream-req-sec" style="display:none">
-              <h4 style="margin-top:16px;border-top:2px solid var(--border);padding-top:8px">
-                <span>Upstream request <span id="gw-upstream-req-len" class="sec-len" style="margin-left:6px"></span></span>
-              </h4>
-              <details class="sec">
-                <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-upstream-req-json-len"></span></summary>
-                <div class="sec-body"><div class="gw-detail-raw" id="gw-upstream-req-raw"></div></div>
-              </details>
-              <div class="gw-detail-structured" id="gw-upstream-req-structured"></div>
-            </div>
-          </div>
-          <div class="gw-detail-pane">
-            <h4>
+          <!-- Row 1: responses (usually smaller, visible immediately) -->
+          <details class="gw-detail-pane sec" open>
+            <summary><h4 style="display:inline">
               <span>Client response <span id="gw-resp-len" class="sec-len" style="margin-left:6px"></span></span>
-              <span style="display:flex;gap:6px">
-                <button class="copy-btn" onclick="bulkSec('resp', true)">expand all</button>
-                <button class="copy-btn" onclick="bulkSec('resp', false)">collapse all</button>
-                <button class="copy-btn" onclick="copyDetail('resp')">copy</button>
+              <span style="display:inline-flex;gap:6px;margin-left:auto">
+                <button class="copy-btn" onclick="event.stopPropagation();bulkSec('resp', true)">expand all</button>
+                <button class="copy-btn" onclick="event.stopPropagation();bulkSec('resp', false)">collapse all</button>
+                <button class="copy-btn" onclick="event.stopPropagation();copyDetail('resp')">copy</button>
               </span>
-            </h4>
+            </h4></summary>
             <details class="sec" id="gw-resp-json-sec">
               <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-resp-json-len"></span></summary>
               <div class="sec-body"><div class="gw-detail-raw" id="gw-resp-raw"></div></div>
             </details>
             <div class="gw-detail-structured" id="gw-resp-structured"></div>
-            <div id="gw-upstream-resp-sec" style="display:none">
-              <h4 style="margin-top:16px;border-top:2px solid var(--border);padding-top:8px">
+          </details>
+          <div id="gw-upstream-resp-sec" style="display:none">
+            <details class="gw-detail-pane sec" open>
+              <summary><h4 style="display:inline">
                 <span>Upstream response <span id="gw-upstream-resp-len" class="sec-len" style="margin-left:6px"></span></span>
-              </h4>
+              </h4></summary>
               <details class="sec">
                 <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-upstream-resp-json-len"></span></summary>
                 <div class="sec-body"><div class="gw-detail-raw" id="gw-upstream-resp-raw"></div></div>
               </details>
               <div class="gw-detail-structured" id="gw-upstream-resp-structured"></div>
-            </div>
+            </details>
+          </div>
+          <!-- Row 2: requests -->
+          <details class="gw-detail-pane sec" open>
+            <summary><h4 style="display:inline">
+              <span>Client request <span id="gw-req-len" class="sec-len" style="margin-left:6px"></span></span>
+              <span style="display:inline-flex;gap:6px;margin-left:auto">
+                <button class="copy-btn" onclick="event.stopPropagation();bulkSec('req', true)">expand all</button>
+                <button class="copy-btn" onclick="event.stopPropagation();bulkSec('req', false)">collapse all</button>
+                <button class="copy-btn" onclick="event.stopPropagation();copyDetail('req')">copy</button>
+              </span>
+            </h4></summary>
+            <details class="sec" id="gw-req-json-sec">
+              <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-req-json-len"></span></summary>
+              <div class="sec-body"><div class="gw-detail-raw" id="gw-req-raw"></div></div>
+            </details>
+            <div class="gw-detail-structured" id="gw-req-structured"></div>
+          </details>
+          <div id="gw-upstream-req-sec" style="display:none">
+            <details class="gw-detail-pane sec" open>
+              <summary><h4 style="display:inline">
+                <span>Upstream request <span id="gw-upstream-req-len" class="sec-len" style="margin-left:6px"></span></span>
+              </h4></summary>
+              <details class="sec">
+                <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-upstream-req-json-len"></span></summary>
+                <div class="sec-body"><div class="gw-detail-raw" id="gw-upstream-req-raw"></div></div>
+              </details>
+              <div class="gw-detail-structured" id="gw-upstream-req-structured"></div>
+            </details>
           </div>
         </div>
       </div>
