@@ -776,7 +776,7 @@ tbody tr:last-child td { border-bottom: none; }
 
   <!-- Gateway panel -->
   <div class="panel" id="p-gateway">
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap">
       <div id="gw-chips" style="display:inline-flex;gap:4px;flex-wrap:wrap"></div>
       <select id="gw-window" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
         <option value="24h" selected>last 24h</option>
@@ -790,6 +790,7 @@ tbody tr:last-child td { border-bottom: none; }
         <div class="gw-sub-btn" data-sub="requests">Requests</div>
       </div>
     </div>
+    <div id="gw-sess-chips" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px"></div>
 
     <!-- Overview sub-view -->
     <div id="gw-sub-overview" class="gw-subview">
@@ -1133,6 +1134,7 @@ let activeTab = tabMap[location.pathname] || 'dashboard';
 let gwHashLast = '';
 let gwHashApplyingDeep = '';
 let gwSelectedSet = new Set();  // empty = all gateways shown
+let gwSessionSet = new Set();   // empty = all sessions shown
 let gwDetailKey = '';
 
 function showTab(name, opts) {
@@ -2270,6 +2272,32 @@ function renderGateway() {
   gwRowsCache = pairs;
   gwRowsByKey = new Map(pairs.map(p => [p.key, p]));
 
+  // Populate session chip bar from distinct sessions in the current data.
+  const sessIds = [...new Set(pairs.map(p => p.req.session_id).filter(Boolean))];
+  // Prune stale selections.
+  for (const s of gwSessionSet) { if (!sessIds.includes(s)) gwSessionSet.delete(s); }
+  const sessBar = document.getElementById('gw-sess-chips');
+  if (sessBar) {
+    if (sessIds.length > 1) {
+      sessBar.style.display = '';
+      sessBar.innerHTML = sessIds.map(sid => {
+        const short = sid.slice(0, 8);
+        const on = gwSessionSet.has(sid) ? ' on' : '';
+        return '<span class="gw-chip'+on+'" data-sess="'+xa(sid)+'" title="'+xa(sid)+'" style="border-color:'+sessColor(sid)+';'+(gwSessionSet.has(sid)?'background:'+sessColor(sid)+';color:var(--bg)':'')+'">' +
+          '<span class="sess-dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:'+sessColor(sid)+';margin-right:4px;vertical-align:middle"></span>'+x(short)+'</span>';
+      }).join('');
+      sessBar.querySelectorAll('.gw-chip').forEach(c => c.addEventListener('click', () => {
+        const sid = c.dataset.sess;
+        if (gwSessionSet.has(sid)) gwSessionSet.delete(sid); else gwSessionSet.add(sid);
+        renderGateway();
+        writeGwHash();
+      }));
+    } else {
+      sessBar.style.display = 'none';
+      sessBar.innerHTML = '';
+    }
+  }
+
   const nGw = activeGws.length;
   if (nGw !== 1) {
     document.getElementById('gw-meta').innerHTML =
@@ -2288,6 +2316,7 @@ function renderGateway() {
     const term = (gwSearchTerm||'').toLowerCase();
     const outcomeFilter = gwOutcomeFilter;
     const filtered = pairs.filter(p => {
+      if (gwSessionSet.size > 0 && !gwSessionSet.has(p.req.session_id||'')) return false;
       if (outcomeFilter && (p.resp.outcome||'') !== outcomeFilter) return false;
       if (!term) return true;
       // Lazy haystack: only JSON.stringify when the user is actually searching.
@@ -3493,6 +3522,7 @@ function writeGwHash() {
   const parts = [gwSubview || 'overview'];
   const params = [];
   if (gwSelectedSet.size > 0) params.push('gw='+[...gwSelectedSet].map(encodeURIComponent).join(','));
+  if (gwSessionSet.size > 0) params.push('sess='+[...gwSessionSet].map(encodeURIComponent).join(','));
   if (gwWindow && gwWindow !== '24h') params.push('window='+encodeURIComponent(gwWindow));
   if (gwSubview === 'requests' && gwDetailKey) params.push('detail='+encodeURIComponent(gwDetailKey));
   let h = '#' + parts[0] + (params.length ? '?' + params.join('&') : '');
@@ -3508,7 +3538,7 @@ function writeGwHash() {
 
 function parseGwHash() {
   const h = (location.hash || '').replace(/^#/, '');
-  if (!h) return {sub: 'overview', gw: [], window: '', detail: ''};
+  if (!h) return {sub: 'overview', gw: [], sess: [], window: '', detail: ''};
   const qIdx = h.indexOf('?');
   const sub = qIdx < 0 ? h : h.slice(0, qIdx);
   const qs = qIdx < 0 ? '' : h.slice(qIdx + 1);
@@ -3517,6 +3547,7 @@ function parseGwHash() {
   return {
     sub: sub || 'overview',
     gw: p.gw ? p.gw.split(',').map(decodeURIComponent) : [],
+    sess: p.sess ? p.sess.split(',').map(decodeURIComponent) : [],
     window: p.window || '',
     detail: p.detail || '',
   };
@@ -3527,10 +3558,9 @@ function applyGwHash() {
   const parsed = parseGwHash();
   setGwSub(parsed.sub);
   gwHashLast = location.hash;
-  // Restore gateway selection from URL.
-  if (parsed.gw.length) {
-    gwSelectedSet = new Set(parsed.gw);
-  }
+  // Restore gateway and session selections from URL.
+  if (parsed.gw.length) gwSelectedSet = new Set(parsed.gw);
+  if (parsed.sess.length) gwSessionSet = new Set(parsed.sess);
   // Restore time window.
   if (parsed.window) {
     gwWindow = parsed.window;
