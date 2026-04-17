@@ -926,7 +926,7 @@ select option { background: var(--bg-card); color: var(--text); }
         <div class="table-scroll">
         <div id="fsa-filter-bar" class="tf-active-bar"></div>
         <table>
-          <thead id="fsa-thead"><tr><th>Direction</th><th>Folder</th><th>Peer</th><th>Files</th><th>Size</th><th>Time</th></tr></thead>
+          <thead id="fsa-thead"><tr><th>Direction</th><th>Folder</th><th>Peer</th><th>Files</th><th>Size</th><th>Time</th><th>Error</th></tr></thead>
           <tbody id="fsa-body"><tr class="loading-row"><td colspan="6">Loading activity…</td></tr></tbody>
         </table>
         </div>
@@ -2386,13 +2386,10 @@ function renderFsActivity() {
   setHTML('fsa-filter-bar', TF.filterBar('fsa'));
   const el = document.getElementById('fsa-body');
   const rows = TF.apply('fsa', fsActivities);
-  const hasErrors = fsActivities.some(a => a.error);
-  const cols = hasErrors ? 7 : 6;
-  if (!rows.length) { el.innerHTML = '<tr><td colspan="'+cols+'" style="color:var(--text-muted);padding:16px">'+(fsActivities.length ? 'No rows match the current filter.' : 'No activity yet')+'</td></tr>'; return; }
+  if (!rows.length) { el.innerHTML = '<tr><td colspan="7" style="color:var(--text-muted);padding:16px">'+(fsActivities.length ? 'No rows match the current filter.' : 'No activity yet')+'</td></tr>'; return; }
   el.innerHTML = rows.map(a => {
     const badge = a.direction === 'download' ? 'badge-ok' : a.direction === 'upload' ? 'badge-warn' : a.error ? 'badge-err' : '';
-    const errCell = hasErrors ? '<td style="color:var(--red)">'+x(a.error||'')+'</td>' : '';
-    return '<tr><td><span class="badge '+badge+'">'+x(a.direction||'error')+'</span></td><td>'+x(a.folder)+'</td><td>'+x(a.peer)+'</td><td>'+a.files+'</td><td>'+fmtBytes(a.bytes)+'</td><td>'+timeAgo(a.time)+'</td>'+errCell+'</tr>';
+    return '<tr><td><span class="badge '+badge+'">'+x(a.direction||'error')+'</span></td><td>'+x(a.folder)+'</td><td>'+x(a.peer)+'</td><td>'+a.files+'</td><td>'+fmtBytes(a.bytes)+'</td><td>'+timeAgo(a.time)+'</td><td style="color:var(--red)">'+x(a.error||'')+'</td></tr>';
   }).join('');
 }
 
@@ -2504,8 +2501,8 @@ function drawChart(id, series, colors) {
     ctx.globalAlpha = 1;
   });
 }
+function last(arr) { return arr.length ? arr[arr.length - 1] : 0; }
 function renderCharts() {
-  const last = arr => arr.length ? arr[arr.length - 1] : 0;
   // Traffic (dual line)
   document.getElementById('chart-tx-val').textContent = fmtRate(last(chartHist.tx));
   document.getElementById('chart-rx-val').textContent = fmtRate(last(chartHist.rx));

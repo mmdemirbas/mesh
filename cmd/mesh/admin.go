@@ -449,7 +449,8 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 		}
 		diff, err := filesync.ComputeConflictDiff(folderRoot, conflictPath)
 		if err != nil {
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 		_ = json.NewEncoder(w).Encode(diff)
