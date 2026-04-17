@@ -639,13 +639,103 @@ func TestScanErrorsSuppressTombstones(t *testing.T) {
 		t.Fatal(scanErr)
 	}
 
-	// locked.txt must NOT be tombstoned — scan had errors.
+	// locked.txt must NOT be tombstoned — it's in errorPaths.
 	entry, ok := idx.Files["locked.txt"]
 	if !ok {
 		t.Fatal("locked.txt should still be in index")
 	}
 	if entry.Deleted {
 		t.Error("B10: locked.txt must not be tombstoned when scan had hash errors")
+	}
+}
+
+// H1+M2: per-file error tracking allows tombstoning of genuinely deleted
+// files even when other files have errors.
+func TestScanPerFileErrorAllowsOtherTombstones(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "good.txt", "hello")
+	writeFile(t, dir, "locked.txt", "important")
+	writeFile(t, dir, "deleted.txt", "will-be-deleted")
+
+	idx := newFileIndex()
+	ignore := &ignoreMatcher{}
+
+	// First scan: all three files indexed.
+	_, _, _, scanErr := idx.scan(context.Background(), dir, ignore)
+	if scanErr != nil {
+		t.Fatal(scanErr)
+	}
+
+	// Make locked.txt unreadable and delete deleted.txt.
+	lockedPath := filepath.Join(dir, "locked.txt")
+	if err := os.Chmod(lockedPath, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lockedPath, 0644) })
+	os.Remove(filepath.Join(dir, "deleted.txt"))
+
+	// Re-scan.
+	_, _, _, scanErr = idx.scan(context.Background(), dir, ignore)
+	if scanErr != nil {
+		t.Fatal(scanErr)
+	}
+
+	// locked.txt must NOT be tombstoned (error path).
+	if e := idx.Files["locked.txt"]; e.Deleted {
+		t.Error("locked.txt must not be tombstoned — it had a hash error")
+	}
+	// deleted.txt MUST be tombstoned (genuinely deleted, not an error).
+	if e := idx.Files["deleted.txt"]; !e.Deleted {
+		t.Error("deleted.txt must be tombstoned — it was genuinely deleted")
+	}
+	// good.txt must be untouched.
+	if e := idx.Files["good.txt"]; e.Deleted {
+		t.Error("good.txt must not be tombstoned")
+	}
+}
+
+// M2 bulk threshold: when error count exceeds the threshold, suppress
+// all tombstones as a safety net for systemic failures.
+func TestScanBulkErrorsSuppressAllTombstones(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	idx := newFileIndex()
+	ignore := &ignoreMatcher{}
+
+	// Seed the index with 10 "previously seen" files (simulate prior scan).
+	for i := 0; i < 10; i++ {
+		name := fmt.Sprintf("file%d.txt", i)
+		writeFile(t, dir, name, fmt.Sprintf("content-%d", i))
+	}
+	_, _, _, scanErr := idx.scan(context.Background(), dir, ignore)
+	if scanErr != nil {
+		t.Fatal(scanErr)
+	}
+
+	// Now make >10% of them unreadable (2 of 10 = 20%) and delete one more.
+	// Modify before chmod so the fast-path (stat unchanged) doesn't skip rehash.
+	for i := 0; i < 2; i++ {
+		name := fmt.Sprintf("file%d.txt", i)
+		writeFile(t, dir, name, fmt.Sprintf("modified-%d", i))
+		p := filepath.Join(dir, name)
+		if err := os.Chmod(p, 0000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(p, 0644) })
+	}
+	os.Remove(filepath.Join(dir, "file9.txt"))
+
+	// Re-scan: 2 hash errors out of 10 tracked = 20% > 10% threshold.
+	_, _, _, scanErr = idx.scan(context.Background(), dir, ignore)
+	if scanErr != nil {
+		t.Fatal(scanErr)
+	}
+
+	// Bulk suppression: even file9.txt (genuinely deleted) must NOT be tombstoned.
+	if e := idx.Files["file9.txt"]; e.Deleted {
+		t.Error("bulk error threshold should suppress all tombstones including genuine deletes")
 	}
 }
 

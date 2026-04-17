@@ -204,6 +204,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	}
 
 	seen := make(map[string]struct{})
+	errorPaths := make(map[string]struct{}) // paths with walk/stat/hash errors — exempt from tombstoning
 	tempCutoff := time.Now().Add(-maxTempFileAge)
 
 	walkStart := time.Now()
@@ -213,7 +214,19 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		}
 		stats.EntriesVisited++
 		if walkErr != nil {
-			return nil // skip inaccessible entries
+			// H1: the entry exists on disk but we can't read it. Mark it in
+			// seen (so the tombstone phase doesn't treat it as deleted) and
+			// record it as an error path for per-file suppression.
+			if rel, relErr := filepath.Rel(folderRoot, path); relErr == nil {
+				rel = filepath.ToSlash(rel)
+				rel = norm.NFC.String(rel)
+				if rel != "." {
+					seen[rel] = struct{}{}
+					errorPaths[rel] = struct{}{}
+				}
+			}
+			stats.StatErrors++
+			return nil
 		}
 
 		// P8: Clean stale temp files during the walk instead of a separate traversal.
@@ -283,6 +296,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		stats.StatDuration += time.Since(statStart)
 		if err != nil {
 			stats.StatErrors++
+			errorPaths[rel] = struct{}{}
 			return nil
 		}
 
@@ -301,6 +315,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		stats.HashDuration += time.Since(hashStart)
 		if hashErr != nil {
 			stats.HashErrors++
+			errorPaths[rel] = struct{}{}
 			return nil // skip unreadable files
 		}
 		stats.FilesHashed++
@@ -339,17 +354,32 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	}
 
 	delStart := time.Now()
-	// B10: suppress tombstone generation when the scan had errors.
-	// A file that couldn't be hashed (permission error, locked) appears
-	// absent from `seen` but isn't actually deleted. Creating a tombstone
-	// would propagate a false deletion to all peers.
-	scanHadErrors := stats.HashErrors > 0 || stats.StatErrors > 0
-	if scanHadErrors {
-		slog.Warn("scan had errors, suppressing deletion detection",
+	// B10/M2: per-file error suppression with bulk safety net.
+	//
+	// Individual files that errored during walk/stat/hash are in errorPaths
+	// and have been added to seen, so they won't be tombstoned. For the
+	// remaining files, tombstone detection runs normally.
+	//
+	// Bulk safety net: if errors exceed 10% of tracked files or 100 absolute,
+	// suppress all tombstones — the scan is likely seeing a systemic failure
+	// (NFS flap, permission reset) rather than individual file issues.
+	totalErrors := len(errorPaths)
+	trackedFiles := len(idx.Files)
+	bulkFailure := totalErrors > 100 || (trackedFiles > 0 && totalErrors*10 > trackedFiles)
+	if bulkFailure {
+		slog.Warn("scan had bulk errors, suppressing all deletion detection",
 			"folder", folderRoot,
+			"error_paths", totalErrors,
 			"hash_errors", stats.HashErrors,
 			"stat_errors", stats.StatErrors)
 	} else {
+		if totalErrors > 0 {
+			slog.Warn("scan had errors on individual files, suppressing their tombstones only",
+				"folder", folderRoot,
+				"error_paths", totalErrors,
+				"hash_errors", stats.HashErrors,
+				"stat_errors", stats.StatErrors)
+		}
 		// Mark deletions: entries in index not seen on disk.
 		for rel, entry := range idx.Files {
 			if entry.Deleted {
