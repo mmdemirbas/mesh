@@ -236,6 +236,23 @@ func GetConflicts() []ConflictInfo {
 	return result
 }
 
+// GetFolderPath returns the disk path for the given folder ID, or ("", false)
+// if the folder is not active.
+func GetFolderPath(folderID string) (string, bool) {
+	var path string
+	var found bool
+	activeNodes.ForEach(func(n *Node) {
+		if found {
+			return
+		}
+		if fs, ok := n.folders[folderID]; ok {
+			path = fs.cfg.Path
+			found = true
+		}
+	})
+	return path, found
+}
+
 // GetActivities returns the most recent sync activities across all active nodes.
 func GetActivities() []SyncActivity {
 	var result []SyncActivity

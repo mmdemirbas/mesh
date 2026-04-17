@@ -432,6 +432,29 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 		_ = json.NewEncoder(w).Encode(conflicts)
 	})
 
+	// GET /api/filesync/conflicts/diff — compute diff for a single conflict file.
+	mux.HandleFunc("GET /api/filesync/conflicts/diff", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		q := r.URL.Query()
+		folderID := q.Get("folder")
+		conflictPath := q.Get("path")
+		if folderID == "" || conflictPath == "" {
+			http.Error(w, `{"error":"missing folder or path"}`, http.StatusBadRequest)
+			return
+		}
+		folderRoot, ok := filesync.GetFolderPath(folderID)
+		if !ok {
+			http.Error(w, `{"error":"unknown folder"}`, http.StatusNotFound)
+			return
+		}
+		diff, err := filesync.ComputeConflictDiff(folderRoot, conflictPath)
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(diff)
+	})
+
 	// GET /api/filesync/activity — recent filesync activities.
 	mux.HandleFunc("/api/filesync/activity", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
