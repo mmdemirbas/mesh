@@ -8,6 +8,7 @@ var adminUI = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F578;</text></svg>">
 <title>mesh ` + version + `</title>
 <style>
 :root {
@@ -36,6 +37,14 @@ var adminUI = `<!DOCTYPE html>
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: var(--font); background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
+/* Skip-to-content link */
+.skip-link {
+  position: absolute; left: -9999px; top: 0; z-index: 9999;
+  background: var(--green); color: var(--bg); padding: 8px 16px;
+  font-size: 14px; font-weight: 600; text-decoration: none;
+  border-radius: 0 0 var(--radius) 0;
+}
+.skip-link:focus { left: 0; }
 
 /* Header */
 .header {
@@ -46,18 +55,24 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); font
 .header-left { display: flex; align-items: center; gap: 12px; }
 .logo { font-weight: 700; font-size: 18px; color: var(--green); letter-spacing: -0.5px; }
 .logo span { color: var(--text-muted); font-weight: 400; font-size: 12px; margin-left: 4px; }
+.logo span:empty { display: none; }
 .header-status { font-size: 12px; color: var(--text-muted); }
 
 /* Tabs */
 .tabs {
   display: flex; gap: 0; border-bottom: 1px solid var(--border);
   background: var(--bg-card); padding: 0 24px;
+  overflow-x: auto; -webkit-overflow-scrolling: touch;
 }
+.tabs::-webkit-scrollbar { height: 0; }
 .tab {
   padding: 10px 20px; font-size: 13px; font-weight: 500;
   color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent;
   transition: all 0.15s;
+  background: none; border-top: none; border-left: none; border-right: none;
+  font-family: inherit; outline: none;
 }
+.tab:focus-visible { outline: 2px solid var(--green); outline-offset: -2px; }
 .tab:hover { color: var(--text); background: var(--bg-hover); }
 .tab.active { color: var(--green); border-bottom-color: var(--green); }
 .tab-sep { width: 1px; background: var(--border); margin: 8px 4px; flex-shrink: 0; }
@@ -101,9 +116,10 @@ thead th {
   text-align: left; padding: 8px 12px; font-weight: 500;
   color: var(--text-muted); font-size: 11px; text-transform: uppercase;
   letter-spacing: 0.5px; border-bottom: 1px solid var(--border);
-  cursor: pointer; user-select: none; white-space: nowrap;
+  user-select: none; white-space: nowrap;
 }
-thead th:hover { color: var(--text-dim); }
+thead th[data-sort], thead th[data-gwsort] { cursor: pointer; }
+thead th[data-sort]:hover, thead th[data-gwsort]:hover { color: var(--text-dim); }
 thead th .sort-arrow { margin-left: 4px; font-size: 10px; }
 tbody td {
   padding: 8px 12px; border-bottom: 1px solid var(--border);
@@ -146,6 +162,13 @@ tbody tr:last-child td { border-bottom: none; }
 }
 .search-input:focus { border-color: var(--green); }
 .search-input::placeholder { color: var(--text-muted); }
+.search-input::-webkit-search-cancel-button { -webkit-appearance: none; cursor: pointer; width: 12px; height: 12px; background: var(--text-muted); mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 3l10 10M13 3L3 13' stroke='%23fff' stroke-width='2'/%3E%3C/svg%3E") center/contain no-repeat; }
+select {
+  background: var(--bg-input); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 8px; font-size: 12px; outline: none;
+}
+select:focus { border-color: var(--green); }
+select option { background: var(--bg-card); color: var(--text); }
 .filter-btn {
   padding: 6px 12px; background: var(--bg-input); border: 1px solid var(--border);
   border-radius: 6px; color: var(--text-dim); font-size: 12px; cursor: pointer;
@@ -650,39 +673,70 @@ tbody tr:last-child td { border-bottom: none; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* Responsive: tablet */
+@media (max-width: 768px) {
+  .content { padding: 12px; }
+  .header { padding: 8px 12px; }
+  .tabs { padding: 0 8px; }
+  .tab { padding: 8px 12px; font-size: 12px; white-space: nowrap; }
+  .stats { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+  .gw-detail-grid { grid-template-columns: 1fr; }
+  .chart-grid { grid-template-columns: 1fr; }
+}
+/* Responsive: phone */
+@media (max-width: 480px) {
+  .content { padding: 8px; }
+  .stat-value { font-size: 18px; }
+  .stats { grid-template-columns: 1fr 1fr; }
+  .gw-scroll { overflow-x: auto; }
+  .table-scroll { overflow-x: auto; }
+}
+/* Print */
+@media print {
+  body { background: #fff; color: #000; }
+  .header, .tabs { background: #fff; border-color: #ccc; }
+  .tab { color: #333; }
+  .tab.active { color: #000; border-bottom-color: #000; }
+  .card { border-color: #ccc; }
+  .badge-ok { background: #e0f7e9; color: #0a5c2f; }
+  .badge-warn { background: #fff8e0; color: #6b4c00; }
+  .badge-err { background: #fde8e8; color: #7b1a1a; }
+}
 </style>
 </head>
 <body>
 
-<div class="header">
+<a class="skip-link" href="#main-content">Skip to content</a>
+<header class="header">
   <div class="header-left">
     <div class="logo">mesh<span>` + version + `</span></div>
   </div>
-  <div class="header-status" id="hdr-status">connecting...</div>
-</div>
+  <div class="header-status" id="hdr-status" role="status" aria-live="polite">connecting...</div>
+</header>
 
-<div class="tabs" id="tabs">
-  <div class="tab active" data-tab="dashboard">Dashboard</div>
-  <div class="tab" data-tab="clipsync">Clipsync</div>
-  <div class="tab" data-tab="filesync">Filesync</div>
-  <div class="tab" data-tab="gateway">Gateway</div>
-  <div class="tab-sep"></div>
-  <div class="tab" data-tab="logs">Logs</div>
-  <div class="tab" data-tab="metrics">Metrics</div>
-  <div class="tab" data-tab="api">API</div>
-  <div class="tab" data-tab="debug">Debug</div>
-</div>
+<nav class="tabs" id="tabs" role="tablist" aria-label="Main navigation">
+  <button class="tab active" role="tab" aria-selected="true" data-tab="dashboard" id="tab-dashboard" aria-controls="p-dashboard">Dashboard</button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="clipsync" id="tab-clipsync" aria-controls="p-clipsync">Clipsync</button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="filesync" id="tab-filesync" aria-controls="p-filesync">Filesync</button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="gateway" id="tab-gateway" aria-controls="p-gateway">Gateway</button>
+  <div class="tab-sep" role="separator"></div>
+  <button class="tab" role="tab" aria-selected="false" data-tab="logs" id="tab-logs" aria-controls="p-logs">Logs</button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="metrics" id="tab-metrics" aria-controls="p-metrics">Metrics</button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="api" id="tab-api" aria-controls="p-api">API</button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="debug" id="tab-debug" aria-controls="p-debug">Debug</button>
+</nav>
 
-<div class="content">
+<main class="content" id="main-content">
 
   <!-- Dashboard panel -->
-  <div class="panel active" id="p-dashboard">
+  <div class="panel active" id="p-dashboard" role="tabpanel" aria-labelledby="tab-dashboard">
     <div class="stats" id="dash-stats"></div>
     <div class="card">
       <div class="card-header">
         <span>Components</span>
         <div style="display:flex;gap:8px">
-          <input class="search-input" id="comp-search" placeholder="Filter components..." style="width:220px">
+          <input type="search" class="search-input" id="comp-search" placeholder="Filter components..." aria-label="Filter components" style="width:220px">
         </div>
       </div>
       <div class="card-body">
@@ -708,7 +762,7 @@ tbody tr:last-child td { border-bottom: none; }
   </div>
 
   <!-- Clipsync panel -->
-  <div class="panel" id="p-clipsync">
+  <div class="panel" id="p-clipsync" role="tabpanel" aria-labelledby="tab-clipsync">
     <div class="stats" id="cs-stats"></div>
     <div class="card">
       <div class="card-header"><span>Recent Activity</span></div>
@@ -730,12 +784,12 @@ tbody tr:last-child td { border-bottom: none; }
   </div>
 
   <!-- Filesync panel -->
-  <div class="panel" id="p-filesync">
+  <div class="panel" id="p-filesync" role="tabpanel" aria-labelledby="tab-filesync">
     <div class="stats" id="fs-stats"></div>
     <div class="card">
       <div class="card-header">
         <span>Folders</span>
-        <input class="search-input" id="fs-search" placeholder="Filter folders..." style="width:220px">
+        <input type="search" class="search-input" id="fs-search" placeholder="Filter folders..." aria-label="Filter folders" style="width:220px">
       </div>
       <div class="card-body">
         <div class="table-scroll">
@@ -780,7 +834,7 @@ tbody tr:last-child td { border-bottom: none; }
   </div>
 
   <!-- Gateway panel -->
-  <div class="panel" id="p-gateway">
+  <div class="panel" id="p-gateway" role="tabpanel" aria-labelledby="tab-gateway">
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap">
       <div id="gw-chips" style="display:inline-flex;gap:4px;flex-wrap:wrap"></div>
       <select id="gw-window" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
@@ -875,7 +929,7 @@ tbody tr:last-child td { border-bottom: none; }
       <div class="card-header">
         <span>Requests</span>
         <div style="display:flex;gap:8px">
-          <input class="search-input" id="gw-search" placeholder="Filter rows..." style="width:220px">
+          <input type="search" class="search-input" id="gw-search" placeholder="Filter rows..." aria-label="Filter gateway rows" style="width:220px">
           <select id="gw-outcome" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
             <option value="">all outcomes</option>
             <option value="ok">ok</option>
@@ -915,7 +969,10 @@ tbody tr:last-child td { border-bottom: none; }
     <div class="card" id="gw-detail-card" style="display:none">
       <div class="card-header">
         <span id="gw-detail-title">Detail</span>
-        <div class="filter-btn" onclick="document.getElementById('gw-detail-card').style.display='none'">close</div>
+        <div style="display:flex;gap:8px">
+          <div class="filter-btn" onclick="document.getElementById('gw-detail-card').style.display='none';gwDetailKey='';writeGwHash()" style="font-size:12px">&#8592; Back to list</div>
+          <div class="filter-btn" onclick="document.getElementById('gw-detail-card').style.display='none';gwDetailKey='';writeGwHash()">&#10005;</div>
+        </div>
       </div>
       <div class="card-body padded">
         <!-- Turn details: audit metadata, tokens, timing — at the top for immediate context -->
@@ -984,10 +1041,10 @@ tbody tr:last-child td { border-bottom: none; }
   </div>
 
   <!-- Logs panel -->
-  <div class="panel" id="p-logs">
+  <div class="panel" id="p-logs" role="tabpanel" aria-labelledby="tab-logs">
     <div class="card">
       <div class="toolbar">
-        <input class="search-input" id="log-search" placeholder="Search logs...">
+        <input type="search" class="search-input" id="log-search" placeholder="Search logs..." aria-label="Search logs">
         <div class="filter-btn active" data-level="all">All</div>
         <div class="filter-btn" data-level="INF">Info</div>
         <div class="filter-btn" data-level="WRN">Warn</div>
@@ -1005,7 +1062,7 @@ tbody tr:last-child td { border-bottom: none; }
   </div>
 
   <!-- Metrics panel -->
-  <div class="panel" id="p-metrics">
+  <div class="panel" id="p-metrics" role="tabpanel" aria-labelledby="tab-metrics">
     <div class="stats" id="met-stats"></div>
     <div class="chart-grid" id="met-charts">
       <div class="chart-card">
@@ -1014,22 +1071,22 @@ tbody tr:last-child td { border-bottom: none; }
           <div class="chart-value" style="color:var(--green)"><span id="chart-tx-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">tx</span></div>
           <div class="chart-value" style="color:var(--purple)"><span id="chart-rx-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">rx</span></div>
         </div>
-        <canvas class="chart-canvas" id="chart-traffic"></canvas>
+        <canvas class="chart-canvas" id="chart-traffic" aria-label="Network traffic chart"></canvas>
       </div>
       <div class="chart-card">
         <div class="chart-title">Active Streams</div>
         <div class="chart-value" id="chart-streams-val" style="margin-bottom:8px">0</div>
-        <canvas class="chart-canvas" id="chart-streams"></canvas>
+        <canvas class="chart-canvas" id="chart-streams" aria-label="Active streams chart"></canvas>
       </div>
       <div class="chart-card">
         <div class="chart-title">Goroutines</div>
         <div class="chart-value" id="chart-goroutines-val" style="margin-bottom:8px">0</div>
-        <canvas class="chart-canvas" id="chart-goroutines"></canvas>
+        <canvas class="chart-canvas" id="chart-goroutines" aria-label="Goroutines chart"></canvas>
       </div>
       <div class="chart-card" id="chart-fds-card">
         <div class="chart-title">Open File Descriptors</div>
         <div class="chart-value" id="chart-fds-val" style="margin-bottom:8px">0</div>
-        <canvas class="chart-canvas" id="chart-fds"></canvas>
+        <canvas class="chart-canvas" id="chart-fds" aria-label="Open file descriptors chart"></canvas>
       </div>
       <div class="chart-card" id="chart-tokens-card" style="display:none">
         <div class="chart-title">Gateway Token Throughput</div>
@@ -1037,7 +1094,7 @@ tbody tr:last-child td { border-bottom: none; }
           <div class="chart-value" style="color:var(--cyan)"><span id="chart-tokin-val">0</span> <span style="font-size:11px;color:var(--text-muted)">in/s</span></div>
           <div class="chart-value" style="color:var(--yellow)"><span id="chart-tokout-val">0</span> <span style="font-size:11px;color:var(--text-muted)">out/s</span></div>
         </div>
-        <canvas class="chart-canvas" id="chart-tokens"></canvas>
+        <canvas class="chart-canvas" id="chart-tokens" aria-label="Gateway token throughput chart"></canvas>
       </div>
       <div class="chart-card">
         <div class="chart-title">Component Health</div>
@@ -1046,7 +1103,7 @@ tbody tr:last-child td { border-bottom: none; }
           <div class="chart-value" style="color:var(--red)"><span id="chart-health-down">0</span> <span style="font-size:11px;color:var(--text-muted)">down</span></div>
           <div class="chart-value" style="color:var(--yellow)"><span id="chart-health-pend">0</span> <span style="font-size:11px;color:var(--text-muted)">pending</span></div>
         </div>
-        <canvas class="chart-canvas" id="chart-health"></canvas>
+        <canvas class="chart-canvas" id="chart-health" aria-label="Component health chart"></canvas>
       </div>
       <div class="chart-card" id="chart-fs-traffic-card" style="display:none">
         <div class="chart-title">Filesync Traffic</div>
@@ -1054,7 +1111,7 @@ tbody tr:last-child td { border-bottom: none; }
           <div class="chart-value" style="color:var(--green)"><span id="chart-fs-dl-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">dl</span></div>
           <div class="chart-value" style="color:var(--purple)"><span id="chart-fs-ul-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">ul</span></div>
         </div>
-        <canvas class="chart-canvas" id="chart-fs-traffic"></canvas>
+        <canvas class="chart-canvas" id="chart-fs-traffic" aria-label="Filesync traffic chart"></canvas>
       </div>
       <div class="chart-card" id="chart-fs-sync-card" style="display:none">
         <div class="chart-title">Filesync Activity</div>
@@ -1062,7 +1119,7 @@ tbody tr:last-child td { border-bottom: none; }
           <div class="chart-value" style="color:var(--cyan)"><span id="chart-fs-cycles-val">0</span> <span style="font-size:11px;color:var(--text-muted)">syncs</span></div>
           <div class="chart-value" style="color:var(--red)"><span id="chart-fs-errors-val">0</span> <span style="font-size:11px;color:var(--text-muted)">errors</span></div>
         </div>
-        <canvas class="chart-canvas" id="chart-fs-sync"></canvas>
+        <canvas class="chart-canvas" id="chart-fs-sync" aria-label="Filesync activity chart"></canvas>
       </div>
     </div>
     <div class="card" id="met-comp-card">
@@ -1083,14 +1140,14 @@ tbody tr:last-child td { border-bottom: none; }
     <div class="card">
       <div class="card-header">
         <span>Prometheus Metrics</span>
-        <input class="search-input" id="met-search" placeholder="Filter metrics..." style="width:220px">
+        <input type="search" class="search-input" id="met-search" placeholder="Filter metrics..." aria-label="Filter metrics" style="width:220px">
       </div>
       <div class="card-body" id="met-body" style="padding:0"></div>
     </div>
   </div>
 
   <!-- API panel -->
-  <div class="panel" id="p-api">
+  <div class="panel" id="p-api" role="tabpanel" aria-labelledby="tab-api">
     <div class="card">
       <div class="card-header"><span>API Endpoints</span></div>
       <div class="card-body" id="api-list"></div>
@@ -1098,7 +1155,7 @@ tbody tr:last-child td { border-bottom: none; }
   </div>
 
   <!-- Debug panel -->
-  <div class="panel" id="p-debug">
+  <div class="panel" id="p-debug" role="tabpanel" aria-labelledby="tab-debug">
     <div class="stats" id="dbg-stats"></div>
     <div class="card">
       <div class="card-header">
@@ -1125,7 +1182,7 @@ tbody tr:last-child td { border-bottom: none; }
       </div>
     </div>
   </div>
-</div>
+</main>
 
 <script>
 // --- State ---
@@ -1140,6 +1197,7 @@ const chartHist = {tx:[], rx:[], streams:[], goroutines:[], fds:[], tokensIn:[],
 let prevTotalTx = 0, prevTotalRx = 0, prevTotalTokIn = 0, prevTotalTokOut = 0, firstTick = true;
 let prevFsDl = 0, prevFsUl = 0, prevFsErrors = 0, prevFsCycles = 0;
 let compMetrics = {};
+let lastSuccessTime = 0;
 
 // --- Tabs ---
 const tabMap = {'/ui':'dashboard','/ui/clipsync':'clipsync','/ui/filesync':'filesync','/ui/gateway':'gateway','/ui/logs':'logs','/ui/metrics':'metrics','/ui/api':'api','/ui/debug':'debug'};
@@ -1193,8 +1251,17 @@ function showTab(name, opts) {
   opts = opts || {};
   const changed = activeTab !== name;
   activeTab = name;
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
-  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'p-'+name));
+  document.querySelectorAll('.tab[role="tab"]').forEach(t => {
+    const sel = t.dataset.tab === name;
+    t.classList.toggle('active', sel);
+    t.setAttribute('aria-selected', sel ? 'true' : 'false');
+    t.tabIndex = sel ? 0 : -1;
+  });
+  document.querySelectorAll('.panel').forEach(p => {
+    const active = p.id === 'p-'+name;
+    p.classList.toggle('active', active);
+    p.setAttribute('aria-hidden', active ? 'false' : 'true');
+  });
   const path = '/ui' + (name === 'dashboard' ? '' : '/'+name);
   // Preserve the hash when pushing so deep-links (e.g. /ui/gateway#sessions/SID)
   // survive programmatic tab changes. Strip the hash for non-gateway tabs.
@@ -1208,7 +1275,17 @@ function showTab(name, opts) {
 }
 
 document.getElementById('tabs').addEventListener('click', e => {
-  if (e.target.classList.contains('tab')) showTab(e.target.dataset.tab, {clearHash: true});
+  if (e.target.classList.contains('tab') && e.target.dataset.tab) showTab(e.target.dataset.tab, {clearHash: true});
+});
+// Arrow-key navigation within the tab bar (WAI-ARIA tabs pattern).
+document.getElementById('tabs').addEventListener('keydown', e => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  const tabs = [...document.querySelectorAll('.tab[role="tab"]')];
+  const cur = tabs.findIndex(t => t.dataset.tab === activeTab);
+  if (cur < 0) return;
+  const next = e.key === 'ArrowRight' ? (cur + 1) % tabs.length : (cur - 1 + tabs.length) % tabs.length;
+  showTab(tabs[next].dataset.tab, {clearHash: true});
+  tabs[next].focus();
 });
 window.addEventListener('popstate', () => { showTab(tabMap[location.pathname] || 'dashboard', {push: false}); });
 window.addEventListener('hashchange', () => { if (activeTab === 'gateway') applyGwHash(); });
@@ -1224,9 +1301,15 @@ function tick() {
   const needClipsync = activeTab === 'dashboard' || activeTab === 'clipsync';
   const needGateway = activeTab === 'gateway';
 
-  const mark = () => { document.getElementById('hdr-status').textContent = 'updated ' + new Date().toLocaleTimeString(); };
-  const fail = (what) => (e) => { document.getElementById('hdr-status').textContent = 'error('+what+'): ' + (e.message||e); };
-  const ok = (r, what) => { if (!r.ok) throw 'HTTP ' + r.status; return r; };
+  const hdr = document.getElementById('hdr-status');
+  const mark = () => { lastSuccessTime = Date.now(); hdr.textContent = 'updated ' + new Date().toLocaleTimeString(); hdr.style.color = ''; };
+  const fail = (what) => (e) => {
+    const stale = lastSuccessTime ? Math.round((Date.now() - lastSuccessTime) / 1000) : 0;
+    const suffix = stale > 5 ? ' (stale '+stale+'s)' : '';
+    hdr.textContent = 'error('+what+'): ' + (e.message||e) + suffix;
+    hdr.style.color = stale > 10 ? 'var(--red)' : 'var(--yellow)';
+  };
+  const ok = (r) => { if (!r.ok) throw 'HTTP ' + r.status; return r; };
 
   fetch('/api/state').then(r=>ok(r)).then(r=>r.json()).then(s => {
     state = s; renderStats(); if (activeTab === 'dashboard') renderComponents(); mark();
@@ -1267,6 +1350,7 @@ function tick() {
     if (activeTab === 'metrics') renderMetrics();
     if (activeTab === 'dashboard') { renderCharts(); renderComponents(); }
     if (activeTab === 'debug') renderDebugStats();
+    mark();
   }).catch(fail('metrics'));
 
   if (needLogs) {
@@ -1319,6 +1403,18 @@ async function loadFileLogs() {
 }
 
 // --- Render ---
+// setHTML: skip innerHTML assignment when content is unchanged. Avoids DOM
+// thrashing, preserves selection/scroll state, and reduces GC pressure on
+// the 1s polling interval.
+const _prevHTML = new WeakMap();
+function setHTML(el, html) {
+  if (typeof el === 'string') el = document.getElementById(el);
+  if (!el) return;
+  const prev = _prevHTML.get(el);
+  if (prev === html) return;
+  _prevHTML.set(el, html);
+  el.innerHTML = html;
+}
 function x(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 // xa: HTML-attribute-safe escape. Use whenever an interpolation lands inside
 // attr="..." (title, data-*, href, src, style). x() alone leaves " and '
@@ -1395,16 +1491,16 @@ function renderStats() {
   const pending = comps.length - up - down;
   const totalFiles = folders.reduce((s,f) => s + (f.file_count||0), 0);
   const totalBytes = folders.reduce((s,f) => s + (f.total_bytes||0), 0);
-  document.getElementById('dash-stats').innerHTML =
+  setHTML('dash-stats',
     stat('Components', comps.length, up+' up') +
     stat('Healthy', up, comps.length ? Math.round(up/comps.length*100)+'%' : '-', up === comps.length ? 'var(--green)' : 'var(--yellow)') +
     stat('Failed', down, '', down > 0 ? 'var(--red)' : 'var(--green)') +
-    stat('Pending', pending, '');
-  document.getElementById('fs-stats').innerHTML =
+    stat('Pending', pending, ''));
+  setHTML('fs-stats',
     stat('Folders', folders.length, '') +
     stat('Total Files', totalFiles.toLocaleString(), '') +
     stat('Total Size', fmtBytes(totalBytes), '') +
-    stat('Conflicts', conflicts.length, '', conflicts.length > 0 ? 'var(--red)' : 'var(--green)');
+    stat('Conflicts', conflicts.length, '', conflicts.length > 0 ? 'var(--red)' : 'var(--green)'));
 }
 
 function stat(label, value, sub, color) {
@@ -1578,7 +1674,7 @@ function renderComponents() {
   const filter = document.getElementById('comp-search').value.toLowerCase();
   const groups = buildComponentTree();
   const el = document.getElementById('comp-body');
-  if (!groups.length) { el.innerHTML = '<tr><td colspan="4" style="color:var(--text-muted);padding:20px">No components</td></tr>'; return; }
+  if (!groups.length) { setHTML(el, '<tr><td colspan="4" style="color:var(--text-muted);padding:20px">No components</td></tr>'); return; }
 
   function matchFilter(node) {
     const c = node.comp;
@@ -1612,7 +1708,7 @@ function renderComponents() {
       html += renderTreeNode(node, 1, filter);
     }
   }
-  el.innerHTML = html;
+  setHTML(el, html);
 }
 
 function renderTreeNode(node, depth, filter) {
@@ -1656,10 +1752,12 @@ function toggleNode(key) {
 
 function renderDashLogs() {
   const el = document.getElementById('dash-logs');
-  if (!logs.length) { el.innerHTML = '<div style="color:var(--text-muted);padding:8px">No logs yet</div>'; return; }
+  if (!logs.length) { setHTML(el, '<div style="color:var(--text-muted);padding:8px">No logs yet</div>'); return; }
   const last = logs.slice(-10);
-  el.innerHTML = last.map(l => '<div class="log-line">' + colorLog(x(l)) + '</div>').join('');
-  el.scrollTop = el.scrollHeight;
+  const html = last.map(l => '<div class="log-line">' + colorLog(x(l)) + '</div>').join('');
+  const changed = _prevHTML.get(el) !== html;
+  setHTML(el, html);
+  if (changed) el.scrollTop = el.scrollHeight;
 }
 
 function peerLabel(p) {
@@ -1865,11 +1963,13 @@ function renderLogs() {
     return '<div class="log-line">' + colorLog(x(l)) + '</div>';
   }).join('');
 
-  el.innerHTML = html || '<div style="color:var(--text-muted);padding:16px">No matching logs</div>';
+  const finalHtml = html || '<div style="color:var(--text-muted);padding:16px">No matching logs</div>';
+  const wasNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+  setHTML(el, finalHtml);
   const suffix = logMode === 'file' && fileLogSize > 0 ? ' (file: ' + (fileLogSize/1024).toFixed(0) + ' KB)' : '';
   document.getElementById('log-count').textContent = shown + ' / ' + total + ' lines' + suffix;
 
-  if (el.scrollHeight - el.scrollTop - el.clientHeight < 100) {
+  if (wasNearBottom) {
     el.scrollTop = el.scrollHeight;
   }
 }
@@ -2075,11 +2175,11 @@ function renderMetrics() {
   const totalSamples = families.reduce((s,f) => s + f.samples.length, 0);
   const gauges = families.filter(f => f.type === 'gauge').length;
   const counters = families.filter(f => f.type === 'counter').length;
-  document.getElementById('met-stats').innerHTML =
+  setHTML('met-stats',
     stat('Metric Families', families.length, '') +
     stat('Total Samples', totalSamples, '') +
     stat('Gauges', gauges, '') +
-    stat('Counters', counters, '');
+    stat('Counters', counters, ''));
 
   const el = document.getElementById('met-body');
   if (!filtered.length) {
@@ -2211,16 +2311,16 @@ function renderClipsync() {
   const sends = clipActivities.filter(a => a.direction === 'send').length;
   const recvs = clipActivities.filter(a => a.direction === 'receive').length;
   const totalSize = clipActivities.reduce((s,a) => s + (a.size||0), 0);
-  document.getElementById('cs-stats').innerHTML =
+  setHTML('cs-stats',
     stat('Total Events', clipActivities.length, sends+' sent, '+recvs+' received') +
-    stat('Total Size', fmtBytes(totalSize), '');
+    stat('Total Size', fmtBytes(totalSize), ''));
 
   const el = document.getElementById('cs-body');
   if (!clipActivities.length) {
-    el.innerHTML = '<tr><td colspan="5" style="color:var(--text-muted);padding:20px">No clipboard activity yet</td></tr>';
+    setHTML(el, '<tr><td colspan="5" style="color:var(--text-muted);padding:20px">No clipboard activity yet</td></tr>');
     return;
   }
-  el.innerHTML = clipActivities.map(a => {
+  setHTML(el, clipActivities.map(a => {
     const dir = a.direction === 'send'
       ? '<span style="color:var(--green)">&#x2191; send</span>'
       : '<span style="color:var(--purple)">&#x2193; receive</span>';
@@ -2236,7 +2336,7 @@ function renderClipsync() {
                      : '<span style="color:var(--text-muted)">-</span>';
     }
     return '<tr><td>'+dir+'</td><td>'+fmtBytes(a.size)+'</td><td>'+content+'</td><td>'+peer+'</td><td style="color:var(--text-muted)">'+ago+'</td></tr>';
-  }).join('');
+  }).join(''));
 }
 
 function fmtBytes(b) {
@@ -4110,7 +4210,7 @@ function renderDebugStats() {
     stat('State Components', stateComps, '') +
     stat('State Metrics', stateMetrics, '');
   if (fds !== null) html += stat('Open FDs', fds, '', fds > 10000 ? 'var(--red)' : fds > 1000 ? 'var(--yellow)' : '');
-  document.getElementById('dbg-stats').innerHTML = html;
+  setHTML('dbg-stats', html);
 }
 
 async function dbgProfile(name) {
@@ -4172,9 +4272,12 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// --- Start ---
-tick();
-setInterval(tick, 1000);
+// --- Visibility-aware polling ---
+let tickTimer = null;
+function startPolling() { if (!tickTimer) { tick(); tickTimer = setInterval(tick, 1000); } }
+function stopPolling() { if (tickTimer) { clearInterval(tickTimer); tickTimer = null; } }
+document.addEventListener('visibilitychange', () => { document.hidden ? stopPolling() : startPolling(); });
+startPolling();
 </script>
 </body>
 </html>`
