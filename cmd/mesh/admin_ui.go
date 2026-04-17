@@ -795,7 +795,8 @@ tbody tr:last-child td { border-bottom: none; }
         <div class="gw-sub-btn" data-sub="requests">Requests</div>
       </div>
     </div>
-    <div id="gw-sess-chips" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px"></div>
+    <div id="gw-sess-chips" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px"></div>
+    <div id="gw-project-chips" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px"></div>
 
     <!-- Overview sub-view -->
     <div id="gw-sub-overview" class="gw-subview">
@@ -900,6 +901,7 @@ tbody tr:last-child td { border-bottom: none; }
               <th data-gwsort="in" style="cursor:pointer">In <span class="sort-arrow"></span></th>
               <th data-gwsort="out" style="cursor:pointer">Out <span class="sort-arrow"></span></th>
               <th data-gwsort="elapsed" style="cursor:pointer">Time <span class="sort-arrow"></span></th>
+              <th data-gwsort="path" style="cursor:pointer">Project <span class="sort-arrow"></span></th>
               <th>Summary</th>
             </tr></thead>
             <tbody id="gw-body"></tbody>
@@ -916,6 +918,8 @@ tbody tr:last-child td { border-bottom: none; }
         <div class="filter-btn" onclick="document.getElementById('gw-detail-card').style.display='none'">close</div>
       </div>
       <div class="card-body padded">
+        <!-- Turn details: audit metadata, tokens, timing — at the top for immediate context -->
+        <div id="gw-turn-details" style="margin-bottom:12px"></div>
         <div class="gw-detail-grid">
           <!-- Row 1: responses (usually smaller, visible immediately) -->
           <details class="gw-detail-pane sec" open>
@@ -974,8 +978,7 @@ tbody tr:last-child td { border-bottom: none; }
             </details>
           </div>
         </div>
-        <!-- Turn details: audit metadata, tokens, timing — below the 4-pane grid -->
-        <div id="gw-turn-details" style="margin-top:12px"></div>
+        <!-- (turn details moved above the grid) -->
       </div>
     </div>
   </div>
@@ -1147,7 +1150,44 @@ let gwHashLast = '';
 let gwHashApplyingDeep = '';
 let gwSelectedSet = new Set();  // empty = all gateways shown
 let gwSessionSet = new Set();   // empty = all sessions shown
+let gwProjectSet = new Set();   // empty = all projects shown
 let gwDetailKey = '';
+
+// extractProject pulls the project path from a request body's system prompt.
+// Mirrors the server-side extractProjectPath: looks for "Primary working
+// directory:" and returns the last two path segments.
+function extractProject(req) {
+  if (req._project !== undefined) return req._project;
+  req._project = '';
+  const body = req.body;
+  if (!body || typeof body !== 'object') return '';
+  // Check system field (Anthropic format).
+  const candidates = [];
+  if (body.system) {
+    if (typeof body.system === 'string') candidates.push(body.system);
+    else if (Array.isArray(body.system)) {
+      for (const b of body.system) if (b.type === 'text' && b.text) candidates.push(b.text);
+    }
+  }
+  // Check system-role messages (OpenAI format).
+  if (Array.isArray(body.messages)) {
+    for (const m of body.messages) {
+      if (m.role === 'system' && typeof m.content === 'string') candidates.push(m.content);
+    }
+  }
+  const marker = 'Primary working directory: ';
+  for (const text of candidates) {
+    const idx = text.indexOf(marker);
+    if (idx < 0) continue;
+    let line = text.slice(idx + marker.length).split('\n')[0].trim();
+    if (!line) continue;
+    line = line.replace(/\\/g, '/').replace(/\/+$/, '');
+    const parts = line.split('/').filter(Boolean);
+    if (parts.length >= 2) { req._project = parts[parts.length-2]+'/'+parts[parts.length-1]; return req._project; }
+    if (parts.length === 1) { req._project = parts[0]; return req._project; }
+  }
+  return '';
+}
 
 function showTab(name, opts) {
   opts = opts || {};
@@ -2233,7 +2273,7 @@ function renderGateway() {
     const meta = document.getElementById('gw-meta');
     if (meta) meta.textContent = '';
     document.getElementById('gw-body').innerHTML =
-      '<tr><td colspan="12" style="color:var(--text-muted);padding:20px">No gateways with audit logging configured. Set log.level: full or metadata in the gateway YAML to populate this view.</td></tr>';
+      '<tr><td colspan="13" style="color:var(--text-muted);padding:20px">No gateways with audit logging configured. Set log.level: full or metadata in the gateway YAML to populate this view.</td></tr>';
     document.getElementById('gw-kpi').innerHTML =
       '<div class="stat" style="grid-column:1/-1;color:var(--text-muted)">No gateway audit data yet. Configure log.level to populate this view.</div>';
     return;
@@ -2311,6 +2351,29 @@ function renderGateway() {
     }
   }
 
+  // Project filter chips — extracted from request bodies.
+  const projectIds = [...new Set(pairs.map(p => extractProject(p.req)).filter(Boolean))].sort();
+  for (const s of gwProjectSet) { if (!projectIds.includes(s)) gwProjectSet.delete(s); }
+  const projBar = document.getElementById('gw-project-chips');
+  if (projBar) {
+    if (projectIds.length > 1) {
+      projBar.style.display = '';
+      projBar.innerHTML = '<span style="color:var(--text-muted);font-size:11px;margin-right:4px">project:</span>' + projectIds.map(pid => {
+        const on = gwProjectSet.has(pid) ? ' on' : '';
+        return '<span class="gw-chip'+on+'" data-proj="'+xa(pid)+'" style="color:var(--cyan)">'+x(pid)+'</span>';
+      }).join('');
+      projBar.querySelectorAll('.gw-chip').forEach(c => c.addEventListener('click', () => {
+        const pid = c.dataset.proj;
+        if (gwProjectSet.has(pid)) gwProjectSet.delete(pid); else gwProjectSet.add(pid);
+        renderGateway();
+        writeGwHash();
+      }));
+    } else {
+      projBar.style.display = 'none';
+      projBar.innerHTML = '';
+    }
+  }
+
   const nGw = activeGws.length;
   if (nGw !== 1) {
     document.getElementById('gw-meta').innerHTML =
@@ -2330,6 +2393,7 @@ function renderGateway() {
     const outcomeFilter = gwOutcomeFilter;
     const filtered = pairs.filter(p => {
       if (gwSessionSet.size > 0 && !gwSessionSet.has(p.req.session_id||'')) return false;
+      if (gwProjectSet.size > 0 && !gwProjectSet.has(extractProject(p.req))) return false;
       if (outcomeFilter && (p.resp.outcome||'') !== outcomeFilter) return false;
       if (!term) return true;
       // Lazy haystack: only JSON.stringify when the user is actually searching.
@@ -2357,6 +2421,7 @@ function renderGateway() {
         case 'in': return (p.resp.usage||{}).input_tokens||0;
         case 'out': return (p.resp.usage||{}).output_tokens||0;
         case 'elapsed': return p.resp.elapsed_ms||0;
+        case 'path': return extractProject(p.req)||p.req.path||'';
         default: return '';
       }
     }
@@ -2374,7 +2439,7 @@ function renderGateway() {
 
     const body = document.getElementById('gw-body');
     if (!filtered.length) {
-      body.innerHTML = '<tr><td colspan="12" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
+      body.innerHTML = '<tr><td colspan="13" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
     } else {
     body.innerHTML = filtered.map(p => {
       const ts = p.resp.ts||p.req.ts||'';
@@ -2391,6 +2456,7 @@ function renderGateway() {
       const outcome = p.resp.outcome || '-';
       const outcomeColor = outcome === 'ok' ? 'var(--green)' : outcome === 'error' ? 'var(--red)' : 'var(--yellow)';
       const u = p.resp.usage || {};
+      const project = extractProject(p.req) || p.req.path || '-';
       const summary = renderGwSummaryCell(p.resp);
       return '<tr style="cursor:pointer" onclick="showGwDetail(\''+xj(p.key)+'\')">'+
         '<td style="color:var(--text-muted);white-space:nowrap">'+fmtLocalTime(ts)+'</td>'+
@@ -2404,6 +2470,7 @@ function renderGateway() {
         '<td>'+fmtTokensHtml(u.input_tokens)+'</td>'+
         '<td>'+fmtTokensHtml(u.output_tokens)+'</td>'+
         '<td>'+fmtElapsedHtml(p.resp.elapsed_ms)+'</td>'+
+        '<td style="color:var(--cyan);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+xa(project)+'">'+x(project)+'</td>'+
         '<td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)">'+summary+'</td>'+
         '</tr>';
     }).join('');
@@ -3642,6 +3709,7 @@ function writeGwHash() {
   const params = [];
   if (gwSelectedSet.size > 0) params.push('gw='+[...gwSelectedSet].map(encodeURIComponent).join(','));
   if (gwSessionSet.size > 0) params.push('sess='+[...gwSessionSet].map(encodeURIComponent).join(','));
+  if (gwProjectSet.size > 0) params.push('proj='+[...gwProjectSet].map(encodeURIComponent).join(','));
   if (gwWindow && gwWindow !== '24h') params.push('window='+encodeURIComponent(gwWindow));
   if (gwSubview === 'requests' && gwDetailKey) params.push('detail='+encodeURIComponent(gwDetailKey));
   let h = '#' + parts[0] + (params.length ? '?' + params.join('&') : '');
@@ -3667,6 +3735,7 @@ function parseGwHash() {
     sub: sub || 'overview',
     gw: p.gw ? p.gw.split(',').map(decodeURIComponent) : [],
     sess: p.sess ? p.sess.split(',').map(decodeURIComponent) : [],
+    proj: p.proj ? p.proj.split(',').map(decodeURIComponent) : [],
     window: p.window ? decodeURIComponent(p.window) : '',
     detail: p.detail ? decodeURIComponent(p.detail) : '',
   };
@@ -3680,6 +3749,7 @@ function applyGwHash() {
   // Restore gateway and session selections from URL.
   if (parsed.gw.length) gwSelectedSet = new Set(parsed.gw);
   if (parsed.sess.length) gwSessionSet = new Set(parsed.sess);
+  if (parsed.proj.length) gwProjectSet = new Set(parsed.proj);
   // Restore time window.
   if (parsed.window) {
     gwWindow = parsed.window;
