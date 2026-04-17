@@ -116,10 +116,8 @@ thead th {
   text-align: left; padding: 8px 12px; font-weight: 500;
   color: var(--text-muted); font-size: 11px; text-transform: uppercase;
   letter-spacing: 0.5px; border-bottom: 1px solid var(--border);
-  user-select: none; white-space: nowrap;
+  user-select: none; white-space: nowrap; position: relative;
 }
-thead th[data-sort], thead th[data-gwsort] { cursor: pointer; }
-thead th[data-sort]:hover, thead th[data-gwsort]:hover { color: var(--text-dim); }
 thead th .sort-arrow { margin-left: 4px; font-size: 10px; }
 tbody td {
   padding: 8px 12px; border-bottom: 1px solid var(--border);
@@ -127,6 +125,84 @@ tbody td {
 }
 tbody tr:hover { background: var(--bg-hover); }
 tbody tr:last-child td { border-bottom: none; }
+
+/* Column filter system */
+.tf-th { cursor: pointer; }
+.tf-th:hover { color: var(--text-dim); }
+.tf-th .tf-icon {
+  display: inline-block; margin-left: 4px; font-size: 9px;
+  color: var(--text-muted); vertical-align: middle;
+}
+.tf-th.tf-filtered .tf-icon { color: var(--green); }
+.tf-th.tf-sorted .sort-arrow { color: var(--green); }
+.tf-dd {
+  position: absolute; top: 100%; left: 0; z-index: 100;
+  min-width: 200px; max-width: 320px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  padding: 0; display: none; font-weight: 400; text-transform: none;
+  letter-spacing: 0;
+}
+.tf-dd.open { display: block; }
+.tf-dd-sort { display: flex; border-bottom: 1px solid var(--border); }
+.tf-dd-sort button {
+  flex: 1; padding: 6px 8px; background: none; border: none; border-right: 1px solid var(--border);
+  color: var(--text-dim); font-size: 11px; cursor: pointer; font-family: inherit;
+}
+.tf-dd-sort button:last-child { border-right: none; }
+.tf-dd-sort button:hover { color: var(--text); background: var(--bg-hover); }
+.tf-dd-sort button.active { color: var(--green); }
+.tf-dd-search {
+  padding: 6px 8px; border-bottom: 1px solid var(--border);
+}
+.tf-dd-search input {
+  width: 100%; padding: 4px 8px; background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text); font-size: 11px; font-family: var(--mono); outline: none;
+}
+.tf-dd-search input:focus { border-color: var(--green); }
+.tf-dd-actions {
+  display: flex; gap: 4px; padding: 4px 8px; border-bottom: 1px solid var(--border);
+  font-size: 10px;
+}
+.tf-dd-actions button {
+  background: none; border: none; color: var(--text-muted); cursor: pointer;
+  font-size: 10px; padding: 2px 4px; font-family: inherit;
+}
+.tf-dd-actions button:hover { color: var(--green); }
+.tf-dd-list {
+  max-height: 240px; overflow-y: auto; padding: 4px 0;
+}
+.tf-dd-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 8px; font-size: 11px; color: var(--text);
+  cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tf-dd-item:hover { background: var(--bg-hover); }
+.tf-dd-item input[type="checkbox"] { accent-color: var(--green); flex-shrink: 0; }
+.tf-dd-item .tf-val { overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); }
+.tf-dd-item .tf-cnt { margin-left: auto; color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
+.tf-dd-footer {
+  padding: 4px 8px; border-top: 1px solid var(--border);
+  font-size: 10px; color: var(--text-muted); text-align: center;
+}
+.tf-active-bar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 6px 12px; font-size: 11px; border-bottom: 1px solid var(--border);
+}
+.tf-active-bar:empty { display: none; }
+.tf-filter-tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 10px; font-size: 10px; color: var(--text-dim); font-family: var(--mono);
+  cursor: pointer; white-space: nowrap;
+}
+.tf-filter-tag:hover { border-color: var(--red); color: var(--red); }
+.tf-filter-tag .tf-tag-x { font-size: 12px; line-height: 1; }
+.tf-clear-all {
+  background: none; border: none; color: var(--text-muted); cursor: pointer;
+  font-size: 10px; padding: 2px 6px; font-family: inherit;
+}
+.tf-clear-all:hover { color: var(--red); }
 
 /* Tree table */
 .tree-group td { background: var(--bg-alt); font-weight: 600; cursor: pointer; user-select: none; }
@@ -768,8 +844,9 @@ select option { background: var(--bg-card); color: var(--text); }
       <div class="card-header"><span>Recent Activity</span></div>
       <div class="card-body">
         <div class="table-scroll">
+        <div id="cs-filter-bar" class="tf-active-bar"></div>
         <table>
-          <thead><tr>
+          <thead id="cs-thead"><tr>
             <th>Direction</th>
             <th>Size</th>
             <th>Content</th>
@@ -789,20 +866,13 @@ select option { background: var(--bg-card); color: var(--text); }
     <div class="card">
       <div class="card-header">
         <span>Folders</span>
-        <input type="search" class="search-input" id="fs-search" placeholder="Filter folders..." aria-label="Filter folders" style="width:220px">
       </div>
       <div class="card-body">
+        <div id="fs-filter-bar" class="tf-active-bar"></div>
         <div class="table-scroll">
         <table>
-          <thead><tr>
-            <th data-sort="id">ID <span class="sort-arrow"></span></th>
-            <th data-sort="path">Path <span class="sort-arrow"></span></th>
-            <th data-sort="direction">Direction <span class="sort-arrow"></span></th>
-            <th data-sort="file_count">Files <span class="sort-arrow"></span></th>
-            <th data-sort="dir_count">Dirs <span class="sort-arrow"></span></th>
-            <th data-sort="total_bytes">Size <span class="sort-arrow"></span></th>
-            <th data-sort="last_sync">Last sync <span class="sort-arrow"></span></th>
-            <th data-sort="peers">Peers <span class="sort-arrow"></span></th>
+          <thead id="fs-thead"><tr>
+            <th>ID</th><th>Path</th><th>Direction</th><th>Files</th><th>Dirs</th><th>Size</th><th>Last sync</th><th>Peers</th>
           </tr></thead>
           <tbody id="fs-body"><tr class="loading-row"><td colspan="8">Loading folders…</td></tr></tbody>
         </table>
@@ -813,8 +883,9 @@ select option { background: var(--bg-card); color: var(--text); }
       <div class="card-header"><span>Conflicts</span><span class="badge badge-ok" id="conflict-count">0</span></div>
       <div class="card-body">
         <div class="table-scroll">
+        <div id="conflict-filter-bar" class="tf-active-bar"></div>
         <table>
-          <thead><tr><th>Folder</th><th>Path</th></tr></thead>
+          <thead id="conflict-thead"><tr><th>Folder</th><th>Path</th></tr></thead>
           <tbody id="conflict-body"><tr class="loading-row"><td colspan="2">Loading conflicts…</td></tr></tbody>
         </table>
         </div>
@@ -824,8 +895,9 @@ select option { background: var(--bg-card); color: var(--text); }
       <div class="card-header"><span>Recent Activity</span></div>
       <div class="card-body">
         <div class="table-scroll">
+        <div id="fsa-filter-bar" class="tf-active-bar"></div>
         <table>
-          <thead><tr><th>Direction</th><th>Folder</th><th>Peer</th><th>Files</th><th>Size</th><th>Time</th></tr></thead>
+          <thead id="fsa-thead"><tr><th>Direction</th><th>Folder</th><th>Peer</th><th>Files</th><th>Size</th><th>Time</th></tr></thead>
           <tbody id="fsa-body"><tr class="loading-row"><td colspan="6">Loading activity…</td></tr></tbody>
         </table>
         </div>
@@ -928,35 +1000,17 @@ select option { background: var(--bg-card); color: var(--text); }
     <div class="card">
       <div class="card-header">
         <span>Requests</span>
-        <div style="display:flex;gap:8px">
-          <input type="search" class="search-input" id="gw-search" placeholder="Filter rows..." aria-label="Filter gateway rows" style="width:220px">
-          <select id="gw-outcome" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
-            <option value="">all outcomes</option>
-            <option value="ok">ok</option>
-            <option value="error">error</option>
-            <option value="truncated">truncated</option>
-            <option value="client_cancelled">client_cancelled</option>
-          </select>
-        </div>
       </div>
       <div class="card-body">
         <div id="gw-meta" style="font-size:12px;color:var(--text-muted);margin-bottom:8px"></div>
+        <div id="gw-filter-bar" class="tf-active-bar"></div>
         <div class="gw-scroll">
           <table>
-            <thead><tr>
-              <th data-gwsort="ts" style="cursor:pointer">Time <span class="sort-arrow"></span></th>
-              <th data-gwsort="gw" style="cursor:pointer">Gateway <span class="sort-arrow"></span></th>
-              <th data-gwsort="session" style="cursor:pointer">Session <span class="sort-arrow"></span></th>
-              <th data-gwsort="dir" style="cursor:pointer">Dir <span class="sort-arrow"></span></th>
-              <th data-gwsort="model" style="cursor:pointer">Client model <span class="sort-arrow"></span></th>
-              <th data-gwsort="upmodel" style="cursor:pointer">Upstream model <span class="sort-arrow"></span></th>
-              <th data-gwsort="status" style="cursor:pointer">Status <span class="sort-arrow"></span></th>
-              <th data-gwsort="outcome" style="cursor:pointer">Outcome <span class="sort-arrow"></span></th>
-              <th data-gwsort="in" style="cursor:pointer">In <span class="sort-arrow"></span></th>
-              <th data-gwsort="out" style="cursor:pointer">Out <span class="sort-arrow"></span></th>
-              <th data-gwsort="elapsed" style="cursor:pointer">Time <span class="sort-arrow"></span></th>
-              <th data-gwsort="path" style="cursor:pointer">Project <span class="sort-arrow"></span></th>
-              <th>Summary</th>
+            <thead id="gw-thead"><tr>
+              <th>Time</th><th>Gateway</th><th>Session</th><th>Dir</th>
+              <th>Client model</th><th>Upstream model</th><th>Status</th>
+              <th>Outcome</th><th>In</th><th>Out</th><th>Elapsed</th>
+              <th>Project</th><th>Summary</th>
             </tr></thead>
             <tbody id="gw-body"></tbody>
           </table>
@@ -1188,7 +1242,6 @@ select option { background: var(--bg-card); color: var(--text); }
 // --- State ---
 let state = {}, logs = [], folders = [], conflicts = [], clipActivities = [], fsActivities = [], metricsText = '', gatewayAudit = [], gwStats = null, gwSubview = 'overview', gwWindow = '24h';
 function gwBucket(w) { return w === '1h' ? 'minute' : w === '24h' ? 'hour' : w === '7d' ? 'hour' : 'day'; }
-let fsSort = {col:'id', asc:true};
 let logLevel = 'all';
 let logMode = 'recent'; // 'recent' (ring buffer) or 'file' (full log file)
 let fileLogLines = [], fileLogSize = 0, fileLogLoaded = false;
@@ -1415,6 +1468,283 @@ function setHTML(el, html) {
   _prevHTML.set(el, html);
   el.innerHTML = html;
 }
+// --- TF: Table Filter/Sort System ---
+// Generic Excel-like column filtering + sorting. Each table registers with
+// TF.register(id, {columns, renderRow, onUpdate, tbody, emptyText}).
+// Columns: [{key, label, type:'text'|'number'|'date', extract:(row)=>displayVal}]
+// TF handles: multi-select per-column filters, sort asc/desc, dropdown UI.
+const TF = (() => {
+  const tables = {};    // id → config
+  const fstate = {};    // id → {sort:{col,asc}, filters:{col→Set}}
+  let openDD = null;    // currently open dropdown {tableId, colKey, el}
+
+  function reg(id, cfg) {
+    tables[id] = cfg;
+    if (!fstate[id]) fstate[id] = {sort:{col:'', asc:true}, filters:{}};
+  }
+
+  function getState(id) {
+    if (!fstate[id]) fstate[id] = {sort:{col:'', asc:true}, filters:{}};
+    return fstate[id];
+  }
+
+  // Apply filters + sort to rows. Returns filtered+sorted array.
+  function apply(id, rows) {
+    const cfg = tables[id];
+    if (!cfg) return rows;
+    const st = getState(id);
+    let out = rows;
+    // Column filters
+    for (const col of cfg.columns) {
+      const sel = st.filters[col.key];
+      if (!sel || sel.size === 0) continue;
+      out = out.filter(r => {
+        const v = String(col.extract ? col.extract(r) : (r[col.key]||''));
+        return sel.has(v);
+      });
+    }
+    // Sort
+    if (st.sort.col) {
+      const col = cfg.columns.find(c => c.key === st.sort.col);
+      if (col) {
+        const asc = st.sort.asc;
+        const tp = col.type || 'text';
+        out = [...out].sort((a, b) => {
+          let va = col.extract ? col.extract(a) : (a[col.key]||'');
+          let vb = col.extract ? col.extract(b) : (b[col.key]||'');
+          if (tp === 'number') { va = Number(va)||0; vb = Number(vb)||0; return asc ? va-vb : vb-va; }
+          if (tp === 'date') { va = va ? new Date(va).getTime() : 0; vb = vb ? new Date(vb).getTime() : 0; return asc ? va-vb : vb-va; }
+          return asc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+        });
+      }
+    }
+    return out;
+  }
+
+  // Build the <thead> HTML with filter-enabled headers.
+  function thead(id) {
+    const cfg = tables[id];
+    if (!cfg) return '';
+    const st = getState(id);
+    return '<tr>' + cfg.columns.map(col => {
+      const sorted = st.sort.col === col.key;
+      const filtered = st.filters[col.key] && st.filters[col.key].size > 0;
+      const arrow = sorted ? (st.sort.asc ? '&#9650;' : '&#9660;') : '';
+      const cls = 'tf-th' + (filtered ? ' tf-filtered' : '') + (sorted ? ' tf-sorted' : '');
+      return '<th class="'+cls+'" data-tf="'+col.key+'" data-table="'+id+'">' +
+        col.label +
+        '<span class="sort-arrow">'+arrow+'</span>' +
+        '<span class="tf-icon">'+(filtered ? '&#9673;' : '&#9662;')+'</span>' +
+      '</th>';
+    }).join('') + '</tr>';
+  }
+
+  // Render active filter tags bar.
+  function filterBar(id) {
+    const cfg = tables[id];
+    if (!cfg) return '';
+    const st = getState(id);
+    const tags = [];
+    for (const col of cfg.columns) {
+      const sel = st.filters[col.key];
+      if (!sel || sel.size === 0) continue;
+      const vals = [...sel];
+      const label = vals.length <= 2 ? vals.map(v => x(v)).join(', ') : vals.length + ' selected';
+      tags.push('<span class="tf-filter-tag" onclick="TF.clearCol(\''+col.key+'\',\''+id+'\')" title="'+vals.map(v=>xa(v)).join(', ')+'">' +
+        x(col.label) + ': ' + label + ' <span class="tf-tag-x">&times;</span></span>');
+    }
+    if (!tags.length) return '';
+    return tags.join('') +
+      '<button class="tf-clear-all" onclick="TF.clearAll(\''+id+'\')">Clear all</button>';
+  }
+
+  // Count unique values for a column across the UNFILTERED data (so the user
+  // can see what options exist even when other columns have active filters).
+  function uniqueVals(id, colKey, allRows) {
+    const cfg = tables[id];
+    const col = cfg.columns.find(c => c.key === colKey);
+    if (!col) return [];
+    const counts = {};
+    for (const r of allRows) {
+      const v = String(col.extract ? col.extract(r) : (r[col.key]||''));
+      counts[v] = (counts[v]||0) + 1;
+    }
+    // Sort by count desc, then alpha.
+    return Object.entries(counts)
+      .sort((a,b) => b[1]-a[1] || a[0].localeCompare(b[0]))
+      .map(([val, cnt]) => ({val, cnt}));
+  }
+
+  // Open dropdown for a column.
+  function openDropdown(tableId, colKey, thEl) {
+    closeDropdown();
+    const cfg = tables[tableId];
+    const col = cfg.columns.find(c => c.key === colKey);
+    if (!col) return;
+    const st = getState(tableId);
+    const sel = st.filters[colKey] || new Set();
+    const allRows = cfg.allRows || [];
+    const vals = uniqueVals(tableId, colKey, allRows);
+
+    const dd = document.createElement('div');
+    dd.className = 'tf-dd open';
+    dd.onclick = e => e.stopPropagation();
+
+    // Sort buttons
+    const sortDiv = document.createElement('div');
+    sortDiv.className = 'tf-dd-sort';
+    const btnAsc = document.createElement('button');
+    btnAsc.textContent = '↑ Sort A→Z';
+    btnAsc.className = st.sort.col === colKey && st.sort.asc ? 'active' : '';
+    btnAsc.onclick = () => { st.sort = {col: colKey, asc: true}; closeDropdown(); cfg.onUpdate(); };
+    const btnDesc = document.createElement('button');
+    btnDesc.textContent = '↓ Sort Z→A';
+    btnDesc.className = st.sort.col === colKey && !st.sort.asc ? 'active' : '';
+    btnDesc.onclick = () => { st.sort = {col: colKey, asc: false}; closeDropdown(); cfg.onUpdate(); };
+    const btnClearSort = document.createElement('button');
+    btnClearSort.textContent = '× Clear';
+    btnClearSort.onclick = () => { if (st.sort.col === colKey) st.sort = {col:'',asc:true}; closeDropdown(); cfg.onUpdate(); };
+    sortDiv.append(btnAsc, btnDesc, btnClearSort);
+    dd.append(sortDiv);
+
+    // Search within values
+    const searchDiv = document.createElement('div');
+    searchDiv.className = 'tf-dd-search';
+    const searchInput = document.createElement('input');
+    searchInput.placeholder = 'Search...';
+    searchInput.oninput = () => renderItems(searchInput.value.toLowerCase());
+    searchDiv.append(searchInput);
+    dd.append(searchDiv);
+
+    // Select all / none
+    const actDiv = document.createElement('div');
+    actDiv.className = 'tf-dd-actions';
+    const btnAll = document.createElement('button');
+    btnAll.textContent = 'Select all';
+    btnAll.onclick = () => { st.filters[colKey] = new Set(); closeDropdown(); cfg.onUpdate(); };
+    const btnNone = document.createElement('button');
+    btnNone.textContent = 'Select none';
+    btnNone.onclick = () => {
+      const visible = [...listDiv.querySelectorAll('.tf-dd-item:not([style*="display: none"])')];
+      const visibleVals = visible.map(el => el.dataset.val);
+      // Invert: select only those NOT visible (effectively hide all visible)
+      const allVals = vals.map(v => v.val);
+      const keep = allVals.filter(v => !visibleVals.includes(v));
+      st.filters[colKey] = keep.length ? new Set(keep) : new Set(['__tf_none__']);
+      closeDropdown(); cfg.onUpdate();
+    };
+    const btnOnly = document.createElement('button');
+    btnOnly.textContent = 'Only visible';
+    btnOnly.onclick = () => {
+      const visible = [...listDiv.querySelectorAll('.tf-dd-item:not([style*="display: none"])')];
+      st.filters[colKey] = new Set(visible.map(el => el.dataset.val));
+      closeDropdown(); cfg.onUpdate();
+    };
+    actDiv.append(btnAll, btnNone, btnOnly);
+    dd.append(actDiv);
+
+    // Value list with checkboxes
+    const listDiv = document.createElement('div');
+    listDiv.className = 'tf-dd-list';
+
+    function renderItems(search) {
+      listDiv.querySelectorAll('.tf-dd-item').forEach(el => {
+        el.style.display = !search || el.dataset.val.toLowerCase().includes(search) ? '' : 'none';
+      });
+    }
+
+    for (const {val, cnt} of vals) {
+      const item = document.createElement('label');
+      item.className = 'tf-dd-item';
+      item.dataset.val = val;
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = sel.size === 0 || sel.has(val);
+      cb.onchange = () => {
+        // Rebuild the selection set from all checkboxes.
+        const cbs = listDiv.querySelectorAll('input[type="checkbox"]');
+        const checked = [...cbs].filter(c => c.checked).map(c => c.closest('.tf-dd-item').dataset.val);
+        if (checked.length === vals.length || checked.length === 0) {
+          delete st.filters[colKey];
+        } else {
+          st.filters[colKey] = new Set(checked);
+        }
+        cfg.onUpdate();
+        // Update header without closing dropdown
+        const th = document.querySelector('th[data-tf="'+colKey+'"][data-table="'+tableId+'"]');
+        if (th) {
+          const filtered = st.filters[colKey] && st.filters[colKey].size > 0;
+          th.classList.toggle('tf-filtered', filtered);
+          const icon = th.querySelector('.tf-icon');
+          if (icon) icon.innerHTML = filtered ? '&#9673;' : '&#9662;';
+        }
+      };
+      const valSpan = document.createElement('span');
+      valSpan.className = 'tf-val';
+      valSpan.textContent = val || '(empty)';
+      valSpan.title = val;
+      const cntSpan = document.createElement('span');
+      cntSpan.className = 'tf-cnt';
+      cntSpan.textContent = cnt;
+      item.append(cb, valSpan, cntSpan);
+      listDiv.append(item);
+    }
+    dd.append(listDiv);
+
+    // Footer with count
+    const footer = document.createElement('div');
+    footer.className = 'tf-dd-footer';
+    footer.textContent = vals.length + ' unique values';
+    dd.append(footer);
+
+    thEl.append(dd);
+    openDD = {tableId, colKey, el: dd};
+    setTimeout(() => searchInput.focus(), 0);
+  }
+
+  function closeDropdown() {
+    if (openDD) { openDD.el.remove(); openDD = null; }
+  }
+
+  // Click on <th> to open dropdown.
+  document.addEventListener('click', e => {
+    const th = e.target.closest('th.tf-th');
+    if (th && th.dataset.tf && th.dataset.table) {
+      e.stopPropagation();
+      if (openDD && openDD.tableId === th.dataset.table && openDD.colKey === th.dataset.tf) {
+        closeDropdown();
+      } else {
+        openDropdown(th.dataset.table, th.dataset.tf, th);
+      }
+      return;
+    }
+    closeDropdown();
+  });
+
+  // Escape closes dropdown.
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && openDD) { closeDropdown(); e.stopPropagation(); } }, true);
+
+  function clearCol(colKey, tableId) {
+    const st = getState(tableId);
+    delete st.filters[colKey];
+    tables[tableId].onUpdate();
+  }
+
+  function clearAll(tableId) {
+    const st = getState(tableId);
+    st.filters = {};
+    st.sort = {col:'', asc:true};
+    tables[tableId].onUpdate();
+  }
+
+  // Store unfiltered rows so dropdown can show all values.
+  function setRows(id, rows) {
+    if (tables[id]) tables[id].allRows = rows;
+  }
+
+  return {reg, apply, thead, filterBar, setRows, clearCol, clearAll, closeDropdown, getState};
+})();
+
 function x(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 // xa: HTML-attribute-safe escape. Use whenever an interpolation lands inside
 // attr="..." (title, data-*, href, src, style). x() alone leaves " and '
@@ -1853,28 +2183,12 @@ function renderFolderDetail(f) {
 }
 
 function renderFilesync() {
-  const filter = document.getElementById('fs-search').value.toLowerCase();
-  let rows = folders.filter(f => {
-    if (!filter) return true;
-    const peerText = (f.peers||[]).map(peerLabel).join(' ');
-    return (f.id+f.path+f.direction+peerText).toLowerCase().includes(filter);
-  });
-  rows.sort((a,b) => {
-    let va, vb;
-    if (fsSort.col === 'file_count' || fsSort.col === 'dir_count' || fsSort.col === 'total_bytes') {
-      va = a[fsSort.col]||0; vb = b[fsSort.col]||0; return fsSort.asc ? va-vb : vb-va;
-    }
-    if (fsSort.col === 'last_sync') {
-      va = a.last_sync ? Date.parse(a.last_sync) : 0;
-      vb = b.last_sync ? Date.parse(b.last_sync) : 0;
-      return fsSort.asc ? va-vb : vb-va;
-    }
-    if (fsSort.col === 'peers') { va = (a.peers||[]).map(peerLabel).join(','); vb = (b.peers||[]).map(peerLabel).join(','); }
-    else { va = String(a[fsSort.col]||''); vb = String(b[fsSort.col]||''); }
-    return fsSort.asc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
-  });
+  TF.setRows('fs', folders);
+  setHTML('fs-thead', TF.thead('fs'));
+  setHTML('fs-filter-bar', TF.filterBar('fs'));
+  const rows = TF.apply('fs', folders);
   const el = document.getElementById('fs-body');
-  if (!rows.length) { el.innerHTML = '<tr><td colspan="8" style="color:var(--text-muted);padding:20px">No folders</td></tr>'; return; }
+  if (!rows.length) { el.innerHTML = '<tr><td colspan="8" style="color:var(--text-muted);padding:20px">'+(folders.length ? 'No rows match the current filter.' : 'No folders')+'</td></tr>'; return; }
   let html = '';
   for (const f of rows) {
     const dirBadge = f.direction === 'send-receive' ? 'badge-ok' :
@@ -1918,16 +2232,24 @@ function renderConflicts() {
   const cnt = document.getElementById('conflict-count');
   cnt.textContent = conflicts.length;
   cnt.className = 'badge ' + (conflicts.length > 0 ? 'badge-err' : 'badge-ok');
-  if (!conflicts.length) { el.innerHTML = '<tr><td colspan="2" style="color:var(--text-muted);padding:16px">No conflicts</td></tr>'; return; }
-  el.innerHTML = conflicts.map(c =>
+  TF.setRows('conflict', conflicts);
+  setHTML('conflict-thead', TF.thead('conflict'));
+  setHTML('conflict-filter-bar', TF.filterBar('conflict'));
+  const rows = TF.apply('conflict', conflicts);
+  if (!rows.length) { el.innerHTML = '<tr><td colspan="2" style="color:var(--text-muted);padding:16px">'+(conflicts.length ? 'No rows match the current filter.' : 'No conflicts')+'</td></tr>'; return; }
+  el.innerHTML = rows.map(c =>
     '<tr><td>'+x(c.folder_id)+'</td><td style="color:var(--red)">'+x(c.path)+'</td></tr>'
   ).join('');
 }
 
 function renderFsActivity() {
+  TF.setRows('fsa', fsActivities);
+  setHTML('fsa-thead', TF.thead('fsa'));
+  setHTML('fsa-filter-bar', TF.filterBar('fsa'));
   const el = document.getElementById('fsa-body');
-  if (!fsActivities.length) { el.innerHTML = '<tr><td colspan="6" style="color:var(--text-muted);padding:16px">No activity yet</td></tr>'; return; }
-  el.innerHTML = fsActivities.map(a => {
+  const rows = TF.apply('fsa', fsActivities);
+  if (!rows.length) { el.innerHTML = '<tr><td colspan="6" style="color:var(--text-muted);padding:16px">'+(fsActivities.length ? 'No rows match the current filter.' : 'No activity yet')+'</td></tr>'; return; }
+  el.innerHTML = rows.map(a => {
     const badge = a.direction === 'download' ? 'badge-ok' : a.direction === 'upload' ? 'badge-warn' : '';
     return '<tr><td><span class="badge '+badge+'">'+x(a.direction)+'</span></td><td>'+x(a.folder)+'</td><td>'+x(a.peer)+'</td><td>'+a.files+'</td><td>'+fmtBytes(a.bytes)+'</td><td>'+timeAgo(a.time)+'</td></tr>';
   }).join('');
@@ -2246,18 +2568,8 @@ document.getElementById('met-search').addEventListener('input', () => {
   metSearchTimer = setTimeout(() => { metSearchTimer = 0; renderMetrics(); }, 150);
 });
 
-// --- Sorting ---
-document.querySelectorAll('#p-filesync th[data-sort]').forEach(th => {
-  th.addEventListener('click', () => {
-    if (fsSort.col === th.dataset.sort) fsSort.asc = !fsSort.asc;
-    else { fsSort.col = th.dataset.sort; fsSort.asc = true; }
-    renderFilesync();
-  });
-});
-
 // --- Filters ---
 document.getElementById('comp-search').addEventListener('input', renderComponents);
-document.getElementById('fs-search').addEventListener('input', renderFilesync);
 document.getElementById('log-search').addEventListener('input', renderLogs);
 document.querySelectorAll('.filter-btn[data-level]').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -2315,12 +2627,16 @@ function renderClipsync() {
     stat('Total Events', clipActivities.length, sends+' sent, '+recvs+' received') +
     stat('Total Size', fmtBytes(totalSize), ''));
 
+  TF.setRows('cs', clipActivities);
+  setHTML('cs-thead', TF.thead('cs'));
+  setHTML('cs-filter-bar', TF.filterBar('cs'));
   const el = document.getElementById('cs-body');
-  if (!clipActivities.length) {
-    setHTML(el, '<tr><td colspan="5" style="color:var(--text-muted);padding:20px">No clipboard activity yet</td></tr>');
+  const rows = TF.apply('cs', clipActivities);
+  if (!rows.length) {
+    setHTML(el, '<tr><td colspan="5" style="color:var(--text-muted);padding:20px">'+(clipActivities.length ? 'No rows match the current filter.' : 'No clipboard activity yet')+'</td></tr>');
     return;
   }
-  setHTML(el, clipActivities.map(a => {
+  setHTML(el, rows.map(a => {
     const dir = a.direction === 'send'
       ? '<span style="color:var(--green)">&#x2191; send</span>'
       : '<span style="color:var(--purple)">&#x2193; receive</span>';
@@ -2364,10 +2680,6 @@ function timeAgo(ts) {
 // initial applyGwHash() (which may call jumpToPair) does not hit the TDZ.
 let gwRowsCache = []; // resp rows joined with their req row, newest first
 let gwRowsByKey = new Map(); // key "run|id" → pair, for click-to-detail across refreshes
-let gwSearchTerm = '';
-let gwOutcomeFilter = '';
-let gwSort = {col: 'ts', asc: false}; // default: newest first
-let gwSearchTimer = 0;  // debounce handle for the search input
 
 function renderGateway() {
   gwFresh();
@@ -2511,53 +2823,15 @@ function renderGateway() {
   }
 
   if (gwSubview === 'requests') {
-    const term = (gwSearchTerm||'').toLowerCase();
-    const outcomeFilter = gwOutcomeFilter;
-    const filtered = pairs.filter(p => {
-      if (gwSessionSet.size > 0 && !gwSessionSet.has(p.req.session_id||'')) return false;
-      if (gwProjectSet.size > 0 && !gwProjectSet.has(extractProject(p.req) || p.req.path || '')) return false;
-      if (outcomeFilter && (p.resp.outcome||'') !== outcomeFilter) return false;
-      if (!term) return true;
-      // Lazy haystack: only JSON.stringify when the user is actually searching.
-      // Cached on the pair so subsequent filter passes within the same data set
-      // reuse the result.
-      if (p.hay === undefined) {
-        p.hay = (JSON.stringify(p.req).slice(0, 200000) + ' ' +
-                 JSON.stringify(p.resp).slice(0, 200000)).toLowerCase();
-      }
-      return p.hay.includes(term);
-    });
+    // Pre-filter by chip selections (session, project).
+    let preFiltered = pairs;
+    if (gwSessionSet.size > 0) preFiltered = preFiltered.filter(p => gwSessionSet.has(p.req.session_id||''));
+    if (gwProjectSet.size > 0) preFiltered = preFiltered.filter(p => gwProjectSet.has(extractProject(p.req) || p.req.path || ''));
 
-    // Sort the filtered array.
-    const sortKey = gwSort.col;
-    function gwSortVal(p) {
-      switch (sortKey) {
-        case 'ts': return p.resp.ts||p.req.ts||'';
-        case 'gw': return p.req.gateway||p.resp.gateway||'';
-        case 'session': return p.req.session_id||'';
-        case 'dir': return p.req.direction||'';
-        case 'model': return p.req.model||'';
-        case 'upmodel': return p.req.mapped_model||(p.resp.stream_summary||{}).model||'';
-        case 'status': return p.resp.status||0;
-        case 'outcome': return p.resp.outcome||'';
-        case 'in': return (p.resp.usage||{}).input_tokens||0;
-        case 'out': return (p.resp.usage||{}).output_tokens||0;
-        case 'elapsed': return p.resp.elapsed_ms||0;
-        case 'path': return extractProject(p.req)||p.req.path||'';
-        default: return '';
-      }
-    }
-    const numeric = ['status','in','out','elapsed'].includes(sortKey);
-    filtered.sort((a, b) => {
-      const va = gwSortVal(a), vb = gwSortVal(b);
-      const cmp = numeric ? (va - vb) : String(va).localeCompare(String(vb));
-      return gwSort.asc ? cmp : -cmp;
-    });
-    // Update sort arrows in header.
-    document.querySelectorAll('th[data-gwsort]').forEach(th => {
-      const arrow = th.querySelector('.sort-arrow');
-      if (arrow) arrow.textContent = th.dataset.gwsort === gwSort.col ? (gwSort.asc ? '\u25B2' : '\u25BC') : '';
-    });
+    TF.setRows('gw', pairs);
+    setHTML('gw-thead', TF.thead('gw'));
+    setHTML('gw-filter-bar', TF.filterBar('gw'));
+    const filtered = TF.apply('gw', preFiltered);
 
     const body = document.getElementById('gw-body');
     if (!filtered.length) {
@@ -3774,20 +4048,7 @@ function _hjTog(togEl) {
   }
 }
 
-document.getElementById('gw-search').addEventListener('input', e => {
-  gwSearchTerm = e.target.value;
-  if (gwSearchTimer) clearTimeout(gwSearchTimer);
-  gwSearchTimer = setTimeout(() => { gwSearchTimer = 0; renderGateway(); }, 150);
-});
-document.getElementById('gw-outcome').addEventListener('change', e => { gwOutcomeFilter = e.target.value; renderGateway(); });
 document.getElementById('gw-window').addEventListener('change', e => { gwWindow = e.target.value; gwStats = null; gwStale(); tick(); writeGwHash(); });
-document.querySelectorAll('th[data-gwsort]').forEach(th => {
-  th.addEventListener('click', () => {
-    if (gwSort.col === th.dataset.gwsort) gwSort.asc = !gwSort.asc;
-    else { gwSort.col = th.dataset.gwsort; gwSort.asc = th.dataset.gwsort === 'ts' ? false : true; }
-    renderGateway();
-  });
-});
 document.querySelectorAll('.gw-sub-btn').forEach(b => b.addEventListener('click', () => {
   setGwSub(b.dataset.sub);
   // User changed sub-view; drop any previous deep state from the URL.
@@ -4270,6 +4531,67 @@ document.addEventListener('keydown', e => {
     const dbg = document.getElementById('dbg-result-card');
     if (dbg && dbg.style.display === 'block') { dbg.style.display = 'none'; return; }
   }
+});
+
+// --- TF table registrations ---
+TF.reg('cs', {
+  columns: [
+    {key:'dir', label:'Direction', extract: r => r.direction||''},
+    {key:'size', label:'Size', type:'number', extract: r => r.size||0},
+    {key:'content', label:'Content', extract: r => r.preview || (r.formats||[]).join(', ') || ''},
+    {key:'peer', label:'Peer', extract: r => r.peer||''},
+    {key:'time', label:'Time', type:'date', extract: r => r.time||''}
+  ],
+  onUpdate: renderClipsync
+});
+TF.reg('fs', {
+  columns: [
+    {key:'id', label:'ID', extract: r => r.id||''},
+    {key:'path', label:'Path', extract: r => r.path||''},
+    {key:'direction', label:'Direction', extract: r => r.direction||''},
+    {key:'file_count', label:'Files', type:'number', extract: r => r.file_count||0},
+    {key:'dir_count', label:'Dirs', type:'number', extract: r => r.dir_count||0},
+    {key:'total_bytes', label:'Size', type:'number', extract: r => r.total_bytes||0},
+    {key:'last_sync', label:'Last sync', type:'date', extract: r => r.last_sync||''},
+    {key:'peers', label:'Peers', extract: r => (r.peers||[]).map(peerLabel).join(', ')}
+  ],
+  onUpdate: renderFilesync
+});
+TF.reg('conflict', {
+  columns: [
+    {key:'folder_id', label:'Folder', extract: r => r.folder_id||''},
+    {key:'path', label:'Path', extract: r => r.path||''}
+  ],
+  onUpdate: renderConflicts
+});
+TF.reg('fsa', {
+  columns: [
+    {key:'direction', label:'Direction', extract: r => r.direction||''},
+    {key:'folder', label:'Folder', extract: r => r.folder||''},
+    {key:'peer', label:'Peer', extract: r => r.peer||''},
+    {key:'files', label:'Files', type:'number', extract: r => r.files||0},
+    {key:'bytes', label:'Size', type:'number', extract: r => r.bytes||0},
+    {key:'time', label:'Time', type:'date', extract: r => r.time||''}
+  ],
+  onUpdate: renderFsActivity
+});
+TF.reg('gw', {
+  columns: [
+    {key:'ts', label:'Time', type:'date', extract: p => p.resp.ts||p.req.ts||''},
+    {key:'gw', label:'Gateway', extract: p => p.req.gateway||p.resp.gateway||''},
+    {key:'session', label:'Session', extract: p => p.req.session_id ? p.req.session_id.slice(0,8) : ''},
+    {key:'dir', label:'Dir', extract: p => p.req.direction||''},
+    {key:'model', label:'Client model', extract: p => p.req.model||''},
+    {key:'upmodel', label:'Upstream model', extract: p => p.req.mapped_model||(p.resp.stream_summary||{}).model||''},
+    {key:'status', label:'Status', type:'number', extract: p => p.resp.status||0},
+    {key:'outcome', label:'Outcome', extract: p => p.resp.outcome||''},
+    {key:'in', label:'In', type:'number', extract: p => (p.resp.usage||{}).input_tokens||0},
+    {key:'out', label:'Out', type:'number', extract: p => (p.resp.usage||{}).output_tokens||0},
+    {key:'elapsed', label:'Elapsed', type:'number', extract: p => p.resp.elapsed_ms||0},
+    {key:'project', label:'Project', extract: p => extractProject(p.req)||p.req.path||''},
+    {key:'summary', label:'Summary', extract: p => { const s=p.resp.stream_summary; return s&&s.content ? s.content.slice(0,120) : ''; }}
+  ],
+  onUpdate: () => renderGateway()
 });
 
 // --- Visibility-aware polling ---
