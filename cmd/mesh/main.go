@@ -453,6 +453,14 @@ func upCmd(nodeNames []string, configPath string) {
 		}
 	}
 
+	// Pre-register filesync folder metadata from config so the admin API
+	// returns folder info immediately, before Start() loads indexes from disk.
+	for _, nodeCfg := range cfgs {
+		for _, fs := range nodeCfg.Filesync {
+			filesync.SetConfigFolders(fs)
+		}
+	}
+
 	// Single admin HTTP endpoint — write port file for each node (same port).
 	// Disabled when admin_addr is "off" in the node config.
 	var adminURL string

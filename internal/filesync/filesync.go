@@ -32,6 +32,51 @@ const (
 // activeNodes tracks running filesync nodes for admin API access.
 var activeNodes nodeutil.Registry[Node]
 
+// configFolders provides folder metadata from config before Start() has
+// registered with activeNodes. This lets the admin API return folder info
+// (ID, path, direction, peers, ignore patterns) immediately on startup
+// without waiting for index loading and scanning.
+var configFolders struct {
+	mu      sync.Mutex
+	folders []FolderStatus
+}
+
+// SetConfigFolders pre-populates folder metadata from config so the admin
+// API can show folder info before Start() finishes loading indexes from disk.
+// Called from main.go before the admin server starts. Accumulates across
+// multiple calls (one per filesync config block).
+func SetConfigFolders(cfg config.FilesyncCfg) {
+	configFolders.mu.Lock()
+	defer configFolders.mu.Unlock()
+	for _, fcfg := range cfg.ResolvedFolders {
+		peers := make([]FolderPeer, len(fcfg.Peers))
+		for i, addr := range fcfg.Peers {
+			name := ""
+			if i < len(fcfg.PeerNames) {
+				name = fcfg.PeerNames[i]
+			}
+			peers[i] = FolderPeer{Name: name, Addr: addr}
+		}
+		configFolders.folders = append(configFolders.folders, FolderStatus{
+			ID:             fcfg.ID,
+			Path:           fcfg.Path,
+			Direction:      fcfg.Direction,
+			IgnorePatterns: append([]string(nil), fcfg.IgnorePatterns...),
+			Peers:          peers,
+			Scanning:       fcfg.Direction != "disabled",
+		})
+	}
+	sort.Slice(configFolders.folders, func(i, j int) bool {
+		return configFolders.folders[i].ID < configFolders.folders[j].ID
+	})
+}
+
+func clearConfigFolders() {
+	configFolders.mu.Lock()
+	configFolders.folders = nil
+	configFolders.mu.Unlock()
+}
+
 // FolderStatus is an exported summary of a folder's sync state for the admin API.
 type FolderStatus struct {
 	ID             string       `json:"id"`
@@ -48,6 +93,10 @@ type FolderStatus struct {
 	LastSync        time.Time `json:"last_sync"`
 	QuarantineCount int       `json:"quarantine_count,omitempty"`
 	QuarantinePaths []string  `json:"quarantine_paths,omitempty"`
+	// Scanning is true when the folder has not yet completed its initial scan.
+	// File counts and sizes may be stale (from the previous session's persisted
+	// index) or zero (first run). The UI should indicate incomplete data.
+	Scanning bool `json:"scanning,omitempty"`
 }
 
 // FolderPeer is a resolved peer entry for a folder: the configured nickname
@@ -196,6 +245,7 @@ func GetFolderStatuses() []FolderStatus {
 			qpaths := fs.retries.quarantinedPaths()
 			fs.indexMu.RUnlock()
 
+			scanning := !fs.initialScanDone.Load() && fs.cfg.Direction != "disabled"
 			result = append(result, FolderStatus{
 				ID:              id,
 				Path:            fs.cfg.Path,
@@ -209,9 +259,18 @@ func GetFolderStatuses() []FolderStatus {
 				LastSync:        lastSync,
 				QuarantineCount: len(qpaths),
 				QuarantinePaths: qpaths,
+				Scanning:        scanning,
 			})
 		}
 	})
+	// Fall back to config-only data when no nodes have registered yet.
+	// This happens during the startup gap between admin server start and
+	// filesync.Start() completing index loading.
+	if result == nil {
+		configFolders.mu.Lock()
+		result = append([]FolderStatus(nil), configFolders.folders...)
+		configFolders.mu.Unlock()
+	}
 	return result
 }
 
@@ -347,6 +406,7 @@ type folderState struct {
 	dirCount        int                       // directory count from last scan (dashboard only)
 	conflicts       []string                  // conflict file paths from last scan (sorted)
 	firstScanLogged atomic.Bool               // N8: true after first scan INFO line emitted
+	initialScanDone atomic.Bool               // true after first full scan completes
 	indexMu         sync.RWMutex
 	retries         retryTracker
 	// H3: inFlight tracks paths currently being downloaded so concurrent
@@ -565,11 +625,23 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 
 		ignore := newIgnoreMatcher(fcfg.IgnorePatterns)
 
+		// Pre-populate conflicts from persisted index so the admin API
+		// shows conflict files immediately on restart without waiting
+		// for the first scan to walk the filesystem.
+		var initConflicts []string
+		for path, entry := range idx.Files {
+			if !entry.Deleted && isConflictFile(filepath.Base(path)) {
+				initConflicts = append(initConflicts, path)
+			}
+		}
+		sort.Strings(initConflicts)
+
 		fs := &folderState{
 			cfg:           fcfg,
 			index:         idx,
 			ignore:        ignore,
 			peers:         peers,
+			conflicts:     initConflicts,
 			pending:       make(map[string]PendingSummary),
 			peerLastError: make(map[string]string),
 			inFlight:      make(map[string]bool),
@@ -592,6 +664,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	// Update global state.
 	state.Global.Update("filesync", cfg.Bind, state.Listening, "")
 	activeNodes.Register(n)
+	clearConfigFolders() // real node data now available — drop config-only fallback
 	defer activeNodes.Unregister(n)
 
 	// Start HTTP server.
@@ -832,6 +905,7 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		fs.indexMu.Unlock()
 		swapDuration := time.Since(swapStart)
 
+		fs.initialScanDone.Store(true)
 		state.Global.Update("filesync-folder", id, state.Connected, "idle")
 		state.Global.UpdateFileCount("filesync-folder", id, countAfterSwap, totalSize)
 

@@ -511,6 +511,10 @@ select option { background: var(--bg-card); color: var(--text); }
   100% { box-shadow: 0 0 0 0 transparent; }
 }
 .bubble.flash { animation: bubble-flash 1.2s ease-out 1; }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
 
 /* Custom embedded blocks (system-reminder, command-*, task-notification, ...) */
 .cblock {
@@ -1863,9 +1867,9 @@ function renderStats() {
     stat('Pending', pending, ''));
   const totalQuarantine = folders.reduce((s,f) => s + (f.quarantine_count||0), 0);
   const hasErr = folders.some(f => (f.peers||[]).some(p => p.last_error));
-  const fsStarting = !folders.length && comps.some(c => c.type === 'filesync-folder');
-  const healthColor = fsStarting ? 'var(--yellow)' : (hasErr || conflicts.length > 0) ? 'var(--red)' : totalQuarantine > 0 ? 'var(--yellow)' : 'var(--green)';
-  const healthLabel = fsStarting ? 'Starting' : (hasErr || conflicts.length > 0) ? 'Error' : totalQuarantine > 0 ? 'Degraded' : 'Healthy';
+  const anyScanning = folders.some(f => f.scanning);
+  const healthColor = (hasErr || conflicts.length > 0) ? 'var(--red)' : anyScanning ? 'var(--cyan)' : totalQuarantine > 0 ? 'var(--yellow)' : 'var(--green)';
+  const healthLabel = (hasErr || conflicts.length > 0) ? 'Error' : anyScanning ? 'Scanning' : totalQuarantine > 0 ? 'Degraded' : 'Healthy';
   setHTML('fs-stats',
     stat('Sync Health', healthLabel, '', healthColor) +
     stat('Folders', folders.length, '') +
@@ -2273,13 +2277,13 @@ function renderFolderDetail(f) {
     +   '<div><div style="color:var(--text-muted);font-size:11px">PATH</div><div style="font-family:var(--mono)">'+x(f.path)+'</div></div>'
     +   '<div><div style="color:var(--text-muted);font-size:11px">SEQUENCE</div><div style="font-family:var(--mono)">'+(f.sequence||0)+'</div></div>'
     +   '<div><div style="color:var(--text-muted);font-size:11px">DIRECTION</div><div>'+x(f.direction)+'</div></div>'
-    +   '<div><div style="color:var(--text-muted);font-size:11px">FILES &middot; DIRS &middot; SIZE</div><div>'+fmtTokens(f.file_count)+' &middot; '+fmtTokens(f.dir_count||0)+' &middot; '+fmtBytes(f.total_bytes||0)+'</div></div>'
+    +   '<div><div style="color:var(--text-muted);font-size:11px">FILES &middot; DIRS &middot; SIZE</div><div'+(f.scanning?' style="color:var(--text-muted);font-style:italic"':'')+'>'+fmtTokens(f.file_count)+' &middot; '+fmtTokens(f.dir_count||0)+' &middot; '+fmtBytes(f.total_bytes||0)+(f.scanning?' <span class="badge badge-warn" style="font-size:10px;margin-left:6px">scanning</span>':'')+'</div></div>'
     +   '<div><div style="color:var(--text-muted);font-size:11px">QUARANTINED</div><div style="color:'+((f.quarantine_count||0)>0?'var(--yellow)':'var(--green)')+'">'+fmtTokens(f.quarantine_count||0)+'</div></div>'
     + '</div>'
     + ((f.quarantine_paths && f.quarantine_paths.length) ? '<div style="margin-bottom:12px"><div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">QUARANTINED FILES</div>'
       + f.quarantine_paths.map(p => '<div style="font-family:var(--mono);font-size:12px;color:var(--yellow);padding:2px 0">'+x(p)+'</div>').join('')
       + '</div>' : '')
-    + '<div style="margin-bottom:12px"><div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">IGNORE PATTERNS ('+ignores.length+')</div>'+ignoreHtml+'</div>'
+    + '<div style="margin-bottom:12px"><div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">IGNORE PATTERNS ('+ignores.length+')</div><div style="display:flex;flex-wrap:wrap">'+ignoreHtml+'</div></div>'
     + '<div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">PEERS &amp; SYNC PLAN</div>'
     + '<table style="width:100%"><thead><tr><th>Name</th><th>Addr</th><th>Last sync</th><th>Seen / Sent seq</th><th>Plan</th><th>Total</th></tr></thead><tbody>'
     + peerRowsHtml + '</tbody></table>'
@@ -2347,15 +2351,18 @@ function renderFilesync() {
       ? ' <span style="margin-left:8px;font-family:var(--mono);font-size:11px">'+planBits.join(' ')+'</span>'
       : '';
     const fHasErr = (f.peers||[]).some(p => p.last_error);
-    const fDotColor = fHasErr ? 'var(--red)' : (f.quarantine_count > 0 || f.direction === 'disabled') ? 'var(--yellow)' : 'var(--green)';
-    const fDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+fDotColor+';margin-right:6px;vertical-align:middle"></span>';
+    const fScanning = f.scanning;
+    const fDotColor = fScanning ? 'var(--cyan)' : fHasErr ? 'var(--red)' : (f.quarantine_count > 0 || f.direction === 'disabled') ? 'var(--yellow)' : 'var(--green)';
+    const fDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+fDotColor+';margin-right:6px;vertical-align:middle'+(fScanning?';animation:pulse 1.5s ease-in-out infinite':'')+'"></span>';
+    const scanBadge = fScanning ? ' <span class="badge badge-warn" style="font-size:10px">scanning</span>' : '';
+    const dimStyle = fScanning ? 'color:var(--text-muted);font-style:italic' : '';
     html += '<tr style="cursor:pointer" onclick="toggleFolder(\''+xj(f.id)+'\')">'
-         +  '<td style="font-weight:600">'+arrow+' '+fDot+x(f.id)+planBadge+'</td>'
+         +  '<td style="font-weight:600">'+arrow+' '+fDot+x(f.id)+scanBadge+planBadge+'</td>'
          +  '<td style="color:var(--text-dim)">'+x(f.path)+'</td>'
          +  '<td><span class="badge '+dirBadge+'">'+x(f.direction)+'</span></td>'
-         +  '<td>'+fmtTokens(f.file_count)+'</td>'
-         +  '<td>'+fmtTokens(f.dir_count||0)+'</td>'
-         +  '<td>'+fmtBytes(f.total_bytes||0)+'</td>'
+         +  '<td'+(dimStyle?' style="'+dimStyle+'"':'')+'>'+fmtTokens(f.file_count)+'</td>'
+         +  '<td'+(dimStyle?' style="'+dimStyle+'"':'')+'>'+fmtTokens(f.dir_count||0)+'</td>'
+         +  '<td'+(dimStyle?' style="'+dimStyle+'"':'')+'>'+fmtBytes(f.total_bytes||0)+'</td>'
          +  '<td style="color:var(--text-muted)">'+lastSync+'</td>'
          +  '<td style="color:var(--text-dim)">'+peers+'</td></tr>';
     if (expanded) html += renderFolderDetail(f);
@@ -2379,8 +2386,9 @@ function renderConflicts() {
     const exp = expandedConflicts.has(key);
     const arrow = exp ? '&#9660;' : '&#9654;';
     const orig = conflictDiffCache[key] && conflictDiffCache[key].original_path ? conflictDiffCache[key].original_path : '';
-    html += '<tr style="cursor:pointer" onclick="toggleConflict(\''+xj(c.folder_id)+'\',\''+xj(c.path)+'\')">'
-      + '<td>'+arrow+' '+x(c.folder_id)+'</td><td style="color:var(--red)">'+x(c.path)+'</td><td style="color:var(--text-muted)">'+x(orig)+'</td></tr>';
+    const diffHint = exp ? '' : ' <span style="color:var(--text-muted);font-size:11px">[diff]</span>';
+    html += '<tr style="cursor:pointer" title="Click to '+(exp?'collapse':'view diff')+'" onclick="toggleConflict(\''+xj(c.folder_id)+'\',\''+xj(c.path)+'\')">'
+      + '<td>'+arrow+' '+x(c.folder_id)+diffHint+'</td><td style="color:var(--red)">'+x(c.path)+'</td><td style="color:var(--text-muted)">'+x(orig)+'</td></tr>';
     if (exp) html += renderConflictDiff(key);
   }
   el.innerHTML = html;
