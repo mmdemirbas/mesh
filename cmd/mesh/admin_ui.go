@@ -2356,7 +2356,7 @@ function renderGateway() {
   for (const s of gwProjectSet) { if (!projectIds.includes(s)) gwProjectSet.delete(s); }
   const projBar = document.getElementById('gw-project-chips');
   if (projBar) {
-    if (projectIds.length > 1) {
+    if (projectIds.length >= 1) {
       projBar.style.display = '';
       projBar.innerHTML = '<span style="color:var(--text-muted);font-size:11px;margin-right:4px">project:</span>' + projectIds.map(pid => {
         const on = gwProjectSet.has(pid) ? ' on' : '';
