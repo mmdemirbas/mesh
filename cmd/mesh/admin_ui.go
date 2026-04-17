@@ -453,6 +453,17 @@ tbody tr:last-child td { border-bottom: none; }
 .gw-sub-btn.active { background: var(--bg-card); color: var(--green); }
 .gw-sub-btn:hover { color: var(--text); }
 
+/* Filter chip bar — multi-select toggle chips for gateway and session filters. */
+.gw-chip {
+  display: inline-block; padding: 3px 10px; border-radius: 12px;
+  font-size: 11px; cursor: pointer; border: 1px solid var(--border);
+  background: var(--bg-input); color: var(--text-dim);
+  transition: background 0.1s, color 0.1s;
+  user-select: none; white-space: nowrap;
+}
+.gw-chip:hover { color: var(--text); }
+.gw-chip.on { background: var(--green); color: var(--bg); border-color: var(--green); }
+
 /* Scroll container for long tables; keeps thead visible while body scrolls. */
 .gw-scroll { max-height: 65vh; overflow: auto; }
 .gw-scroll table thead th { position: sticky; top: 0; background: var(--bg-card); z-index: 1; }
@@ -766,7 +777,7 @@ tbody tr:last-child td { border-bottom: none; }
   <!-- Gateway panel -->
   <div class="panel" id="p-gateway">
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
-      <select id="gw-select" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px"></select>
+      <div id="gw-chips" style="display:inline-flex;gap:4px;flex-wrap:wrap"></div>
       <select id="gw-window" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
         <option value="24h" selected>last 24h</option>
         <option value="1h">last 1h</option>
@@ -1118,12 +1129,10 @@ let compMetrics = {};
 const tabMap = {'/ui':'dashboard','/ui/clipsync':'clipsync','/ui/filesync':'filesync','/ui/gateway':'gateway','/ui/logs':'logs','/ui/metrics':'metrics','/ui/api':'api','/ui/debug':'debug'};
 let activeTab = tabMap[location.pathname] || 'dashboard';
 // Gateway hash routing state; declared up here so applyGwHash() (called from
-// showTab on initial load) does not hit the TDZ. gwSelected / gwDetailKey
-// are also used by applyGwHash via jumpToPair, so they are hoisted here too
-// to survive the same cold-load path.
+// showTab on initial load) does not hit the TDZ.
 let gwHashLast = '';
 let gwHashApplyingDeep = '';
-let gwSelected = '';
+let gwSelectedSet = new Set();  // empty = all gateways shown
 let gwDetailKey = '';
 
 function showTab(name, opts) {
@@ -1219,8 +1228,12 @@ function tick() {
   }
   if (needGateway) {
     fetch('/api/gateway/audit?limit=200').then(r=>ok(r)).then(r=>r.json()).then(v => { gatewayAudit = v; renderGateway(); }).catch(fail('gateway'));
-    if (gwSelected && gwSelected !== '(all)') {
-      fetch('/api/gateway/audit/stats?gateway='+encodeURIComponent(gwSelected)+
+    // Stats endpoint takes a single gateway name. Fetch when exactly one is
+    // active (either one selected chip or only one gateway exists).
+    const statsGw = gwSelectedSet.size === 1 ? [...gwSelectedSet][0]
+      : (gwSelectedSet.size === 0 && gatewayAudit && gatewayAudit.length === 1) ? gatewayAudit[0].gateway : '';
+    if (statsGw) {
+      fetch('/api/gateway/audit/stats?gateway='+encodeURIComponent(statsGw)+
         '&window='+encodeURIComponent(gwWindow)+'&bucket='+gwBucket(gwWindow))
         .then(r=>ok(r)).then(r=>r.json()).then(v => { gwStats = v; if (gwSubview === 'overview') renderGatewayOverview(); }).catch(fail('gw-stats'));
     }
@@ -2188,7 +2201,7 @@ function timeAgo(ts) {
 }
 
 // --- Gateway audit ---
-// gwSelected and gwDetailKey are hoisted near the tab-routing block so the
+// gwSelectedSet and gwDetailKey are hoisted near the tab-routing block so the
 // initial applyGwHash() (which may call jumpToPair) does not hit the TDZ.
 let gwRowsCache = []; // resp rows joined with their req row, newest first
 let gwRowsByKey = new Map(); // key "run|id" → pair, for click-to-detail across refreshes
@@ -2198,10 +2211,10 @@ let gwSearchTimer = 0;  // debounce handle for the search input
 
 function renderGateway() {
   gwFresh();
-  const sel = document.getElementById('gw-select');
-  if (!sel) return;
+  const chipBar = document.getElementById('gw-chips');
+  if (!chipBar) return;
   if (!gatewayAudit || !gatewayAudit.length) {
-    sel.innerHTML = '<option value="">(no gateways with audit logging)</option>';
+    chipBar.innerHTML = '<span style="color:var(--text-muted);font-size:12px">No gateways with audit logging</span>';
     const meta = document.getElementById('gw-meta');
     if (meta) meta.textContent = '';
     document.getElementById('gw-body').innerHTML =
@@ -2210,20 +2223,22 @@ function renderGateway() {
       '<div class="stat" style="grid-column:1/-1;color:var(--text-muted)">No gateway audit data yet. Configure log.level to populate this view.</div>';
     return;
   }
-  // Populate selector once / on changes. "All" merges rows from every gateway.
+  // Render gateway chips. Empty selection = all gateways shown.
   const names = gatewayAudit.map(g => g.gateway);
-  const allNames = names.length > 1 ? ['(all)', ...names] : names;
-  const desired = (sel.options[sel.selectedIndex]||{}).value || gwSelected || allNames[0];
-  if (sel.options.length !== allNames.length || Array.from(sel.options).some((o,i)=>o.value!==allNames[i])) {
-    sel.innerHTML = allNames.map(n => '<option value="'+x(n)+'">'+x(n)+'</option>').join('');
-    sel.value = allNames.includes(desired) ? desired : allNames[0];
-  }
-  gwSelected = sel.value;
+  // Prune stale selections (gateway removed from config).
+  for (const s of gwSelectedSet) { if (!names.includes(s)) gwSelectedSet.delete(s); }
+  chipBar.innerHTML = names.map(n =>
+    '<span class="gw-chip'+(gwSelectedSet.has(n) ? ' on' : '')+'" data-gw="'+xa(n)+'">'+x(n)+'</span>'
+  ).join('');
+  chipBar.querySelectorAll('.gw-chip').forEach(c => c.addEventListener('click', () => {
+    const nm = c.dataset.gw;
+    if (gwSelectedSet.has(nm)) gwSelectedSet.delete(nm); else gwSelectedSet.add(nm);
+    gwStats = null; gwStale(); tick();
+    writeGwHash();
+  }));
   if (gwSubview === 'overview') renderGatewayOverview();
-  // If a hash-driven deep restore was queued before data arrived, run it now
-  // that gwSelected is known. Guarded by gwHashApplyingDeep so we only retry
-  // until the corresponding fetch has been issued.
-  if (gwHashApplyingDeep && gwSelected) {
+  // If a hash-driven deep restore was queued before data arrived, run it now.
+  if (gwHashApplyingDeep) {
     const deep = gwHashApplyingDeep;
     gwHashApplyingDeep = '';
     if (gwSubview === 'requests') {
@@ -2232,15 +2247,10 @@ function renderGateway() {
     }
   }
 
-  // Merge rows from all gateways when "(all)" is selected.
-  let rowsRaw;
-  if (gwSelected === '(all)') {
-    rowsRaw = [];
-    for (const g of gatewayAudit) rowsRaw.push(...(g.rows || []));
-  } else {
-    const entry = gatewayAudit.find(g => g.gateway === gwSelected) || gatewayAudit[0];
-    rowsRaw = entry.rows || [];
-  }
+  // Merge rows from selected gateways (empty set = all).
+  let rowsRaw = [];
+  const activeGws = gwSelectedSet.size === 0 ? gatewayAudit : gatewayAudit.filter(g => gwSelectedSet.has(g.gateway));
+  for (const g of activeGws) rowsRaw.push(...(g.rows || []));
   // Pair req with resp by id+run. Each pair gets a stable composite key
   // (run|id) so the detail card survives auto-refresh even when the list
   // reorders. Haystack (hay) is computed lazily on first search so idle
@@ -2260,11 +2270,13 @@ function renderGateway() {
   gwRowsCache = pairs;
   gwRowsByKey = new Map(pairs.map(p => [p.key, p]));
 
-  if (gwSelected === '(all)') {
+  const nGw = activeGws.length;
+  if (nGw !== 1) {
     document.getElementById('gw-meta').innerHTML =
-      '<b>all gateways</b> · '+gatewayAudit.length+' gateways · '+pairs.length+' completed requests';
+      (gwSelectedSet.size === 0 ? '<b>all gateways</b>' : '<b>'+nGw+' gateways</b>')+
+      ' · '+pairs.length+' completed requests';
   } else {
-    const entry = gatewayAudit.find(g => g.gateway === gwSelected) || gatewayAudit[0];
+    const entry = activeGws[0];
     document.getElementById('gw-meta').innerHTML =
       'gateway <b>'+x(entry.gateway)+'</b> · file <span style="color:var(--text-dim)">'+x(entry.file||'(none)')+'</span>'+
       (entry.file_size ? ' · '+fmtBytes(entry.file_size) : '')+
@@ -3438,8 +3450,7 @@ document.getElementById('gw-search').addEventListener('input', e => {
   gwSearchTimer = setTimeout(() => { gwSearchTimer = 0; renderGateway(); }, 150);
 });
 document.getElementById('gw-outcome').addEventListener('change', e => { gwOutcomeFilter = e.target.value; renderGateway(); });
-document.getElementById('gw-select').addEventListener('change', e => { gwSelected = e.target.value; gwStats = null; gwStale(); tick(); });
-document.getElementById('gw-window').addEventListener('change', e => { gwWindow = e.target.value; gwStats = null; gwStale(); tick(); });
+document.getElementById('gw-window').addEventListener('change', e => { gwWindow = e.target.value; gwStats = null; gwStale(); tick(); writeGwHash(); });
 document.querySelectorAll('.gw-sub-btn').forEach(b => b.addEventListener('click', () => {
   setGwSub(b.dataset.sub);
   // User changed sub-view; drop any previous deep state from the URL.
@@ -3474,49 +3485,67 @@ function setGwSub(sub) {
   document.getElementById('gw-sub-requests').style.display = sub === 'requests' ? '' : 'none';
 }
 
-// writeGwHash syncs the URL hash to the current gateway sub-view + deep
-// selection, so refresh/back/forward restore the same view. Uses replaceState
-// when the sub alone changed and pushState when a deep selection changed, so
-// back navigation lands on the sub-view without the selection.
+// writeGwHash syncs the URL hash to the current gateway filter + sub-view +
+// detail state, so refresh/back/forward restore the same view.
+// Format: #sub?gw=a,b&window=24h&detail=run|id
 function writeGwHash() {
   if (activeTab !== 'gateway') return;
-  let h = '#' + (gwSubview || 'overview');
-  if (gwSubview === 'requests' && gwDetailKey) h += '/' + encodeURIComponent(gwDetailKey);
+  const parts = [gwSubview || 'overview'];
+  const params = [];
+  if (gwSelectedSet.size > 0) params.push('gw='+[...gwSelectedSet].map(encodeURIComponent).join(','));
+  if (gwWindow && gwWindow !== '24h') params.push('window='+encodeURIComponent(gwWindow));
+  if (gwSubview === 'requests' && gwDetailKey) params.push('detail='+encodeURIComponent(gwDetailKey));
+  let h = '#' + parts[0] + (params.length ? '?' + params.join('&') : '');
   if (location.hash === h) return;
   const full = location.pathname + h;
-  // Push when gaining a deep segment so "back" clears selection; replace otherwise.
-  const prevDeep = gwHashLast.indexOf('/') >= 0;
-  const nextDeep = h.indexOf('/') >= 0;
-  if (nextDeep && !prevDeep) history.pushState(null, '', full);
+  const prevDetail = gwHashLast.includes('detail=');
+  const nextDetail = h.includes('detail=');
+  if (nextDetail && !prevDetail) history.pushState(null, '', full);
   else history.replaceState(null, '', full);
   gwHashLast = h;
-  gwHashApplyingDeep = ''; // URL now reflects live state; no pending restore.
+  gwHashApplyingDeep = '';
 }
 
 function parseGwHash() {
   const h = (location.hash || '').replace(/^#/, '');
-  if (!h) return {sub: 'overview', deep: ''};
-  const slash = h.indexOf('/');
-  if (slash < 0) return {sub: h, deep: ''};
-  return {sub: h.slice(0, slash), deep: decodeURIComponent(h.slice(slash+1))};
+  if (!h) return {sub: 'overview', gw: [], window: '', detail: ''};
+  const qIdx = h.indexOf('?');
+  const sub = qIdx < 0 ? h : h.slice(0, qIdx);
+  const qs = qIdx < 0 ? '' : h.slice(qIdx + 1);
+  const p = {};
+  qs.split('&').forEach(kv => { const [k,v] = kv.split('='); if (k) p[k] = decodeURIComponent(v||''); });
+  return {
+    sub: sub || 'overview',
+    gw: p.gw ? p.gw.split(',').map(decodeURIComponent) : [],
+    window: p.window || '',
+    detail: p.detail || '',
+  };
 }
 
 function applyGwHash() {
   if (activeTab !== 'gateway') return;
-  const {sub, deep} = parseGwHash();
-  setGwSub(sub);
+  const parsed = parseGwHash();
+  setGwSub(parsed.sub);
   gwHashLast = location.hash;
-  if (!deep) {
-    if (sub !== 'requests') gwDetailKey = '';
+  // Restore gateway selection from URL.
+  if (parsed.gw.length) {
+    gwSelectedSet = new Set(parsed.gw);
+  }
+  // Restore time window.
+  if (parsed.window) {
+    gwWindow = parsed.window;
+    const wSel = document.getElementById('gw-window');
+    if (wSel) wSel.value = gwWindow;
+  }
+  if (!parsed.detail) {
+    if (parsed.sub !== 'requests') gwDetailKey = '';
     return;
   }
-  gwHashApplyingDeep = deep;
-  if (sub === 'requests') {
-    const bar = deep.indexOf('|');
+  gwHashApplyingDeep = parsed.detail;
+  if (parsed.sub === 'requests') {
+    const bar = parsed.detail.indexOf('|');
     if (bar > 0) {
-      const run = deep.slice(0, bar);
-      const id = deep.slice(bar+1);
-      jumpToPair(run, id);
+      jumpToPair(parsed.detail.slice(0, bar), parsed.detail.slice(bar+1));
     }
   }
 }
@@ -3531,7 +3560,11 @@ function renderGatewayOverview() {
   const kpi = document.getElementById('gw-kpi');
   if (!kpi) return;
   if (!gwStats) {
-    kpi.innerHTML = '<div class="stat" style="grid-column:1/-1;color:var(--text-muted)">Loading stats…</div>';
+    // Stats require a single gateway. Show a helpful notice when multiple
+    // gateways are selected or when stats are still loading.
+    const multi = gwSelectedSet.size !== 1 && !(gwSelectedSet.size === 0 && gatewayAudit && gatewayAudit.length === 1);
+    const msg = multi ? 'Select a single gateway for overview stats.' : 'Loading stats\u2026';
+    kpi.innerHTML = '<div class="stat" style="grid-column:1/-1;color:var(--text-muted)">'+msg+'</div>';
     document.getElementById('gw-series').innerHTML = '';
     document.getElementById('gw-top-sessions').innerHTML = '';
     document.getElementById('gw-top-models').innerHTML = '';
@@ -3653,7 +3686,11 @@ function renderHourChart(rows) {
 // opens the detail card. Handy from the top-requests table and anywhere
 // else the user wants to drill into a specific id+run.
 function jumpToPair(run, id) {
-  if (!gwSelected) return;
+  // Determine which gateway to query. Prefer the single selected chip;
+  // fall back to the only available gateway.
+  const pairGw = gwSelectedSet.size === 1 ? [...gwSelectedSet][0]
+    : (gatewayAudit && gatewayAudit.length === 1) ? gatewayAudit[0].gateway : '';
+  if (!pairGw) return;
   setGwSub('requests');
   // Try to resolve from the existing data first (avoids a round-trip and
   // the 400/404 errors that occur when the pair endpoint cannot find it).
@@ -3662,7 +3699,7 @@ function jumpToPair(run, id) {
     showGwDetail(key);
     return;
   }
-  fetch('/api/gateway/audit/pair?gateway='+encodeURIComponent(gwSelected)+
+  fetch('/api/gateway/audit/pair?gateway='+encodeURIComponent(pairGw)+
         '&run='+encodeURIComponent(run)+'&id='+encodeURIComponent(id))
     .then(r => r.ok ? r.json() : null)
     .then(pair => {
