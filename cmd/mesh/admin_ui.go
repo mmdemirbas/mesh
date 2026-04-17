@@ -164,6 +164,17 @@ tbody tr:last-child td { border-bottom: none; }
 .chip.warn { border-color: var(--yellow); color: var(--yellow); }
 .chip.error { border-color: var(--red); color: var(--red); }
 .chip.ok { border-color: var(--green); color: var(--green); }
+/* Metadata key-value table (replaces chip row) */
+.meta-tbl {
+  border-collapse: collapse; font-size: 11px; font-family: var(--mono);
+  margin-bottom: 8px; width: auto;
+}
+.meta-tbl td {
+  padding: 2px 10px 2px 0; vertical-align: top; white-space: nowrap;
+}
+.meta-tbl .mk { color: var(--text-muted); }
+.meta-tbl .mv { color: var(--text); font-weight: 600; }
+.meta-tbl .mv.dim { color: var(--text-dim); font-weight: 400; }
 .msg-block {
   border: 1px solid var(--border); border-radius: 4px;
   margin-bottom: 6px; background: var(--bg);
@@ -197,8 +208,13 @@ tbody tr:last-child td { border-bottom: none; }
 .md-list     { color: var(--yellow); font-weight: 700; }
 .md-quote    { color: var(--text-dim); border-left: 2px solid var(--border); padding-left: 6px; display: block; }
 .md-hr       { color: var(--text-muted); }
-.msg-body .truncate { color: var(--text-dim); cursor: pointer; }
-.msg-body .truncate:hover { color: var(--green); }
+.truncate {
+  display: inline-block; padding: 1px 8px; margin-left: 4px;
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 3px; color: var(--text-dim); cursor: pointer;
+  font-size: 10px; font-family: var(--mono); vertical-align: middle;
+}
+.truncate:hover { border-color: var(--green); color: var(--green); }
 .tool-block {
   border-left: 2px solid var(--yellow); padding: 4px 8px;
   margin: 4px 0; background: var(--bg-card);
@@ -427,8 +443,12 @@ tbody tr:last-child td { border-bottom: none; }
 }
 .gw-sess-row:hover { background: var(--bg-hover); }
 .gw-sess-row.active { background: var(--bg-hover); border-left: 3px solid var(--green); padding-left: 9px; }
-.gw-sess-row .id { font-family: var(--mono); color: var(--cyan); font-size: 11px; }
+.gw-sess-row .id { font-family: var(--mono); font-size: 11px; }
 .gw-sess-row .meta { color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+.gw-sess-row .sess-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 4px; vertical-align: middle;
+}
 .gw-turn {
   display: grid; grid-template-columns: 60px 1fr auto; gap: 8px;
   padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px;
@@ -786,7 +806,7 @@ tbody tr:last-child td { border-bottom: none; }
           <div class="card-header"><span>By project</span></div>
           <div class="card-body">
             <table>
-              <thead><tr><th>Project</th><th>Requests</th><th>Tokens (in/out)</th></tr></thead>
+              <thead><tr><th>Project / path</th><th>Requests</th><th>Tokens (in/out)</th></tr></thead>
               <tbody id="gw-by-path"></tbody>
             </table>
           </div>
@@ -2227,6 +2247,7 @@ function renderGateway() {
       const ts = p.resp.ts||p.req.ts||'';
       const dir = p.req.direction || '-';
       const model = p.req.model || '-';
+      const mm = p.req.mapped_model && p.req.mapped_model !== p.req.model ? p.req.mapped_model : '';
       const stream = p.req.stream ? 'yes' : 'no';
       const status = p.resp.status || 0;
       const statusColor = status >= 400 ? 'var(--red)' : status >= 200 ? 'var(--green)' : 'var(--text-dim)';
@@ -2239,7 +2260,7 @@ function renderGateway() {
       return '<tr style="cursor:pointer" onclick="showGwDetail(\''+xj(p.key)+'\')">'+
         '<td style="color:var(--text-muted);white-space:nowrap">'+fmtLocalTime(ts)+'</td>'+
         '<td>'+x(dir)+'</td>'+
-        '<td style="color:var(--text-dim)">'+x(model)+'</td>'+
+        '<td style="color:var(--text-dim)">'+x(model)+(mm ? ' <span style="color:var(--text-muted)">→ '+x(mm)+'</span>' : '')+'</td>'+
         '<td style="color:var(--text-muted)">'+stream+'</td>'+
         '<td style="color:'+statusColor+'">'+status+'</td>'+
         '<td style="color:'+outcomeColor+'">'+x(outcome)+'</td>'+
@@ -2337,6 +2358,34 @@ function bulkSec(side, open) {
   root.querySelectorAll('details.sec').forEach(d => { d.open = open; });
 }
 
+// sessColor returns a stable HSL color string for a session ID. Uses the
+// hash of the ID to pick a hue, keeping saturation and lightness constant
+// so every session gets a unique-ish tint that contrasts against the dark bg.
+const sessColorCache = {};
+function sessColor(sid) {
+  if (sessColorCache[sid]) return sessColorCache[sid];
+  let h = 0;
+  for (let i = 0; i < sid.length; i++) h = (h * 31 + sid.charCodeAt(i)) & 0xFFFF;
+  const hue = h % 360;
+  sessColorCache[sid] = 'hsl('+hue+',70%,65%)';
+  return sessColorCache[sid];
+}
+
+// metaRow renders a single <tr> for a metadata table. The value string is
+// always escaped; label may contain trusted HTML (info icons).
+function metaRow(label, value, cls) {
+  if (value == null || value === '' || value === undefined) return '';
+  return '<tr><td class="mk">'+label+'</td><td class="mv'+(cls?' '+cls:'')+'">'+x(String(value))+'</td></tr>';
+}
+
+// metaTable wraps rows in a .meta-tbl. Empty rows are omitted automatically
+// (metaRow returns '' for missing values).
+function metaTable(rows) {
+  const joined = rows.join('');
+  if (!joined) return '';
+  return '<table class="meta-tbl">'+joined+'</table>';
+}
+
 // info renders a small (?) tooltip. Uses data-help with a pure-CSS ::after
 // tooltip so the hint appears instantly on hover — native title is slow and
 // unreliable across browsers.
@@ -2373,17 +2422,19 @@ const tokenHelp = {
 // signals a user opens this view to find.
 function renderResponseStructured(resp) {
   let html = '';
-  const chips = [];
-  if (resp.status) chips.push(chip('status', resp.status, resp.status >= 400 ? 'error' : 'ok'));
-  if (resp.outcome) chips.push(chip('outcome', resp.outcome,
-    resp.outcome === 'ok' ? 'ok' : resp.outcome === 'error' ? 'error' : 'warn'));
   const summary = resp.stream_summary || {};
-  if (summary.stop_reason) chips.push(chip('stop'+info(tokenHelp.stopReason), summary.stop_reason));
-  if (resp.elapsed_ms) chips.push(chip('elapsed', resp.elapsed_ms+'ms'));
-  if (summary.events) chips.push(chip('events', summary.events));
-  if (summary.message_id) chips.push(chip('msg_id', summary.message_id));
-  if (summary.model) chips.push(chip('upstream_model', summary.model));
-  if (chips.length) html += '<div style="margin-bottom:8px">' + chips.join('') + '</div>';
+  // Metadata table for response.
+  const statusCls = resp.status >= 400 ? ' style="color:var(--red)"' : resp.status >= 200 ? ' style="color:var(--green)"' : '';
+  const outcomeCls = resp.outcome === 'ok' ? ' style="color:var(--green)"' : resp.outcome === 'error' ? ' style="color:var(--red)"' : '';
+  html += '<table class="meta-tbl">' +
+    (resp.status ? '<tr><td class="mk">status</td><td class="mv"'+statusCls+'>'+x(String(resp.status))+'</td></tr>' : '') +
+    (resp.outcome ? '<tr><td class="mk">outcome</td><td class="mv"'+outcomeCls+'>'+x(resp.outcome)+'</td></tr>' : '') +
+    metaRow('stop_reason '+info(tokenHelp.stopReason), summary.stop_reason) +
+    metaRow('elapsed', resp.elapsed_ms ? resp.elapsed_ms+'ms' : '') +
+    metaRow('events', summary.events) +
+    metaRow('message_id', summary.message_id) +
+    metaRow('upstream_model', summary.model) +
+  '</table>';
 
   // Token breakdown bar — visible whenever any of the four buckets is non-zero.
   const u = resp.usage || summary.usage;
@@ -2433,7 +2484,7 @@ function renderResponseStructured(resp) {
 
   if (summary.thinking) {
     html += sec('Thinking', fmtLen(summary.thinking.length)+' chars',
-      renderCustomBlock({name: 'think', body: summary.thinking}), false);
+      renderPlainText(summary.thinking), false);
   }
 
   // Multi-choice OpenAI responses surface remaining choices verbatim — rare,
@@ -2498,16 +2549,20 @@ function renderRequestStructured(req) {
     return emptyNote('Body not captured. Set log.level: full in the gateway YAML to record full request bodies.');
   }
   let html = '';
-  // Header chips: model, stream, session, turn, temperature, max_tokens.
-  const chips = [];
-  if (body.model) chips.push(chip('model', body.model));
-  if (req.stream || body.stream) chips.push(chip('stream', 'true'));
-  if (req.session_id) chips.push(chip('session'+info(tokenHelp.sessionId), req.session_id));
-  if (req.turn_index) chips.push(chip('turn'+info(tokenHelp.turnIndex), req.turn_index));
-  if (typeof body.temperature === 'number') chips.push(chip('temp', body.temperature));
-  if (body.max_tokens) chips.push(chip('max_tokens', body.max_tokens));
-  if (body.top_p) chips.push(chip('top_p', body.top_p));
-  if (chips.length) html += '<div style="margin-bottom:8px">' + chips.join('') + '</div>';
+  // Metadata table: model, upstream model, stream, session, turn, etc.
+  const mapped = req.mapped_model && req.mapped_model !== (body.model||'') ? req.mapped_model : '';
+  html += metaTable([
+    metaRow('model', body.model),
+    mapped ? metaRow('upstream model', mapped, 'dim') : '',
+    metaRow('stream', (req.stream || body.stream) ? 'true' : ''),
+    metaRow('session '+info(tokenHelp.sessionId), req.session_id),
+    metaRow('turn '+info(tokenHelp.turnIndex), req.turn_index),
+    typeof body.temperature === 'number' ? metaRow('temperature', body.temperature) : '',
+    metaRow('max_tokens', body.max_tokens),
+    body.top_p ? metaRow('top_p', body.top_p) : '',
+    metaRow('direction', req.direction),
+    metaRow('path', req.path, 'dim'),
+  ]);
 
   // System prompt (Anthropic top-level string or array of content blocks;
   // OpenAI inlines the system message in the messages array, so it appears
@@ -2954,10 +3009,10 @@ function renderPlainText(s) {
     return '<div class="text">'+highlightMarkdown(s)+'</div>';
   }
   const id = 'tx-'+(_hjId++);
-  return '<div class="text" id="'+id+'-short">'+highlightMarkdown(s.slice(0, truncateLen))+'…' +
-    ' <span class="truncate" onclick="_txExpand(\''+id+'\')">expand ('+fmtLen(s.length)+' chars)</span></div>' +
+  return '<div class="text" id="'+id+'-short">'+highlightMarkdown(s.slice(0, truncateLen))+
+    '<span class="truncate" onclick="_txExpand(\''+id+'\')">▼ '+fmtLen(s.length)+' chars</span></div>' +
     '<div class="text json-collapsed" id="'+id+'-full">'+highlightMarkdown(s)+
-    ' <span class="truncate" onclick="_txCollapse(\''+id+'\')">collapse</span></div>';
+    '<span class="truncate" onclick="_txCollapse(\''+id+'\')">▲ collapse</span></div>';
 }
 
 // renderToolResultContent renders a tool_result payload. Unlike renderText,
@@ -3337,7 +3392,7 @@ function renderGatewayOverview() {
   document.getElementById('gw-top-sessions').innerHTML = sessions.length === 0
     ? '<tr><td colspan="5" style="color:var(--text-muted);padding:12px">No sessions in window.</td></tr>'
     : sessions.map(s => '<tr style="cursor:pointer" onclick="jumpToSession(\''+xj(s.key)+'\')">' +
-        '<td><code style="color:var(--cyan)">'+x(s.key)+'</code></td>' +
+        '<td><code style="color:'+sessColor(s.key)+'">'+x(s.key)+'</code></td>' +
         '<td style="color:var(--text-dim)">'+x(s.first_model||'-')+'</td>' +
         '<td>'+(s.turns||s.requests)+'</td>' +
         '<td>'+fmtTokens(s.input_tokens)+' / '+fmtTokens(s.output_tokens)+'</td>' +
@@ -3359,11 +3414,16 @@ function renderGatewayOverview() {
   const paths = (gwStats.by_path || []).slice(0, 10);
   document.getElementById('gw-by-path').innerHTML = paths.length === 0
     ? '<tr><td colspan="3" style="color:var(--text-muted);padding:12px">No projects in window.</td></tr>'
-    : paths.map(p => '<tr>' +
-        '<td><code style="color:var(--cyan)">'+x(p.key||'-')+'</code></td>' +
-        '<td>'+p.requests+'</td>' +
-        '<td>'+fmtTokens(p.input_tokens)+' / '+fmtTokens(p.output_tokens)+'</td>' +
-      '</tr>').join('');
+    : paths.map(p => {
+        const k = p.key || '-';
+        const isUrl = k.startsWith('/');
+        const style = isUrl ? 'color:var(--text-muted);font-style:italic' : 'color:var(--cyan)';
+        return '<tr>' +
+          '<td><code style="'+style+'">'+x(k)+'</code></td>' +
+          '<td>'+p.requests+'</td>' +
+          '<td>'+fmtTokens(p.input_tokens)+' / '+fmtTokens(p.output_tokens)+'</td>' +
+        '</tr>';
+      }).join('');
 
   // By-hour-of-day: 24-bucket bar chart (only populated hours). Tells the
   // user whether usage clusters at specific times (e.g. morning pair-programming).
@@ -3375,7 +3435,7 @@ function renderGatewayOverview() {
     ? '<tr><td colspan="6" style="color:var(--text-muted);padding:12px">No requests in window.</td></tr>'
     : topReqs.map(r => '<tr style="cursor:pointer" onclick="jumpToPair(\''+xj(r.run)+'\','+(Number(r.id)||0)+')">' +
         '<td style="color:var(--text-muted);white-space:nowrap">'+x(fmtAgo(r.ts))+'</td>' +
-        '<td><code style="color:var(--cyan)">'+x(r.session||'-')+'</code></td>' +
+        '<td><code style="color:'+(r.session ? sessColor(r.session) : 'var(--text-muted)')+'">'+x(r.session||'-')+'</code></td>' +
         '<td style="color:var(--text-dim)">'+x(r.model||'-')+'</td>' +
         '<td style="color:var(--text-muted)">'+x(r.path||'-')+'</td>' +
         '<td style="font-weight:600">'+fmtTokens(r.total_tokens)+'</td>' +
@@ -3423,13 +3483,20 @@ function renderHourChart(rows) {
 // opens the detail card. Handy from the top-requests table and anywhere
 // else the user wants to drill into a specific id+run.
 function jumpToPair(run, id) {
+  if (!gwSelected) return;
   setGwSub('requests');
+  // Try to resolve from the existing data first (avoids a round-trip and
+  // the 400/404 errors that occur when the pair endpoint cannot find it).
+  const key = (run||'')+'|'+id;
+  if (gwRowsByKey.has(key)) {
+    showGwDetail(key);
+    return;
+  }
   fetch('/api/gateway/audit/pair?gateway='+encodeURIComponent(gwSelected)+
         '&run='+encodeURIComponent(run)+'&id='+encodeURIComponent(id))
     .then(r => r.ok ? r.json() : null)
     .then(pair => {
       if (!pair) return;
-      const key = (run||'')+'|'+id;
       const p = {req: pair.request, resp: pair.response, key, hay: ''};
       gwRowsCache = [p];
       gwRowsByKey.set(key, p);
@@ -3486,11 +3553,12 @@ function renderSessions() {
   }
   list.innerHTML = filtered.map(s => {
     const active = s.key === gwSessSelected ? ' active' : '';
+    const clr = sessColor(s.key);
     return '<div class="gw-sess-row'+active+'" onclick="selectSession(\''+xj(s.key)+'\')">' +
-      '<div class="id">'+x(s.key)+'</div>' +
+      '<div class="id"><span class="sess-dot" style="background:'+clr+'"></span>'+x(s.key)+'</div>' +
       '<div class="meta">'+x(s.first_model||'?')+' · '+(s.turns||s.requests)+' turns · ' +
         ((s.input_tokens||0)+(s.output_tokens||0)).toLocaleString()+' tokens</div>' +
-      (s.paths ? '<div class="meta" style="color:var(--cyan)">'+x(s.paths)+'</div>' : '') +
+      (s.paths ? '<div class="meta" style="color:'+clr+'">'+x(s.paths)+'</div>' : '') +
       '<div class="meta">last '+x(timeAgo(s.last_seen||''))+'</div>' +
     '</div>';
   }).join('');
@@ -3502,6 +3570,7 @@ function renderSessions() {
 }
 
 function selectSession(sid) {
+  if (!gwSelected) return;
   gwSessSelected = sid;
   if (gwSubview === 'sessions') writeGwHash();
   document.querySelectorAll('.gw-sess-row').forEach(el => el.classList.remove('active'));
@@ -3545,7 +3614,7 @@ function renderSessionTimeline() {
   }
   pairs.sort((a, b) => (a.req.ts||'').localeCompare(b.req.ts||''));
 
-  title.innerHTML = 'Session <code style="color:var(--cyan)">'+x(gwSessSelected)+'</code> · '+pairs.length+' turns';
+  title.innerHTML = 'Session <code style="color:'+sessColor(gwSessSelected)+'">'+x(gwSessSelected)+'</code> · '+pairs.length+' turns';
 
   if (!pairs.length) {
     wrap.innerHTML = '<div style="color:var(--text-muted);padding:12px">No turns recorded.</div>';
