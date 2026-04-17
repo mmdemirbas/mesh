@@ -1282,14 +1282,19 @@ function tick() {
   }
   if (needGateway) {
     fetch('/api/gateway/audit?limit=200').then(r=>ok(r)).then(r=>r.json()).then(v => { gatewayAudit = v; renderGateway(); }).catch(fail('gateway'));
-    // Stats endpoint takes a single gateway name. Fetch when exactly one is
-    // active (either one selected chip or only one gateway exists).
-    const statsGw = gwSelectedSet.size === 1 ? [...gwSelectedSet][0]
-      : (gwSelectedSet.size === 0 && gatewayAudit && gatewayAudit.length === 1) ? gatewayAudit[0].gateway : '';
-    if (statsGw) {
-      fetch('/api/gateway/audit/stats?gateway='+encodeURIComponent(statsGw)+
-        '&window='+encodeURIComponent(gwWindow)+'&bucket='+gwBucket(gwWindow))
-        .then(r=>ok(r)).then(r=>r.json()).then(v => { gwStats = v; if (gwSubview === 'overview') renderGatewayOverview(); }).catch(fail('gw-stats'));
+    // Stats: fetch for each active gateway and merge client-side.
+    // When no chips are selected, fetch all gateways.
+    const statsGws = gwSelectedSet.size > 0 ? [...gwSelectedSet]
+      : (gatewayAudit ? gatewayAudit.map(g => g.gateway) : []);
+    if (statsGws.length > 0) {
+      Promise.all(statsGws.map(gw =>
+        fetch('/api/gateway/audit/stats?gateway='+encodeURIComponent(gw)+
+          '&window='+encodeURIComponent(gwWindow)+'&bucket='+gwBucket(gwWindow))
+          .then(r => ok(r)).then(r => r.json())
+      )).then(results => {
+        gwStats = results.length === 1 ? results[0] : mergeGwStats(results);
+        if (gwSubview === 'overview') renderGatewayOverview();
+      }).catch(fail('gw-stats'));
     }
   }
 }
@@ -2333,7 +2338,7 @@ function renderGateway() {
   if (sessBar) {
     if (sessIds.length > 1) {
       sessBar.style.display = '';
-      sessBar.innerHTML = sessIds.map(sid => {
+      sessBar.innerHTML = '<span style="color:var(--text-muted);font-size:11px;margin-right:4px">session:</span>' + sessIds.map(sid => {
         const short = sid.slice(0, 8);
         const on = gwSessionSet.has(sid) ? ' on' : '';
         return '<span class="gw-chip'+on+'" data-sess="'+xa(sid)+'" title="'+xa(sid)+'" style="border-color:'+sessColor(sid)+';'+(gwSessionSet.has(sid)?'background:'+sessColor(sid)+';color:var(--bg)':'')+'">' +
@@ -2352,7 +2357,7 @@ function renderGateway() {
   }
 
   // Project filter chips — extracted from request bodies.
-  const projectIds = [...new Set(pairs.map(p => extractProject(p.req)).filter(Boolean))].sort();
+  const projectIds = [...new Set(pairs.map(p => extractProject(p.req) || p.req.path || '').filter(Boolean))].sort();
   for (const s of gwProjectSet) { if (!projectIds.includes(s)) gwProjectSet.delete(s); }
   const projBar = document.getElementById('gw-project-chips');
   if (projBar) {
@@ -2393,7 +2398,7 @@ function renderGateway() {
     const outcomeFilter = gwOutcomeFilter;
     const filtered = pairs.filter(p => {
       if (gwSessionSet.size > 0 && !gwSessionSet.has(p.req.session_id||'')) return false;
-      if (gwProjectSet.size > 0 && !gwProjectSet.has(extractProject(p.req))) return false;
+      if (gwProjectSet.size > 0 && !gwProjectSet.has(extractProject(p.req) || p.req.path || '')) return false;
       if (outcomeFilter && (p.resp.outcome||'') !== outcomeFilter) return false;
       if (!term) return true;
       // Lazy haystack: only JSON.stringify when the user is actually searching.
@@ -3769,6 +3774,91 @@ function applyGwHash() {
   }
 }
 
+// mergeGwStats combines stats responses from multiple gateways into one.
+// Totals are summed, by_model/by_session/by_path/preamble_blocks are merged
+// by key, series buckets are summed by timestamp, top_requests are merged and
+// re-sorted, by_hour is summed.
+function mergeGwStats(results) {
+  if (!results.length) return null;
+  const out = {
+    window: results[0].window,
+    bucket: results[0].bucket,
+    totals: {requests:0, errors:0, input_tokens:0, output_tokens:0,
+             cache_read_tokens:0, cache_creation_tokens:0, reasoning_tokens:0,
+             cache_hit_ratio:0, elapsed_sum_ms:0},
+    by_model: [], by_session: [], by_path: [], by_hour: [],
+    top_requests: [], preamble_blocks: [], series: [],
+  };
+  // Merge keyed rows into maps.
+  const models = {}, sessions = {}, paths = {}, preambles = {};
+  const hours = {}, seriesMap = {};
+  function mergeRow(map, row) {
+    const e = map[row.key];
+    if (!e) { map[row.key] = Object.assign({}, row); return; }
+    e.requests += row.requests || 0;
+    e.input_tokens += row.input_tokens || 0;
+    e.output_tokens += row.output_tokens || 0;
+    e.cache_read_tokens += row.cache_read_tokens || 0;
+    e.cache_creation_tokens += row.cache_creation_tokens || 0;
+    if (row.turns && row.turns > (e.turns||0)) e.turns = row.turns;
+    if (row.first_seen && (!e.first_seen || row.first_seen < e.first_seen)) e.first_seen = row.first_seen;
+    if (row.last_seen && (!e.last_seen || row.last_seen > e.last_seen)) e.last_seen = row.last_seen;
+    if (!e.first_model && row.first_model) e.first_model = row.first_model;
+    if (row.paths) {
+      const existing = (e.paths||'').split(', ').filter(Boolean);
+      for (const p of row.paths.split(', ').filter(Boolean)) {
+        if (!existing.includes(p)) existing.push(p);
+      }
+      e.paths = existing.join(', ');
+    }
+  }
+  for (const r of results) {
+    const t = r.totals || {};
+    out.totals.requests += t.requests || 0;
+    out.totals.errors += t.errors || 0;
+    out.totals.input_tokens += t.input_tokens || 0;
+    out.totals.output_tokens += t.output_tokens || 0;
+    out.totals.cache_read_tokens += t.cache_read_tokens || 0;
+    out.totals.cache_creation_tokens += t.cache_creation_tokens || 0;
+    out.totals.reasoning_tokens += t.reasoning_tokens || 0;
+    out.totals.elapsed_sum_ms += t.elapsed_sum_ms || 0;
+    for (const row of (r.by_model||[])) mergeRow(models, row);
+    for (const row of (r.by_session||[])) mergeRow(sessions, row);
+    for (const row of (r.by_path||[])) mergeRow(paths, row);
+    for (const row of (r.preamble_blocks||[])) mergeRow(preambles, row);
+    for (const row of (r.top_requests||[])) out.top_requests.push(row);
+    for (const row of (r.by_hour||[])) {
+      if (!hours[row.hour]) hours[row.hour] = {hour:row.hour, requests:0, input_tokens:0, output_tokens:0};
+      hours[row.hour].requests += row.requests||0;
+      hours[row.hour].input_tokens += row.input_tokens||0;
+      hours[row.hour].output_tokens += row.output_tokens||0;
+    }
+    for (const row of (r.series||[])) {
+      if (!seriesMap[row.t]) seriesMap[row.t] = {t:row.t, requests:0, input_tokens:0, output_tokens:0, cache_read_tokens:0, cache_creation_tokens:0};
+      const s = seriesMap[row.t];
+      s.requests += row.requests||0;
+      s.input_tokens += row.input_tokens||0;
+      s.output_tokens += row.output_tokens||0;
+      s.cache_read_tokens += row.cache_read_tokens||0;
+      s.cache_creation_tokens += row.cache_creation_tokens||0;
+    }
+  }
+  // Recompute cache hit ratio.
+  const totalIn = out.totals.input_tokens + out.totals.cache_read_tokens + out.totals.cache_creation_tokens;
+  if (totalIn > 0) out.totals.cache_hit_ratio = out.totals.cache_read_tokens / totalIn;
+  // Convert maps to sorted arrays.
+  const sortByTokens = arr => arr.sort((a,b) => (b.input_tokens+b.output_tokens) - (a.input_tokens+a.output_tokens));
+  out.by_model = sortByTokens(Object.values(models));
+  out.by_session = sortByTokens(Object.values(sessions));
+  out.by_path = sortByTokens(Object.values(paths));
+  out.preamble_blocks = sortByTokens(Object.values(preambles));
+  out.by_hour = Object.values(hours).sort((a,b) => a.hour - b.hour);
+  out.top_requests.sort((a,b) => (b.total_tokens||0) - (a.total_tokens||0));
+  out.top_requests = out.top_requests.slice(0, 20);
+  out.series = Object.values(seriesMap).sort((a,b) => a.t < b.t ? -1 : 1);
+  return out;
+}
+
 // --- Gateway overview ---
 //
 // Reads gwStats (the response from /api/gateway/audit/stats) and paints the
@@ -3779,11 +3869,7 @@ function renderGatewayOverview() {
   const kpi = document.getElementById('gw-kpi');
   if (!kpi) return;
   if (!gwStats) {
-    // Stats require a single gateway. Show a helpful notice when multiple
-    // gateways are selected or when stats are still loading.
-    const multi = gwSelectedSet.size !== 1 && !(gwSelectedSet.size === 0 && gatewayAudit && gatewayAudit.length === 1);
-    const msg = multi ? 'Select a single gateway for overview stats.' : 'Loading stats\u2026';
-    kpi.innerHTML = '<div class="stat" style="grid-column:1/-1;color:var(--text-muted)">'+msg+'</div>';
+    kpi.innerHTML = '<div class="stat" style="grid-column:1/-1;color:var(--text-muted)">Loading stats\u2026</div>';
     document.getElementById('gw-series').innerHTML = '';
     document.getElementById('gw-top-sessions').innerHTML = '';
     document.getElementById('gw-top-models').innerHTML = '';
