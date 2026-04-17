@@ -1842,11 +1842,17 @@ function renderStats() {
     stat('Healthy', up, comps.length ? Math.round(up/comps.length*100)+'%' : '-', up === comps.length ? 'var(--green)' : 'var(--yellow)') +
     stat('Failed', down, '', down > 0 ? 'var(--red)' : 'var(--green)') +
     stat('Pending', pending, ''));
+  const totalQuarantine = folders.reduce((s,f) => s + (f.quarantine_count||0), 0);
+  const hasErr = folders.some(f => (f.peers||[]).some(p => p.last_error));
+  const healthColor = (hasErr || conflicts.length > 0) ? 'var(--red)' : totalQuarantine > 0 ? 'var(--yellow)' : 'var(--green)';
+  const healthLabel = (hasErr || conflicts.length > 0) ? 'Error' : totalQuarantine > 0 ? 'Degraded' : 'Healthy';
   setHTML('fs-stats',
+    stat('Sync Health', healthLabel, '', healthColor) +
     stat('Folders', folders.length, '') +
     stat('Total Files', totalFiles.toLocaleString(), '') +
     stat('Total Size', fmtBytes(totalBytes), '') +
-    stat('Conflicts', conflicts.length, '', conflicts.length > 0 ? 'var(--red)' : 'var(--green)'));
+    stat('Conflicts', conflicts.length, '', conflicts.length > 0 ? 'var(--red)' : 'var(--green)') +
+    stat('Quarantined', totalQuarantine, '', totalQuarantine > 0 ? 'var(--yellow)' : 'var(--green)'));
 }
 
 function stat(label, value, sub, color) {
@@ -2236,7 +2242,11 @@ function renderFolderDetail(f) {
     +   '<div><div style="color:var(--text-muted);font-size:11px">SEQUENCE</div><div style="font-family:var(--mono)">'+(f.sequence||0)+'</div></div>'
     +   '<div><div style="color:var(--text-muted);font-size:11px">DIRECTION</div><div>'+x(f.direction)+'</div></div>'
     +   '<div><div style="color:var(--text-muted);font-size:11px">FILES &middot; DIRS &middot; SIZE</div><div>'+fmtTokens(f.file_count)+' &middot; '+fmtTokens(f.dir_count||0)+' &middot; '+fmtBytes(f.total_bytes||0)+'</div></div>'
+    +   '<div><div style="color:var(--text-muted);font-size:11px">QUARANTINED</div><div style="color:'+((f.quarantine_count||0)>0?'var(--yellow)':'var(--green)')+'">'+fmtTokens(f.quarantine_count||0)+'</div></div>'
     + '</div>'
+    + ((f.quarantine_paths && f.quarantine_paths.length) ? '<div style="margin-bottom:12px"><div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">QUARANTINED FILES</div>'
+      + f.quarantine_paths.map(p => '<div style="font-family:var(--mono);font-size:12px;color:var(--yellow);padding:2px 0">'+x(p)+'</div>').join('')
+      + '</div>' : '')
     + '<div style="margin-bottom:12px"><div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">IGNORE PATTERNS ('+ignores.length+')</div>'+ignoreHtml+'</div>'
     + '<div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">PEERS &amp; SYNC PLAN</div>'
     + '<table style="width:100%"><thead><tr><th>Name</th><th>Addr</th><th>Last sync</th><th>Seen / Sent seq</th><th>Plan</th><th>Total</th></tr></thead><tbody>'
@@ -2277,8 +2287,11 @@ function renderFilesync() {
     const planBadge = planBits.length
       ? ' <span style="margin-left:8px;font-family:var(--mono);font-size:11px">'+planBits.join(' ')+'</span>'
       : '';
+    const fHasErr = (f.peers||[]).some(p => p.last_error);
+    const fDotColor = fHasErr ? 'var(--red)' : (f.quarantine_count > 0 || f.direction === 'disabled') ? 'var(--yellow)' : 'var(--green)';
+    const fDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+fDotColor+';margin-right:6px;vertical-align:middle"></span>';
     html += '<tr style="cursor:pointer" onclick="toggleFolder(\''+xj(f.id)+'\')">'
-         +  '<td style="font-weight:600">'+arrow+' '+x(f.id)+planBadge+'</td>'
+         +  '<td style="font-weight:600">'+arrow+' '+fDot+x(f.id)+planBadge+'</td>'
          +  '<td style="color:var(--text-dim)">'+x(f.path)+'</td>'
          +  '<td><span class="badge '+dirBadge+'">'+x(f.direction)+'</span></td>'
          +  '<td>'+fmtTokens(f.file_count)+'</td>'
@@ -2320,10 +2333,13 @@ function renderFsActivity() {
   setHTML('fsa-filter-bar', TF.filterBar('fsa'));
   const el = document.getElementById('fsa-body');
   const rows = TF.apply('fsa', fsActivities);
-  if (!rows.length) { el.innerHTML = '<tr><td colspan="6" style="color:var(--text-muted);padding:16px">'+(fsActivities.length ? 'No rows match the current filter.' : 'No activity yet')+'</td></tr>'; return; }
+  const hasErrors = fsActivities.some(a => a.error);
+  const cols = hasErrors ? 7 : 6;
+  if (!rows.length) { el.innerHTML = '<tr><td colspan="'+cols+'" style="color:var(--text-muted);padding:16px">'+(fsActivities.length ? 'No rows match the current filter.' : 'No activity yet')+'</td></tr>'; return; }
   el.innerHTML = rows.map(a => {
-    const badge = a.direction === 'download' ? 'badge-ok' : a.direction === 'upload' ? 'badge-warn' : '';
-    return '<tr><td><span class="badge '+badge+'">'+x(a.direction)+'</span></td><td>'+x(a.folder)+'</td><td>'+x(a.peer)+'</td><td>'+a.files+'</td><td>'+fmtBytes(a.bytes)+'</td><td>'+timeAgo(a.time)+'</td></tr>';
+    const badge = a.direction === 'download' ? 'badge-ok' : a.direction === 'upload' ? 'badge-warn' : a.error ? 'badge-err' : '';
+    const errCell = hasErrors ? '<td style="color:var(--red)">'+x(a.error||'')+'</td>' : '';
+    return '<tr><td><span class="badge '+badge+'">'+x(a.direction||'error')+'</span></td><td>'+x(a.folder)+'</td><td>'+x(a.peer)+'</td><td>'+a.files+'</td><td>'+fmtBytes(a.bytes)+'</td><td>'+timeAgo(a.time)+'</td>'+errCell+'</tr>';
   }).join('');
 }
 
@@ -4646,7 +4662,8 @@ TF.reg('fsa', {
     {key:'peer', label:'Peer', extract: r => r.peer||''},
     {key:'files', label:'Files', type:'number', extract: r => r.files||0},
     {key:'bytes', label:'Size', type:'number', extract: r => r.bytes||0},
-    {key:'time', label:'Time', type:'date', extract: r => r.time||''}
+    {key:'time', label:'Time', type:'date', extract: r => r.time||''},
+    {key:'error', label:'Error', extract: r => r.error||''}
   ],
   onUpdate: renderFsActivity
 });
