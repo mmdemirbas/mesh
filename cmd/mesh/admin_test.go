@@ -577,10 +577,6 @@ func TestAdminUIGatewayDetailMarkup(t *testing.T) {
 		`gw-sub-btn`,
 		`gw-kpi`,
 		`gw-top-sessions`,
-		`renderSessions`,
-		`renderSessionTimeline`,
-		`gw-sess-list`,
-		`gw-session-grid`,
 		// Step 11–17 redesign: chat-first layout, custom blocks, length badges, tooltips.
 		`function fmtLen`,
 		`function bulkSec`,
