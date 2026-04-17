@@ -2433,8 +2433,7 @@ function renderResponseStructured(resp) {
 
   if (summary.thinking) {
     html += sec('Thinking', fmtLen(summary.thinking.length)+' chars',
-      '<div style="border-left:2px solid var(--purple);padding:4px 8px;color:var(--text-dim);font-style:italic">'+
-        renderText(summary.thinking)+'</div>', false);
+      renderCustomBlock({name: 'think', body: summary.thinking}), false);
   }
 
   // Multi-choice OpenAI responses surface remaining choices verbatim — rare,
