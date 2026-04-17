@@ -66,23 +66,54 @@ func (idx *FileIndex) clone() *FileIndex {
 	return &FileIndex{Path: idx.Path, Sequence: idx.Sequence, Files: files}
 }
 
-// loadIndex reads a persisted index from disk.
+// prevPath returns the backup path for double-write persistence.
+func prevPath(path string) string { return path + ".prev" }
+
+// loadIndex reads a persisted index from disk. H2a: tries both the primary
+// and backup files, returning whichever has the higher sequence. This
+// survives single-file corruption (disk sector error, partial write).
 func loadIndex(path string) (*FileIndex, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed from user cache dir
-	if err != nil {
-		if os.IsNotExist(err) {
+	primary := tryLoadIndex(path)
+	backup := tryLoadIndex(prevPath(path))
+
+	switch {
+	case primary != nil && backup != nil:
+		if backup.Sequence > primary.Sequence {
+			return backup, nil
+		}
+		return primary, nil
+	case primary != nil:
+		return primary, nil
+	case backup != nil:
+		slog.Warn("index loaded from backup (primary corrupted or missing)", "path", path)
+		return backup, nil
+	default:
+		// Both missing (first run) → not an error.
+		if isNotExist(path) && isNotExist(prevPath(path)) {
 			return newFileIndex(), nil
 		}
-		return nil, fmt.Errorf("read index: %w", err)
+		return nil, fmt.Errorf("both index files unreadable: %s", path)
+	}
+}
+
+// tryLoadIndex attempts to read and parse a single index file. Returns nil
+// on any error (missing, corrupt, I/O).
+func tryLoadIndex(path string) *FileIndex {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed from user cache dir
+	if err != nil {
+		return nil
 	}
 	idx := newFileIndex()
 	if err := yaml.Unmarshal(data, idx); err != nil {
-		return nil, fmt.Errorf("parse index: %w", err)
+		slog.Warn("corrupt index file, skipping", "path", path, "error", err)
+		return nil
 	}
-	return idx, nil
+	return idx
 }
 
-// save writes the index to disk atomically (temp + rename).
+// save writes the index to disk with fsync and double-write. H2a: alternates
+// between path and path.prev so that at least one valid copy survives a
+// crash or single-file disk corruption.
 func (idx *FileIndex) save(path string) error {
 	data, err := yaml.Marshal(idx)
 	if err != nil {
@@ -92,34 +123,65 @@ func (idx *FileIndex) save(path string) error {
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("create index dir: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return fmt.Errorf("write index temp: %w", err)
-	}
-	if err := renameReplace(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename index: %w", err)
+	// Write to the older of the two files (or primary if equal/missing).
+	target := doubleWriteTarget(path)
+	if err := writeFileSync(target, data); err != nil {
+		return fmt.Errorf("write index: %w", err)
 	}
 	return nil
 }
 
-// loadPeerStates reads per-peer sync state from disk.
+// loadPeerStates reads per-peer sync state from disk. H2a: tries both
+// primary and backup, preferring the one with a later LastSync timestamp.
 func loadPeerStates(path string) (map[string]PeerState, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed from user cache dir
-	if err != nil {
-		if os.IsNotExist(err) {
+	primary := tryLoadPeerStates(path)
+	backup := tryLoadPeerStates(prevPath(path))
+
+	switch {
+	case primary != nil && backup != nil:
+		if latestSync(backup).After(latestSync(primary)) {
+			return backup, nil
+		}
+		return primary, nil
+	case primary != nil:
+		return primary, nil
+	case backup != nil:
+		slog.Warn("peer state loaded from backup (primary corrupted or missing)", "path", path)
+		return backup, nil
+	default:
+		if isNotExist(path) && isNotExist(prevPath(path)) {
 			return make(map[string]PeerState), nil
 		}
-		return nil, fmt.Errorf("read peers: %w", err)
+		return nil, fmt.Errorf("both peer state files unreadable: %s", path)
+	}
+}
+
+// tryLoadPeerStates attempts to read and parse a single peer state file.
+func tryLoadPeerStates(path string) map[string]PeerState {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed from user cache dir
+	if err != nil {
+		return nil
 	}
 	peers := make(map[string]PeerState)
 	if err := yaml.Unmarshal(data, &peers); err != nil {
-		return nil, fmt.Errorf("parse peers: %w", err)
+		slog.Warn("corrupt peer state file, skipping", "path", path, "error", err)
+		return nil
 	}
-	return peers, nil
+	return peers
 }
 
-// savePeerStates writes peer state to disk atomically.
+// latestSync returns the most recent LastSync across all peers.
+func latestSync(peers map[string]PeerState) time.Time {
+	var latest time.Time
+	for _, ps := range peers {
+		if ps.LastSync.After(latest) {
+			latest = ps.LastSync
+		}
+	}
+	return latest
+}
+
+// savePeerStates writes peer state to disk with fsync and double-write.
 func savePeerStates(path string, peers map[string]PeerState) error {
 	data, err := yaml.Marshal(peers)
 	if err != nil {
@@ -129,15 +191,67 @@ func savePeerStates(path string, peers map[string]PeerState) error {
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("create peers dir: %w", err)
 	}
+	target := doubleWriteTarget(path)
+	if err := writeFileSync(target, data); err != nil {
+		return fmt.Errorf("write peers: %w", err)
+	}
+	return nil
+}
+
+// writeFileSync writes data to path via temp+fsync+rename. The fsync
+// ensures data hits stable storage before the rename makes it visible.
+func writeFileSync(path string, data []byte) error {
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return fmt.Errorf("write peers temp: %w", err)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600) //nolint:gosec // G304
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
 	}
 	if err := renameReplace(tmp, path); err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("rename peers: %w", err)
+		return err
 	}
 	return nil
+}
+
+// doubleWriteTarget returns which of the two files (primary or .prev) to
+// write to. Picks the older one by mtime so writes alternate between them.
+func doubleWriteTarget(path string) string {
+	prev := prevPath(path)
+	pi, piErr := os.Stat(path)
+	bi, biErr := os.Stat(prev)
+
+	// If one doesn't exist, write to it.
+	if piErr != nil {
+		return path
+	}
+	if biErr != nil {
+		return prev
+	}
+	// Both exist: write to the older one.
+	if bi.ModTime().Before(pi.ModTime()) {
+		return prev
+	}
+	return path
+}
+
+// isNotExist returns true if the path does not exist.
+func isNotExist(path string) bool {
+	_, err := os.Stat(path)
+	return os.IsNotExist(err)
 }
 
 // activeCountAndSize returns the number of non-deleted files and their total size.

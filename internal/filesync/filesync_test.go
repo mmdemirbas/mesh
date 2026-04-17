@@ -554,6 +554,105 @@ func TestScanAndPersist(t *testing.T) {
 	}
 }
 
+// H2a: when primary index.yaml is corrupted, load falls back to .prev.
+func TestLoadIndex_FallbackToPrev(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	idxPath := filepath.Join(dir, "index.yaml")
+
+	// Save an index (writes to primary first since neither exists).
+	idx := newFileIndex()
+	idx.Sequence = 10
+	idx.Files["a.txt"] = FileEntry{SHA256: "aaa", Sequence: 5}
+	if err := idx.save(idxPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// Save again with higher sequence (writes to .prev since primary is newer).
+	idx.Sequence = 20
+	idx.Files["b.txt"] = FileEntry{SHA256: "bbb", Sequence: 15}
+	if err := idx.save(idxPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt the file that has the HIGHER sequence.
+	// Determine which file has seq 20 by loading each.
+	p := tryLoadIndex(idxPath)
+	bp := tryLoadIndex(prevPath(idxPath))
+	var corruptTarget string
+	if p != nil && p.Sequence == 20 {
+		corruptTarget = idxPath
+	} else if bp != nil && bp.Sequence == 20 {
+		corruptTarget = prevPath(idxPath)
+	} else {
+		t.Fatal("neither file has sequence 20")
+	}
+	if err := os.WriteFile(corruptTarget, []byte("corrupt!!!"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Load should succeed with the surviving copy (seq 10).
+	loaded, err := loadIndex(idxPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Sequence != 10 {
+		t.Errorf("expected sequence 10 from fallback, got %d", loaded.Sequence)
+	}
+}
+
+// H2a: when both files are missing (first run), loadIndex returns empty index.
+func TestLoadIndex_BothMissing(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	idxPath := filepath.Join(dir, "nonexistent", "index.yaml")
+
+	loaded, err := loadIndex(idxPath)
+	if err != nil {
+		t.Fatalf("expected no error for missing files, got: %v", err)
+	}
+	if loaded.Sequence != 0 || len(loaded.Files) != 0 {
+		t.Error("expected empty index for first run")
+	}
+}
+
+// H2a: peer state double-write survives primary corruption.
+func TestLoadPeerStates_FallbackToPrev(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	peersPath := filepath.Join(dir, "peers.yaml")
+
+	peers := map[string]PeerState{
+		"10.0.0.1:7756": {LastSeenSequence: 100, LastSync: time.Now().Add(-time.Minute)},
+	}
+	if err := savePeerStates(peersPath, peers); err != nil {
+		t.Fatal(err)
+	}
+
+	// Save again with newer timestamp.
+	peers["10.0.0.1:7756"] = PeerState{LastSeenSequence: 200, LastSync: time.Now()}
+	if err := savePeerStates(peersPath, peers); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt primary.
+	if err := os.WriteFile(peersPath, []byte("corrupt!!!"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := loadPeerStates(peersPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) == 0 {
+		t.Fatal("expected peer state from backup")
+	}
+	ps := loaded["10.0.0.1:7756"]
+	if ps.LastSeenSequence == 0 {
+		t.Error("expected non-zero LastSeenSequence from backup")
+	}
+}
+
 func TestScanDetectsDeletion(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
