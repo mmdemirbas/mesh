@@ -2739,17 +2739,16 @@ function renderRequestStructured(req) {
     return emptyNote('Body not captured. Set log.level: full in the gateway YAML to record full request bodies.');
   }
   let html = '';
-  // Metadata table: model, upstream model, stream, session, turn, etc.
-  const mapped = req.mapped_model && req.mapped_model !== (body.model||'') ? req.mapped_model : '';
+  // Metadata table: only fields present in the raw JSON body, plus audit
+  // metadata that describes how the request was captured.
   html += metaTable([
     metaRow('model', body.model, '', body.model ? 'color:'+modelColor(body.model) : ''),
-    mapped ? metaRow('upstream model', mapped, '', 'color:'+modelColor(mapped)) : '',
-    metaRow('stream', (req.stream || body.stream) ? 'true' : ''),
-    metaRow('session '+info(tokenHelp.sessionId), req.session_id),
-    metaRow('turn '+info(tokenHelp.turnIndex), req.turn_index),
+    metaRow('stream', body.stream ? 'true' : ''),
     typeof body.temperature === 'number' ? metaRow('temperature', body.temperature) : '',
     metaRow('max_tokens', body.max_tokens),
     body.top_p ? metaRow('top_p', body.top_p) : '',
+    metaRow('session '+info(tokenHelp.sessionId), req.session_id),
+    metaRow('turn '+info(tokenHelp.turnIndex), req.turn_index),
     metaRow('direction', req.direction, '', req.direction ? 'color:'+dirColor(req.direction) : ''),
     metaRow('path', req.path, 'dim'),
   ]);
@@ -2798,16 +2797,27 @@ function renderUpstreamStructured(obj, kind) {
       metaRow('max_tokens', obj.max_tokens),
       obj.top_p ? metaRow('top_p', obj.top_p) : '',
     ]);
+    // System prompt: Anthropic has top-level obj.system; OpenAI has
+    // messages[0].role === "system". Extract and render consistently.
+    let sysText = '';
     if (obj.system) {
-      const txt = typeof obj.system === 'string' ? obj.system : JSON.stringify(obj.system);
-      html += sec('System prompt', fmtLen(txt.length)+' chars',
-        renderSystemPrompt(obj.system), false);
+      sysText = typeof obj.system === 'string' ? obj.system : JSON.stringify(obj.system);
     }
     const msgs = Array.isArray(obj.messages) ? obj.messages : [];
-    if (msgs.length) {
-      const totalChars = msgs.reduce((n, m) => n + msgChars(m), 0);
-      html += sec('Conversation ('+msgs.length+')', msgs.length+' msgs · '+fmtLen(totalChars)+' chars',
-        '<div class="chat">' + msgs.map((m, i) => renderBubble(m, i)).join('') + '</div>', true);
+    // Extract system messages from the array (OpenAI format).
+    const sysMsgs = msgs.filter(m => m.role === 'system');
+    const nonSysMsgs = msgs.filter(m => m.role !== 'system');
+    if (!sysText && sysMsgs.length) {
+      sysText = sysMsgs.map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join('\n\n');
+    }
+    if (sysText) {
+      html += sec('System prompt', fmtLen(sysText.length)+' chars',
+        renderSystemPrompt(sysText), false);
+    }
+    if (nonSysMsgs.length) {
+      const totalChars = nonSysMsgs.reduce((n, m) => n + msgChars(m), 0);
+      html += sec('Conversation ('+nonSysMsgs.length+')', nonSysMsgs.length+' msgs · '+fmtLen(totalChars)+' chars',
+        '<div class="chat">' + nonSysMsgs.map((m, i) => renderBubble(m, i)).join('') + '</div>', true);
     }
     const tools = Array.isArray(obj.tools) ? obj.tools : [];
     if (tools.length) {
