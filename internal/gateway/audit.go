@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -68,13 +69,15 @@ type RequestMeta struct {
 
 // ResponseMeta is the structured context written to an audit response row.
 type ResponseMeta struct {
-	Status    int
-	Outcome   string
-	Usage     *Usage
-	Summary   *SSESummary // optional reassembled SSE summary (streamed responses)
-	StartTime time.Time
-	EndTime   time.Time
-	Headers   map[string][]string
+	Status       int
+	Outcome      string
+	Usage        *Usage
+	Summary      *SSESummary // optional reassembled SSE summary (streamed responses)
+	StartTime    time.Time
+	EndTime      time.Time
+	Headers      map[string][]string
+	UpstreamReq  []byte // translated request body sent upstream (set by handler)
+	UpstreamResp []byte // raw upstream response body (non-streaming; set by handler)
 }
 
 // Usage is the token accounting captured per response. Any field may be zero
@@ -250,6 +253,12 @@ func (r *Recorder) Response(id RequestID, meta ResponseMeta, body []byte) {
 	}
 	if r.level == LogLevelFull {
 		row["body"] = rawOrString(body)
+		if len(meta.UpstreamReq) > 0 {
+			row["upstream_req"] = rawOrString(meta.UpstreamReq)
+		}
+		if len(meta.UpstreamResp) > 0 {
+			row["upstream_resp"] = rawOrString(meta.UpstreamResp)
+		}
 	}
 	r.writeRow(row)
 }
@@ -415,6 +424,29 @@ func rawOrString(body []byte) any {
 	return string(trimmed)
 }
 
+// AuditUpstream carries the translated upstream request body and (for
+// non-streaming) the raw upstream response body back from the handler to
+// wrapAuditing. The handler populates the fields; the wrapper reads them
+// after the handler returns.
+type AuditUpstream struct {
+	ReqBody  []byte // translated request sent to upstream
+	RespBody []byte // raw upstream response (non-streaming only)
+}
+
+type auditUpstreamKey struct{}
+
+// WithAuditUpstream attaches an AuditUpstream to the request context.
+func WithAuditUpstream(r *http.Request) (*AuditUpstream, *http.Request) {
+	u := &AuditUpstream{}
+	return u, r.WithContext(context.WithValue(r.Context(), auditUpstreamKey{}, u))
+}
+
+// getAuditUpstream retrieves the AuditUpstream from the request context, or nil.
+func getAuditUpstream(r *http.Request) *AuditUpstream {
+	v, _ := r.Context().Value(auditUpstreamKey{}).(*AuditUpstream)
+	return v
+}
+
 // auditingWriter wraps an http.ResponseWriter to capture a capped copy of the
 // bytes written and the final status code, while preserving streaming Flush
 // behavior. Used by wrapAuditing to tee translation-handler output into the
@@ -510,6 +542,7 @@ func wrapAuditing(cfg GatewayCfg, recorder *Recorder, clientAPI string, inner ht
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
 
+		upstream, r := WithAuditUpstream(r)
 		aw := &auditingWriter{ResponseWriter: w}
 		inner(aw, r)
 
@@ -544,13 +577,15 @@ func wrapAuditing(cfg GatewayCfg, recorder *Recorder, clientAPI string, inner ht
 		}
 
 		recorder.Response(reqID, ResponseMeta{
-			Status:    status,
-			Outcome:   outcome,
-			Usage:     usage,
-			Summary:   summary,
-			StartTime: start,
-			EndTime:   time.Now(),
-			Headers:   aw.Header(),
+			Status:       status,
+			Outcome:      outcome,
+			Usage:        usage,
+			Summary:      summary,
+			StartTime:    start,
+			EndTime:      time.Now(),
+			Headers:      aw.Header(),
+			UpstreamReq:  upstream.ReqBody,
+			UpstreamResp: upstream.RespBody,
 		}, auditBody)
 	}
 }

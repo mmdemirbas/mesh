@@ -21,6 +21,11 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 
 	anthBody, _ := json.Marshal(anthReq)
 
+	// Record the upstream request body for the audit log.
+	if au := getAuditUpstream(r); au != nil {
+		au.ReqBody = anthBody
+	}
+
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), "POST", cfg.Upstream, bytes.NewReader(anthBody))
 	if err != nil {
 		writeOpenAIError(w, 500, "cannot create upstream request")

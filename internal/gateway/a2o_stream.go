@@ -30,6 +30,11 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 
 	oaiBody, _ := json.Marshal(oaiReq)
 
+	// Record the upstream request body for the audit log.
+	if au := getAuditUpstream(r); au != nil {
+		au.ReqBody = oaiBody
+	}
+
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), "POST", cfg.Upstream, bytes.NewReader(oaiBody))
 	if err != nil {
 		writeAnthropicError(w, 500, "cannot create upstream request")

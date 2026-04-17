@@ -199,6 +199,11 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 
 	oaiBody, _ := json.Marshal(oaiReq)
 
+	// Record the upstream request body for the audit log.
+	if au := getAuditUpstream(r); au != nil {
+		au.ReqBody = oaiBody
+	}
+
 	headers := map[string]string{}
 	if apiKey != "" {
 		headers["Authorization"] = "Bearer " + apiKey
@@ -209,6 +214,11 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 		writeAnthropicError(w, 502, err.Error())
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
 		return
+	}
+
+	// Record the raw upstream response body for the audit log.
+	if au := getAuditUpstream(r); au != nil {
+		au.RespBody = respBody
 	}
 
 	if statusCode != http.StatusOK {
@@ -282,6 +292,11 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 
 	anthBody, _ := json.Marshal(anthReq)
 
+	// Record the upstream request body for the audit log.
+	if au := getAuditUpstream(r); au != nil {
+		au.ReqBody = anthBody
+	}
+
 	headers := map[string]string{}
 	if apiKey != "" {
 		headers["x-api-key"] = apiKey
@@ -293,6 +308,11 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 		writeOpenAIError(w, 502, err.Error())
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
 		return
+	}
+
+	// Record the raw upstream response body for the audit log.
+	if au := getAuditUpstream(r); au != nil {
+		au.RespBody = respBody
 	}
 
 	if statusCode != http.StatusOK {

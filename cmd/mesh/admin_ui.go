@@ -208,13 +208,25 @@ tbody tr:last-child td { border-bottom: none; }
 .md-list     { color: var(--yellow); font-weight: 700; }
 .md-quote    { color: var(--text-dim); border-left: 2px solid var(--border); padding-left: 6px; display: block; }
 .md-hr       { color: var(--text-muted); }
-.truncate {
-  display: inline-block; padding: 1px 8px; margin-left: 4px;
-  background: var(--bg-input); border: 1px solid var(--border);
-  border-radius: 3px; color: var(--text-dim); cursor: pointer;
-  font-size: 10px; font-family: var(--mono); vertical-align: middle;
+/* Truncated text with gradient fade */
+.text-wrap { position: relative; }
+.text-wrap.collapsed .text-inner {
+  max-height: 8em; overflow: hidden;
 }
-.truncate:hover { border-color: var(--green); color: var(--green); }
+.text-wrap.collapsed .text-fade {
+  display: block; position: absolute; bottom: 24px; left: 0; right: 0;
+  height: 3em; pointer-events: none;
+  background: linear-gradient(transparent, var(--bg-card));
+}
+.text-wrap:not(.collapsed) .text-fade { display: none; }
+.text-wrap:not(.collapsed) .text-inner { max-height: none; }
+.text-toggle {
+  display: block; padding: 2px 0; margin-top: 2px;
+  color: var(--text-dim); cursor: pointer;
+  font-size: 10px; font-family: var(--mono); text-align: center;
+  border-top: 1px dashed var(--border);
+}
+.text-toggle:hover { color: var(--green); }
 .tool-block {
   border-left: 2px solid var(--yellow); padding: 4px 8px;
   margin: 4px 0; background: var(--bg-card);
@@ -884,7 +896,8 @@ tbody tr:last-child td { border-bottom: none; }
             <thead><tr>
               <th>Time</th>
               <th>Dir</th>
-              <th>Model</th>
+              <th>Client model</th>
+              <th>Upstream model</th>
               <th>Stream</th>
               <th>Status</th>
               <th>Outcome</th>
@@ -909,7 +922,7 @@ tbody tr:last-child td { border-bottom: none; }
         <div class="gw-detail-grid">
           <div class="gw-detail-pane">
             <h4>
-              <span>Request <span id="gw-req-len" class="sec-len" style="margin-left:6px"></span></span>
+              <span>Client request <span id="gw-req-len" class="sec-len" style="margin-left:6px"></span></span>
               <span style="display:flex;gap:6px">
                 <button class="copy-btn" onclick="bulkSec('req', true)">expand all</button>
                 <button class="copy-btn" onclick="bulkSec('req', false)">collapse all</button>
@@ -921,10 +934,20 @@ tbody tr:last-child td { border-bottom: none; }
               <div class="sec-body"><div class="gw-detail-raw" id="gw-req-raw"></div></div>
             </details>
             <div class="gw-detail-structured" id="gw-req-structured"></div>
+            <div id="gw-upstream-req-sec" style="display:none">
+              <h4 style="margin-top:16px;border-top:2px solid var(--border);padding-top:8px">
+                <span>Upstream request <span id="gw-upstream-req-len" class="sec-len" style="margin-left:6px"></span></span>
+              </h4>
+              <details class="sec">
+                <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-upstream-req-json-len"></span></summary>
+                <div class="sec-body"><div class="gw-detail-raw" id="gw-upstream-req-raw"></div></div>
+              </details>
+              <div class="gw-detail-structured" id="gw-upstream-req-structured"></div>
+            </div>
           </div>
           <div class="gw-detail-pane">
             <h4>
-              <span>Response <span id="gw-resp-len" class="sec-len" style="margin-left:6px"></span></span>
+              <span>Client response <span id="gw-resp-len" class="sec-len" style="margin-left:6px"></span></span>
               <span style="display:flex;gap:6px">
                 <button class="copy-btn" onclick="bulkSec('resp', true)">expand all</button>
                 <button class="copy-btn" onclick="bulkSec('resp', false)">collapse all</button>
@@ -936,6 +959,16 @@ tbody tr:last-child td { border-bottom: none; }
               <div class="sec-body"><div class="gw-detail-raw" id="gw-resp-raw"></div></div>
             </details>
             <div class="gw-detail-structured" id="gw-resp-structured"></div>
+            <div id="gw-upstream-resp-sec" style="display:none">
+              <h4 style="margin-top:16px;border-top:2px solid var(--border);padding-top:8px">
+                <span>Upstream response <span id="gw-upstream-resp-len" class="sec-len" style="margin-left:6px"></span></span>
+              </h4>
+              <details class="sec">
+                <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-upstream-resp-json-len"></span></summary>
+                <div class="sec-body"><div class="gw-detail-raw" id="gw-upstream-resp-raw"></div></div>
+              </details>
+              <div class="gw-detail-structured" id="gw-upstream-resp-structured"></div>
+            </div>
           </div>
         </div>
       </div>
@@ -2241,13 +2274,14 @@ function renderGateway() {
 
     const body = document.getElementById('gw-body');
     if (!filtered.length) {
-      body.innerHTML = '<tr><td colspan="9" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
+      body.innerHTML = '<tr><td colspan="10" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
     } else {
     body.innerHTML = filtered.map(p => {
       const ts = p.resp.ts||p.req.ts||'';
       const dir = p.req.direction || '-';
       const model = p.req.model || '-';
-      const mm = p.req.mapped_model && p.req.mapped_model !== p.req.model ? p.req.mapped_model : '';
+      const ss = (p.resp.stream_summary || {});
+      const upModel = p.req.mapped_model || ss.model || '';
       const stream = p.req.stream ? 'yes' : 'no';
       const status = p.resp.status || 0;
       const statusColor = status >= 400 ? 'var(--red)' : status >= 200 ? 'var(--green)' : 'var(--text-dim)';
@@ -2260,7 +2294,8 @@ function renderGateway() {
       return '<tr style="cursor:pointer" onclick="showGwDetail(\''+xj(p.key)+'\')">'+
         '<td style="color:var(--text-muted);white-space:nowrap">'+fmtLocalTime(ts)+'</td>'+
         '<td>'+x(dir)+'</td>'+
-        '<td style="color:var(--text-dim)">'+x(model)+(mm ? ' <span style="color:var(--text-muted)">→ '+x(mm)+'</span>' : '')+'</td>'+
+        '<td style="color:var(--text-dim)">'+x(model)+'</td>'+
+        '<td style="color:var(--text-muted)">'+(upModel && upModel !== model ? x(upModel) : '-')+'</td>'+
         '<td style="color:var(--text-muted)">'+stream+'</td>'+
         '<td style="color:'+statusColor+'">'+status+'</td>'+
         '<td style="color:'+outcomeColor+'">'+x(outcome)+'</td>'+
@@ -2324,6 +2359,31 @@ function showGwDetail(idx) {
   document.getElementById('gw-resp-json-sec').open = false;
   document.getElementById('gw-req-structured').innerHTML = renderRequestStructured(p.req);
   document.getElementById('gw-resp-structured').innerHTML = renderResponseStructured(p.resp);
+  // Upstream request/response panes — only present in translation mode with full logging.
+  const upReq = p.resp.upstream_req;
+  const upResp = p.resp.upstream_resp;
+  const upReqSec = document.getElementById('gw-upstream-req-sec');
+  const upRespSec = document.getElementById('gw-upstream-resp-sec');
+  if (upReq && typeof upReq === 'object') {
+    upReqSec.style.display = '';
+    const uj = JSON.stringify(upReq);
+    document.getElementById('gw-upstream-req-raw').innerHTML = highlightJSON(upReq);
+    document.getElementById('gw-upstream-req-json-len').textContent = fmtLen(uj.length)+' chars';
+    document.getElementById('gw-upstream-req-len').textContent = fmtLen(uj.length)+' chars';
+    document.getElementById('gw-upstream-req-structured').innerHTML = renderUpstreamStructured(upReq, 'request');
+  } else {
+    upReqSec.style.display = 'none';
+  }
+  if (upResp && typeof upResp === 'object') {
+    upRespSec.style.display = '';
+    const uj = JSON.stringify(upResp);
+    document.getElementById('gw-upstream-resp-raw').innerHTML = highlightJSON(upResp);
+    document.getElementById('gw-upstream-resp-json-len').textContent = fmtLen(uj.length)+' chars';
+    document.getElementById('gw-upstream-resp-len').textContent = fmtLen(uj.length)+' chars';
+    document.getElementById('gw-upstream-resp-structured').innerHTML = renderUpstreamStructured(upResp, 'response');
+  } else {
+    upRespSec.style.display = 'none';
+  }
   // Reset scroll on the single scroll surface.
   const body = document.querySelector('#gw-detail-card .card-body');
   if (body) body.scrollTop = 0;
@@ -2591,6 +2651,80 @@ function renderRequestStructured(req) {
       tools.map(renderToolDefinition).join(''), false);
   }
   return html || emptyNote('Empty body — request had no system, messages, or tools.');
+}
+
+// renderUpstreamStructured renders the translated upstream request or raw
+// upstream response body. Both Anthropic and OpenAI shapes are detected and
+// rendered with the same building blocks used in the client-side panes.
+function renderUpstreamStructured(obj, kind) {
+  if (!obj || typeof obj !== 'object') return emptyNote('No data.');
+  let html = '';
+  if (kind === 'request') {
+    // Could be OpenAI (messages, model, tools) or Anthropic (messages, model, system, tools).
+    html += metaTable([
+      metaRow('model', obj.model),
+      metaRow('stream', obj.stream ? 'true' : ''),
+      typeof obj.temperature === 'number' ? metaRow('temperature', obj.temperature) : '',
+      metaRow('max_tokens', obj.max_tokens),
+      obj.top_p ? metaRow('top_p', obj.top_p) : '',
+    ]);
+    if (obj.system) {
+      const txt = typeof obj.system === 'string' ? obj.system : JSON.stringify(obj.system);
+      html += sec('System prompt', fmtLen(txt.length)+' chars',
+        renderSystemPrompt(obj.system), false);
+    }
+    const msgs = Array.isArray(obj.messages) ? obj.messages : [];
+    if (msgs.length) {
+      const totalChars = msgs.reduce((n, m) => n + msgChars(m), 0);
+      html += sec('Conversation ('+msgs.length+')', msgs.length+' msgs · '+fmtLen(totalChars)+' chars',
+        '<div class="chat">' + msgs.map((m, i) => renderBubble(m, i)).join('') + '</div>', true);
+    }
+    const tools = Array.isArray(obj.tools) ? obj.tools : [];
+    if (tools.length) {
+      const totalToolChars = tools.reduce((n, t) => n + JSON.stringify(t).length, 0);
+      html += sec('Tools ('+tools.length+')', tools.length+' tools · '+fmtLen(totalToolChars)+' chars',
+        tools.map(renderToolDefinition).join(''), false);
+    }
+  } else {
+    // Response — could be OpenAI ChatCompletionResponse or Anthropic MessagesResponse.
+    html += metaTable([
+      metaRow('id', obj.id),
+      metaRow('model', obj.model),
+      metaRow('stop_reason', obj.stop_reason || (obj.choices && obj.choices[0] && obj.choices[0].finish_reason) || ''),
+    ]);
+    // Anthropic response: content array.
+    if (Array.isArray(obj.content)) {
+      const assistantMsg = {role:'assistant', content: obj.content};
+      const totalChars = msgChars(assistantMsg);
+      html += sec('Content', fmtLen(totalChars)+' chars',
+        '<div class="chat">'+renderBubble(assistantMsg, 0)+'</div>', true);
+    }
+    // OpenAI response: choices array.
+    if (Array.isArray(obj.choices)) {
+      obj.choices.forEach(function(c, i) {
+        const m = c.message || {};
+        const msg = {role: m.role || 'assistant', content: m.content, tool_calls: m.tool_calls};
+        html += sec('Choice '+i, '',
+          '<div class="chat">'+renderBubble(msg, 0)+'</div>', i === 0);
+      });
+    }
+    // Usage from either shape.
+    const u = obj.usage;
+    if (u) {
+      const uRows = [];
+      // Anthropic shape.
+      if (u.input_tokens) uRows.push(metaRow('input_tokens', u.input_tokens));
+      if (u.output_tokens) uRows.push(metaRow('output_tokens', u.output_tokens));
+      if (u.cache_read_input_tokens) uRows.push(metaRow('cache_read', u.cache_read_input_tokens));
+      if (u.cache_creation_input_tokens) uRows.push(metaRow('cache_creation', u.cache_creation_input_tokens));
+      // OpenAI shape.
+      if (u.prompt_tokens) uRows.push(metaRow('prompt_tokens', u.prompt_tokens));
+      if (u.completion_tokens) uRows.push(metaRow('completion_tokens', u.completion_tokens));
+      if (u.total_tokens) uRows.push(metaRow('total_tokens', u.total_tokens));
+      if (uRows.length) html += sec('Usage', '', metaTable(uRows), false);
+    }
+  }
+  return html || emptyNote('Upstream body is empty.');
 }
 
 // renderSystemPrompt turns a system prompt string into a minimal outline:
@@ -3009,10 +3143,11 @@ function renderPlainText(s) {
     return '<div class="text">'+highlightMarkdown(s)+'</div>';
   }
   const id = 'tx-'+(_hjId++);
-  return '<div class="text" id="'+id+'-short">'+highlightMarkdown(s.slice(0, truncateLen))+
-    '<span class="truncate" onclick="_txExpand(\''+id+'\')">▼ '+fmtLen(s.length)+' chars</span></div>' +
-    '<div class="text json-collapsed" id="'+id+'-full">'+highlightMarkdown(s)+
-    '<span class="truncate" onclick="_txCollapse(\''+id+'\')">▲ collapse</span></div>';
+  return '<div class="text-wrap collapsed" id="'+id+'">' +
+    '<div class="text-inner"><div class="text">'+highlightMarkdown(s)+'</div></div>' +
+    '<div class="text-fade"></div>' +
+    '<span class="text-toggle" data-len="'+fmtLen(s.length)+' chars" onclick="_txToggle(\''+id+'\')">▼ expand ('+fmtLen(s.length)+' chars)</span>' +
+  '</div>';
 }
 
 // renderToolResultContent renders a tool_result payload. Unlike renderText,
@@ -3145,13 +3280,15 @@ function renderCustomBlock(p) {
     head + '<div class="cblock-body">'+inner+'</div>' +
   '</div>';
 }
-function _txExpand(id) {
-  document.getElementById(id+'-short').classList.add('json-collapsed');
-  document.getElementById(id+'-full').classList.remove('json-collapsed');
-}
-function _txCollapse(id) {
-  document.getElementById(id+'-short').classList.remove('json-collapsed');
-  document.getElementById(id+'-full').classList.add('json-collapsed');
+function _txToggle(id) {
+  const wrap = document.getElementById(id);
+  if (!wrap) return;
+  const collapsed = wrap.classList.toggle('collapsed');
+  const btn = wrap.querySelector('.text-toggle');
+  if (btn) {
+    const len = btn.dataset.len || '';
+    btn.textContent = collapsed ? '▼ expand ('+len+')' : '▲ collapse';
+  }
 }
 
 function renderOpenAIToolCall(tc) {
