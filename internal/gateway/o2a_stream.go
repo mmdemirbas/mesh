@@ -116,15 +116,16 @@ type o2aStreamState struct {
 	metrics      *state.Metrics
 	includeUsage bool
 
-	toolIndex    int
-	inToolBlock  bool
-	sentFirst    bool
-	finishReason string
-	usage        *OpenAIUsage
-	messageID    string
-	created      int64
-	jsonBuf      bytes.Buffer  // reused across emit calls to avoid per-chunk allocation
-	jsonEnc      *json.Encoder // writes to jsonBuf, reuses internal encode state
+	toolIndex       int
+	inToolBlock     bool
+	inThinkingBlock bool
+	sentFirst       bool
+	finishReason    string
+	usage           *OpenAIUsage
+	messageID       string
+	created         int64
+	jsonBuf         bytes.Buffer  // reused across emit calls to avoid per-chunk allocation
+	jsonEnc         *json.Encoder // writes to jsonBuf, reuses internal encode state
 }
 
 func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEvent) {
@@ -161,8 +162,14 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 					},
 				})
 			case "thinking":
-				// Drop.
+				// OpenAI has no native thinking type. Wrap as <think>
+				// tags in text content so it round-trips correctly.
+				s.inThinkingBlock = true
 				s.inToolBlock = false
+				s.emitChunk(OpenAIChunkChoice{
+					Index: 0,
+					Delta: OpenAIChunkDelta{Content: strPtr("<think>")},
+				})
 			default:
 				s.inToolBlock = false
 			}
@@ -191,12 +198,26 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 					}},
 				},
 			})
+
+		case "thinking_delta":
+			// Emit thinking content as text (inside <think> wrapper).
+			s.emitChunk(OpenAIChunkChoice{
+				Index: 0,
+				Delta: OpenAIChunkDelta{Content: &event.Delta.Thinking},
+			})
 		}
 
 	case "content_block_stop":
 		if s.inToolBlock {
 			s.toolIndex++
 			s.inToolBlock = false
+		}
+		if s.inThinkingBlock {
+			s.inThinkingBlock = false
+			s.emitChunk(OpenAIChunkChoice{
+				Index: 0,
+				Delta: OpenAIChunkDelta{Content: strPtr("</think>\n\n")},
+			})
 		}
 
 	case "message_delta":

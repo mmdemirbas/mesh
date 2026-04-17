@@ -338,7 +338,7 @@ func TestTranslateAnthropicRequest_Stream(t *testing.T) {
 	}
 }
 
-func TestTranslateAnthropicRequest_ThinkingDropped(t *testing.T) {
+func TestTranslateAnthropicRequest_ThinkingWrapped(t *testing.T) {
 	t.Parallel()
 	cfg := &GatewayCfg{}
 	content := `[{"type":"thinking","thinking":"I think..."},{"type":"text","text":"Hello"}]`
@@ -355,11 +355,9 @@ func TestTranslateAnthropicRequest_ThinkingDropped(t *testing.T) {
 
 	var text string
 	json.Unmarshal(out.Messages[0].Content, &text)
-	if text != "Hello" {
-		t.Errorf("content = %q, want 'Hello'", text)
-	}
-	if len(out.Messages[0].ToolCalls) != 0 {
-		t.Error("should have no tool calls")
+	want := "<think>I think...</think>\n\nHello"
+	if text != want {
+		t.Errorf("content = %q, want %q", text, want)
 	}
 }
 

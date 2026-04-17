@@ -310,7 +310,7 @@ func TestO2AStream_ToolCall(t *testing.T) {
 	}
 }
 
-func TestO2AStream_ThinkingDropped(t *testing.T) {
+func TestO2AStream_ThinkingWrapped(t *testing.T) {
 	t.Parallel()
 	anthropicEvents := []string{
 		`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_3","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":5,"output_tokens":0}}}`,
@@ -329,8 +329,8 @@ func TestO2AStream_ThinkingDropped(t *testing.T) {
 
 	events := runO2AStreamTest(t, upstream.URL, "gpt-4o", nil, false)
 
-	// Should get text "Hello" but no thinking content.
-	var hasThinking bool
+	// Thinking should appear as <think>...</think> tags in text content.
+	var allText strings.Builder
 	for _, e := range events {
 		if e.data == "[DONE]" {
 			continue
@@ -340,13 +340,18 @@ func TestO2AStream_ThinkingDropped(t *testing.T) {
 			continue
 		}
 		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != nil {
-			if strings.Contains(*chunk.Choices[0].Delta.Content, "think") {
-				hasThinking = true
-			}
+			allText.WriteString(*chunk.Choices[0].Delta.Content)
 		}
 	}
-	if hasThinking {
-		t.Error("thinking content should not appear in OpenAI output")
+	got := allText.String()
+	if !strings.Contains(got, "<think>") || !strings.Contains(got, "</think>") {
+		t.Errorf("expected <think> wrapper in output, got %q", got)
+	}
+	if !strings.Contains(got, "Let me think...") {
+		t.Errorf("expected thinking content in output, got %q", got)
+	}
+	if !strings.Contains(got, "Hello") {
+		t.Errorf("expected 'Hello' text in output, got %q", got)
 	}
 }
 

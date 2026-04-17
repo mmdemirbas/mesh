@@ -457,10 +457,12 @@ func translateAnthropicResponse(resp *MessagesResponse, clientModel string) (*Ch
 				},
 			})
 		case "thinking":
-			// OpenAI Chat Completions has no native thinking type, so we
-			// drop these on the response side too. Logged at debug level.
-			slog.Debug("dropping anthropic 'thinking' block in o2a translation",
-				"thinking_chars", len(b.Thinking))
+			// OpenAI has no native thinking type. Wrap as <think> XML
+			// tags in the text content so the A→O direction can translate
+			// them back to native thinking blocks on the return trip.
+			if b.Thinking != "" {
+				texts = append(texts, "<think>"+b.Thinking+"</think>\n\n")
+			}
 		}
 	}
 

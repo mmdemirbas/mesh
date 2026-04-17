@@ -133,8 +133,9 @@ type AnthropicStreamEvent struct {
 
 // AnthropicDelta holds incremental content within a streaming event.
 type AnthropicDelta struct {
-	Type        string `json:"type,omitempty"`         // "text_delta", "input_json_delta"
+	Type        string `json:"type,omitempty"`         // "text_delta", "input_json_delta", "thinking_delta"
 	Text        string `json:"text,omitempty"`         // for text_delta
+	Thinking    string `json:"thinking,omitempty"`     // for thinking_delta
 	PartialJSON string `json:"partial_json,omitempty"` // for input_json_delta
 	StopReason  string `json:"stop_reason,omitempty"`  // for message_delta
 }

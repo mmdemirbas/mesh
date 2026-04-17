@@ -464,7 +464,7 @@ func TestTranslateAnthropicResponse_IDPrefix(t *testing.T) {
 	}
 }
 
-func TestTranslateAnthropicResponse_ThinkingDropped(t *testing.T) {
+func TestTranslateAnthropicResponse_ThinkingWrapped(t *testing.T) {
 	t.Parallel()
 	resp := &MessagesResponse{
 		ID:         "msg_789",
@@ -480,14 +480,12 @@ func TestTranslateAnthropicResponse_ThinkingDropped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Should have text only, thinking dropped.
+	// Thinking should be wrapped as <think> tags before text.
 	var text string
 	json.Unmarshal(out.Choices[0].Message.Content, &text)
-	if text != "Hello" {
-		t.Errorf("content = %q, want Hello", text)
-	}
-	if len(out.Choices[0].Message.ToolCalls) != 0 {
-		t.Error("should have no tool calls")
+	want := "<think>I think...</think>\n\nHello"
+	if text != want {
+		t.Errorf("content = %q, want %q", text, want)
 	}
 }
 
