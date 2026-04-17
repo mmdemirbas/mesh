@@ -3229,6 +3229,35 @@ function renderMdViewer(s) {
           '<span class="toc-len" style="color:'+lenClr+'">'+fmtLen(sectionLen)+'</span> '+x(h.title)+'</a>';
       }).join('') +
     '</div>';
+  } else if (s.length > 2000) {
+    // No markdown headings but content is long — try to build a TOC from
+    // top-level XML tags (e.g. <types>, <type>, <examples>).
+    const xmlRe = /^<([a-zA-Z][a-zA-Z0-9_-]*)(?:\s[^>]*)?>$/gm;
+    const xmlTags = [];
+    let xm;
+    while ((xm = xmlRe.exec(s)) !== null) {
+      xmlTags.push({tag: xm[1], offset: xm.index});
+    }
+    if (xmlTags.length > 1) {
+      // Inject anchors into the rendered body at each escaped opening tag.
+      let xIdx = 0;
+      body = body.replace(/&lt;([a-zA-Z][a-zA-Z0-9_-]*)(?:\s[^&]*?)?&gt;/g, function(match, tag) {
+        if (xIdx < xmlTags.length && tag === xmlTags[xIdx].tag) {
+          return '<span id="'+id+'-x'+(xIdx++)+'"></span>' + match;
+        }
+        return match;
+      });
+      toc = '<div class="md-toc">' +
+        '<div style="font-weight:600;color:var(--text-dim);margin-bottom:4px">Tags <span class="toc-len">'+fmtLen(s.length)+' chars</span></div>' +
+        xmlTags.map(function(t, i) {
+          const nextOff = i+1 < xmlTags.length ? xmlTags[i+1].offset : s.length;
+          const sectionLen = nextOff - t.offset;
+          const lenClr = sectionLen > 10000 ? 'var(--red)' : sectionLen > 2000 ? 'var(--yellow)' : sectionLen > 500 ? 'var(--text)' : 'var(--text-muted)';
+          return '<a onclick="_mdScroll(\''+id+'-x'+i+'\')" title="&lt;'+xa(t.tag)+'&gt;">' +
+            '<span class="toc-len" style="color:'+lenClr+'">'+fmtLen(sectionLen)+'</span> &lt;'+x(t.tag)+'&gt;</a>';
+        }).join('') +
+      '</div>';
+    }
   }
   return '<div class="md-viewer" id="'+id+'">' +
     '<div class="md-body">'+body+'</div>' +
