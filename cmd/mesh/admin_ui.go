@@ -2450,6 +2450,17 @@ function showGwDetail(idx) {
     document.getElementById('gw-upstream-resp-json-len').textContent = fmtLen(uj.length)+' chars';
     document.getElementById('gw-upstream-resp-len').textContent = fmtLen(uj.length)+' chars';
     document.getElementById('gw-upstream-resp-structured').innerHTML = renderUpstreamStructured(upResp, 'response');
+  } else if (upReq && p.req.stream) {
+    // Streaming: upstream response body is consumed event-by-event and not
+    // captured. Show the section with an explanatory note.
+    upRespSec.style.display = '';
+    document.getElementById('gw-upstream-resp-raw').innerHTML = '';
+    document.getElementById('gw-upstream-resp-json-len').textContent = '';
+    document.getElementById('gw-upstream-resp-len').textContent = '';
+    document.getElementById('gw-upstream-resp-structured').innerHTML =
+      '<div style="color:var(--text-muted);padding:12px">Upstream response not available for streamed requests. ' +
+      'The response body is consumed event-by-event during SSE translation. ' +
+      'See the client response stream summary for the reassembled content.</div>';
   } else {
     upRespSec.style.display = 'none';
   }
