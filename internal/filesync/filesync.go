@@ -46,7 +46,8 @@ type FolderStatus struct {
 	// LastSync is the most recent successful sync time across all peers.
 	// Zero value means no peer has synced yet.
 	LastSync        time.Time `json:"last_sync"`
-	QuarantineCount int       `json:"quarantine_count,omitempty"`
+	QuarantineCount int      `json:"quarantine_count,omitempty"`
+	QuarantinePaths []string `json:"quarantine_paths,omitempty"`
 }
 
 // FolderPeer is a resolved peer entry for a folder: the configured nickname
@@ -192,7 +193,7 @@ func GetFolderStatuses() []FolderStatus {
 				peers[i] = fp
 			}
 			ignores := append([]string(nil), fs.cfg.IgnorePatterns...)
-			qcount := len(fs.retries.quarantinedPaths())
+			qpaths := fs.retries.quarantinedPaths()
 			fs.indexMu.RUnlock()
 
 			result = append(result, FolderStatus{
@@ -206,7 +207,8 @@ func GetFolderStatuses() []FolderStatus {
 				IgnorePatterns:  ignores,
 				Peers:           peers,
 				LastSync:        lastSync,
-				QuarantineCount: qcount,
+				QuarantineCount: len(qpaths),
+				QuarantinePaths: qpaths,
 			})
 		}
 	})
@@ -1015,6 +1017,12 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		fs.indexMu.Lock()
 		fs.peerLastError[peerAddr] = err.Error()
 		fs.indexMu.Unlock()
+		n.recordActivity(SyncActivity{
+			Time:   time.Now(),
+			Folder: folderID,
+			Peer:   peerAddr,
+			Error:  err.Error(),
+		})
 		return
 	}
 
@@ -1370,6 +1378,10 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	if fs.cfg.Direction == "send-only" {
 		direction = "upload"
 	}
+	var errMsg string
+	if len(failedSeqs) > 0 {
+		errMsg = fmt.Sprintf("%d files failed", len(failedSeqs))
+	}
 	n.recordActivity(SyncActivity{
 		Time:      time.Now(),
 		Folder:    folderID,
@@ -1377,6 +1389,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		Direction: direction,
 		Files:     downloads + conflicts + deletes,
 		Bytes:     totalBytes,
+		Error:     errMsg,
 	})
 
 	// B9: compute safe LastSeenSequence — do not advance past entries
