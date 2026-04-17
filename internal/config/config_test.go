@@ -852,6 +852,81 @@ func TestValidate_FilesyncDryRunRequiresPeers(t *testing.T) {
 	}
 }
 
+// M4: overlapping folder paths should fail validation.
+func TestValidate_FilesyncOverlappingPaths(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	_ = os.MkdirAll(sub, 0755)
+
+	fsCfg := FilesyncCfg{
+		Bind:          "0.0.0.0:7756",
+		MaxConcurrent: 4,
+		Peers:         map[string][]string{"p1": {"10.0.0.1:7756"}},
+		Folders: map[string]FolderCfgRaw{
+			"parent": {Path: dir, Peers: []string{"p1"}},
+			"child":  {Path: sub, Peers: []string{"p1"}},
+		},
+	}
+	_ = fsCfg.Resolve()
+	cfg := &Config{Filesync: []FilesyncCfg{fsCfg}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("overlapping folder paths should fail validation")
+	}
+	if !strings.Contains(err.Error(), "overlaps") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// M4: same path in two folders should fail validation.
+func TestValidate_FilesyncDuplicatePaths(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	fsCfg := FilesyncCfg{
+		Bind:          "0.0.0.0:7756",
+		MaxConcurrent: 4,
+		Peers:         map[string][]string{"p1": {"10.0.0.1:7756"}},
+		Folders: map[string]FolderCfgRaw{
+			"a": {Path: dir, Peers: []string{"p1"}},
+			"b": {Path: dir, Peers: []string{"p1"}},
+		},
+	}
+	_ = fsCfg.Resolve()
+	cfg := &Config{Filesync: []FilesyncCfg{fsCfg}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("duplicate folder paths should fail validation")
+	}
+	if !strings.Contains(err.Error(), "same path") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// M4: non-overlapping paths should pass.
+func TestValidate_FilesyncNonOverlappingPaths(t *testing.T) {
+	t.Parallel()
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	fsCfg := FilesyncCfg{
+		Bind:          "0.0.0.0:7756",
+		MaxConcurrent: 4,
+		Peers:         map[string][]string{"p1": {"10.0.0.1:7756"}},
+		Folders: map[string]FolderCfgRaw{
+			"a": {Path: dir1, Peers: []string{"p1"}},
+			"b": {Path: dir2, Peers: []string{"p1"}},
+		},
+	}
+	_ = fsCfg.Resolve()
+	cfg := &Config{Filesync: []FilesyncCfg{fsCfg}}
+	err := cfg.Validate()
+	if err != nil {
+		t.Fatalf("non-overlapping paths should pass: %v", err)
+	}
+}
+
 func TestFilesyncResolve(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

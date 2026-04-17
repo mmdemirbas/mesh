@@ -238,6 +238,8 @@ func (c *FilesyncCfg) Resolve() error {
 		}
 		if direction == "" {
 			direction = "send-receive"
+			slog.Warn("no direction configured, defaulting to send-receive",
+				"folder", id)
 		}
 
 		// Ignore patterns: defaults + folder (appended).
@@ -656,6 +658,11 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// M4: check for overlapping folder paths across all filesync blocks.
+	if err := checkOverlappingFolders(c.Filesync); err != nil {
+		return err
+	}
+
 	for i, gw := range c.Gateway {
 		if err := gw.Validate(); err != nil {
 			return fmt.Errorf("gateway[%d] %q: %w", i, gw.Name, err)
@@ -685,6 +692,49 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// checkOverlappingFolders detects filesync folders whose paths overlap.
+// Two folders syncing overlapping paths causes delete/re-add loops because
+// the same file appears in both indexes with independent tombstone lifecycles.
+func checkOverlappingFolders(fss []FilesyncCfg) error {
+	type folderPath struct {
+		id   string
+		abs  string
+		fsID int
+	}
+	var all []folderPath
+	for i, fs := range fss {
+		for _, f := range fs.ResolvedFolders {
+			abs, err := filepath.Abs(f.Path)
+			if err != nil {
+				continue // can't resolve — skip overlap check for this one
+			}
+			abs = filepath.Clean(abs)
+			all = append(all, folderPath{id: f.ID, abs: abs, fsID: i})
+		}
+	}
+	for i := 0; i < len(all); i++ {
+		for j := i + 1; j < len(all); j++ {
+			a, b := all[i], all[j]
+			if a.abs == b.abs {
+				return fmt.Errorf("filesync folders %q and %q have the same path %q", a.id, b.id, a.abs)
+			}
+			// Check prefix: a is parent of b or vice versa.
+			if isSubpath(a.abs, b.abs) {
+				return fmt.Errorf("filesync folder %q (%s) overlaps with %q (%s)", a.id, a.abs, b.id, b.abs)
+			}
+			if isSubpath(b.abs, a.abs) {
+				return fmt.Errorf("filesync folder %q (%s) overlaps with %q (%s)", b.id, b.abs, a.id, a.abs)
+			}
+		}
+	}
+	return nil
+}
+
+// isSubpath returns true if child is under parent (parent is a prefix path component).
+func isSubpath(parent, child string) bool {
+	return strings.HasPrefix(child, parent+string(filepath.Separator))
 }
 
 // checkDuplicateNames detects name collisions within connection names,
