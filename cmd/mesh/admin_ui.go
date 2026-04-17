@@ -1269,7 +1269,7 @@ select option { background: var(--bg-card); color: var(--text); }
 
 <script>
 // --- State ---
-let state = {}, logs = [], folders = [], conflicts = [], clipActivities = [], fsActivities = [], metricsText = '', gatewayAudit = [], gwStats = null, gwSubview = 'overview', gwWindow = '24h';
+let state = {}, logs = [], folders = [], conflicts = [], clipActivities = [], fsActivities = [], metricsText = '', gatewayAudit = [], gwStats = null, gwSubview = 'overview', gwWindow = '24h', fsMetrics = {};
 function gwBucket(w) { return w === '1h' ? 'minute' : w === '24h' ? 'hour' : w === '7d' ? 'hour' : 'day'; }
 let logLevel = 'all';
 let logMode = 'recent'; // 'recent' (ring buffer) or 'file' (full log file)
@@ -1400,6 +1400,7 @@ function tick() {
   fetch('/api/metrics').then(r=>ok(r)).then(r=>r.text()).then(t => {
     metricsText = t;
     compMetrics = extractCompMetrics(t);
+    fsMetrics = extractFsMetrics(t);
     const nowTx = sumMetric(metricsText, 'mesh_bytes_tx_total');
     const nowRx = sumMetric(metricsText, 'mesh_bytes_rx_total');
     const nowTokIn = sumMetric(metricsText, 'mesh_gateway_tokens_in_total');
@@ -1905,6 +1906,18 @@ function extractCompMetrics(text) {
   return cm;
 }
 
+function extractFsMetrics(text) {
+  const fm = {};
+  const re = /^mesh_filesync_(\w+)\{folder="([^"]+)"\}\s+(\S+)/gm;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const metric = m[1], folder = m[2], val = parseFloat(m[3]) || 0;
+    if (!fm[folder]) fm[folder] = {};
+    fm[folder][metric] = val;
+  }
+  return fm;
+}
+
 function fmtUptime(secs) {
   if (!secs || secs <= 0) return '';
   if (secs < 60) return Math.floor(secs) + 's';
@@ -2271,7 +2284,29 @@ function renderFolderDetail(f) {
     + peerRowsHtml + '</tbody></table>'
     + '<div style="color:var(--text-muted);font-size:11px;margin-top:12px;margin-bottom:4px">PENDING FILE PREVIEW</div>'
     + previewHtml
+    + renderFolderMetrics(f.id)
     + '</td></tr>';
+}
+
+function renderFolderMetrics(folderId) {
+  const m = fsMetrics[folderId];
+  if (!m) return '';
+  function fv(key) { return m[key] != null ? m[key] : 0; }
+  function dur(ns) { const s = ns; return s < 0.001 ? '<1ms' : s < 1 ? (s*1000).toFixed(0)+'ms' : s.toFixed(2)+'s'; }
+  return '<div style="color:var(--text-muted);font-size:11px;margin-top:12px;margin-bottom:4px">CUMULATIVE COUNTERS</div>'
+    + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px 16px;font-size:12px">'
+    + '<div><span style="color:var(--text-muted)">Peer syncs</span> '+fmtTokens(fv('peer_syncs_total'))+'</div>'
+    + '<div><span style="color:var(--text-muted)">Files DL</span> '+fmtTokens(fv('files_downloaded_total'))+'</div>'
+    + '<div><span style="color:var(--text-muted)">Files DEL</span> '+fmtTokens(fv('files_deleted_total'))+'</div>'
+    + '<div><span style="color:var(--text-muted)">Conflicts</span> '+fmtTokens(fv('files_conflicted_total'))+'</div>'
+    + '<div><span style="color:var(--text-muted)">Errors</span> <span style="color:'+(fv('sync_errors_total')>0?'var(--red)':'inherit')+'">'+fmtTokens(fv('sync_errors_total'))+'</span></div>'
+    + '<div><span style="color:var(--text-muted)">Bytes DL</span> '+fmtBytes(fv('bytes_downloaded_total'))+'</div>'
+    + '<div><span style="color:var(--text-muted)">Bytes UL</span> '+fmtBytes(fv('bytes_uploaded_total'))+'</div>'
+    + '<div><span style="color:var(--text-muted)">Idx exchanges</span> '+fmtTokens(fv('index_exchanges_total'))+'</div>'
+    + '<div><span style="color:var(--text-muted)">Scans</span> '+fmtTokens(fv('scans_total'))+'</div>'
+    + '<div><span style="color:var(--text-muted)">Last scan</span> '+dur(fv('scan_duration_seconds'))+'</div>'
+    + '<div><span style="color:var(--text-muted)">Last sync</span> '+dur(fv('peer_sync_duration_seconds'))+'</div>'
+    + '</div>';
 }
 
 function renderFilesync() {
