@@ -901,9 +901,18 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		if conflicts != nil {
 			fs.conflicts = conflicts
 		}
+		// M3: maintain removed-peer markers on the live peers map.
+		peersChanged := markRemovedPeers(fs.peers, fs.cfg.Peers)
+		peersChanged = gcRemovedPeers(fs.peers, tombstoneMaxAge) > 0 || peersChanged
 		countAfterSwap, totalSize := fs.index.activeCountAndSize()
 		fs.indexMu.Unlock()
 		swapDuration := time.Since(swapStart)
+
+		// Persist peer state when M3 maintenance modified it, so changes
+		// survive restarts without waiting for the next syncFolder call.
+		if peersChanged {
+			n.persistFolder(id)
+		}
 
 		fs.initialScanDone.Store(true)
 		state.Global.Update("filesync-folder", id, state.Connected, "idle")
@@ -1118,7 +1127,25 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			"folder", folderID, "peer", peerAddr,
 			"remote_seq", remoteIdx.GetSequence(), "last_seen", peerLastSeq)
 		fs.indexMu.Lock()
-		fs.peers[peerAddr] = PeerState{LastSeenSequence: 0, LastSentSequence: 0, LastSync: time.Now()}
+		// H2b: preserve LastEpoch from old state so the epoch change is
+		// visible on the next cycle when diff actually runs.
+		var lastEpoch string
+		if old, ok := fs.peers[peerAddr]; ok {
+			lastEpoch = old.LastEpoch
+		}
+		// Store remote's new epoch as PendingEpoch. On the next cycle's
+		// diff, downloads for locally-tombstoned files will be filtered.
+		var pendingEpoch string
+		if remoteEpoch := remoteIdx.GetEpoch(); remoteEpoch != "" && remoteEpoch != lastEpoch {
+			pendingEpoch = remoteEpoch
+		}
+		fs.peers[peerAddr] = PeerState{
+			LastSeenSequence: 0,
+			LastSentSequence: 0,
+			LastSync:         time.Now(),
+			LastEpoch:        lastEpoch,
+			PendingEpoch:     pendingEpoch,
+		}
 		fs.indexMu.Unlock()
 		return
 	}
@@ -1132,10 +1159,37 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	// so concurrent downloads that bumped Sequence are visible to diff().
 	fs.indexMu.RLock()
 	lastSeenSeq := int64(0)
+	var pendingEpoch string
 	if ps, ok := fs.peers[peerAddr]; ok {
 		lastSeenSeq = ps.LastSeenSequence
+		pendingEpoch = ps.PendingEpoch
 	}
 	actions := fs.index.diff(remoteFileIndex, lastSeenSeq, fs.cfg.Direction)
+
+	// H2b: when an epoch change was detected on the previous cycle (restart
+	// detection stored PendingEpoch), filter out downloads for files we have
+	// locally as tombstones. The reset peer lost its index and re-advertised
+	// everything — our tombstones are authoritative.
+	if pendingEpoch != "" {
+		filtered := 0
+		n := 0
+		for _, a := range actions {
+			if a.Action == ActionDownload {
+				if le, ok := fs.index.Files[a.Path]; ok && le.Deleted {
+					filtered++
+					continue
+				}
+			}
+			actions[n] = a
+			n++
+		}
+		actions = actions[:n]
+		if filtered > 0 {
+			slog.Info("epoch guard filtered resurrected files",
+				"folder", folderID, "peer", peerAddr,
+				"filtered", filtered, "remaining", len(actions))
+		}
+	}
 	fs.indexMu.RUnlock()
 
 	slog.Debug("diff computed",
@@ -1150,6 +1204,14 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	}
 	fs.indexMu.Unlock()
 
+	// H2b: resolve epoch for the updated peer state. If PendingEpoch was
+	// set (epoch change in progress), promote it to LastEpoch. Otherwise
+	// track the remote's current epoch.
+	resolvedEpoch := remoteIdx.GetEpoch()
+	if pendingEpoch != "" {
+		resolvedEpoch = pendingEpoch
+	}
+
 	if len(actions) == 0 {
 		// Update peer state even when nothing to do.
 		fs.indexMu.Lock()
@@ -1157,6 +1219,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			LastSeenSequence: remoteIdx.GetSequence(),
 			LastSentSequence: ourCurrentSeq,
 			LastSync:         time.Now(),
+			LastEpoch:        resolvedEpoch,
 		}
 		fs.indexMu.Unlock()
 
@@ -1483,6 +1546,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		LastSeenSequence: safeSeq,
 		LastSentSequence: ourCurrentSeq,
 		LastSync:         time.Now(),
+		LastEpoch:        resolvedEpoch,
 	}
 	fs.indexMu.Unlock()
 
@@ -1535,6 +1599,7 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 		DeviceId: n.deviceID,
 		FolderId: folderID,
 		Sequence: fs.index.Sequence,
+		Epoch:    fs.index.Epoch,
 		Files:    files,
 	}
 }
@@ -1597,6 +1662,7 @@ func (n *Node) persistFolder(folderID string) {
 func protoToFileIndex(idx *pb.IndexExchange) *FileIndex {
 	fi := &FileIndex{
 		Sequence: idx.GetSequence(),
+		Epoch:    idx.GetEpoch(),
 		Files:    make(map[string]FileEntry, len(idx.GetFiles())),
 	}
 	for _, f := range idx.GetFiles() {

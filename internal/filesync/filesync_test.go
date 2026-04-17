@@ -642,6 +642,115 @@ func TestLoadPeerStates_FallbackToPrev(t *testing.T) {
 	}
 }
 
+// H2b: new indexes get a random epoch.
+func TestNewFileIndexHasEpoch(t *testing.T) {
+	t.Parallel()
+	idx := newFileIndex()
+	if idx.Epoch == "" {
+		t.Error("new index should have a non-empty epoch")
+	}
+	if len(idx.Epoch) != 16 { // 8 bytes = 16 hex chars
+		t.Errorf("epoch should be 16 hex chars, got %q", idx.Epoch)
+	}
+	// Two indexes should have different epochs.
+	idx2 := newFileIndex()
+	if idx.Epoch == idx2.Epoch {
+		t.Error("two new indexes should have different epochs")
+	}
+}
+
+// H2b: old persisted indexes without epoch get one assigned on load.
+func TestLoadIndex_MigratesEpoch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	idxPath := filepath.Join(dir, "index.yaml")
+
+	// Write an index without an epoch field (simulates pre-H2b format).
+	data := []byte("path: /tmp\nsequence: 5\nfiles:\n  a.txt:\n    sha256: aaa\n    sequence: 1\n")
+	if err := os.WriteFile(idxPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := loadIndex(idxPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Epoch == "" {
+		t.Error("loaded index should have an epoch after migration")
+	}
+	if loaded.Sequence != 5 {
+		t.Errorf("expected sequence 5, got %d", loaded.Sequence)
+	}
+}
+
+// H2b: epoch guard filters downloads for locally-tombstoned files when a
+// peer's epoch changed (index recreation after corruption/reset).
+func TestEpochGuardFiltersResurrectedFiles(t *testing.T) {
+	t.Parallel()
+
+	// Local index: file X is tombstoned, file Y is live.
+	local := newFileIndex()
+	local.Sequence = 100
+	local.Files["x.txt"] = FileEntry{SHA256: "old", Sequence: 50, Deleted: true, MtimeNS: time.Now().UnixNano()}
+	local.Files["y.txt"] = FileEntry{SHA256: "yyy", Sequence: 60, Size: 10}
+
+	// Remote index (recreated with new epoch): X and Z are live.
+	// X was deleted by local but the reset peer re-indexed it.
+	remote := newFileIndex()
+	remote.Sequence = 50
+	remote.Files["x.txt"] = FileEntry{SHA256: "new-hash", Sequence: 30, Size: 20}
+	remote.Files["z.txt"] = FileEntry{SHA256: "zzz", Sequence: 40, Size: 30}
+
+	// Cycle 2 scenario: lastSeenSeq=0 (after restart detection zeroed it).
+	// diff() with lastSeenSeq=0 will produce ActionDownload for x.txt and z.txt.
+	actions := local.diff(remote, 0, "send-receive")
+
+	// Before filtering: should have downloads for both x.txt and z.txt.
+	downloads := map[string]bool{}
+	for _, a := range actions {
+		if a.Action == ActionDownload {
+			downloads[a.Path] = true
+		}
+	}
+	if !downloads["x.txt"] {
+		t.Fatal("expected ActionDownload for x.txt before epoch filter")
+	}
+	if !downloads["z.txt"] {
+		t.Fatal("expected ActionDownload for z.txt before epoch filter")
+	}
+
+	// Apply the epoch guard filter (same logic as syncFolder).
+	filtered := 0
+	n := 0
+	for _, a := range actions {
+		if a.Action == ActionDownload {
+			if le, ok := local.Files[a.Path]; ok && le.Deleted {
+				filtered++
+				continue
+			}
+		}
+		actions[n] = a
+		n++
+	}
+	actions = actions[:n]
+
+	if filtered != 1 {
+		t.Errorf("expected 1 filtered (x.txt), got %d", filtered)
+	}
+
+	// After filtering: z.txt should remain, x.txt should be gone.
+	remaining := map[string]bool{}
+	for _, a := range actions {
+		remaining[a.Path] = true
+	}
+	if remaining["x.txt"] {
+		t.Error("x.txt should have been filtered by epoch guard")
+	}
+	if !remaining["z.txt"] {
+		t.Error("z.txt should remain (not a local tombstone)")
+	}
+}
+
 func TestScanDetectsDeletion(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -1321,6 +1430,92 @@ func TestPurgeTombstones_NoPeers(t *testing.T) {
 	}
 	if _, ok := idx.Files["gone.txt"]; ok {
 		t.Error("tombstone should be purged with no peers")
+	}
+}
+
+// M3: removed peers still block tombstone purge until GC'd.
+func TestPurgeTombstones_RemovedPeerBlocksPurge(t *testing.T) {
+	t.Parallel()
+	idx := newFileIndex()
+	oldNs := time.Now().Add(-60 * 24 * time.Hour).UnixNano()
+	idx.Files["gone.txt"] = FileEntry{Deleted: true, MtimeNS: oldNs, Sequence: 50}
+
+	peers := map[string]PeerState{
+		"10.0.0.1:7756": {LastSeenSequence: 100, LastSync: time.Now()},
+		"10.0.0.2:7756": {
+			LastSeenSequence: 10, // hasn't seen seq 50
+			Removed:          true,
+			RemovedAt:        time.Now().Add(-5 * 24 * time.Hour), // removed 5 days ago
+		},
+	}
+
+	// Removed peer hasn't acked seq 50, so purge should be blocked.
+	n := idx.purgeTombstones(30*24*time.Hour, peers)
+	if n != 0 {
+		t.Errorf("expected 0 purged (removed peer blocks), got %d", n)
+	}
+	if _, ok := idx.Files["gone.txt"]; !ok {
+		t.Error("tombstone should NOT be purged while removed peer hasn't acked")
+	}
+}
+
+// M3: markRemovedPeers marks peers not in config and un-removes returning ones.
+func TestMarkRemovedPeers(t *testing.T) {
+	t.Parallel()
+	peers := map[string]PeerState{
+		"10.0.0.1:7756": {LastSeenSequence: 100},
+		"10.0.0.2:7756": {LastSeenSequence: 200},
+	}
+
+	// Remove 10.0.0.2 from config.
+	markRemovedPeers(peers, []string{"10.0.0.1:7756"})
+
+	if peers["10.0.0.1:7756"].Removed {
+		t.Error("active peer should not be marked as removed")
+	}
+	if !peers["10.0.0.2:7756"].Removed {
+		t.Error("unconfigured peer should be marked as removed")
+	}
+	if peers["10.0.0.2:7756"].RemovedAt.IsZero() {
+		t.Error("RemovedAt should be set")
+	}
+
+	// Re-add 10.0.0.2 to config — should un-remove it.
+	markRemovedPeers(peers, []string{"10.0.0.1:7756", "10.0.0.2:7756"})
+	if peers["10.0.0.2:7756"].Removed {
+		t.Error("peer back in config should be un-removed")
+	}
+}
+
+// M3: gcRemovedPeers deletes old removed entries.
+func TestGcRemovedPeers(t *testing.T) {
+	t.Parallel()
+	peers := map[string]PeerState{
+		"10.0.0.1:7756": {LastSeenSequence: 100},
+		"10.0.0.2:7756": {
+			LastSeenSequence: 200,
+			Removed:          true,
+			RemovedAt:        time.Now().Add(-60 * 24 * time.Hour), // 60 days ago
+		},
+		"10.0.0.3:7756": {
+			LastSeenSequence: 300,
+			Removed:          true,
+			RemovedAt:        time.Now().Add(-5 * 24 * time.Hour), // 5 days ago
+		},
+	}
+
+	removed := gcRemovedPeers(peers, 30*24*time.Hour)
+	if removed != 1 {
+		t.Errorf("expected 1 GC'd, got %d", removed)
+	}
+	if _, ok := peers["10.0.0.2:7756"]; ok {
+		t.Error("old removed peer should be GC'd")
+	}
+	if _, ok := peers["10.0.0.3:7756"]; !ok {
+		t.Error("recently removed peer should survive GC")
+	}
+	if _, ok := peers["10.0.0.1:7756"]; !ok {
+		t.Error("active peer should survive GC")
 	}
 }
 

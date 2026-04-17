@@ -2,6 +2,7 @@ package filesync
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -40,6 +41,7 @@ type FileEntry struct {
 type FileIndex struct {
 	Path     string               `yaml:"path"`
 	Sequence int64                `yaml:"sequence"`
+	Epoch    string               `yaml:"epoch,omitempty"` // H2b: random ID, regenerated on index creation
 	Files    map[string]FileEntry `yaml:"files"`
 }
 
@@ -48,11 +50,25 @@ type PeerState struct {
 	LastSeenSequence int64     `yaml:"last_seen_sequence"`
 	LastSentSequence int64     `yaml:"last_sent_sequence"` // our index sequence last sent to this peer
 	LastSync         time.Time `yaml:"last_sync"`
+	LastEpoch        string    `yaml:"last_epoch,omitempty"`    // H2b: last known epoch of this peer
+	PendingEpoch     string    `yaml:"pending_epoch,omitempty"` // H2b: new epoch detected, awaiting diff filter
+	Removed          bool      `yaml:"removed,omitempty"`       // M3: peer no longer in config
+	RemovedAt        time.Time `yaml:"removed_at,omitempty"`    // M3: when peer was marked removed
 }
 
 // newFileIndex creates an empty index.
 func newFileIndex() *FileIndex {
-	return &FileIndex{Files: make(map[string]FileEntry)}
+	return &FileIndex{
+		Epoch: generateEpoch(),
+		Files: make(map[string]FileEntry),
+	}
+}
+
+// generateEpoch returns 8 random bytes as hex (16 chars).
+func generateEpoch() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // clone returns a deep copy of the index. Used by the scan path so WalkDir
@@ -63,7 +79,7 @@ func (idx *FileIndex) clone() *FileIndex {
 	for k, v := range idx.Files {
 		files[k] = v
 	}
-	return &FileIndex{Path: idx.Path, Sequence: idx.Sequence, Files: files}
+	return &FileIndex{Path: idx.Path, Sequence: idx.Sequence, Epoch: idx.Epoch, Files: files}
 }
 
 // prevPath returns the backup path for double-write persistence.
@@ -76,17 +92,19 @@ func loadIndex(path string) (*FileIndex, error) {
 	primary := tryLoadIndex(path)
 	backup := tryLoadIndex(prevPath(path))
 
+	var idx *FileIndex
 	switch {
 	case primary != nil && backup != nil:
 		if backup.Sequence > primary.Sequence {
-			return backup, nil
+			idx = backup
+		} else {
+			idx = primary
 		}
-		return primary, nil
 	case primary != nil:
-		return primary, nil
+		idx = primary
 	case backup != nil:
 		slog.Warn("index loaded from backup (primary corrupted or missing)", "path", path)
-		return backup, nil
+		idx = backup
 	default:
 		// Both missing (first run) → not an error.
 		if isNotExist(path) && isNotExist(prevPath(path)) {
@@ -94,6 +112,11 @@ func loadIndex(path string) (*FileIndex, error) {
 		}
 		return nil, fmt.Errorf("both index files unreadable: %s", path)
 	}
+	// H2b migration: assign an epoch to indexes persisted before epoch support.
+	if idx.Epoch == "" {
+		idx.Epoch = generateEpoch()
+	}
+	return idx, nil
 }
 
 // tryLoadIndex attempts to read and parse a single index file. Returns nil
@@ -664,9 +687,13 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, direction strin
 }
 
 // purgeTombstones removes deleted entries older than maxAge, but only when
-// ALL configured peers have acknowledged them (LastSeenSequence >= tombstone
-// Sequence). This prevents file resurrection when a peer reconnects after
-// extended offline (B14).
+// ALL tracked peers (including removed ones) have acknowledged them
+// (LastSeenSequence >= tombstone Sequence). This prevents file resurrection
+// when a peer reconnects after extended offline (B14).
+//
+// M3: removed peers are also checked — their LastSeenSequence must have
+// caught up before we purge. Removed peer entries are garbage-collected
+// once they are older than maxAge themselves.
 func (idx *FileIndex) purgeTombstones(maxAge time.Duration, peers map[string]PeerState) int {
 	cutoff := time.Now().Add(-maxAge).UnixNano()
 	purged := 0
@@ -674,7 +701,7 @@ func (idx *FileIndex) purgeTombstones(maxAge time.Duration, peers map[string]Pee
 		if !entry.Deleted || entry.MtimeNS >= cutoff {
 			continue
 		}
-		// B14: only purge if every configured peer has seen this tombstone.
+		// B14: only purge if every tracked peer has seen this tombstone.
 		allAcked := true
 		for _, ps := range peers {
 			if ps.LastSeenSequence < entry.Sequence {
@@ -688,6 +715,57 @@ func (idx *FileIndex) purgeTombstones(maxAge time.Duration, peers map[string]Pee
 		}
 	}
 	return purged
+}
+
+// gcRemovedPeers deletes removed peer entries that are older than maxAge.
+// Called after purgeTombstones so stale removed peers don't block purge
+// indefinitely.
+func gcRemovedPeers(peers map[string]PeerState, maxAge time.Duration) int {
+	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+	for addr, ps := range peers {
+		if ps.Removed && !ps.RemovedAt.IsZero() && ps.RemovedAt.Before(cutoff) {
+			delete(peers, addr)
+			removed++
+		}
+	}
+	return removed
+}
+
+// markRemovedPeers marks peers that are no longer in the configured address
+// list. Peers already marked as removed are left unchanged. Returns true if
+// any peer entry was modified.
+func markRemovedPeers(peers map[string]PeerState, configuredAddrs []string) bool {
+	active := make(map[string]struct{}, len(configuredAddrs))
+	for _, addr := range configuredAddrs {
+		active[addr] = struct{}{}
+	}
+	changed := false
+	now := time.Now()
+	for addr, ps := range peers {
+		if ps.Removed {
+			continue
+		}
+		if _, ok := active[addr]; !ok {
+			ps.Removed = true
+			ps.RemovedAt = now
+			peers[addr] = ps
+			changed = true
+		}
+	}
+	// Un-remove peers that came back into the config.
+	for addr, ps := range peers {
+		if !ps.Removed {
+			continue
+		}
+		if _, ok := active[addr]; ok {
+			ps.Removed = false
+			ps.RemovedAt = time.Time{}
+			peers[addr] = ps
+			changed = true
+		}
+	}
+	return changed
 }
 
 // cleanTempFiles removes stale .mesh-tmp-* files from the entire folder tree.

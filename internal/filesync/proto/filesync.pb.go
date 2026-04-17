@@ -33,6 +33,7 @@ type IndexExchange struct {
 	Page          int32                  `protobuf:"varint,6,opt,name=page,proto3" json:"page,omitempty"`                               // 0-based page number
 	TotalPages    int32                  `protobuf:"varint,7,opt,name=total_pages,json=totalPages,proto3" json:"total_pages,omitempty"` // Total pages (0 or 1 = single page, legacy compat)
 	Fetch         bool                   `protobuf:"varint,8,opt,name=fetch,proto3" json:"fetch,omitempty"`                             // True = client is fetching a server response page
+	Epoch         string                 `protobuf:"bytes,9,opt,name=epoch,proto3" json:"epoch,omitempty"`                              // Random ID regenerated on index creation; used to detect index loss
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -121,6 +122,13 @@ func (x *IndexExchange) GetFetch() bool {
 		return x.Fetch
 	}
 	return false
+}
+
+func (x *IndexExchange) GetEpoch() string {
+	if x != nil {
+		return x.Epoch
+	}
+	return ""
 }
 
 // FileInfo describes a single file (or a deletion tombstone) in the index.
@@ -405,7 +413,7 @@ var File_internal_filesync_proto_filesync_proto protoreflect.FileDescriptor
 
 const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
 	"\n" +
-	"&internal/filesync/proto/filesync.proto\x12\bfilesync\"\xf0\x01\n" +
+	"&internal/filesync/proto/filesync.proto\x12\bfilesync\"\x86\x02\n" +
 	"\rIndexExchange\x12\x1b\n" +
 	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12\x1b\n" +
 	"\tfolder_id\x18\x02 \x01(\tR\bfolderId\x12\x1a\n" +
@@ -415,7 +423,8 @@ const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
 	"\x04page\x18\x06 \x01(\x05R\x04page\x12\x1f\n" +
 	"\vtotal_pages\x18\a \x01(\x05R\n" +
 	"totalPages\x12\x14\n" +
-	"\x05fetch\x18\b \x01(\bR\x05fetch\"\x9b\x01\n" +
+	"\x05fetch\x18\b \x01(\bR\x05fetch\x12\x14\n" +
+	"\x05epoch\x18\t \x01(\tR\x05epoch\"\x9b\x01\n" +
 	"\bFileInfo\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x03R\x04size\x12\x19\n" +
