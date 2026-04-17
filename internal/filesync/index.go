@@ -353,6 +353,19 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		return changed, len(seen), dirCount, stats, conflicts, fmt.Errorf("scan %s: %w", folderRoot, err)
 	}
 
+	// M1: TOCTOU guard — if the walk found zero files but the index has
+	// entries, the folder root may have been unmounted between the pre-walk
+	// stat and the WalkDir. Re-stat to distinguish a genuinely empty folder
+	// from a vanished mount point. Without this, all tracked files would be
+	// tombstoned and the deletions propagated to every peer.
+	if len(seen) == 0 && len(idx.Files) > 0 {
+		if _, statErr := os.Stat(folderRoot); statErr != nil {
+			return false, 0, 0, stats, nil, fmt.Errorf("folder root vanished during scan: %w", statErr)
+		}
+		// Root still exists and is accessible — the folder is legitimately
+		// empty. Proceed with tombstoning.
+	}
+
 	delStart := time.Now()
 	// B10/M2: per-file error suppression with bulk safety net.
 	//
