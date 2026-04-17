@@ -885,17 +885,17 @@ tbody tr:last-child td { border-bottom: none; }
         <div class="gw-scroll">
           <table>
             <thead><tr>
-              <th>Time</th>
-              <th>Gateway</th>
-              <th>Session</th>
-              <th>Dir</th>
-              <th>Client model</th>
-              <th>Upstream model</th>
-              <th>Status</th>
-              <th>Outcome</th>
-              <th>In</th>
-              <th>Out</th>
-              <th>Time</th>
+              <th data-gwsort="ts" style="cursor:pointer">Time <span class="sort-arrow"></span></th>
+              <th data-gwsort="gw" style="cursor:pointer">Gateway <span class="sort-arrow"></span></th>
+              <th data-gwsort="session" style="cursor:pointer">Session <span class="sort-arrow"></span></th>
+              <th data-gwsort="dir" style="cursor:pointer">Dir <span class="sort-arrow"></span></th>
+              <th data-gwsort="model" style="cursor:pointer">Client model <span class="sort-arrow"></span></th>
+              <th data-gwsort="upmodel" style="cursor:pointer">Upstream model <span class="sort-arrow"></span></th>
+              <th data-gwsort="status" style="cursor:pointer">Status <span class="sort-arrow"></span></th>
+              <th data-gwsort="outcome" style="cursor:pointer">Outcome <span class="sort-arrow"></span></th>
+              <th data-gwsort="in" style="cursor:pointer">In <span class="sort-arrow"></span></th>
+              <th data-gwsort="out" style="cursor:pointer">Out <span class="sort-arrow"></span></th>
+              <th data-gwsort="elapsed" style="cursor:pointer">Time <span class="sort-arrow"></span></th>
               <th>Summary</th>
             </tr></thead>
             <tbody id="gw-body"></tbody>
@@ -2215,6 +2215,7 @@ let gwRowsCache = []; // resp rows joined with their req row, newest first
 let gwRowsByKey = new Map(); // key "run|id" → pair, for click-to-detail across refreshes
 let gwSearchTerm = '';
 let gwOutcomeFilter = '';
+let gwSort = {col: 'ts', asc: false}; // default: newest first
 let gwSearchTimer = 0;  // debounce handle for the search input
 
 function renderGateway() {
@@ -2335,6 +2336,36 @@ function renderGateway() {
       return p.hay.includes(term);
     });
 
+    // Sort the filtered array.
+    const sortKey = gwSort.col;
+    function gwSortVal(p) {
+      switch (sortKey) {
+        case 'ts': return p.resp.ts||p.req.ts||'';
+        case 'gw': return p.req.gateway||p.resp.gateway||'';
+        case 'session': return p.req.session_id||'';
+        case 'dir': return p.req.direction||'';
+        case 'model': return p.req.model||'';
+        case 'upmodel': return p.req.mapped_model||(p.resp.stream_summary||{}).model||'';
+        case 'status': return p.resp.status||0;
+        case 'outcome': return p.resp.outcome||'';
+        case 'in': return (p.resp.usage||{}).input_tokens||0;
+        case 'out': return (p.resp.usage||{}).output_tokens||0;
+        case 'elapsed': return p.resp.elapsed_ms||0;
+        default: return '';
+      }
+    }
+    const numeric = ['status','in','out','elapsed'].includes(sortKey);
+    filtered.sort((a, b) => {
+      const va = gwSortVal(a), vb = gwSortVal(b);
+      const cmp = numeric ? (va - vb) : String(va).localeCompare(String(vb));
+      return gwSort.asc ? cmp : -cmp;
+    });
+    // Update sort arrows in header.
+    document.querySelectorAll('th[data-gwsort]').forEach(th => {
+      const arrow = th.querySelector('.sort-arrow');
+      if (arrow) arrow.textContent = th.dataset.gwsort === gwSort.col ? (gwSort.asc ? '\u25B2' : '\u25BC') : '';
+    });
+
     const body = document.getElementById('gw-body');
     if (!filtered.length) {
       body.innerHTML = '<tr><td colspan="12" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
@@ -2359,7 +2390,7 @@ function renderGateway() {
         '<td style="color:var(--text-muted);white-space:nowrap">'+fmtLocalTime(ts)+'</td>'+
         '<td style="color:'+modelColor(gw)+'">'+x(gw)+'</td>'+
         '<td><code style="color:'+sidClr+';font-size:11px" title="'+xa(sid)+'">'+x(sidShort)+'</code></td>'+
-        '<td>'+x(dir)+'</td>'+
+        '<td style="color:'+dirColor(dir)+'">'+x(dir)+'</td>'+
         '<td style="color:'+modelColor(model)+'">'+x(model)+'</td>'+
         '<td style="color:'+(upModel && upModel !== model ? modelColor(upModel) : 'var(--text-muted)')+'">'+(upModel && upModel !== model ? x(upModel) : '-')+'</td>'+
         '<td style="color:'+statusColor+'">'+status+'</td>'+
@@ -2519,6 +2550,15 @@ function modelColor(name) {
   const hue = h % 360;
   modelColorCache[name] = 'hsl('+hue+',55%,70%)';
   return modelColorCache[name];
+}
+
+// dirColor returns a stable color for a gateway direction string.
+function dirColor(d) {
+  if (d === 'a2o') return 'var(--cyan)';
+  if (d === 'o2a') return 'var(--purple)';
+  if (d === 'a2a') return 'var(--yellow)';
+  if (d === 'o2o') return 'var(--green)';
+  return 'var(--text-dim)';
 }
 
 // metaRow renders a single <tr> for a metadata table. The value string is
@@ -2710,7 +2750,7 @@ function renderRequestStructured(req) {
     typeof body.temperature === 'number' ? metaRow('temperature', body.temperature) : '',
     metaRow('max_tokens', body.max_tokens),
     body.top_p ? metaRow('top_p', body.top_p) : '',
-    metaRow('direction', req.direction),
+    metaRow('direction', req.direction, '', req.direction ? 'color:'+dirColor(req.direction) : ''),
     metaRow('path', req.path, 'dim'),
   ]);
 
@@ -3524,6 +3564,13 @@ document.getElementById('gw-search').addEventListener('input', e => {
 });
 document.getElementById('gw-outcome').addEventListener('change', e => { gwOutcomeFilter = e.target.value; renderGateway(); });
 document.getElementById('gw-window').addEventListener('change', e => { gwWindow = e.target.value; gwStats = null; gwStale(); tick(); writeGwHash(); });
+document.querySelectorAll('th[data-gwsort]').forEach(th => {
+  th.addEventListener('click', () => {
+    if (gwSort.col === th.dataset.gwsort) gwSort.asc = !gwSort.asc;
+    else { gwSort.col = th.dataset.gwsort; gwSort.asc = th.dataset.gwsort === 'ts' ? false : true; }
+    renderGateway();
+  });
+});
 document.querySelectorAll('.gw-sub-btn').forEach(b => b.addEventListener('click', () => {
   setGwSub(b.dataset.sub);
   // User changed sub-view; drop any previous deep state from the URL.
