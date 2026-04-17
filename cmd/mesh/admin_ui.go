@@ -891,7 +891,6 @@ tbody tr:last-child td { border-bottom: none; }
               <th>Dir</th>
               <th>Client model</th>
               <th>Upstream model</th>
-              <th>Stream</th>
               <th>Status</th>
               <th>Outcome</th>
               <th>In</th>
@@ -2227,7 +2226,7 @@ function renderGateway() {
     const meta = document.getElementById('gw-meta');
     if (meta) meta.textContent = '';
     document.getElementById('gw-body').innerHTML =
-      '<tr><td colspan="13" style="color:var(--text-muted);padding:20px">No gateways with audit logging configured. Set log.level: full or metadata in the gateway YAML to populate this view.</td></tr>';
+      '<tr><td colspan="12" style="color:var(--text-muted);padding:20px">No gateways with audit logging configured. Set log.level: full or metadata in the gateway YAML to populate this view.</td></tr>';
     document.getElementById('gw-kpi').innerHTML =
       '<div class="stat" style="grid-column:1/-1;color:var(--text-muted)">No gateway audit data yet. Configure log.level to populate this view.</div>';
     return;
@@ -2338,7 +2337,7 @@ function renderGateway() {
 
     const body = document.getElementById('gw-body');
     if (!filtered.length) {
-      body.innerHTML = '<tr><td colspan="13" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
+      body.innerHTML = '<tr><td colspan="12" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
     } else {
     body.innerHTML = filtered.map(p => {
       const ts = p.resp.ts||p.req.ts||'';
@@ -2350,7 +2349,6 @@ function renderGateway() {
       const sid = p.req.session_id || '';
       const sidShort = sid ? sid.slice(0, 8) : '-';
       const sidClr = sid ? sessColor(sid) : 'var(--text-muted)';
-      const stream = p.req.stream ? 'yes' : 'no';
       const status = p.resp.status || 0;
       const statusColor = status >= 400 ? 'var(--red)' : status >= 200 ? 'var(--green)' : 'var(--text-dim)';
       const outcome = p.resp.outcome || '-';
@@ -2364,7 +2362,6 @@ function renderGateway() {
         '<td>'+x(dir)+'</td>'+
         '<td style="color:'+modelColor(model)+'">'+x(model)+'</td>'+
         '<td style="color:'+(upModel && upModel !== model ? modelColor(upModel) : 'var(--text-muted)')+'">'+(upModel && upModel !== model ? x(upModel) : '-')+'</td>'+
-        '<td style="color:var(--text-muted)">'+stream+'</td>'+
         '<td style="color:'+statusColor+'">'+status+'</td>'+
         '<td style="color:'+outcomeColor+'">'+x(outcome)+'</td>'+
         '<td>'+fmtTokensHtml(u.input_tokens)+'</td>'+
