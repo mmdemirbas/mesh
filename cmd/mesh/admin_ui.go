@@ -921,35 +921,7 @@ tbody tr:last-child td { border-bottom: none; }
         <!-- Turn details: audit metadata, tokens, timing — at the top for immediate context -->
         <div id="gw-turn-details" style="margin-bottom:12px"></div>
         <div class="gw-detail-grid">
-          <!-- Row 1: responses (usually smaller, visible immediately) -->
-          <details class="gw-detail-pane sec" open>
-            <summary><h4 style="display:inline">
-              <span>Client response <span id="gw-resp-len" class="sec-len" style="margin-left:6px"></span></span>
-              <span style="display:inline-flex;gap:6px;margin-left:auto">
-                <button class="copy-btn" onclick="event.stopPropagation();bulkSec('resp', true)">expand all</button>
-                <button class="copy-btn" onclick="event.stopPropagation();bulkSec('resp', false)">collapse all</button>
-                <button class="copy-btn" onclick="event.stopPropagation();copyDetail('resp')">copy</button>
-              </span>
-            </h4></summary>
-            <details class="sec" id="gw-resp-json-sec">
-              <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-resp-json-len"></span></summary>
-              <div class="sec-body"><div class="gw-detail-raw" id="gw-resp-raw"></div></div>
-            </details>
-            <div class="gw-detail-structured" id="gw-resp-structured"></div>
-          </details>
-          <div id="gw-upstream-resp-sec" style="display:none">
-            <details class="gw-detail-pane sec" open>
-              <summary><h4 style="display:inline">
-                <span>Upstream response <span id="gw-upstream-resp-len" class="sec-len" style="margin-left:6px"></span></span>
-              </h4></summary>
-              <details class="sec">
-                <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-upstream-resp-json-len"></span></summary>
-                <div class="sec-body"><div class="gw-detail-raw" id="gw-upstream-resp-raw"></div></div>
-              </details>
-              <div class="gw-detail-structured" id="gw-upstream-resp-structured"></div>
-            </details>
-          </div>
-          <!-- Row 2: requests -->
+          <!-- Row 1: requests (natural top-to-bottom flow: request then response) -->
           <details class="gw-detail-pane sec" open>
             <summary><h4 style="display:inline">
               <span>Client request <span id="gw-req-len" class="sec-len" style="margin-left:6px"></span></span>
@@ -975,6 +947,34 @@ tbody tr:last-child td { border-bottom: none; }
                 <div class="sec-body"><div class="gw-detail-raw" id="gw-upstream-req-raw"></div></div>
               </details>
               <div class="gw-detail-structured" id="gw-upstream-req-structured"></div>
+            </details>
+          </div>
+          <!-- Row 2: responses -->
+          <details class="gw-detail-pane sec" open>
+            <summary><h4 style="display:inline">
+              <span>Client response <span id="gw-resp-len" class="sec-len" style="margin-left:6px"></span></span>
+              <span style="display:inline-flex;gap:6px;margin-left:auto">
+                <button class="copy-btn" onclick="event.stopPropagation();bulkSec('resp', true)">expand all</button>
+                <button class="copy-btn" onclick="event.stopPropagation();bulkSec('resp', false)">collapse all</button>
+                <button class="copy-btn" onclick="event.stopPropagation();copyDetail('resp')">copy</button>
+              </span>
+            </h4></summary>
+            <details class="sec" id="gw-resp-json-sec">
+              <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-resp-json-len"></span></summary>
+              <div class="sec-body"><div class="gw-detail-raw" id="gw-resp-raw"></div></div>
+            </details>
+            <div class="gw-detail-structured" id="gw-resp-structured"></div>
+          </details>
+          <div id="gw-upstream-resp-sec" style="display:none">
+            <details class="gw-detail-pane sec" open>
+              <summary><h4 style="display:inline">
+                <span>Upstream response <span id="gw-upstream-resp-len" class="sec-len" style="margin-left:6px"></span></span>
+              </h4></summary>
+              <details class="sec">
+                <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-upstream-resp-json-len"></span></summary>
+                <div class="sec-body"><div class="gw-detail-raw" id="gw-upstream-resp-raw"></div></div>
+              </details>
+              <div class="gw-detail-structured" id="gw-upstream-resp-structured"></div>
             </details>
           </div>
         </div>
