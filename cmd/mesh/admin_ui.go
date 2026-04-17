@@ -1863,8 +1863,9 @@ function renderStats() {
     stat('Pending', pending, ''));
   const totalQuarantine = folders.reduce((s,f) => s + (f.quarantine_count||0), 0);
   const hasErr = folders.some(f => (f.peers||[]).some(p => p.last_error));
-  const healthColor = (hasErr || conflicts.length > 0) ? 'var(--red)' : totalQuarantine > 0 ? 'var(--yellow)' : 'var(--green)';
-  const healthLabel = (hasErr || conflicts.length > 0) ? 'Error' : totalQuarantine > 0 ? 'Degraded' : 'Healthy';
+  const fsStarting = !folders.length && comps.some(c => c.type === 'filesync-folder');
+  const healthColor = fsStarting ? 'var(--yellow)' : (hasErr || conflicts.length > 0) ? 'var(--red)' : totalQuarantine > 0 ? 'var(--yellow)' : 'var(--green)';
+  const healthLabel = fsStarting ? 'Starting' : (hasErr || conflicts.length > 0) ? 'Error' : totalQuarantine > 0 ? 'Degraded' : 'Healthy';
   setHTML('fs-stats',
     stat('Sync Health', healthLabel, '', healthColor) +
     stat('Folders', folders.length, '') +
@@ -2315,7 +2316,12 @@ function renderFilesync() {
   setHTML('fs-filter-bar', TF.filterBar('fs'));
   const rows = TF.apply('fs', folders);
   const el = document.getElementById('fs-body');
-  if (!rows.length) { el.innerHTML = '<tr><td colspan="8" style="color:var(--text-muted);padding:20px">'+(folders.length ? 'No rows match the current filter.' : 'No folders')+'</td></tr>'; return; }
+  if (!rows.length) {
+    let msg = 'No folders';
+    if (folders.length) msg = 'No rows match the current filter.';
+    else if (Object.values(state).some(c => c.type === 'filesync-folder')) msg = 'Starting\u2026';
+    el.innerHTML = '<tr><td colspan="8" style="color:var(--text-muted);padding:20px">'+msg+'</td></tr>'; return;
+  }
   let html = '';
   for (const f of rows) {
     const dirBadge = f.direction === 'send-receive' ? 'badge-ok' :
