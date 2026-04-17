@@ -2447,7 +2447,7 @@ function showGwDetail(idx) {
     document.getElementById('gw-upstream-resp-json-len').textContent = fmtLen(uj.length)+' chars';
     document.getElementById('gw-upstream-resp-len').textContent = fmtLen(uj.length)+' chars';
     document.getElementById('gw-upstream-resp-structured').innerHTML = renderUpstreamStructured(upResp, 'response');
-  } else if (upReq && p.req.stream) {
+  } else if (upReq && (p.req.stream || p.resp.stream_summary)) {
     // Streaming: upstream response body is consumed event-by-event and not
     // captured. Show the section with an explanatory note.
     upRespSec.style.display = '';
@@ -3587,13 +3587,13 @@ function parseGwHash() {
   const sub = qIdx < 0 ? h : h.slice(0, qIdx);
   const qs = qIdx < 0 ? '' : h.slice(qIdx + 1);
   const p = {};
-  qs.split('&').forEach(kv => { const [k,v] = kv.split('='); if (k) p[k] = decodeURIComponent(v||''); });
+  qs.split('&').forEach(kv => { const eq = kv.indexOf('='); if (eq < 0) return; p[kv.slice(0,eq)] = kv.slice(eq+1); });
   return {
     sub: sub || 'overview',
     gw: p.gw ? p.gw.split(',').map(decodeURIComponent) : [],
     sess: p.sess ? p.sess.split(',').map(decodeURIComponent) : [],
-    window: p.window || '',
-    detail: p.detail || '',
+    window: p.window ? decodeURIComponent(p.window) : '',
+    detail: p.detail ? decodeURIComponent(p.detail) : '',
   };
 }
 
