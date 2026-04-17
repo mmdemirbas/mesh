@@ -874,6 +874,24 @@ select option { background: var(--bg-card); color: var(--text); }
   <!-- Filesync panel -->
   <div class="panel" id="p-filesync" role="tabpanel" aria-labelledby="tab-filesync">
     <div class="stats" id="fs-stats"></div>
+    <div class="chart-grid" id="fs-charts">
+      <div class="chart-card" id="fstab-traffic-card" style="display:none">
+        <div class="chart-title">Sync Traffic</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--green)"><span id="fstab-dl-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">dl</span></div>
+          <div class="chart-value" style="color:var(--purple)"><span id="fstab-ul-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">ul</span></div>
+        </div>
+        <canvas class="chart-canvas" id="fstab-traffic" aria-label="Filesync traffic chart"></canvas>
+      </div>
+      <div class="chart-card" id="fstab-sync-card" style="display:none">
+        <div class="chart-title">Sync Cycles &amp; Errors</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--cyan)"><span id="fstab-cycles-val">0</span> <span style="font-size:11px;color:var(--text-muted)">syncs</span></div>
+          <div class="chart-value" style="color:var(--red)"><span id="fstab-errors-val">0</span> <span style="font-size:11px;color:var(--text-muted)">errors</span></div>
+        </div>
+        <canvas class="chart-canvas" id="fstab-sync" aria-label="Filesync sync chart"></canvas>
+      </div>
+    </div>
     <div class="card">
       <div class="card-header">
         <span>Folders</span>
@@ -2509,6 +2527,25 @@ function renderCharts() {
   }
   // Per-component traffic table
   renderCompTraffic();
+  // Filesync tab charts (mirrors dashboard charts but on the filesync tab)
+  if (activeTab === 'filesync') renderFsTabCharts();
+}
+
+function renderFsTabCharts() {
+  const tc = document.getElementById('fstab-traffic-card');
+  if (chartHist.fsDlRate.some(v => v > 0) || chartHist.fsUlRate.some(v => v > 0)) {
+    tc.style.display = '';
+    document.getElementById('fstab-dl-val').textContent = fmtRate(last(chartHist.fsDlRate));
+    document.getElementById('fstab-ul-val').textContent = fmtRate(last(chartHist.fsUlRate));
+    drawChart('fstab-traffic', [chartHist.fsDlRate, chartHist.fsUlRate], ['#34d399', '#a78bfa']);
+  } else { tc.style.display = 'none'; }
+  const sc = document.getElementById('fstab-sync-card');
+  if (chartHist.fsSyncCycles.some(v => v > 0) || chartHist.fsSyncErrors.some(v => v > 0)) {
+    sc.style.display = '';
+    document.getElementById('fstab-cycles-val').textContent = last(chartHist.fsSyncCycles);
+    document.getElementById('fstab-errors-val').textContent = last(chartHist.fsSyncErrors);
+    drawChart('fstab-sync', [chartHist.fsSyncCycles, chartHist.fsSyncErrors], ['#22d3ee', '#f87171']);
+  } else { sc.style.display = 'none'; }
 }
 
 function renderCompTraffic() {
