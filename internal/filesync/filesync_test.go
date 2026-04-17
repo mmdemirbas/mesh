@@ -109,6 +109,47 @@ func TestShouldIgnore(t *testing.T) {
 	}
 }
 
+// H3: user config must not be able to un-ignore builtin temp file patterns.
+func TestBuiltinIgnoresNonNegatable(t *testing.T) {
+	t.Parallel()
+	// Config attempts to negate both builtin patterns.
+	m := newIgnoreMatcher([]string{"!.mesh-tmp-*", "!*.mesh-delta-tmp"})
+
+	tests := []struct {
+		path   string
+		ignore bool
+	}{
+		{".mesh-tmp-abc123", true},        // builtin must win over config negation
+		{"foo.mesh-delta-tmp", true},       // builtin must win over config negation
+		{"sub/.mesh-tmp-xyz", true},        // nested path, builtin still wins
+		{"sub/bar.mesh-delta-tmp", true},   // nested path, builtin still wins
+		{"normal.txt", false},              // non-builtin unaffected
+		{"important.log", false},           // non-builtin unaffected
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			t.Parallel()
+			got := m.shouldIgnore(tt.path, false)
+			if got != tt.ignore {
+				t.Errorf("shouldIgnore(%q) = %v, want %v — builtin ignores must be non-negatable", tt.path, got, tt.ignore)
+			}
+		})
+	}
+}
+
+// Verify that user negation patterns still work for non-builtin patterns.
+func TestUserNegationStillWorksForNonBuiltins(t *testing.T) {
+	t.Parallel()
+	m := newIgnoreMatcher([]string{"*.log", "!important.log"})
+
+	if !m.shouldIgnore("debug.log", false) {
+		t.Error("*.log should be ignored")
+	}
+	if m.shouldIgnore("important.log", false) {
+		t.Error("important.log should NOT be ignored — user negation must work for non-builtins")
+	}
+}
+
 func TestMatchPattern(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

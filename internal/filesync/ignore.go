@@ -78,6 +78,14 @@ func (m *ignoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
 			ignored = !p.negation
 		}
 	}
+	// H3: builtin ignores are non-negatable. A config pattern like
+	// "!.mesh-tmp-*" must not un-ignore temp files — indexing them
+	// causes false tombstones when they are cleaned up.
+	for _, bi := range builtinIgnores {
+		if matchPattern(bi, relPath) {
+			return true
+		}
+	}
 	return ignored
 }
 
