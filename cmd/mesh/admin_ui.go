@@ -974,6 +974,8 @@ tbody tr:last-child td { border-bottom: none; }
             </details>
           </div>
         </div>
+        <!-- Turn details: audit metadata, tokens, timing — below the 4-pane grid -->
+        <div id="gw-turn-details" style="margin-top:12px"></div>
       </div>
     </div>
   </div>
@@ -2496,6 +2498,8 @@ function showGwDetail(idx) {
   } else {
     upRespSec.style.display = 'none';
   }
+  // Turn details section below the 4-pane grid.
+  document.getElementById('gw-turn-details').innerHTML = renderTurnDetails(p.req, p.resp);
   // Reset scroll on the single scroll surface.
   const body = document.querySelector('#gw-detail-card .card-body');
   if (body) body.scrollTop = 0;
@@ -2617,24 +2621,6 @@ const tokenHelp = {
 function renderResponseStructured(resp) {
   let html = '';
   const summary = resp.stream_summary || {};
-  // Metadata table for response.
-  const statusCls = resp.status >= 400 ? ' style="color:var(--red)"' : resp.status >= 200 ? ' style="color:var(--green)"' : '';
-  const outcomeCls = resp.outcome === 'ok' ? ' style="color:var(--green)"' : resp.outcome === 'error' ? ' style="color:var(--red)"' : '';
-  html += '<table class="meta-tbl">' +
-    (resp.status ? '<tr><td class="mk">status</td><td class="mv"'+statusCls+'>'+x(String(resp.status))+'</td></tr>' : '') +
-    (resp.outcome ? '<tr><td class="mk">outcome</td><td class="mv"'+outcomeCls+'>'+x(resp.outcome)+'</td></tr>' : '') +
-    metaRow('stop_reason '+info(tokenHelp.stopReason), summary.stop_reason) +
-    metaRow('elapsed', resp.elapsed_ms ? fmtElapsed(resp.elapsed_ms) : '') +
-    metaRow('events', summary.events) +
-    metaRow('message_id', summary.message_id) +
-    metaRow('upstream_model', summary.model, '', summary.model ? 'color:'+modelColor(summary.model) : '') +
-  '</table>';
-
-  // Token breakdown bar — visible whenever any of the four buckets is non-zero.
-  const u = resp.usage || summary.usage;
-  if (u && (u.input_tokens || u.output_tokens || u.cache_read_input_tokens || u.cache_creation_input_tokens)) {
-    html += renderTokenBar(u);
-  }
 
   // Mid-stream errors (Anthropic event:error) — show in red, prominent.
   if (Array.isArray(summary.errors) && summary.errors.length) {
@@ -2697,6 +2683,39 @@ function renderResponseStructured(resp) {
   return html;
 }
 
+// renderTurnDetails shows audit metadata and summary info for the selected
+// turn in a dedicated section below the 4-pane grid. This keeps the panes
+// focused on raw JSON body content only.
+function renderTurnDetails(req, resp) {
+  let html = '';
+  const summary = resp.stream_summary || {};
+
+  // Audit metadata table.
+  const statusCls = resp.status >= 400 ? ' style="color:var(--red)"' : resp.status >= 200 ? ' style="color:var(--green)"' : '';
+  const outcomeCls = resp.outcome === 'ok' ? ' style="color:var(--green)"' : resp.outcome === 'error' ? ' style="color:var(--red)"' : '';
+  html += '<div class="section-title">Turn details</div>';
+  html += '<table class="meta-tbl">' +
+    metaRow('session '+info(tokenHelp.sessionId), req.session_id) +
+    metaRow('turn '+info(tokenHelp.turnIndex), req.turn_index) +
+    metaRow('direction', req.direction, '', req.direction ? 'color:'+dirColor(req.direction) : '') +
+    metaRow('path', req.path, 'dim') +
+    (resp.status ? '<tr><td class="mk">status</td><td class="mv"'+statusCls+'>'+x(String(resp.status))+'</td></tr>' : '') +
+    (resp.outcome ? '<tr><td class="mk">outcome</td><td class="mv"'+outcomeCls+'>'+x(resp.outcome)+'</td></tr>' : '') +
+    metaRow('stop_reason '+info(tokenHelp.stopReason), summary.stop_reason) +
+    metaRow('elapsed', resp.elapsed_ms ? fmtElapsed(resp.elapsed_ms) : '') +
+    metaRow('events', summary.events) +
+    metaRow('message_id', summary.message_id) +
+    metaRow('upstream_model', summary.model, '', summary.model ? 'color:'+modelColor(summary.model) : '') +
+  '</table>';
+
+  // Token breakdown bar.
+  const u = resp.usage || summary.usage;
+  if (u && (u.input_tokens || u.output_tokens || u.cache_read_input_tokens || u.cache_creation_input_tokens)) {
+    html += renderTokenBar(u);
+  }
+  return html;
+}
+
 // renderTokenBar draws the four-segment horizontal stack used by both the
 // detail card and (later) the overview view. Widths are proportional to the
 // total of all four buckets; an empty bucket renders a 0-width segment.
@@ -2743,18 +2762,13 @@ function renderRequestStructured(req) {
     return emptyNote('Body not captured. Set log.level: full in the gateway YAML to record full request bodies.');
   }
   let html = '';
-  // Metadata table: only fields present in the raw JSON body, plus audit
-  // metadata that describes how the request was captured.
+  // Metadata table: only fields present in the raw JSON body.
   html += metaTable([
     metaRow('model', body.model, '', body.model ? 'color:'+modelColor(body.model) : ''),
     metaRow('stream', body.stream ? 'true' : ''),
     typeof body.temperature === 'number' ? metaRow('temperature', body.temperature) : '',
     metaRow('max_tokens', body.max_tokens),
     body.top_p ? metaRow('top_p', body.top_p) : '',
-    metaRow('session '+info(tokenHelp.sessionId), req.session_id),
-    metaRow('turn '+info(tokenHelp.turnIndex), req.turn_index),
-    metaRow('direction', req.direction, '', req.direction ? 'color:'+dirColor(req.direction) : ''),
-    metaRow('path', req.path, 'dim'),
   ]);
 
   // System prompt (Anthropic top-level string or array of content blocks;
