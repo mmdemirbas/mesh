@@ -208,6 +208,8 @@ tbody tr:last-child td { border-bottom: none; }
 .md-list     { color: var(--yellow); font-weight: 700; }
 .md-quote    { color: var(--text-dim); border-left: 2px solid var(--border); padding-left: 6px; display: block; }
 .md-hr       { color: var(--text-muted); }
+.md-xml      { color: var(--text-dim); }
+.md-xml-tag  { color: var(--cyan); font-weight: 600; }
 /* Scrollable markdown viewer with optional TOC sidebar */
 .md-viewer { display: flex; gap: 0; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); }
 .md-viewer .md-body {
@@ -226,7 +228,7 @@ tbody tr:last-child td { border-bottom: none; }
 .md-viewer .md-toc a:hover { color: var(--green); }
 .md-viewer .md-toc a.depth-2 { padding-left: 8px; }
 .md-viewer .md-toc a.depth-3 { padding-left: 16px; }
-.md-viewer .md-toc .toc-len { color: var(--text-muted); font-size: 9px; }
+.md-viewer .md-toc .toc-len { font-size: 9px; display: inline-block; width: 32px; text-align: right; margin-right: 4px; flex-shrink: 0; }
 @media (max-width: 900px) { .md-viewer .md-toc { display: none; } }
 /* Loading overlay for stale data */
 .gw-loading { position: relative; pointer-events: none; }
@@ -911,8 +913,9 @@ tbody tr:last-child td { border-bottom: none; }
               <th>Stream</th>
               <th>Status</th>
               <th>Outcome</th>
-              <th>Tokens</th>
-              <th>Elapsed</th>
+              <th>In</th>
+              <th>Out</th>
+              <th>Time</th>
               <th>Summary</th>
             </tr></thead>
             <tbody id="gw-body"></tbody>
@@ -1313,6 +1316,29 @@ function fmtTokens(n) {
   const v = Number(n||0);
   if (!Number.isSafeInteger(v)) return '≈'+v.toLocaleString();
   return v.toLocaleString();
+}
+
+// fmtElapsed formats milliseconds into a human-readable string with
+// appropriate units: ms for <1s, s for <60s, m+s for >=60s.
+function fmtElapsed(ms) {
+  ms = Number(ms) || 0;
+  if (ms < 1000) return ms + 'ms';
+  if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+  const m = Math.floor(ms / 60000);
+  const s = Math.round((ms % 60000) / 1000);
+  return m + 'm ' + s + 's';
+}
+// fmtElapsedHtml wraps fmtElapsed in a colored span based on duration.
+function fmtElapsedHtml(ms) {
+  ms = Number(ms) || 0;
+  const clr = ms > 30000 ? 'var(--red)' : ms > 5000 ? 'var(--yellow)' : ms > 1000 ? 'var(--text)' : 'var(--green)';
+  return '<span style="color:'+clr+'">'+fmtElapsed(ms)+'</span>';
+}
+// fmtTokensHtml wraps a token count in a colored span based on magnitude.
+function fmtTokensHtml(n) {
+  n = Number(n) || 0;
+  const clr = n > 50000 ? 'var(--red)' : n > 10000 ? 'var(--yellow)' : n > 1000 ? 'var(--text)' : 'var(--text-muted)';
+  return '<span style="color:'+clr+'">'+fmtTokens(n)+'</span>';
 }
 
 function badge(status) {
@@ -2212,7 +2238,7 @@ function renderGateway() {
     const meta = document.getElementById('gw-meta');
     if (meta) meta.textContent = '';
     document.getElementById('gw-body').innerHTML =
-      '<tr><td colspan="11" style="color:var(--text-muted);padding:20px">No gateways with audit logging configured. Set log.level: full or metadata in the gateway YAML to populate this view.</td></tr>';
+      '<tr><td colspan="12" style="color:var(--text-muted);padding:20px">No gateways with audit logging configured. Set log.level: full or metadata in the gateway YAML to populate this view.</td></tr>';
     document.getElementById('gw-kpi').innerHTML =
       '<div class="stat" style="grid-column:1/-1;color:var(--text-muted)">No gateway audit data yet. Configure log.level to populate this view.</div>';
     return;
@@ -2299,7 +2325,7 @@ function renderGateway() {
 
     const body = document.getElementById('gw-body');
     if (!filtered.length) {
-      body.innerHTML = '<tr><td colspan="11" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
+      body.innerHTML = '<tr><td colspan="12" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
     } else {
     body.innerHTML = filtered.map(p => {
       const ts = p.resp.ts||p.req.ts||'';
@@ -2316,8 +2342,6 @@ function renderGateway() {
       const outcome = p.resp.outcome || '-';
       const outcomeColor = outcome === 'ok' ? 'var(--green)' : outcome === 'error' ? 'var(--red)' : 'var(--yellow)';
       const u = p.resp.usage || {};
-      const tokens = fmtTokens(u.input_tokens)+'/'+fmtTokens(u.output_tokens);
-      const elapsed = (p.resp.elapsed_ms||0)+'ms';
       const summary = renderGwSummaryCell(p.resp);
       return '<tr style="cursor:pointer" onclick="showGwDetail(\''+xj(p.key)+'\')">'+
         '<td style="color:var(--text-muted);white-space:nowrap">'+fmtLocalTime(ts)+'</td>'+
@@ -2328,8 +2352,9 @@ function renderGateway() {
         '<td style="color:var(--text-muted)">'+stream+'</td>'+
         '<td style="color:'+statusColor+'">'+status+'</td>'+
         '<td style="color:'+outcomeColor+'">'+x(outcome)+'</td>'+
-        '<td style="color:var(--text-dim)">'+tokens+'</td>'+
-        '<td style="color:var(--text-muted)">'+elapsed+'</td>'+
+        '<td>'+fmtTokensHtml(u.input_tokens)+'</td>'+
+        '<td>'+fmtTokensHtml(u.output_tokens)+'</td>'+
+        '<td>'+fmtElapsedHtml(p.resp.elapsed_ms)+'</td>'+
         '<td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)">'+summary+'</td>'+
         '</tr>';
     }).join('');
@@ -2519,7 +2544,7 @@ function renderResponseStructured(resp) {
     (resp.status ? '<tr><td class="mk">status</td><td class="mv"'+statusCls+'>'+x(String(resp.status))+'</td></tr>' : '') +
     (resp.outcome ? '<tr><td class="mk">outcome</td><td class="mv"'+outcomeCls+'>'+x(resp.outcome)+'</td></tr>' : '') +
     metaRow('stop_reason '+info(tokenHelp.stopReason), summary.stop_reason) +
-    metaRow('elapsed', resp.elapsed_ms ? resp.elapsed_ms+'ms' : '') +
+    metaRow('elapsed', resp.elapsed_ms ? fmtElapsed(resp.elapsed_ms) : '') +
     metaRow('events', summary.events) +
     metaRow('message_id', summary.message_id) +
     metaRow('upstream_model', summary.model) +
@@ -3116,6 +3141,15 @@ function renderPlainText(s) {
 // For short strings (< 600 chars) it skips the TOC and just shows text.
 // The TOC is built from Markdown headings (# / ## / ###). Each heading
 // gets an anchor that scrolls the body pane on click.
+// _mdScroll scrolls to a heading anchor inside the .md-body container
+// without scrolling the page itself.
+function _mdScroll(anchorId) {
+  const el = document.getElementById(anchorId);
+  if (!el) return;
+  const body = el.closest('.md-body');
+  if (body) body.scrollTop = el.offsetTop - body.offsetTop;
+}
+
 function renderMdViewer(s) {
   if (!s) return '';
   // Short text: no viewer chrome needed.
@@ -3151,8 +3185,9 @@ function renderMdViewer(s) {
         const nextOff = i+1 < headings.length ? headings[i+1].offset : s.length;
         const sectionLen = nextOff - h.offset;
         const depthCls = h.depth >= 3 ? 'depth-3' : h.depth >= 2 ? 'depth-2' : '';
-        return '<a class="'+depthCls+'" onclick="document.getElementById(\''+id+'-h'+i+'\').scrollIntoView({block:\'start\',behavior:\'smooth\'})" title="'+xa(h.title)+'">'+
-          x(h.title)+' <span class="toc-len">'+fmtLen(sectionLen)+'</span></a>';
+        const lenClr = sectionLen > 10000 ? 'var(--red)' : sectionLen > 2000 ? 'var(--yellow)' : sectionLen > 500 ? 'var(--text)' : 'var(--text-muted)';
+        return '<a class="'+depthCls+'" onclick="_mdScroll(\''+id+'-h'+i+'\')" title="'+xa(h.title)+'">' +
+          '<span class="toc-len" style="color:'+lenClr+'">'+fmtLen(sectionLen)+'</span> '+x(h.title)+'</a>';
       }).join('') +
     '</div>';
   }
@@ -3217,6 +3252,16 @@ function highlightMarkdown(s) {
     (m, pre, body) => pre + hold('<span class="md-italic">*' + body + '*</span>'));
   out = out.replace(/(^|[^_\w])_([^_\n]+)_(?=[^_\w]|$)/g,
     (m, pre, body) => pre + hold('<span class="md-italic">_' + body + '_</span>'));
+  // XML/HTML tags (escaped as &lt;tagname&gt;). Color tag names and delimiters.
+  // Closing tags: &lt;/tagname&gt;
+  out = out.replace(/&lt;\/([a-zA-Z][a-zA-Z0-9_-]*)&gt;/g,
+    (m, tag) => hold('<span class="md-xml">&lt;/<span class="md-xml-tag">' + tag + '</span>&gt;</span>'));
+  // Self-closing: &lt;tagname/&gt; or &lt;tagname /&gt;
+  out = out.replace(/&lt;([a-zA-Z][a-zA-Z0-9_-]*)\s*\/&gt;/g,
+    (m, tag) => hold('<span class="md-xml">&lt;<span class="md-xml-tag">' + tag + '</span>/&gt;</span>'));
+  // Opening tags: &lt;tagname&gt; or &lt;tagname attr...&gt;
+  out = out.replace(/&lt;([a-zA-Z][a-zA-Z0-9_-]*)(\s[^&]*?)?&gt;/g,
+    (m, tag, attrs) => hold('<span class="md-xml">&lt;<span class="md-xml-tag">' + tag + '</span>' + (attrs||'') + '&gt;</span>'));
   // Restore placeholders.
   return out.replace(/\u0001MD(\d+)\u0002/g, (m, i) => holds[+i]);
 }
@@ -3814,7 +3859,7 @@ function renderSessionTimeline() {
     const deltaCls = delta == null ? '' : delta > 0 ? 'delta-up' : delta < 0 ? 'delta-down' : '';
     const deltaLabel = delta == null ? '' : (delta >= 0 ? '+' : '') + delta.toLocaleString();
     const stop = (p.resp.stream_summary||{}).stop_reason || '';
-    const elapsed = p.resp.elapsed_ms ? p.resp.elapsed_ms+'ms' : '';
+    const elapsed = p.resp.elapsed_ms ? fmtElapsed(p.resp.elapsed_ms) : '';
     const tools = ((p.resp.stream_summary||{}).tool_calls||[]).length;
     return '<div class="gw-turn" onclick="showGwDetail(\''+xj(p.key)+'\')">' +
       '<div class="turn-no">#'+(p.req.turn_index||(p._chronoIdx+1))+'</div>' +
