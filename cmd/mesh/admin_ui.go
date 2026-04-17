@@ -873,6 +873,7 @@ tbody tr:last-child td { border-bottom: none; }
           <table>
             <thead><tr>
               <th>Time</th>
+              <th>Gateway</th>
               <th>Session</th>
               <th>Dir</th>
               <th>Client model</th>
@@ -2204,7 +2205,7 @@ function renderGateway() {
     const meta = document.getElementById('gw-meta');
     if (meta) meta.textContent = '';
     document.getElementById('gw-body').innerHTML =
-      '<tr><td colspan="12" style="color:var(--text-muted);padding:20px">No gateways with audit logging configured. Set log.level: full or metadata in the gateway YAML to populate this view.</td></tr>';
+      '<tr><td colspan="13" style="color:var(--text-muted);padding:20px">No gateways with audit logging configured. Set log.level: full or metadata in the gateway YAML to populate this view.</td></tr>';
     document.getElementById('gw-kpi').innerHTML =
       '<div class="stat" style="grid-column:1/-1;color:var(--text-muted)">No gateway audit data yet. Configure log.level to populate this view.</div>';
     return;
@@ -2289,10 +2290,11 @@ function renderGateway() {
 
     const body = document.getElementById('gw-body');
     if (!filtered.length) {
-      body.innerHTML = '<tr><td colspan="12" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
+      body.innerHTML = '<tr><td colspan="13" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
     } else {
     body.innerHTML = filtered.map(p => {
       const ts = p.resp.ts||p.req.ts||'';
+      const gw = p.req.gateway || p.resp.gateway || '-';
       const dir = p.req.direction || '-';
       const model = p.req.model || '-';
       const ss = (p.resp.stream_summary || {});
@@ -2309,6 +2311,7 @@ function renderGateway() {
       const summary = renderGwSummaryCell(p.resp);
       return '<tr style="cursor:pointer" onclick="showGwDetail(\''+xj(p.key)+'\')">'+
         '<td style="color:var(--text-muted);white-space:nowrap">'+fmtLocalTime(ts)+'</td>'+
+        '<td style="color:'+modelColor(gw)+'">'+x(gw)+'</td>'+
         '<td><code style="color:'+sidClr+';font-size:11px" title="'+xa(sid)+'">'+x(sidShort)+'</code></td>'+
         '<td>'+x(dir)+'</td>'+
         '<td style="color:'+modelColor(model)+'">'+x(model)+'</td>'+
