@@ -111,9 +111,10 @@ func tryLoadIndex(path string) *FileIndex {
 	return idx
 }
 
-// save writes the index to disk with fsync and double-write. H2a: alternates
-// between path and path.prev so that at least one valid copy survives a
-// crash or single-file disk corruption.
+// save writes the index to disk with fsync and double-write. H2a: writes to
+// .prev first (via temp+fsync+rename), then to primary. If a crash occurs
+// during the first write, primary retains the previous state. If during
+// the second, .prev has the latest data. Load picks the higher sequence.
 func (idx *FileIndex) save(path string) error {
 	data, err := yaml.Marshal(idx)
 	if err != nil {
@@ -123,10 +124,12 @@ func (idx *FileIndex) save(path string) error {
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("create index dir: %w", err)
 	}
-	// Write to the older of the two files (or primary if equal/missing).
-	target := doubleWriteTarget(path)
-	if err := writeFileSync(target, data); err != nil {
-		return fmt.Errorf("write index: %w", err)
+	// Write backup first, then primary. At least one is always valid.
+	if err := writeFileSync(prevPath(path), data); err != nil {
+		return fmt.Errorf("write index backup: %w", err)
+	}
+	if err := writeFileSync(path, data); err != nil {
+		return fmt.Errorf("write index primary: %w", err)
 	}
 	return nil
 }
@@ -182,6 +185,8 @@ func latestSync(peers map[string]PeerState) time.Time {
 }
 
 // savePeerStates writes peer state to disk with fsync and double-write.
+// Both copies are written every time (peer state is small) so they stay
+// in sync and either can serve as a recovery source.
 func savePeerStates(path string, peers map[string]PeerState) error {
 	data, err := yaml.Marshal(peers)
 	if err != nil {
@@ -191,9 +196,11 @@ func savePeerStates(path string, peers map[string]PeerState) error {
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("create peers dir: %w", err)
 	}
-	target := doubleWriteTarget(path)
-	if err := writeFileSync(target, data); err != nil {
-		return fmt.Errorf("write peers: %w", err)
+	if err := writeFileSync(path, data); err != nil {
+		return fmt.Errorf("write peers primary: %w", err)
+	}
+	if err := writeFileSync(prevPath(path), data); err != nil {
+		return fmt.Errorf("write peers backup: %w", err)
 	}
 	return nil
 }
@@ -225,27 +232,6 @@ func writeFileSync(path string, data []byte) error {
 		return err
 	}
 	return nil
-}
-
-// doubleWriteTarget returns which of the two files (primary or .prev) to
-// write to. Picks the older one by mtime so writes alternate between them.
-func doubleWriteTarget(path string) string {
-	prev := prevPath(path)
-	pi, piErr := os.Stat(path)
-	bi, biErr := os.Stat(prev)
-
-	// If one doesn't exist, write to it.
-	if piErr != nil {
-		return path
-	}
-	if biErr != nil {
-		return prev
-	}
-	// Both exist: write to the older one.
-	if bi.ModTime().Before(pi.ModTime()) {
-		return prev
-	}
-	return path
 }
 
 // isNotExist returns true if the path does not exist.
@@ -337,6 +323,17 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 				if rel != "." {
 					seen[rel] = struct{}{}
 					errorPaths[rel] = struct{}{}
+					// If this is a directory, its children won't be walked.
+					// Protect all known children from tombstoning by adding
+					// them to seen (they still exist on disk, we just can't
+					// traverse into the parent).
+					dirPrefix := rel + "/"
+					for child := range idx.Files {
+						if strings.HasPrefix(child, dirPrefix) {
+							seen[child] = struct{}{}
+							errorPaths[child] = struct{}{}
+						}
+					}
 				}
 			}
 			stats.StatErrors++
@@ -491,8 +488,15 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	// suppress all tombstones — the scan is likely seeing a systemic failure
 	// (NFS flap, permission reset) rather than individual file issues.
 	totalErrors := len(errorPaths)
-	trackedFiles := len(idx.Files)
-	bulkFailure := totalErrors > 100 || (trackedFiles > 0 && totalErrors*10 > trackedFiles)
+	// Use live (non-tombstone) file count as denominator so old tombstones
+	// don't inflate the threshold and make bulk suppression harder to trigger.
+	liveFiles := 0
+	for _, e := range idx.Files {
+		if !e.Deleted {
+			liveFiles++
+		}
+	}
+	bulkFailure := totalErrors > 100 || (liveFiles > 0 && totalErrors*10 > liveFiles)
 	if bulkFailure {
 		slog.Warn("scan had bulk errors, suppressing all deletion detection",
 			"folder", folderRoot,

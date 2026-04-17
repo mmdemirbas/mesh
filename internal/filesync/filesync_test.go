@@ -560,44 +560,38 @@ func TestLoadIndex_FallbackToPrev(t *testing.T) {
 	dir := t.TempDir()
 	idxPath := filepath.Join(dir, "index.yaml")
 
-	// Save an index (writes to primary first since neither exists).
+	// Save an index — both primary and .prev get the same data.
 	idx := newFileIndex()
-	idx.Sequence = 10
-	idx.Files["a.txt"] = FileEntry{SHA256: "aaa", Sequence: 5}
-	if err := idx.save(idxPath); err != nil {
-		t.Fatal(err)
-	}
-
-	// Save again with higher sequence (writes to .prev since primary is newer).
 	idx.Sequence = 20
+	idx.Files["a.txt"] = FileEntry{SHA256: "aaa", Sequence: 5}
 	idx.Files["b.txt"] = FileEntry{SHA256: "bbb", Sequence: 15}
 	if err := idx.save(idxPath); err != nil {
 		t.Fatal(err)
 	}
 
-	// Corrupt the file that has the HIGHER sequence.
-	// Determine which file has seq 20 by loading each.
-	p := tryLoadIndex(idxPath)
-	bp := tryLoadIndex(prevPath(idxPath))
-	var corruptTarget string
-	if p != nil && p.Sequence == 20 {
-		corruptTarget = idxPath
-	} else if bp != nil && bp.Sequence == 20 {
-		corruptTarget = prevPath(idxPath)
-	} else {
-		t.Fatal("neither file has sequence 20")
-	}
-	if err := os.WriteFile(corruptTarget, []byte("corrupt!!!"), 0600); err != nil {
+	// Corrupt primary — backup should still load.
+	if err := os.WriteFile(idxPath, []byte("corrupt!!!"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	// Load should succeed with the surviving copy (seq 10).
 	loaded, err := loadIndex(idxPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Sequence != 10 {
-		t.Errorf("expected sequence 10 from fallback, got %d", loaded.Sequence)
+	if loaded.Sequence != 20 {
+		t.Errorf("expected sequence 20 from backup, got %d", loaded.Sequence)
+	}
+	if _, ok := loaded.Files["b.txt"]; !ok {
+		t.Error("expected b.txt in loaded index")
+	}
+
+	// Corrupt backup too — should fail.
+	if err := os.WriteFile(prevPath(idxPath), []byte("also corrupt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = loadIndex(idxPath)
+	if err == nil {
+		t.Error("expected error when both files are corrupt")
 	}
 }
 
@@ -622,20 +616,15 @@ func TestLoadPeerStates_FallbackToPrev(t *testing.T) {
 	dir := t.TempDir()
 	peersPath := filepath.Join(dir, "peers.yaml")
 
+	// Save peer state — both primary and .prev get the same data.
 	peers := map[string]PeerState{
-		"10.0.0.1:7756": {LastSeenSequence: 100, LastSync: time.Now().Add(-time.Minute)},
+		"10.0.0.1:7756": {LastSeenSequence: 200, LastSync: time.Now()},
 	}
 	if err := savePeerStates(peersPath, peers); err != nil {
 		t.Fatal(err)
 	}
 
-	// Save again with newer timestamp.
-	peers["10.0.0.1:7756"] = PeerState{LastSeenSequence: 200, LastSync: time.Now()}
-	if err := savePeerStates(peersPath, peers); err != nil {
-		t.Fatal(err)
-	}
-
-	// Corrupt primary.
+	// Corrupt primary — backup should still load.
 	if err := os.WriteFile(peersPath, []byte("corrupt!!!"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -648,8 +637,8 @@ func TestLoadPeerStates_FallbackToPrev(t *testing.T) {
 		t.Fatal("expected peer state from backup")
 	}
 	ps := loaded["10.0.0.1:7756"]
-	if ps.LastSeenSequence == 0 {
-		t.Error("expected non-zero LastSeenSequence from backup")
+	if ps.LastSeenSequence != 200 {
+		t.Errorf("expected LastSeenSequence 200 from backup, got %d", ps.LastSeenSequence)
 	}
 }
 
