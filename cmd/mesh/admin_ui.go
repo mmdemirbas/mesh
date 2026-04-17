@@ -779,6 +779,17 @@ select option { background: var(--bg-card); color: var(--text); }
   .badge-warn { background: #fff8e0; color: #6b4c00; }
   .badge-err { background: #fde8e8; color: #7b1a1a; }
 }
+.diff-container { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; margin-top: 8px; overflow: auto; max-height: 400px; }
+.diff-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.diff-meta-label { color: var(--text-muted); font-size: 11px; text-transform: uppercase; margin-bottom: 4px; }
+.diff-meta-val { font-family: var(--mono); font-size: 13px; }
+.diff-lines { font-family: var(--mono); font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; padding: 8px 0; }
+.diff-line { padding: 0 16px; }
+.diff-add { background: var(--green-dim); color: var(--green); }
+.diff-del { background: var(--red-dim); color: var(--red); }
+.diff-eq { color: var(--text-dim); }
+.diff-info { padding: 16px; }
+.diff-truncated { color: var(--yellow); font-size: 11px; padding: 8px 16px; border-top: 1px solid var(--border); }
 </style>
 </head>
 <body>
@@ -885,8 +896,8 @@ select option { background: var(--bg-card); color: var(--text); }
         <div class="table-scroll">
         <div id="conflict-filter-bar" class="tf-active-bar"></div>
         <table>
-          <thead id="conflict-thead"><tr><th>Folder</th><th>Path</th></tr></thead>
-          <tbody id="conflict-body"><tr class="loading-row"><td colspan="2">Loading conflicts…</td></tr></tbody>
+          <thead id="conflict-thead"><tr><th>Folder</th><th>Conflict Path</th><th>Original</th></tr></thead>
+          <tbody id="conflict-body"><tr class="loading-row"><td colspan="3">Loading conflicts…</td></tr></tbody>
         </table>
         </div>
       </div>
@@ -1411,7 +1422,12 @@ function tick() {
   }
   if (needFilesync) {
     fetch('/api/filesync/folders').then(r=>ok(r)).then(r=>r.json()).then(v => { folders = v; renderFilesync(); }).catch(fail('folders'));
-    fetch('/api/filesync/conflicts').then(r=>ok(r)).then(r=>r.json()).then(v => { conflicts = v; renderConflicts(); }).catch(fail('conflicts'));
+    fetch('/api/filesync/conflicts').then(r=>ok(r)).then(r=>r.json()).then(v => {
+      const cur = new Set(v.map(c => c.folder_id+'|'+c.path));
+      for (const k of Object.keys(conflictDiffCache)) { if (!cur.has(k)) delete conflictDiffCache[k]; }
+      for (const k of expandedConflicts) { if (!cur.has(k)) expandedConflicts.delete(k); }
+      conflicts = v; renderConflicts();
+    }).catch(fail('conflicts'));
     fetch('/api/filesync/activity').then(r=>ok(r)).then(r=>r.json()).then(v => { fsActivities = v; renderFsActivity(); }).catch(fail('fs-activity'));
   }
   if (needClipsync) {
@@ -2105,6 +2121,54 @@ function toggleFolder(id) {
   renderFilesync();
 }
 
+const expandedConflicts = new Set();
+const conflictDiffCache = {};
+function toggleConflict(fid, path) {
+  const key = fid + '|' + path;
+  if (expandedConflicts.has(key)) expandedConflicts.delete(key);
+  else { expandedConflicts.add(key); if (!conflictDiffCache[key]) fetchConflictDiff(fid, path); }
+  renderConflicts();
+}
+function fetchConflictDiff(fid, path) {
+  const key = fid + '|' + path;
+  fetch('/api/filesync/conflicts/diff?folder='+encodeURIComponent(fid)+'&path='+encodeURIComponent(path))
+    .then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); })
+    .then(d => { conflictDiffCache[key] = d; renderConflicts(); })
+    .catch(e => { conflictDiffCache[key] = {error: e.message}; renderConflicts(); });
+}
+function renderConflictDiff(key) {
+  const d = conflictDiffCache[key];
+  if (!d) return '<tr><td colspan="3" class="diff-info" style="color:var(--text-muted)">Loading diff...</td></tr>';
+  if (d.error) return '<tr><td colspan="3" class="diff-info" style="color:var(--red)">Error: '+x(d.error)+'</td></tr>';
+  let h = '<tr><td colspan="3" style="padding:0"><div class="diff-container"><div class="diff-meta">';
+  h += '<div><div class="diff-meta-label">Conflict</div><div class="diff-meta-val">'+fmtBytes(d.conflict.size)+'</div><div class="diff-meta-val" style="color:var(--text-muted)">'+timeAgo(d.conflict.mtime)+'</div></div>';
+  if (d.original_exists) {
+    h += '<div><div class="diff-meta-label">Original ('+x(d.original_path)+')</div><div class="diff-meta-val">'+fmtBytes(d.original.size)+'</div><div class="diff-meta-val" style="color:var(--text-muted)">'+timeAgo(d.original.mtime)+'</div></div>';
+  } else {
+    h += '<div><div class="diff-meta-label">Original</div><div class="diff-meta-val" style="color:var(--yellow)">Deleted</div></div>';
+  }
+  h += '</div>';
+  if (!d.original_exists) {
+    h += '<div class="diff-info" style="color:var(--yellow)">Original file no longer exists. Conflict file is the only copy.</div>';
+  } else if (d.is_binary) {
+    const same = d.conflict.sha256 === d.original.sha256;
+    h += '<div class="diff-info" style="color:var(--yellow)">Binary file. '+(same ? 'Content identical (SHA-256 match).' : 'Content differs.')+'</div>';
+  } else if (d.lines && d.lines.length > 0) {
+    h += '<div class="diff-lines">';
+    for (const l of d.lines) {
+      const cls = l.op==='add'?'diff-add':l.op==='delete'?'diff-del':'diff-eq';
+      const pfx = l.op==='add'?'+':l.op==='delete'?'-':' ';
+      h += '<div class="diff-line '+cls+'">'+pfx+' '+x(l.text)+'</div>';
+    }
+    h += '</div>';
+  } else {
+    h += '<div class="diff-info" style="color:var(--green)">Files are identical.</div>';
+  }
+  if (d.truncated) h += '<div class="diff-truncated">Diff truncated (file too large for full comparison).</div>';
+  h += '</div></td></tr>';
+  return h;
+}
+
 function fmtTime(t) {
   if (!t || (typeof t === 'string' && t.startsWith('0001-01-01'))) {
     return '<span style="color:var(--text-muted)">never</span>';
@@ -2236,10 +2300,18 @@ function renderConflicts() {
   setHTML('conflict-thead', TF.thead('conflict'));
   setHTML('conflict-filter-bar', TF.filterBar('conflict'));
   const rows = TF.apply('conflict', conflicts);
-  if (!rows.length) { el.innerHTML = '<tr><td colspan="2" style="color:var(--text-muted);padding:16px">'+(conflicts.length ? 'No rows match the current filter.' : 'No conflicts')+'</td></tr>'; return; }
-  el.innerHTML = rows.map(c =>
-    '<tr><td>'+x(c.folder_id)+'</td><td style="color:var(--red)">'+x(c.path)+'</td></tr>'
-  ).join('');
+  if (!rows.length) { el.innerHTML = '<tr><td colspan="3" style="color:var(--text-muted);padding:16px">'+(conflicts.length ? 'No rows match the current filter.' : 'No conflicts')+'</td></tr>'; return; }
+  let html = '';
+  for (const c of rows) {
+    const key = c.folder_id + '|' + c.path;
+    const exp = expandedConflicts.has(key);
+    const arrow = exp ? '&#9660;' : '&#9654;';
+    const orig = conflictDiffCache[key] && conflictDiffCache[key].original_path ? conflictDiffCache[key].original_path : '';
+    html += '<tr style="cursor:pointer" onclick="toggleConflict(\''+xj(c.folder_id)+'\',\''+xj(c.path)+'\')">'
+      + '<td>'+arrow+' '+x(c.folder_id)+'</td><td style="color:var(--red)">'+x(c.path)+'</td><td style="color:var(--text-muted)">'+x(orig)+'</td></tr>';
+    if (exp) html += renderConflictDiff(key);
+  }
+  el.innerHTML = html;
 }
 
 function renderFsActivity() {
@@ -4562,7 +4634,8 @@ TF.reg('fs', {
 TF.reg('conflict', {
   columns: [
     {key:'folder_id', label:'Folder', extract: r => r.folder_id||''},
-    {key:'path', label:'Path', extract: r => r.path||''}
+    {key:'path', label:'Conflict Path', extract: r => r.path||''},
+    {key:'original', label:'Original', extract: r => { const d = conflictDiffCache[r.folder_id+'|'+r.path]; return d && d.original_path ? d.original_path : ''; }}
   ],
   onUpdate: renderConflicts
 });
