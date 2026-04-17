@@ -53,16 +53,17 @@ type RequestID uint64
 // chat is byte-stable across replays from history, so its hash is a sound
 // conversation key.
 type RequestMeta struct {
-	Gateway   string
-	Direction string
-	Model     string
-	Stream    bool
-	Method    string
-	Path      string
-	Headers   map[string][]string
-	SessionID string
-	TurnIndex int
-	StartTime time.Time
+	Gateway     string
+	Direction   string
+	Model       string
+	MappedModel string // upstream model after model_map (empty when no mapping)
+	Stream      bool
+	Method      string
+	Path        string
+	Headers     map[string][]string
+	SessionID   string
+	TurnIndex   int
+	StartTime   time.Time
 }
 
 // ResponseMeta is the structured context written to an audit response row.
@@ -203,6 +204,9 @@ func (r *Recorder) Request(meta RequestMeta, body []byte) RequestID {
 		"method":    meta.Method,
 		"path":      meta.Path,
 		"headers":   redactHeaders(meta.Headers),
+	}
+	if meta.MappedModel != "" && meta.MappedModel != meta.Model {
+		row["mapped_model"] = meta.MappedModel
 	}
 	if meta.SessionID != "" {
 		row["session_id"] = meta.SessionID
@@ -488,17 +492,19 @@ func wrapAuditing(cfg GatewayCfg, recorder *Recorder, clientAPI string, inner ht
 		_ = json.Unmarshal(body, &peek)
 		sessionID, turnIndex := extractSessionInfo(r.Header, body)
 
+		mapped := cfg.MapModel(peek.Model)
 		reqID := recorder.Request(RequestMeta{
-			Gateway:   cfg.Name,
-			Direction: cfg.Direction().String(),
-			Model:     peek.Model,
-			Stream:    peek.Stream,
-			Method:    r.Method,
-			Path:      r.URL.Path,
-			Headers:   r.Header,
-			SessionID: sessionID,
-			TurnIndex: turnIndex,
-			StartTime: start,
+			Gateway:     cfg.Name,
+			Direction:   cfg.Direction().String(),
+			Model:       peek.Model,
+			MappedModel: mapped,
+			Stream:      peek.Stream,
+			Method:      r.Method,
+			Path:        r.URL.Path,
+			Headers:     r.Header,
+			SessionID:   sessionID,
+			TurnIndex:   turnIndex,
+			StartTime:   start,
 		}, body)
 
 		r.Body = io.NopCloser(bytes.NewReader(body))
