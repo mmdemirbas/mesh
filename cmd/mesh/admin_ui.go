@@ -208,25 +208,34 @@ tbody tr:last-child td { border-bottom: none; }
 .md-list     { color: var(--yellow); font-weight: 700; }
 .md-quote    { color: var(--text-dim); border-left: 2px solid var(--border); padding-left: 6px; display: block; }
 .md-hr       { color: var(--text-muted); }
-/* Truncated text with gradient fade */
-.text-wrap { position: relative; }
-.text-wrap.collapsed .text-inner {
-  max-height: 8em; overflow: hidden;
+/* Scrollable markdown viewer with optional TOC sidebar */
+.md-viewer { display: flex; gap: 0; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); }
+.md-viewer .md-body {
+  flex: 1; min-width: 0; max-height: 50vh; overflow: auto; padding: 8px 12px;
+  font-family: var(--mono); font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
 }
-.text-wrap.collapsed .text-fade {
-  display: block; position: absolute; bottom: 24px; left: 0; right: 0;
-  height: 3em; pointer-events: none;
-  background: linear-gradient(transparent, var(--bg-card));
+.md-viewer .md-toc {
+  width: 200px; flex-shrink: 0; max-height: 50vh; overflow: auto;
+  border-left: 1px solid var(--border); padding: 6px 8px;
+  font-size: 10px; line-height: 1.6;
 }
-.text-wrap:not(.collapsed) .text-fade { display: none; }
-.text-wrap:not(.collapsed) .text-inner { max-height: none; }
-.text-toggle {
-  display: block; padding: 2px 0; margin-top: 2px;
-  color: var(--text-dim); cursor: pointer;
-  font-size: 10px; font-family: var(--mono); text-align: center;
-  border-top: 1px dashed var(--border);
+.md-viewer .md-toc a {
+  display: block; color: var(--text-muted); text-decoration: none; cursor: pointer;
+  padding: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.text-toggle:hover { color: var(--green); }
+.md-viewer .md-toc a:hover { color: var(--green); }
+.md-viewer .md-toc a.depth-2 { padding-left: 8px; }
+.md-viewer .md-toc a.depth-3 { padding-left: 16px; }
+.md-viewer .md-toc .toc-len { color: var(--text-muted); font-size: 9px; }
+@media (max-width: 900px) { .md-viewer .md-toc { display: none; } }
+/* Loading overlay for stale data */
+.gw-loading { position: relative; pointer-events: none; }
+.gw-loading::after {
+  content: 'Loading…'; position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(15,17,23,0.7); color: var(--text-muted);
+  font-size: 12px; z-index: 10; border-radius: var(--radius);
+}
 .tool-block {
   border-left: 2px solid var(--yellow); padding: 4px 8px;
   margin: 4px 0; background: var(--bg-card);
@@ -895,6 +904,7 @@ tbody tr:last-child td { border-bottom: none; }
           <table>
             <thead><tr>
               <th>Time</th>
+              <th>Session</th>
               <th>Dir</th>
               <th>Client model</th>
               <th>Upstream model</th>
@@ -1239,7 +1249,7 @@ function tick() {
   }
   if (needGateway) {
     fetch('/api/gateway/audit?limit=200').then(r=>ok(r)).then(r=>r.json()).then(v => { gatewayAudit = v; renderGateway(); }).catch(fail('gateway'));
-    if (gwSelected) {
+    if (gwSelected && gwSelected !== '(all)') {
       fetch('/api/gateway/audit/stats?gateway='+encodeURIComponent(gwSelected)+
         '&window='+encodeURIComponent(gwWindow)+'&bucket='+gwBucket(gwWindow))
         .then(r=>ok(r)).then(r=>r.json()).then(v => { gwStats = v; if (gwSubview === 'overview') renderGatewayOverview(); else if (gwSubview === 'sessions') renderSessions(); }).catch(fail('gw-stats'));
@@ -2194,6 +2204,7 @@ let gwOutcomeFilter = '';
 let gwSearchTimer = 0;  // debounce handle for the search input
 
 function renderGateway() {
+  gwFresh();
   const sel = document.getElementById('gw-select');
   if (!sel) return;
   if (!gatewayAudit || !gatewayAudit.length) {
@@ -2201,17 +2212,18 @@ function renderGateway() {
     const meta = document.getElementById('gw-meta');
     if (meta) meta.textContent = '';
     document.getElementById('gw-body').innerHTML =
-      '<tr><td colspan="9" style="color:var(--text-muted);padding:20px">No gateways with audit logging configured. Set log.level: full or metadata in the gateway YAML to populate this view.</td></tr>';
+      '<tr><td colspan="11" style="color:var(--text-muted);padding:20px">No gateways with audit logging configured. Set log.level: full or metadata in the gateway YAML to populate this view.</td></tr>';
     document.getElementById('gw-kpi').innerHTML =
       '<div class="stat" style="grid-column:1/-1;color:var(--text-muted)">No gateway audit data yet. Configure log.level to populate this view.</div>';
     return;
   }
-  // Populate selector once / on changes.
+  // Populate selector once / on changes. "All" merges rows from every gateway.
   const names = gatewayAudit.map(g => g.gateway);
-  const desired = (sel.options[sel.selectedIndex]||{}).value || gwSelected || names[0];
-  if (sel.options.length !== names.length || Array.from(sel.options).some((o,i)=>o.value!==names[i])) {
-    sel.innerHTML = names.map(n => '<option value="'+x(n)+'">'+x(n)+'</option>').join('');
-    sel.value = names.includes(desired) ? desired : names[0];
+  const allNames = names.length > 1 ? ['(all)', ...names] : names;
+  const desired = (sel.options[sel.selectedIndex]||{}).value || gwSelected || allNames[0];
+  if (sel.options.length !== allNames.length || Array.from(sel.options).some((o,i)=>o.value!==allNames[i])) {
+    sel.innerHTML = allNames.map(n => '<option value="'+x(n)+'">'+x(n)+'</option>').join('');
+    sel.value = allNames.includes(desired) ? desired : allNames[0];
   }
   gwSelected = sel.value;
   if (gwSubview === 'overview') renderGatewayOverview();
@@ -2229,8 +2241,15 @@ function renderGateway() {
     }
   }
 
-  const entry = gatewayAudit.find(g => g.gateway === gwSelected) || gatewayAudit[0];
-  const rowsRaw = entry.rows || [];
+  // Merge rows from all gateways when "(all)" is selected.
+  let rowsRaw;
+  if (gwSelected === '(all)') {
+    rowsRaw = [];
+    for (const g of gatewayAudit) rowsRaw.push(...(g.rows || []));
+  } else {
+    const entry = gatewayAudit.find(g => g.gateway === gwSelected) || gatewayAudit[0];
+    rowsRaw = entry.rows || [];
+  }
   // Pair req with resp by id+run. Each pair gets a stable composite key
   // (run|id) so the detail card survives auto-refresh even when the list
   // reorders. Haystack (hay) is computed lazily on first search so idle
@@ -2250,11 +2269,17 @@ function renderGateway() {
   gwRowsCache = pairs;
   gwRowsByKey = new Map(pairs.map(p => [p.key, p]));
 
-  document.getElementById('gw-meta').innerHTML =
-    'gateway <b>'+x(entry.gateway)+'</b> · file <span style="color:var(--text-dim)">'+x(entry.file||'(none)')+'</span>'+
-    (entry.file_size ? ' · '+fmtBytes(entry.file_size) : '')+
-    ' · '+pairs.length+' completed requests'+
-    (entry.error ? ' · <span style="color:var(--red)">error: '+x(entry.error)+'</span>' : '');
+  if (gwSelected === '(all)') {
+    document.getElementById('gw-meta').innerHTML =
+      '<b>all gateways</b> · '+gatewayAudit.length+' gateways · '+pairs.length+' completed requests';
+  } else {
+    const entry = gatewayAudit.find(g => g.gateway === gwSelected) || gatewayAudit[0];
+    document.getElementById('gw-meta').innerHTML =
+      'gateway <b>'+x(entry.gateway)+'</b> · file <span style="color:var(--text-dim)">'+x(entry.file||'(none)')+'</span>'+
+      (entry.file_size ? ' · '+fmtBytes(entry.file_size) : '')+
+      ' · '+pairs.length+' completed requests'+
+      (entry.error ? ' · <span style="color:var(--red)">error: '+x(entry.error)+'</span>' : '');
+  }
 
   if (gwSubview === 'requests') {
     const term = (gwSearchTerm||'').toLowerCase();
@@ -2274,7 +2299,7 @@ function renderGateway() {
 
     const body = document.getElementById('gw-body');
     if (!filtered.length) {
-      body.innerHTML = '<tr><td colspan="10" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
+      body.innerHTML = '<tr><td colspan="11" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
     } else {
     body.innerHTML = filtered.map(p => {
       const ts = p.resp.ts||p.req.ts||'';
@@ -2282,6 +2307,9 @@ function renderGateway() {
       const model = p.req.model || '-';
       const ss = (p.resp.stream_summary || {});
       const upModel = p.req.mapped_model || ss.model || '';
+      const sid = p.req.session_id || '';
+      const sidShort = sid ? sid.slice(0, 8) : '-';
+      const sidClr = sid ? sessColor(sid) : 'var(--text-muted)';
       const stream = p.req.stream ? 'yes' : 'no';
       const status = p.resp.status || 0;
       const statusColor = status >= 400 ? 'var(--red)' : status >= 200 ? 'var(--green)' : 'var(--text-dim)';
@@ -2293,6 +2321,7 @@ function renderGateway() {
       const summary = renderGwSummaryCell(p.resp);
       return '<tr style="cursor:pointer" onclick="showGwDetail(\''+xj(p.key)+'\')">'+
         '<td style="color:var(--text-muted);white-space:nowrap">'+fmtLocalTime(ts)+'</td>'+
+        '<td><code style="color:'+sidClr+';font-size:11px" title="'+xa(sid)+'">'+x(sidShort)+'</code></td>'+
         '<td>'+x(dir)+'</td>'+
         '<td style="color:var(--text-dim)">'+x(model)+'</td>'+
         '<td style="color:var(--text-muted)">'+(upModel && upModel !== model ? x(upModel) : '-')+'</td>'+
@@ -2630,7 +2659,7 @@ function renderRequestStructured(req) {
   if (body.system) {
     const txt = typeof body.system === 'string' ? body.system : JSON.stringify(body.system);
     html += sec('System prompt', fmtLen(txt.length)+' chars',
-      renderSystemPrompt(body.system), true);
+      renderSystemPrompt(body.system), false);
   }
 
   // Messages → chat-style bubbles.
@@ -2744,67 +2773,8 @@ function renderSystemPrompt(v) {
   if (typeof v !== 'string') {
     return '<div class="msg-block"><div class="msg-body">' + renderContent(v) + '</div></div>';
   }
-  const s = v;
-  const lines = s.split('\n');
-
-  // Step 1: peel off leading key:value metadata lines (e.g. billing headers).
-  // A metadata line matches /^[a-z][a-z0-9-]*:\s+\S/ and continues until the
-  // first non-matching line.
-  const metaRe = /^[a-z][a-z0-9-]*:\s+\S/i;
-  const meta = [];
-  let i = 0;
-  while (i < lines.length && (lines[i] === '' || metaRe.test(lines[i]))) {
-    if (lines[i] !== '') meta.push(lines[i]);
-    i++;
-  }
-
-  // Step 2: collect sections split by # / ## / ### headings. Text before
-  // the first heading becomes a synthetic "Preamble" section.
-  const body = lines.slice(i);
-  const headingRe = /^(#{1,6})\s+(.+)$/;
-  const sections = [];
-  let current = {depth: 0, title: 'Preamble', lines: []};
-  for (const ln of body) {
-    const h = ln.match(headingRe);
-    if (h) {
-      if (current.lines.length > 0 || current.title !== 'Preamble') sections.push(current);
-      current = {depth: h[1].length, title: h[2].trim(), lines: []};
-    } else {
-      current.lines.push(ln);
-    }
-  }
-  if (current.lines.length > 0 || current.title !== 'Preamble') sections.push(current);
-
-  let html = '';
-  if (meta.length) {
-    html += '<div style="margin-bottom:8px;display:flex;flex-wrap:wrap;gap:4px">' +
-      meta.map(line => {
-        const colon = line.indexOf(':');
-        const k = line.slice(0, colon);
-        const v = line.slice(colon+1).trim();
-        return chip(x(k), v);
-      }).join('') +
-    '</div>';
-  }
-
-  // If there are no headings and only one synthetic section, just render
-  // the text straight — no pointless outer details wrapper.
-  if (sections.length === 0) return html + emptyNote('(no body)');
-  if (sections.length === 1 && sections[0].title === 'Preamble') {
-    return html + '<div class="msg-block"><div class="msg-body">' +
-      renderPlainText(sections[0].lines.join('\n').trim()) +
-      '</div></div>';
-  }
-
-  for (const sec0 of sections) {
-    const body = sec0.lines.join('\n').trim();
-    const title = (sec0.depth ? '#'.repeat(sec0.depth) + ' ' : '') + sec0.title;
-    const open = sec0.title === 'Preamble';
-    html += sec(title, fmtLen(body.length)+' chars',
-      '<div class="msg-block"><div class="msg-body">'+renderPlainText(body)+'</div></div>',
-      open);
-  }
-  return html;
+  // Render as a single scrollable markdown viewer with TOC sidebar.
+  return renderMdViewer(v);
 }
 
 // msgChars returns the visible character count of a message — used for the
@@ -3139,14 +3109,56 @@ function renderText(s) {
 
 function renderPlainText(s) {
   if (!s) return '';
-  if (s.length <= truncateLen) {
+  return renderMdViewer(s);
+}
+
+// renderMdViewer renders a string as a scrollable box with a TOC sidebar.
+// For short strings (< 600 chars) it skips the TOC and just shows text.
+// The TOC is built from Markdown headings (# / ## / ###). Each heading
+// gets an anchor that scrolls the body pane on click.
+function renderMdViewer(s) {
+  if (!s) return '';
+  // Short text: no viewer chrome needed.
+  if (s.length < 600) {
     return '<div class="text">'+highlightMarkdown(s)+'</div>';
   }
-  const id = 'tx-'+(_hjId++);
-  return '<div class="text-wrap collapsed" id="'+id+'">' +
-    '<div class="text-inner"><div class="text">'+highlightMarkdown(s)+'</div></div>' +
-    '<div class="text-fade"></div>' +
-    '<span class="text-toggle" data-len="'+fmtLen(s.length)+' chars" onclick="_txToggle(\''+id+'\')">▼ expand ('+fmtLen(s.length)+' chars)</span>' +
+  const id = 'mdv-'+(_hjId++);
+  // Extract headings for TOC.
+  const headingRe = /^(#{1,6})\s+(.+)$/gm;
+  const headings = [];
+  let m;
+  while ((m = headingRe.exec(s)) !== null) {
+    headings.push({depth: m[1].length, title: m[2].trim(), offset: m.index});
+  }
+  // Build body with anchor spans at heading positions.
+  let body = highlightMarkdown(s);
+  // Inject anchors before <span class="md-h"> tags. highlightMarkdown wraps
+  // headings as <span class="md-h"># Title</span>, so we find each such span
+  // in order and prepend an anchor for the TOC to scroll to.
+  let hIdx = 0;
+  body = body.replace(/<span class="md-h">/g, function(match) {
+    if (hIdx < headings.length) {
+      return '<span id="'+id+'-h'+(hIdx++)+'"></span>' + match;
+    }
+    return match;
+  });
+  let toc = '';
+  if (headings.length > 0) {
+    toc = '<div class="md-toc">' +
+      '<div style="font-weight:600;color:var(--text-dim);margin-bottom:4px">Contents <span class="toc-len">'+fmtLen(s.length)+' chars</span></div>' +
+      headings.map(function(h, i) {
+        // Compute approximate char count for this section (until next heading or end).
+        const nextOff = i+1 < headings.length ? headings[i+1].offset : s.length;
+        const sectionLen = nextOff - h.offset;
+        const depthCls = h.depth >= 3 ? 'depth-3' : h.depth >= 2 ? 'depth-2' : '';
+        return '<a class="'+depthCls+'" onclick="document.getElementById(\''+id+'-h'+i+'\').scrollIntoView({block:\'start\',behavior:\'smooth\'})" title="'+xa(h.title)+'">'+
+          x(h.title)+' <span class="toc-len">'+fmtLen(sectionLen)+'</span></a>';
+      }).join('') +
+    '</div>';
+  }
+  return '<div class="md-viewer" id="'+id+'">' +
+    '<div class="md-body">'+body+'</div>' +
+    toc +
   '</div>';
 }
 
@@ -3280,17 +3292,6 @@ function renderCustomBlock(p) {
     head + '<div class="cblock-body">'+inner+'</div>' +
   '</div>';
 }
-function _txToggle(id) {
-  const wrap = document.getElementById(id);
-  if (!wrap) return;
-  const collapsed = wrap.classList.toggle('collapsed');
-  const btn = wrap.querySelector('.text-toggle');
-  if (btn) {
-    const len = btn.dataset.len || '';
-    btn.textContent = collapsed ? '▼ expand ('+len+')' : '▲ collapse';
-  }
-}
-
 function renderOpenAIToolCall(tc) {
   if (!tc || !tc.function) return '';
   return '<div class="tool-block">' +
@@ -3412,8 +3413,8 @@ document.getElementById('gw-search').addEventListener('input', e => {
   gwSearchTimer = setTimeout(() => { gwSearchTimer = 0; renderGateway(); }, 150);
 });
 document.getElementById('gw-outcome').addEventListener('change', e => { gwOutcomeFilter = e.target.value; renderGateway(); });
-document.getElementById('gw-select').addEventListener('change', e => { gwSelected = e.target.value; gwStats = null; tick(); });
-document.getElementById('gw-window').addEventListener('change', e => { gwWindow = e.target.value; gwStats = null; tick(); });
+document.getElementById('gw-select').addEventListener('change', e => { gwSelected = e.target.value; gwStats = null; gwStale(); tick(); });
+document.getElementById('gw-window').addEventListener('change', e => { gwWindow = e.target.value; gwStats = null; gwStale(); tick(); });
 document.querySelectorAll('.gw-sub-btn').forEach(b => b.addEventListener('click', () => {
   setGwSub(b.dataset.sub);
   // User changed sub-view; drop any previous deep state from the URL.
@@ -3421,6 +3422,21 @@ document.querySelectorAll('.gw-sub-btn').forEach(b => b.addEventListener('click'
   gwSessSelected = '';
   writeGwHash();
 }));
+
+// gwStale adds a loading overlay to gateway sub-views so the user sees
+// that a refresh is in progress after changing filters.
+function gwStale() {
+  ['gw-sub-overview','gw-sub-requests','gw-sub-sessions'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.add('gw-loading');
+  });
+}
+function gwFresh() {
+  ['gw-sub-overview','gw-sub-requests','gw-sub-sessions'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('gw-loading');
+  });
+}
 
 // setGwSub switches the gateway sub-view (overview | sessions | requests).
 // Caller is responsible for writeGwHash() afterwards when the state change
@@ -3706,15 +3722,27 @@ function renderSessions() {
   }
 }
 
+// gwWindowSince returns an ISO timestamp for the start of the current
+// time window, or '' for 'all'. Passed as the "since" query param so
+// the server doesn't scan beyond the visible window.
+function gwWindowSince() {
+  const ms = {
+    '1h': 3600000, '24h': 86400000, '7d': 604800000, '30d': 2592000000,
+  }[gwWindow];
+  if (!ms) return '';
+  return new Date(Date.now() - ms).toISOString();
+}
+
 function selectSession(sid) {
   if (!gwSelected) return;
   gwSessSelected = sid;
   if (gwSubview === 'sessions') writeGwHash();
   document.querySelectorAll('.gw-sess-row').forEach(el => el.classList.remove('active'));
-  // Fetch the per-session rows; the response is paired so the timeline can
-  // be reconstructed.
+  // Fetch the per-session rows with time window so older sessions can be found.
+  const since = gwWindowSince();
+  const sinceParam = since ? '&since='+encodeURIComponent(since) : '';
   fetch('/api/gateway/audit?gateway='+encodeURIComponent(gwSelected)+
-        '&session='+encodeURIComponent(sid)+'&limit=200')
+        '&session='+encodeURIComponent(sid)+'&limit=200'+sinceParam)
     .then(r => r.json())
     .then(arr => {
       gwSessRows = (arr && arr[0] && arr[0].rows) || [];
