@@ -2331,7 +2331,20 @@ function renderGateway() {
   gwRowsByKey = new Map(pairs.map(p => [p.key, p]));
 
   // Populate session chip bar from distinct sessions in the current data.
-  const sessIds = [...new Set(pairs.map(p => p.req.session_id).filter(Boolean))];
+  // Gather per-session metadata for richer chips.
+  const sessMap = {};
+  for (const p of pairs) {
+    const sid = p.req.session_id;
+    if (!sid) continue;
+    if (!sessMap[sid]) sessMap[sid] = {turns: 0, model: '', project: '', lastTs: ''};
+    const sm = sessMap[sid];
+    sm.turns++;
+    if (!sm.model && p.req.model) sm.model = p.req.model;
+    if (!sm.project) sm.project = extractProject(p.req);
+    const ts = p.resp.ts || p.req.ts || '';
+    if (ts && (!sm.lastTs || ts > sm.lastTs)) sm.lastTs = ts;
+  }
+  const sessIds = Object.keys(sessMap);
   // Prune stale selections.
   for (const s of gwSessionSet) { if (!sessIds.includes(s)) gwSessionSet.delete(s); }
   const sessBar = document.getElementById('gw-sess-chips');
@@ -2340,9 +2353,13 @@ function renderGateway() {
       sessBar.style.display = '';
       sessBar.innerHTML = '<span style="color:var(--text-muted);font-size:11px;margin-right:4px">session:</span>' + sessIds.map(sid => {
         const short = sid.slice(0, 8);
+        const sm = sessMap[sid];
         const on = gwSessionSet.has(sid) ? ' on' : '';
-        return '<span class="gw-chip'+on+'" data-sess="'+xa(sid)+'" title="'+xa(sid)+'" style="border-color:'+sessColor(sid)+';'+(gwSessionSet.has(sid)?'background:'+sessColor(sid)+';color:var(--bg)':'')+'">' +
-          '<span class="sess-dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:'+sessColor(sid)+';margin-right:4px;vertical-align:middle"></span>'+x(short)+'</span>';
+        const sub = [sm.project, sm.model, sm.turns + 't', sm.lastTs ? fmtAgo(sm.lastTs) : ''].filter(Boolean).join(' · ');
+        const tip = sid + '\n' + sub;
+        return '<span class="gw-chip'+on+'" data-sess="'+xa(sid)+'" title="'+xa(tip)+'" style="border-color:'+sessColor(sid)+';'+(gwSessionSet.has(sid)?'background:'+sessColor(sid)+';color:var(--bg)':'')+'">' +
+          '<span class="sess-dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:'+sessColor(sid)+';margin-right:4px;vertical-align:middle"></span>'+x(short)+
+          '<span style="margin-left:4px;font-size:10px;opacity:0.7">'+x(sm.project || sm.model || '')+'</span></span>';
       }).join('');
       sessBar.querySelectorAll('.gw-chip').forEach(c => c.addEventListener('click', () => {
         const sid = c.dataset.sess;
