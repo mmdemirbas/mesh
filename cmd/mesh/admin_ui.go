@@ -1400,8 +1400,8 @@ function tick() {
     pushHist('healthUp', comps.filter(c => c.status === 'listening' || c.status === 'connected').length);
     pushHist('healthDown', comps.filter(c => c.status === 'failed').length);
     pushHist('healthPending', comps.filter(c => c.status !== 'listening' && c.status !== 'connected' && c.status !== 'failed').length);
-    if (activeTab === 'metrics') renderMetrics();
-    if (activeTab === 'dashboard') { renderCharts(); renderComponents(); }
+    if (activeTab === 'metrics') { renderCharts(); renderMetrics(); }
+    if (activeTab === 'dashboard') renderComponents();
     if (activeTab === 'debug') renderDebugStats();
     mark();
   }).catch(fail('metrics'));
