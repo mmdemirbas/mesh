@@ -2347,8 +2347,8 @@ function renderGateway() {
         '<td style="color:var(--text-muted);white-space:nowrap">'+fmtLocalTime(ts)+'</td>'+
         '<td><code style="color:'+sidClr+';font-size:11px" title="'+xa(sid)+'">'+x(sidShort)+'</code></td>'+
         '<td>'+x(dir)+'</td>'+
-        '<td style="color:var(--text-dim)">'+x(model)+'</td>'+
-        '<td style="color:var(--text-muted)">'+(upModel && upModel !== model ? x(upModel) : '-')+'</td>'+
+        '<td style="color:'+modelColor(model)+'">'+x(model)+'</td>'+
+        '<td style="color:'+(upModel && upModel !== model ? modelColor(upModel) : 'var(--text-muted)')+'">'+(upModel && upModel !== model ? x(upModel) : '-')+'</td>'+
         '<td style="color:var(--text-muted)">'+stream+'</td>'+
         '<td style="color:'+statusColor+'">'+status+'</td>'+
         '<td style="color:'+outcomeColor+'">'+x(outcome)+'</td>'+
@@ -2485,11 +2485,24 @@ function sessColor(sid) {
   return sessColorCache[sid];
 }
 
+// modelColor returns a stable HSL color for a model name. Same hash approach
+// as sessColor but with different saturation/lightness for visual distinction.
+const modelColorCache = {};
+function modelColor(name) {
+  if (!name) return 'var(--text-dim)';
+  if (modelColorCache[name]) return modelColorCache[name];
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xFFFF;
+  const hue = h % 360;
+  modelColorCache[name] = 'hsl('+hue+',55%,70%)';
+  return modelColorCache[name];
+}
+
 // metaRow renders a single <tr> for a metadata table. The value string is
 // always escaped; label may contain trusted HTML (info icons).
-function metaRow(label, value, cls) {
+function metaRow(label, value, cls, style) {
   if (value == null || value === '' || value === undefined) return '';
-  return '<tr><td class="mk">'+label+'</td><td class="mv'+(cls?' '+cls:'')+'">'+x(String(value))+'</td></tr>';
+  return '<tr><td class="mk">'+label+'</td><td class="mv'+(cls?' '+cls:'')+'"'+(style?' style="'+style+'"':'')+ '>'+x(String(value))+'</td></tr>';
 }
 
 // metaTable wraps rows in a .meta-tbl. Empty rows are omitted automatically
@@ -2547,7 +2560,7 @@ function renderResponseStructured(resp) {
     metaRow('elapsed', resp.elapsed_ms ? fmtElapsed(resp.elapsed_ms) : '') +
     metaRow('events', summary.events) +
     metaRow('message_id', summary.message_id) +
-    metaRow('upstream_model', summary.model) +
+    metaRow('upstream_model', summary.model, '', summary.model ? 'color:'+modelColor(summary.model) : '') +
   '</table>';
 
   // Token breakdown bar — visible whenever any of the four buckets is non-zero.
@@ -2666,8 +2679,8 @@ function renderRequestStructured(req) {
   // Metadata table: model, upstream model, stream, session, turn, etc.
   const mapped = req.mapped_model && req.mapped_model !== (body.model||'') ? req.mapped_model : '';
   html += metaTable([
-    metaRow('model', body.model),
-    mapped ? metaRow('upstream model', mapped, 'dim') : '',
+    metaRow('model', body.model, '', body.model ? 'color:'+modelColor(body.model) : ''),
+    mapped ? metaRow('upstream model', mapped, '', 'color:'+modelColor(mapped)) : '',
     metaRow('stream', (req.stream || body.stream) ? 'true' : ''),
     metaRow('session '+info(tokenHelp.sessionId), req.session_id),
     metaRow('turn '+info(tokenHelp.turnIndex), req.turn_index),
@@ -2716,7 +2729,7 @@ function renderUpstreamStructured(obj, kind) {
   if (kind === 'request') {
     // Could be OpenAI (messages, model, tools) or Anthropic (messages, model, system, tools).
     html += metaTable([
-      metaRow('model', obj.model),
+      metaRow('model', obj.model, '', obj.model ? 'color:'+modelColor(obj.model) : ''),
       metaRow('stream', obj.stream ? 'true' : ''),
       typeof obj.temperature === 'number' ? metaRow('temperature', obj.temperature) : '',
       metaRow('max_tokens', obj.max_tokens),
@@ -2743,7 +2756,7 @@ function renderUpstreamStructured(obj, kind) {
     // Response — could be OpenAI ChatCompletionResponse or Anthropic MessagesResponse.
     html += metaTable([
       metaRow('id', obj.id),
-      metaRow('model', obj.model),
+      metaRow('model', obj.model, '', obj.model ? 'color:'+modelColor(obj.model) : ''),
       metaRow('stop_reason', obj.stop_reason || (obj.choices && obj.choices[0] && obj.choices[0].finish_reason) || ''),
     ]);
     // Anthropic response: content array.
@@ -3591,7 +3604,7 @@ function renderGatewayOverview() {
     ? '<tr><td colspan="5" style="color:var(--text-muted);padding:12px">No sessions in window.</td></tr>'
     : sessions.map(s => '<tr style="cursor:pointer" onclick="jumpToSession(\''+xj(s.key)+'\')">' +
         '<td><code style="color:'+sessColor(s.key)+'">'+x(s.key)+'</code></td>' +
-        '<td style="color:var(--text-dim)">'+x(s.first_model||'-')+'</td>' +
+        '<td style="color:'+modelColor(s.first_model)+'">'+x(s.first_model||'-')+'</td>' +
         '<td>'+(s.turns||s.requests)+'</td>' +
         '<td>'+fmtTokens(s.input_tokens)+' / '+fmtTokens(s.output_tokens)+'</td>' +
         '<td style="color:var(--text-muted)">'+x(fmtAgo(s.last_seen||''))+'</td>' +
@@ -3601,7 +3614,7 @@ function renderGatewayOverview() {
   document.getElementById('gw-top-models').innerHTML = models.length === 0
     ? '<tr><td colspan="4" style="color:var(--text-muted);padding:12px">No models in window.</td></tr>'
     : models.map(m => '<tr>' +
-        '<td style="color:var(--text-dim)">'+x(m.key||'-')+'</td>' +
+        '<td style="color:'+modelColor(m.key)+'">'+x(m.key||'-')+'</td>' +
         '<td>'+m.requests+'</td>' +
         '<td>'+fmtTokens(m.input_tokens)+' / '+fmtTokens(m.output_tokens)+'</td>' +
         '<td>'+fmtTokens(m.cache_read_tokens)+'</td>' +
