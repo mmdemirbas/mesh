@@ -230,6 +230,10 @@ tbody tr:last-child td { border-bottom: none; }
 .md-viewer .md-toc a.depth-3 { padding-left: 16px; }
 .md-viewer .md-toc .toc-len { font-size: 9px; display: inline-block; width: 32px; text-align: right; margin-right: 4px; flex-shrink: 0; }
 @media (max-width: 900px) { .md-viewer .md-toc { display: none; } }
+/* Constrain md-viewer height when nested inside detail panes so the
+   scrollable body stays within the parent instead of overflowing. */
+.gw-detail-pane .md-viewer .md-body,
+.gw-detail-pane .md-viewer .md-toc { max-height: 30vh; }
 /* Loading overlay for stale data */
 .gw-loading { position: relative; pointer-events: none; }
 .gw-loading::after {
