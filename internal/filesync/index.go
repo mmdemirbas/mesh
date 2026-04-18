@@ -14,8 +14,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/text/unicode/norm"
@@ -390,6 +392,36 @@ type ScanStats struct {
 	Deletions       int // tombstones created in this pass
 }
 
+// hashJob is a file path to hash, sent from the walk to the worker pool.
+type hashJob struct {
+	absPath string
+	result  chan hashResult
+}
+
+// hashResult carries the SHA-256 hex string or an error from a worker.
+type hashResult struct {
+	hash string
+	err  error
+}
+
+// pendingHash records metadata captured during the walk for a file that
+// needs hashing. The hash result is delivered via the result channel.
+type pendingHash struct {
+	rel     string
+	absPath string
+	size    int64
+	mtimeNS int64
+	mode    uint32
+	exists  bool      // true if the file was already in the index
+	old     FileEntry // previous index entry (valid only when exists)
+	result  chan hashResult
+}
+
+// scanHashWorkers is the number of parallel hash workers. Capped at 8 to
+// avoid saturating disk I/O on spinning disks while still benefiting from
+// SSD parallelism and multi-core SHA-256.
+var scanHashWorkers = min(runtime.GOMAXPROCS(0), 8)
+
 // scan walks the folder, updates the index, cleans stale temp files, and
 // returns whether any files changed, the active (non-deleted) file count,
 // and the number of directories walked (excluding the root and ignored subtrees).
@@ -416,6 +448,22 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	seen := make(map[string]struct{}, len(idx.Files)) // P18a: pre-size to avoid rehash cascades
 	errorPaths := make(map[string]struct{})           // paths with walk/stat/hash errors — exempt from tombstoning
 	tempCutoff := time.Now().Add(-maxTempFileAge)
+
+	// P20a: parallel hash worker pool. Files that miss the fast path
+	// (stat changed) are sent to workers; results are drained after the walk.
+	hashCh := make(chan hashJob, 64)
+	var hashWg sync.WaitGroup
+	for range scanHashWorkers {
+		hashWg.Add(1)
+		go func() {
+			defer hashWg.Done()
+			for job := range hashCh {
+				h, hErr := hashFile(job.absPath)
+				job.result <- hashResult{h, hErr}
+			}
+		}()
+	}
+	var pending []pendingHash
 
 	walkStart := time.Now()
 	err = filepath.WalkDir(folderRoot, func(path string, d fs.DirEntry, walkErr error) error {
@@ -538,47 +586,66 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			return nil
 		}
 
-		hashStart := time.Now()
-		hash, hashErr := hashFile(path)
-		stats.HashDuration += time.Since(hashStart)
-		if hashErr != nil {
+		// P20a: submit to parallel hash pool instead of hashing inline.
+		resultCh := make(chan hashResult, 1)
+		pending = append(pending, pendingHash{
+			rel: rel, absPath: path,
+			size: size, mtimeNS: mtimeNS, mode: mode,
+			exists: exists, old: existing,
+			result: resultCh,
+		})
+		hashCh <- hashJob{absPath: path, result: resultCh}
+		return nil
+	})
+	stats.WalkDuration = time.Since(walkStart)
+
+	// P20a: close the hash channel and wait for all workers to finish.
+	close(hashCh)
+	hashWg.Wait()
+
+	// P20a: drain hash results and update index sequentially.
+	hashDrainStart := time.Now()
+	for _, p := range pending {
+		r := <-p.result
+		if r.err != nil {
 			stats.HashErrors++
-			errorPaths[rel] = struct{}{}
-			return nil // skip unreadable files
+			errorPaths[p.rel] = struct{}{}
+			continue
 		}
 		stats.FilesHashed++
-		stats.BytesHashed += size
+		stats.BytesHashed += p.size
 
 		// B11: TOCTOU guard — if the file was modified during hashing,
 		// the hash corresponds to a partially-modified file. Discard it;
 		// the next scan will re-hash the stable version.
-		postInfo, postErr := os.Stat(path)
-		if postErr != nil || postInfo.ModTime().UnixNano() != mtimeNS || postInfo.Size() != size {
+		postInfo, postErr := os.Stat(p.absPath)
+		if postErr != nil || postInfo.ModTime().UnixNano() != p.mtimeNS || postInfo.Size() != p.size {
 			stats.TocTouSkips++
-			return nil
+			continue
 		}
 
-		if exists && !existing.Deleted && existing.SHA256 == hash {
+		if p.exists && !p.old.Deleted && p.old.SHA256 == r.hash {
 			// Content identical despite stat change (e.g., touch, chmod). Update stat only.
-			existing.MtimeNS = mtimeNS
-			existing.Size = size
-			existing.Mode = mode
-			idx.Files[rel] = existing
-			return nil
+			entry := p.old
+			entry.MtimeNS = p.mtimeNS
+			entry.Size = p.size
+			entry.Mode = p.mode
+			idx.Files[p.rel] = entry
+			continue
 		}
 
 		idx.Sequence++
-		idx.Files[rel] = FileEntry{
-			Size:     size,
-			MtimeNS:  mtimeNS,
-			SHA256:   hash,
+		idx.Files[p.rel] = FileEntry{
+			Size:     p.size,
+			MtimeNS:  p.mtimeNS,
+			SHA256:   r.hash,
 			Sequence: idx.Sequence,
-			Mode:     mode,
+			Mode:     p.mode,
 		}
 		changed = true
-		return nil
-	})
-	stats.WalkDuration = time.Since(walkStart)
+	}
+	stats.HashDuration = time.Since(hashDrainStart)
+
 	if err != nil {
 		return changed, len(seen), dirCount, stats, conflicts, fmt.Errorf("scan %s: %w", folderRoot, err)
 	}

@@ -4108,6 +4108,53 @@ func BenchmarkScan(b *testing.B) {
 	}
 }
 
+// BenchmarkScanInitial measures initial scan (all files need hashing).
+func BenchmarkScanInitial(b *testing.B) {
+	dir := b.TempDir()
+	// Create 1000 files across 10 subdirs, 10 KB each — simulates a real project.
+	for d := range 10 {
+		subdir := filepath.Join(dir, fmt.Sprintf("dir%02d", d))
+		_ = os.MkdirAll(subdir, 0750)
+		for f := range 100 {
+			data := make([]byte, 10*1024)
+			for i := range data {
+				data[i] = byte((d*100 + f + i) % 251)
+			}
+			_ = os.WriteFile(filepath.Join(subdir, fmt.Sprintf("file%03d.dat", f)), data, 0600)
+		}
+	}
+	ignore := &ignoreMatcher{}
+	b.ResetTimer()
+	for b.Loop() {
+		idx := newFileIndex() // fresh index each iteration — forces full hash
+		_, _, _, _ = idx.scan(context.Background(), dir, ignore)
+	}
+}
+
+// BenchmarkScanSteadyState measures steady-state scan (all files hit fast path).
+func BenchmarkScanSteadyState(b *testing.B) {
+	dir := b.TempDir()
+	for d := range 10 {
+		subdir := filepath.Join(dir, fmt.Sprintf("dir%02d", d))
+		_ = os.MkdirAll(subdir, 0750)
+		for f := range 100 {
+			data := make([]byte, 10*1024)
+			for i := range data {
+				data[i] = byte((d*100 + f + i) % 251)
+			}
+			_ = os.WriteFile(filepath.Join(subdir, fmt.Sprintf("file%03d.dat", f)), data, 0600)
+		}
+	}
+	idx := newFileIndex()
+	ignore := &ignoreMatcher{}
+	// Seed the index with a first scan.
+	_, _, _, _ = idx.scan(context.Background(), dir, ignore)
+	b.ResetTimer()
+	for b.Loop() {
+		_, _, _, _ = idx.scan(context.Background(), dir, ignore)
+	}
+}
+
 func BenchmarkBlockSignatures(b *testing.B) {
 	dir := b.TempDir()
 	// 1 MB file = 8 blocks at 128 KB.
