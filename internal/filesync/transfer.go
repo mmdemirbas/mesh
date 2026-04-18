@@ -102,7 +102,7 @@ func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, 
 	}
 
 	// Build request URL.
-	u := fmt.Sprintf("http://%s/file?folder=%s&path=%s",
+	u := fmt.Sprintf("https://%s/file?folder=%s&path=%s",
 		peerAddr,
 		url.QueryEscape(folderID),
 		url.QueryEscape(relPath),
@@ -273,7 +273,7 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 		return "", fmt.Errorf("marshal block sigs: %w", err)
 	}
 
-	u := fmt.Sprintf("http://%s/delta", peerAddr)
+	u := fmt.Sprintf("https://%s/delta", peerAddr)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(reqData))
 	if err != nil {
 		return "", fmt.Errorf("create delta request: %w", err)
@@ -398,7 +398,7 @@ func downloadBundle(ctx context.Context, client *http.Client, peerAddr, folderID
 		return nil, entries
 	}
 
-	reqURL := fmt.Sprintf("http://%s/bundle", peerAddr)
+	reqURL := fmt.Sprintf("https://%s/bundle", peerAddr)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(compressed))
 	if err != nil {
 		return nil, entries

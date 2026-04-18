@@ -3,6 +3,7 @@ package filesync
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
 	"github.com/mmdemirbas/mesh/internal/nodeutil"
 	"github.com/mmdemirbas/mesh/internal/state"
+	"github.com/mmdemirbas/mesh/internal/tlsutil"
 )
 
 const (
@@ -540,7 +542,15 @@ type Node struct {
 	// and is never modified after that — no lock needed for map reads.
 	folders map[string]*folderState
 
-	httpClient *http.Client
+	// tlsFingerprint is the SHA-256 fingerprint of this node's server cert.
+	tlsFingerprint string
+
+	// peerClients maps peer address to an http.Client configured with the
+	// appropriate TLS fingerprint for that peer. Read-only after Start().
+	peerClients map[string]*http.Client
+
+	// defaultClient is used for peer addresses not in peerClients.
+	defaultClient *http.Client
 
 	// rateLimiter throttles file transfer bandwidth. nil means unlimited.
 	rateLimiter *rate.Limiter
@@ -556,6 +566,15 @@ type Node struct {
 	activities []SyncActivity // ring buffer, most recent last
 }
 
+// clientForPeer returns the http.Client for the given peer address, carrying
+// the TLS config appropriate for that peer (fingerprint or encrypt-only).
+func (n *Node) clientForPeer(addr string) *http.Client {
+	if c, ok := n.peerClients[addr]; ok {
+		return c
+	}
+	return n.defaultClient
+}
+
 // Start initializes and runs the filesync node. Blocks until ctx is cancelled.
 func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	deviceID := generateDeviceID()
@@ -568,33 +587,78 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	dataDir := filepath.Join(meshDir, "filesync")
 	initPerfLog(meshDir, cfg.NodeName)
 
+	// Resolve TLS certificate for this node's HTTP server.
+	tlsDir := filepath.Join(meshDir, "tls")
+	var serverCert tls.Certificate
+	var serverFP string
+	if cfg.TLS.CertFile != "" && cfg.TLS.KeyFile != "" {
+		serverCert, err = tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+		if err != nil {
+			return fmt.Errorf("load filesync TLS cert: %w", err)
+		}
+		serverFP = tlsutil.Fingerprint(serverCert)
+	} else {
+		serverCert, serverFP, err = tlsutil.AutoCert(
+			filepath.Join(tlsDir, "filesync.crt"),
+			filepath.Join(tlsDir, "filesync.key"),
+			"mesh-filesync",
+		)
+		if err != nil {
+			return fmt.Errorf("auto-cert filesync: %w", err)
+		}
+	}
+
+	// Build per-peer HTTP clients keyed by peer address.
+	// Each client carries the TLS config for the expected peer cert fingerprint.
+	// No client-level Timeout: governed by ctx and per-call deadlines.
+	newTransport := func(tlsCfg *tls.Config) *http.Transport {
+		return &http.Transport{
+			// Short dial: a blackholed peer should not hold a goroutine for
+			// the kernel's default SYN timeout (~2m).
+			DialContext: (&net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSClientConfig:       tlsCfg,
+			MaxIdleConnsPerHost:   4,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		}
+	}
+	defaultClient := &http.Client{Transport: newTransport(tlsutil.ClientTLS(""))}
+	peerClients := make(map[string]*http.Client)
+	fpToClient := make(map[string]*http.Client)
+	for _, fcfg := range cfg.ResolvedFolders {
+		for i, addr := range fcfg.Peers {
+			if _, exists := peerClients[addr]; exists {
+				continue
+			}
+			fp := ""
+			if i < len(fcfg.PeerFingerprints) {
+				fp = fcfg.PeerFingerprints[i]
+			}
+			if c, exists := fpToClient[fp]; exists {
+				peerClients[addr] = c
+				continue
+			}
+			c := &http.Client{Transport: newTransport(tlsutil.ClientTLS(fp))}
+			fpToClient[fp] = c
+			peerClients[addr] = c
+		}
+	}
+
 	n := &Node{
-		cfg:      cfg,
-		deviceID: deviceID,
-		dataDir:  dataDir,
-		folders:  make(map[string]*folderState),
-		httpClient: &http.Client{
-			// No client-level Timeout: request lifetime is governed by ctx
-			// (index exchange and delta use short per-call deadlines;
-			// downloads can legitimately stream for long periods and are
-			// cancelled by shutdown via ctx). A fixed Timeout here would
-			// abort large transfers on slow links.
-			Transport: &http.Transport{
-				// Short dial timeout: a blackholed peer should not pin a
-				// goroutine for the kernel's default SYN timeout (~2m).
-				DialContext: (&net.Dialer{
-					Timeout:   5 * time.Second,
-					KeepAlive: 30 * time.Second,
-				}).DialContext,
-				MaxIdleConnsPerHost:   4,
-				IdleConnTimeout:       90 * time.Second,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ResponseHeaderTimeout: 30 * time.Second,
-				ExpectContinueTimeout: 1 * time.Second,
-			},
-		},
-		scanTrigger:   make(chan struct{}, 1),
-		firstScanDone: make(chan struct{}),
+		cfg:            cfg,
+		deviceID:       deviceID,
+		dataDir:        dataDir,
+		folders:        make(map[string]*folderState),
+		tlsFingerprint: serverFP,
+		peerClients:    peerClients,
+		defaultClient:  defaultClient,
+		scanTrigger:    make(chan struct{}, 1),
+		firstScanDone:  make(chan struct{}),
 	}
 
 	// Set up bandwidth limiter.
@@ -732,13 +796,14 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		Handler:     srv.handler(),
 	}
 
-	ln, err := net.Listen("tcp", cfg.Bind)
+	tcpLn, err := net.Listen("tcp", cfg.Bind)
 	if err != nil {
 		state.Global.Update("filesync", cfg.Bind, state.Failed, err.Error())
 		return fmt.Errorf("listen %s: %w", cfg.Bind, err)
 	}
+	ln := tls.NewListener(tcpLn, tlsutil.ServerTLS(serverCert))
 
-	slog.Info("filesync listening", "bind", ln.Addr().String(), "device_id", deviceID, "folders", len(cfg.ResolvedFolders))
+	slog.Info("filesync listening", "bind", ln.Addr().String(), "device_id", deviceID, "folders", len(cfg.ResolvedFolders), "tls_fingerprint", serverFP)
 
 	var wg sync.WaitGroup
 
@@ -844,7 +909,10 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	wg.Wait()
 
 	// Close idle HTTP connections after all goroutines have stopped.
-	n.httpClient.CloseIdleConnections()
+	for _, c := range n.peerClients {
+		c.CloseIdleConnections()
+	}
+	n.defaultClient.CloseIdleConnections()
 
 	closePerfLog()
 
@@ -1185,7 +1253,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	// is generous even for paginated multi-page exchanges over slow links.
 	indexCtx, indexCancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer indexCancel()
-	remoteIdx, err := sendIndex(indexCtx, n.httpClient, peerAddr, exchange)
+	remoteIdx, err := sendIndex(indexCtx, n.clientForPeer(peerAddr), peerAddr, exchange)
 	if err != nil {
 		slog.Debug("sync failed", "folder", folderID, "peer", peerAddr, "error", err)
 		state.Global.Update("filesync-peer", stateKey, state.Retrying, err.Error())
@@ -1419,7 +1487,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					continue
 				}
 
-				ok, retry := downloadBundle(ctx, n.httpClient, peerAddr, folderID, claimed, fs.root, n.rateLimiter)
+				ok, retry := downloadBundle(ctx, n.clientForPeer(peerAddr), peerAddr, folderID, claimed, fs.root, n.rateLimiter)
 				for _, path := range ok {
 					bundledPaths[path] = true
 					fs.releasePath(path)
@@ -1533,7 +1601,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				defer func() { <-sem }()
 
 				dlStart := time.Now()
-				err := downloadFromPeer(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.root, n.rateLimiter)
+				err := downloadFromPeer(ctx, n.clientForPeer(peerAddr), peerAddr, folderID, action.Path, action.RemoteHash, fs.root, n.rateLimiter)
 				if err != nil {
 					slog.Warn("download failed", "folder", folderID, "path", action.Path, "peer", peerAddr, "error", err)
 					fs.indexMu.Lock()
@@ -1651,7 +1719,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					// B13: download remote to verified temp FIRST — local file
 					// stays intact until the download succeeds. If the download
 					// fails, the local file is untouched.
-					tmpRelPath, err := downloadToVerifiedTemp(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.root, n.rateLimiter)
+					tmpRelPath, err := downloadToVerifiedTemp(ctx, n.clientForPeer(peerAddr), peerAddr, folderID, action.Path, action.RemoteHash, fs.root, n.rateLimiter)
 					if err != nil {
 						slog.Warn("conflict download failed", "folder", folderID, "path", action.Path, "error", err)
 						fs.indexMu.Lock()

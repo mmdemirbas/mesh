@@ -810,7 +810,7 @@ func postIndex(ctx context.Context, client *http.Client, peerAddr string, data [
 		return nil, fmt.Errorf("compress index: %w", err)
 	}
 
-	u := fmt.Sprintf("http://%s/index", peerAddr)
+	u := fmt.Sprintf("https://%s/index", peerAddr)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(compressed))
 	if err != nil {
 		return nil, fmt.Errorf("create index request: %w", err)
@@ -860,7 +860,7 @@ func postIndexAck(ctx context.Context, client *http.Client, peerAddr string, dat
 		return fmt.Errorf("compress index: %w", err)
 	}
 
-	u := fmt.Sprintf("http://%s/index", peerAddr)
+	u := fmt.Sprintf("https://%s/index", peerAddr)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(compressed))
 	if err != nil {
 		return fmt.Errorf("create index request: %w", err)

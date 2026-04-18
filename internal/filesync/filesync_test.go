@@ -2203,10 +2203,10 @@ func TestDownloadBundle_Integration(t *testing.T) {
 	}
 
 	n := &Node{
-		cfg:        testCfg(serverDir, "127.0.0.1"),
-		folders:    make(map[string]*folderState),
-		deviceID:   "test-device",
-		httpClient: http.DefaultClient,
+		cfg:           testCfg(serverDir, "127.0.0.1"),
+		folders:       make(map[string]*folderState),
+		deviceID:      "test-device",
+		defaultClient: http.DefaultClient,
 	}
 	n.folders["test"] = &folderState{
 		cfg:   testFolderCfg(serverDir, "127.0.0.1"),
@@ -2215,7 +2215,7 @@ func TestDownloadBundle_Integration(t *testing.T) {
 	}
 
 	srv := &server{node: n}
-	ts := httptest.NewServer(srv.handler())
+	ts := httptest.NewTLSServer(srv.handler())
 	defer ts.Close()
 
 	// Build entries for download.
@@ -2229,7 +2229,7 @@ func TestDownloadBundle_Integration(t *testing.T) {
 	}
 
 	clientRoot := openTestRoot(t, clientDir)
-	ok, retry := downloadBundle(t.Context(), http.DefaultClient, ts.Listener.Addr().String(), "test", entries, clientRoot, nil)
+	ok, retry := downloadBundle(t.Context(), ts.Client(), ts.Listener.Addr().String(), "test", entries, clientRoot, nil)
 
 	if len(retry) != 0 {
 		t.Errorf("expected 0 retries, got %d", len(retry))
@@ -2373,7 +2373,7 @@ func TestDownloadBundle_HashMismatch(t *testing.T) {
 	}
 
 	srv := &server{node: n}
-	ts := httptest.NewServer(srv.handler())
+	ts := httptest.NewTLSServer(srv.handler())
 	defer ts.Close()
 
 	entries := []bundleEntry{
@@ -2382,7 +2382,7 @@ func TestDownloadBundle_HashMismatch(t *testing.T) {
 	}
 
 	clientRoot := openTestRoot(t, clientDir)
-	ok, retry := downloadBundle(t.Context(), http.DefaultClient, ts.Listener.Addr().String(), "test", entries, clientRoot, nil)
+	ok, retry := downloadBundle(t.Context(), ts.Client(), ts.Listener.Addr().String(), "test", entries, clientRoot, nil)
 
 	if len(ok) != 1 || ok[0] != "good.txt" {
 		t.Errorf("expected [good.txt] ok, got %v", ok)
@@ -3437,7 +3437,7 @@ func TestPaginatedIndexExchange(t *testing.T) {
 	}
 
 	srv := &server{node: n}
-	ts := httptest.NewServer(srv.handler())
+	ts := httptest.NewTLSServer(srv.handler())
 	defer ts.Close()
 
 	// Client builds its own index (also large).
@@ -3457,9 +3457,8 @@ func TestPaginatedIndexExchange(t *testing.T) {
 	}
 
 	// Use sendIndex which should automatically paginate.
-	client := &http.Client{Timeout: 10 * time.Second}
 	addr := ts.Listener.Addr().String()
-	resp, err := sendIndex(t.Context(), client, addr, exchange)
+	resp, err := sendIndex(t.Context(), ts.Client(), addr, exchange)
 	if err != nil {
 		t.Fatalf("sendIndex: %v", err)
 	}
@@ -3493,7 +3492,7 @@ func TestPaginatedIndexExchange_SmallIndex(t *testing.T) {
 	}
 
 	srv := &server{node: n}
-	ts := httptest.NewServer(srv.handler())
+	ts := httptest.NewTLSServer(srv.handler())
 	defer ts.Close()
 
 	exchange := &pb.IndexExchange{
@@ -3503,8 +3502,7 @@ func TestPaginatedIndexExchange_SmallIndex(t *testing.T) {
 		Files:    []*pb.FileInfo{{Path: "b.txt", Size: 20, Sha256: []byte("bbb"), Sequence: 1}},
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := sendIndex(t.Context(), client, ts.Listener.Addr().String(), exchange)
+	resp, err := sendIndex(t.Context(), ts.Client(), ts.Listener.Addr().String(), exchange)
 	if err != nil {
 		t.Fatalf("sendIndex: %v", err)
 	}
@@ -3760,15 +3758,15 @@ func TestTwoNodeSync(t *testing.T) {
 		index: idxB,
 		peers: make(map[string]PeerState),
 	}
-	srvB := httptest.NewServer((&server{node: nodeB}).handler())
+	srvB := httptest.NewTLSServer((&server{node: nodeB}).handler())
 	defer srvB.Close()
 
 	// Node A's HTTP server.
 	nodeA := &Node{
-		cfg:        testCfg(dirA, "127.0.0.1"),
-		folders:    make(map[string]*folderState),
-		deviceID:   "node-a",
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		cfg:           testCfg(dirA, "127.0.0.1"),
+		folders:       make(map[string]*folderState),
+		deviceID:      "node-a",
+		defaultClient: srvB.Client(),
 	}
 	nodeA.folders["test"] = &folderState{
 		cfg:   testFolderCfg(dirA, "127.0.0.1"),
@@ -3776,12 +3774,12 @@ func TestTwoNodeSync(t *testing.T) {
 		index: idxA,
 		peers: make(map[string]PeerState),
 	}
-	srvA := httptest.NewServer((&server{node: nodeA}).handler())
+	srvA := httptest.NewTLSServer((&server{node: nodeA}).handler())
 	defer srvA.Close()
 
 	// Node B exchanges index with node A via A's server.
 	exchangeB := nodeB.buildIndexExchange("test", 0)
-	remoteIdx, err := sendIndex(t.Context(), &http.Client{}, srvA.Listener.Addr().String(), exchangeB)
+	remoteIdx, err := sendIndex(t.Context(), srvA.Client(), srvA.Listener.Addr().String(), exchangeB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3807,7 +3805,7 @@ func TestTwoNodeSync(t *testing.T) {
 
 	// Download the file from node A's server.
 	err = downloadFromPeer(t.Context(),
-		&http.Client{},
+		srvA.Client(),
 		srvA.Listener.Addr().String(),
 		"test",
 		"from-a.txt",
@@ -3856,7 +3854,7 @@ func TestDownloadFile_Resume(t *testing.T) {
 		cfg:  testFolderCfg(nodeDir, "127.0.0.1"),
 		root: openTestRoot(t, nodeDir),
 	}
-	srv := httptest.NewServer((&server{node: n}).handler())
+	srv := httptest.NewTLSServer((&server{node: n}).handler())
 	defer srv.Close()
 
 	destDir := t.TempDir()
@@ -3873,7 +3871,7 @@ func TestDownloadFile_Resume(t *testing.T) {
 	// Download should resume from offset 5.
 	destRoot := openTestRoot(t, destDir)
 	relPath, err := downloadFile(t.Context(),
-		&http.Client{},
+		srv.Client(),
 		peerAddr,
 		"test",
 		"data.txt",
@@ -5351,7 +5349,7 @@ func TestDeltaFileSize_Validation(t *testing.T) {
 			t.Parallel()
 
 			// Fake peer: returns a DeltaResponse with the test FileSize.
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				resp := &pb.DeltaResponse{
 					FileSize: tc.fileSize,
 					Blocks:   nil,
@@ -5367,7 +5365,7 @@ func TestDeltaFileSize_Validation(t *testing.T) {
 			writeFile(t, destDir, "target.txt", "old content")
 
 			_, err := downloadFileDelta(t.Context(),
-				&http.Client{},
+				srv.Client(),
 				srv.Listener.Addr().String(),
 				"test",
 				"target.txt",
@@ -5554,14 +5552,14 @@ func TestDownloadFile_PreservesMtime(t *testing.T) {
 		cfg:  testFolderCfg(serverDir, "127.0.0.1"),
 		root: openTestRoot(t, serverDir),
 	}
-	srv := httptest.NewServer((&server{node: n}).handler())
+	srv := httptest.NewTLSServer((&server{node: n}).handler())
 	defer srv.Close()
 
 	clientDir := t.TempDir()
 	clientRoot := openTestRoot(t, clientDir)
 
 	// Download the file.
-	relPath, err := downloadFile(t.Context(), &http.Client{},
+	relPath, err := downloadFile(t.Context(), srv.Client(),
 		srv.Listener.Addr().String(), "test", "data.txt", expectedHash, clientRoot, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -5628,7 +5626,7 @@ func TestDownloadBundle_PreservesMtime(t *testing.T) {
 		root:  openTestRoot(t, serverDir),
 		index: idx,
 	}
-	srv := httptest.NewServer((&server{node: n}).handler())
+	srv := httptest.NewTLSServer((&server{node: n}).handler())
 	defer srv.Close()
 
 	// Build entries with remote mtime.
@@ -5643,7 +5641,7 @@ func TestDownloadBundle_PreservesMtime(t *testing.T) {
 	}
 
 	clientRoot := openTestRoot(t, clientDir)
-	ok, retry := downloadBundle(t.Context(), http.DefaultClient,
+	ok, retry := downloadBundle(t.Context(), srv.Client(),
 		srv.Listener.Addr().String(), "test", entries, clientRoot, nil)
 
 	if len(retry) != 0 {
