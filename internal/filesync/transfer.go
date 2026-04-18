@@ -57,13 +57,9 @@ func validateRelPath(relPath string) error {
 // L5: all filesystem operations go through os.Root to prevent symlink TOCTOU.
 // H1: temp file name includes a peer-derived suffix so concurrent downloads
 // of the same file from different peers get separate temp files.
-func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash string, root *os.Root, limiter *rate.Limiter) (string, error) {
+func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, folderID, relPath string, expectedHash Hash256, root *os.Root, limiter *rate.Limiter) (string, error) {
 	if err := validateRelPath(relPath); err != nil {
 		return "", err
-	}
-
-	if len(expectedHash) < 16 {
-		return "", fmt.Errorf("invalid hash for %q: too short (%d chars)", relPath, len(expectedHash))
 	}
 
 	// Ensure parent directory exists.
@@ -76,7 +72,8 @@ func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, 
 	// Temp file for atomic write + resume.
 	// H1: include peer suffix to prevent concurrent download collision
 	// when multiple peers serve the same file.
-	tmpName := ".mesh-tmp-" + expectedHash[:16] + "-" + peerSuffix(peerAddr)
+	hashHex := expectedHash.String()
+	tmpName := ".mesh-tmp-" + hashHex[:16] + "-" + peerSuffix(peerAddr)
 	tmpRelPath := filepath.Join(filepath.Dir(relPath), tmpName)
 
 	// Check if we can resume from an existing temp file.
@@ -154,7 +151,7 @@ func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, 
 
 // downloadFile fetches a file from a peer and writes it to the folder.
 // Returns the relative path of the completed file within root.
-func downloadFile(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash string, root *os.Root, limiter *rate.Limiter) (string, error) {
+func downloadFile(ctx context.Context, client *http.Client, peerAddr, folderID, relPath string, expectedHash Hash256, root *os.Root, limiter *rate.Limiter) (string, error) {
 	tmpRelPath, err := downloadToVerifiedTemp(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
 	if err != nil {
 		return "", err
@@ -215,7 +212,7 @@ func safePath(folderRoot, relPath string) (string, error) {
 // It computes block signatures of the local file, sends them to the peer,
 // and reconstructs the file from unchanged local blocks + received delta blocks.
 // Falls back to full download if the local file doesn't exist.
-func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash string, root *os.Root, limiter *rate.Limiter) (string, error) {
+func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folderID, relPath string, expectedHash Hash256, root *os.Root, limiter *rate.Limiter) (string, error) {
 	if err := validateRelPath(relPath); err != nil {
 		return "", err
 	}
@@ -324,7 +321,7 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 // bundleEntry describes one file expected from a bundle download.
 type bundleEntry struct {
 	Path         string
-	ExpectedHash string
+	ExpectedHash Hash256
 	RemoteSize   int64
 	RemoteMode   uint32
 }
@@ -454,7 +451,7 @@ func downloadBundle(ctx context.Context, client *http.Client, peerAddr, folderID
 			continue
 		}
 
-		actualHash := hex.EncodeToString(h.Sum(nil))
+		actualHash := hash256FromBytes(h.Sum(nil))
 		if actualHash != e.ExpectedHash {
 			slog.Warn("bundle hash mismatch", "folder", folderID, "path", hdr.Name,
 				"expected", e.ExpectedHash, "actual", actualHash)
@@ -492,7 +489,7 @@ func downloadBundle(ctx context.Context, client *http.Client, peerAddr, folderID
 // expectedHash. Used on network filesystems (C2) where write-back caching can
 // silently corrupt data. Returns nil when the hash matches. On mismatch,
 // records a retry so the file is re-downloaded on the next sync cycle.
-func verifyPostWrite(root *os.Root, relPath, expectedHash, folderID string, retries *retryTracker, indexMu *sync.RWMutex) error {
+func verifyPostWrite(root *os.Root, relPath string, expectedHash Hash256, folderID string, retries *retryTracker, indexMu *sync.RWMutex) error {
 	actualHash, err := hashFileRoot(root, relPath)
 	if err != nil {
 		slog.Error("C2: post-write verification failed: cannot re-read file",

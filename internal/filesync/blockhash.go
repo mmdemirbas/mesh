@@ -3,7 +3,6 @@ package filesync
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -228,17 +227,17 @@ func assembleDelta(out, old *os.File, blockSize, remoteFileSize int64, blocks []
 
 // hashFileRoot computes the SHA-256 hash of a file via an os.Root handle,
 // preventing symlink TOCTOU (L5).
-func hashFileRoot(root *os.Root, relPath string) (string, error) {
+func hashFileRoot(root *os.Root, relPath string) (Hash256, error) {
 	f, err := root.Open(relPath)
 	if err != nil {
-		return "", err
+		return Hash256{}, err
 	}
 	defer func() { _ = f.Close() }()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+		return Hash256{}, err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hash256FromBytes(h.Sum(nil)), nil
 }
 
 // hashEqual compares two byte slices for equality.

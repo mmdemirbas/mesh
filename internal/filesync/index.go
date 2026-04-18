@@ -34,14 +34,47 @@ const defaultMaxIndexFiles = 500_000
 // exceeds the configured cap. Callers must not swap a partial index.
 var errIndexCapExceeded = errors.New("folder exceeds max tracked files")
 
+// Hash256 is a SHA-256 digest stored as a fixed-size array.
+// Zero value represents an empty/unknown hash.
+type Hash256 [32]byte
+
+// IsZero reports whether h is the zero hash (all bytes zero).
+func (h Hash256) IsZero() bool { return h == Hash256{} }
+
+// String returns the hex-encoded digest.
+func (h Hash256) String() string { return hex.EncodeToString(h[:]) }
+
+// MarshalYAML encodes the hash as a hex string for YAML serialization.
+func (h Hash256) MarshalYAML() (any, error) { return h.String(), nil }
+
+// UnmarshalYAML decodes a hex string into the hash.
+func (h *Hash256) UnmarshalYAML(node *yaml.Node) error {
+	b, err := hex.DecodeString(node.Value)
+	if err != nil {
+		return fmt.Errorf("invalid sha256 hex %q: %w", node.Value, err)
+	}
+	if len(b) != 32 {
+		return fmt.Errorf("sha256 hex %q: need 32 bytes, got %d", node.Value, len(b))
+	}
+	copy(h[:], b)
+	return nil
+}
+
+// hash256FromBytes copies a byte slice into a Hash256.
+func hash256FromBytes(b []byte) Hash256 {
+	var h Hash256
+	copy(h[:], b)
+	return h
+}
+
 // FileEntry holds metadata for a single tracked file.
 type FileEntry struct {
-	Size     int64  `yaml:"size"`
-	MtimeNS  int64  `yaml:"mtime_ns"`
-	SHA256   string `yaml:"sha256"`
-	Deleted  bool   `yaml:"deleted,omitempty"`
-	Sequence int64  `yaml:"sequence"`
-	Mode     uint32 `yaml:"mode,omitempty"` // L1: Unix permission bits (e.g., 0644)
+	Size     int64   `yaml:"size"`
+	MtimeNS  int64   `yaml:"mtime_ns"`
+	SHA256   Hash256 `yaml:"sha256"`
+	Deleted  bool    `yaml:"deleted,omitempty"`
+	Sequence int64   `yaml:"sequence"`
+	Mode     uint32  `yaml:"mode,omitempty"` // L1: Unix permission bits (e.g., 0644)
 
 	// PH: incremental hashing state for append-only optimization.
 	// HashState is the serialized sha256 internal state after hashing
@@ -441,9 +474,9 @@ type hashJob struct {
 	prefixCheck []byte // PH: boundary bytes for truncate+regrow detection
 }
 
-// hashResult carries the SHA-256 hex string or an error from a worker.
+// hashResult carries the SHA-256 digest or an error from a worker.
 type hashResult struct {
-	hash        string
+	hash        Hash256
 	err         error
 	hashState   []byte // PH: serialized hasher state after hashing
 	prefixCheck []byte // PH: boundary bytes captured after hashing
@@ -922,20 +955,20 @@ var sha256Pool = sync.Pool{
 // Files below this threshold are fully re-hashed every scan (cheap enough).
 const minIncrementalHashSize = 1 << 20 // 1 MB
 
-// hashFile computes the SHA-256 hex digest of a file.
-func hashFile(path string) (string, error) {
+// hashFile computes the SHA-256 digest of a file.
+func hashFile(path string) (Hash256, error) {
 	f, err := os.Open(path) //nolint:gosec // G304: path comes from scan walk within a user-configured folder
 	if err != nil {
-		return "", err
+		return Hash256{}, err
 	}
 	defer func() { _ = f.Close() }()
 	h := sha256Pool.Get().(hash.Hash)
 	h.Reset()
 	defer sha256Pool.Put(h)
 	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+		return Hash256{}, err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hash256FromBytes(h.Sum(nil)), nil
 }
 
 // prefixCheckSize is the number of bytes verified at the boundary before
@@ -952,10 +985,10 @@ const prefixCheckSize = 4096
 // (4) the boundary region (last prefixCheckSize bytes of the previously-hashed
 // content) matches the saved prefixCheck. Condition (4) catches truncate+regrow
 // where the file was rewritten with different content.
-func hashFileIncremental(path string, savedState []byte, hashedBytes, newSize int64, prefixCheck []byte) (hexHash string, state []byte, newPrefixCheck []byte, err error) {
+func hashFileIncremental(path string, savedState []byte, hashedBytes, newSize int64, prefixCheck []byte) (digest Hash256, state []byte, newPrefixCheck []byte, err error) {
 	f, err := os.Open(path) //nolint:gosec // G304: path comes from scan walk within a user-configured folder
 	if err != nil {
-		return "", nil, nil, err
+		return Hash256{}, nil, nil, err
 	}
 	defer func() { _ = f.Close() }()
 
@@ -983,29 +1016,29 @@ func hashFileIncremental(path string, savedState []byte, hashedBytes, newSize in
 			if restoreErr := um.UnmarshalBinary(savedState); restoreErr == nil {
 				if _, seekErr := f.Seek(hashedBytes, io.SeekStart); seekErr == nil {
 					if _, cpErr := io.Copy(h, f); cpErr != nil {
-						return "", nil, nil, cpErr
+						return Hash256{}, nil, nil, cpErr
 					}
-					hexHash = hex.EncodeToString(h.Sum(nil))
+					digest = hash256FromBytes(h.Sum(nil))
 					if m, mok := h.(encoding.BinaryMarshaler); mok {
 						state, _ = m.MarshalBinary()
 					}
 					newPrefixCheck = capturePrefixCheck(f, newSize)
-					return hexHash, state, newPrefixCheck, nil
+					return digest, state, newPrefixCheck, nil
 				}
 			}
 		}
 		// Fall through to full hash on any restore/seek failure.
 		h.Reset()
 		if _, seekErr := f.Seek(0, io.SeekStart); seekErr != nil {
-			return "", nil, nil, seekErr
+			return Hash256{}, nil, nil, seekErr
 		}
 	}
 
 	// Full hash.
 	if _, err := io.Copy(h, f); err != nil {
-		return "", nil, nil, err
+		return Hash256{}, nil, nil, err
 	}
-	hexHash = hex.EncodeToString(h.Sum(nil))
+	digest = hash256FromBytes(h.Sum(nil))
 
 	// Save state for files above the threshold.
 	if newSize >= minIncrementalHashSize {
@@ -1014,7 +1047,7 @@ func hashFileIncremental(path string, savedState []byte, hashedBytes, newSize in
 		}
 		newPrefixCheck = capturePrefixCheck(f, newSize)
 	}
-	return hexHash, state, newPrefixCheck, nil
+	return digest, state, newPrefixCheck, nil
 }
 
 // capturePrefixCheck reads the last prefixCheckSize bytes of the file (or
@@ -1046,7 +1079,7 @@ const (
 type DiffEntry struct {
 	Path           string
 	Action         DiffAction
-	RemoteHash     string
+	RemoteHash     Hash256
 	RemoteSize     int64
 	RemoteMtime    int64
 	RemoteMode     uint32 // L1: file permission bits from remote

@@ -881,7 +881,7 @@ func postIndexAck(ctx context.Context, client *http.Client, peerAddr string, dat
 }
 
 // downloadFromPeer downloads a single file from a peer with resume support.
-func downloadFromPeer(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash string, root *os.Root, limiter *rate.Limiter) error {
+func downloadFromPeer(ctx context.Context, client *http.Client, peerAddr, folderID, relPath string, expectedHash Hash256, root *os.Root, limiter *rate.Limiter) error {
 	_, err := downloadFileDelta(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
 	return err
 }

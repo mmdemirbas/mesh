@@ -442,13 +442,13 @@ type retryTracker struct {
 
 type retryEntry struct {
 	failures   int
-	lastHash   string // remote hash at last failure — reset when it changes
+	lastHash   Hash256 // remote hash at last failure — reset when it changes
 	lastFailed time.Time
 }
 
 // record increments the failure count for path.  If the remote hash changed
 // since the last failure, the counter resets (the file was updated upstream).
-func (rt *retryTracker) record(path, remoteHash string) {
+func (rt *retryTracker) record(path string, remoteHash Hash256) {
 	if rt.counts == nil {
 		rt.counts = make(map[string]retryEntry)
 	}
@@ -462,7 +462,7 @@ func (rt *retryTracker) record(path, remoteHash string) {
 }
 
 // quarantined reports whether the file has exceeded maxRetries.
-func (rt *retryTracker) quarantined(path, remoteHash string) bool {
+func (rt *retryTracker) quarantined(path string, remoteHash Hash256) bool {
 	if rt.counts == nil {
 		return false
 	}
@@ -1571,7 +1571,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				// from disk (never trust cached index hash) and compare with
 				// the remote hash. If identical, adopt remote metadata — no
 				// conflict file needed, no download.
-				if action.RemoteHash != "" {
+				if !action.RemoteHash.IsZero() {
 					if localHash, hashErr := hashFileRoot(fs.root, action.Path); hashErr == nil && localHash == action.RemoteHash {
 						fs.indexMu.Lock()
 						fs.index.Sequence++
@@ -1871,7 +1871,7 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 				Path:     se.path,
 				Size:     entry.Size,
 				MtimeNs:  entry.MtimeNS,
-				Sha256:   hexToBytes(entry.SHA256),
+				Sha256:   entry.SHA256[:],
 				Deleted:  entry.Deleted,
 				Sequence: entry.Sequence,
 				Mode:     entry.Mode,
@@ -1896,7 +1896,7 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 			Path:     path,
 			Size:     entry.Size,
 			MtimeNs:  entry.MtimeNS,
-			Sha256:   hexToBytes(entry.SHA256),
+			Sha256:   entry.SHA256[:],
 			Deleted:  entry.Deleted,
 			Sequence: entry.Sequence,
 			Mode:     entry.Mode,
@@ -2031,7 +2031,7 @@ func protoToFileIndex(idx *pb.IndexExchange) *FileIndex {
 		fi.Files[path] = FileEntry{
 			Size:     f.GetSize(),
 			MtimeNS:  f.GetMtimeNs(),
-			SHA256:   bytesToHex(f.GetSha256()),
+			SHA256:   hash256FromBytes(f.GetSha256()),
 			Deleted:  f.GetDeleted(),
 			Sequence: f.GetSequence(),
 			Mode:     f.GetMode(),
@@ -2055,14 +2055,5 @@ func localMtime(fs *folderState, relPath string) int64 {
 func generateDeviceID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-func hexToBytes(s string) []byte {
-	b, _ := hex.DecodeString(s)
-	return b
-}
-
-func bytesToHex(b []byte) string {
 	return hex.EncodeToString(b)
 }
