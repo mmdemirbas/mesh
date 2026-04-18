@@ -430,10 +430,16 @@ func (s *server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	decoded, err := gzipDecode(body)
-	if err != nil {
-		// Try raw (non-compressed).
-		decoded = body
+	// F9: check Content-Encoding header instead of silent gzip fallback,
+	// consistent with handleIndex (line 149).
+	decoded := body
+	if r.Header.Get("Content-Encoding") == "gzip" {
+		var gzErr error
+		decoded, gzErr = gzipDecode(body)
+		if gzErr != nil {
+			http.Error(w, "gzip decode: "+gzErr.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	var req pb.BundleRequest

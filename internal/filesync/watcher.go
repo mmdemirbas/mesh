@@ -255,6 +255,14 @@ func (fw *folderWatcher) run(ctx context.Context) {
 				debounceTimer = time.NewTimer(debounceInterval)
 				debounceC = debounceTimer.C
 			} else {
+				// F10: drain channel before Reset to prevent a pending
+				// fire from triggering an immediate premature scan.
+				if !debounceTimer.Stop() {
+					select {
+					case <-debounceTimer.C:
+					default:
+					}
+				}
 				debounceTimer.Reset(debounceInterval)
 			}
 
@@ -300,7 +308,7 @@ func (fw *folderWatcher) removeStaleWatches() {
 // not trigger scan events.
 func isTempFile(path string) bool {
 	base := filepath.Base(path)
-	return strings.HasPrefix(base, ".mesh-tmp-") || strings.HasSuffix(base, ".mesh-delta-tmp")
+	return strings.HasPrefix(base, ".mesh-tmp-") || strings.Contains(base, ".mesh-delta-tmp-")
 }
 
 // drainDirtyRoots returns the set of folder roots that received events since

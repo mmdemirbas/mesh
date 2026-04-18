@@ -85,7 +85,7 @@ func TestClassifyGlob(t *testing.T) {
 		{"node_modules", kindLiteral, "node_modules"},
 		{".git", kindLiteral, ".git"},
 		{"*.class", kindStarSuffix, ".class"},
-		{"*.mesh-delta-tmp", kindStarSuffix, ".mesh-delta-tmp"},
+		{"*.mesh-delta-tmp-*", kindGeneric, ""},
 		{".mesh-tmp-*", kindPrefixStar, ".mesh-tmp-"},
 		{"prefix*", kindPrefixStar, "prefix"},
 		{"f?o", kindGeneric, ""},     // ? is not optimizable
@@ -151,18 +151,18 @@ func TestShouldIgnore(t *testing.T) {
 func TestBuiltinIgnoresNonNegatable(t *testing.T) {
 	t.Parallel()
 	// Config attempts to negate both builtin patterns.
-	m := newIgnoreMatcher([]string{"!.mesh-tmp-*", "!*.mesh-delta-tmp"})
+	m := newIgnoreMatcher([]string{"!.mesh-tmp-*", "!*.mesh-delta-tmp-*"})
 
 	tests := []struct {
 		path   string
 		ignore bool
 	}{
-		{".mesh-tmp-abc123", true},       // builtin must win over config negation
-		{"foo.mesh-delta-tmp", true},     // builtin must win over config negation
-		{"sub/.mesh-tmp-xyz", true},      // nested path, builtin still wins
-		{"sub/bar.mesh-delta-tmp", true}, // nested path, builtin still wins
-		{"normal.txt", false},            // non-builtin unaffected
-		{"important.log", false},         // non-builtin unaffected
+		{".mesh-tmp-abc123", true},            // builtin must win over config negation
+		{"foo.mesh-delta-tmp-ab12cd34", true}, // builtin must win over config negation
+		{"sub/.mesh-tmp-xyz", true},           // nested path, builtin still wins
+		{"sub/bar.mesh-delta-tmp-ef56", true}, // nested path, builtin still wins
+		{"normal.txt", false},                 // non-builtin unaffected
+		{"important.log", false},              // non-builtin unaffected
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
@@ -2530,7 +2530,7 @@ func TestApplyDeltaRoot(t *testing.T) {
 	root := openTestRoot(t, dir)
 
 	blocks := []deltaBlock{{index: 1, data: []byte("XXXX")}}
-	tmpRelPath, err := applyDeltaRoot(root, "old.bin", 4, 10, blocks)
+	tmpRelPath, err := applyDeltaRoot(root, "old.bin", "testpeer", 4, 10, blocks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2574,7 +2574,7 @@ func TestApplyDelta(t *testing.T) {
 	tmpPath, err := applyDelta(
 		filepath.Join(dir, "old.bin"),
 		filepath.Join(dir, "result.bin"),
-		4, 10, blocks,
+		"testpeer", 4, 10, blocks,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -4699,8 +4699,8 @@ func TestDiffTombstone_AfterFirstSync(t *testing.T) {
 func TestBuiltinIgnores_DeltaTmp(t *testing.T) {
 	t.Parallel()
 	m := newIgnoreMatcher(nil)
-	if !m.shouldIgnore("data.txt.mesh-delta-tmp", false) {
-		t.Error("builtinIgnores should match .mesh-delta-tmp suffix")
+	if !m.shouldIgnore("data.txt.mesh-delta-tmp-ab12cd34", false) {
+		t.Error("builtinIgnores should match .mesh-delta-tmp-* pattern")
 	}
 	if !m.shouldIgnore(".mesh-tmp-abc123", false) {
 		t.Error("builtinIgnores should match .mesh-tmp- prefix")

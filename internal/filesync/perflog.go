@@ -103,17 +103,13 @@ func (pl *perfLogger) rotate() {
 	pl.f = nil
 
 	// Shift backups: perf.3.jsonl → delete, perf.2 → perf.3, etc.
+	// F11: unconditional Remove before Rename so Windows doesn't fail
+	// when the target already exists.
 	for i := perfMaxBackups; i >= 1; i-- {
 		from := pl.backupPath(i - 1)
 		to := pl.backupPath(i)
-		if i == perfMaxBackups {
-			_ = os.Remove(to)
-		}
-		if from == pl.path {
-			_ = os.Rename(from, to)
-		} else {
-			_ = os.Rename(from, to)
-		}
+		_ = os.Remove(to)
+		_ = os.Rename(from, to)
 	}
 
 	// Re-open fresh.

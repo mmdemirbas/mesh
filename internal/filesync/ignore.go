@@ -8,7 +8,7 @@ import (
 // builtinIgnores are always excluded from sync and scanning.
 var builtinIgnores = []string{
 	".mesh-tmp-*",
-	"*.mesh-delta-tmp",
+	"*.mesh-delta-tmp-*",
 }
 
 // patternKind describes the fast-match strategy for a classified pattern.

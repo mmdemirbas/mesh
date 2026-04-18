@@ -296,7 +296,7 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 	}
 
 	// Apply delta to reconstruct the file.
-	tmpRelPath, err := applyDeltaRoot(root, relPath, blockSize, remoteFileSize, blocks)
+	tmpRelPath, err := applyDeltaRoot(root, relPath, peerSuffix(peerAddr), blockSize, remoteFileSize, blocks)
 	if err != nil {
 		return "", fmt.Errorf("apply delta: %w", err)
 	}
