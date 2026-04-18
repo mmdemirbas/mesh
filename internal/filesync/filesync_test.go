@@ -75,17 +75,50 @@ func TestParseLine(t *testing.T) {
 	}
 }
 
+func TestClassifyGlob(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		pattern  string
+		wantKind patternKind
+		wantFix  string
+	}{
+		{"node_modules", kindLiteral, "node_modules"},
+		{".git", kindLiteral, ".git"},
+		{"*.class", kindStarSuffix, ".class"},
+		{"*.mesh-delta-tmp", kindStarSuffix, ".mesh-delta-tmp"},
+		{".mesh-tmp-*", kindPrefixStar, ".mesh-tmp-"},
+		{"prefix*", kindPrefixStar, "prefix"},
+		{"f?o", kindGeneric, ""},     // ? is not optimizable
+		{"[abc]", kindGeneric, ""},   // character class
+		{"a*b", kindGeneric, ""},     // star in the middle
+		{"**", kindGeneric, ""},      // double star
+		{"*.tar.*", kindGeneric, ""}, // two stars
+		{"", kindLiteral, ""},        // degenerate but classified
+		{"exact.txt", kindLiteral, "exact.txt"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.pattern, func(t *testing.T) {
+			t.Parallel()
+			kind, fixed := classifyGlob(tt.pattern)
+			if kind != tt.wantKind {
+				t.Errorf("classifyGlob(%q) kind=%d, want %d", tt.pattern, kind, tt.wantKind)
+			}
+			if fixed != tt.wantFix {
+				t.Errorf("classifyGlob(%q) fixed=%q, want %q", tt.pattern, fixed, tt.wantFix)
+			}
+		})
+	}
+}
+
 func TestShouldIgnore(t *testing.T) {
 	t.Parallel()
-	m := &ignoreMatcher{
-		patterns: []ignorePattern{
-			{pattern: ".stfolder"},
-			{pattern: ".mesh-tmp-*"},
-			{pattern: "*.log"},
-			{pattern: "build", dirOnly: true},
-			{pattern: "important.log", negation: true},
-		},
-	}
+	m := newIgnoreMatcher([]string{
+		".stfolder",
+		".mesh-tmp-*",
+		"*.log",
+		"build/",
+		"!important.log",
+	})
 
 	tests := []struct {
 		path   string
@@ -897,9 +930,7 @@ func TestScanRespectsIgnore(t *testing.T) {
 	writeFile(t, dir, "skip.log", "skip")
 
 	idx := newFileIndex()
-	ignore := &ignoreMatcher{
-		patterns: []ignorePattern{{pattern: "*.log"}},
-	}
+	ignore := newIgnoreMatcher([]string{"*.log"})
 
 	_, _, _, _ = idx.scan(context.Background(), dir, ignore)
 
@@ -4152,6 +4183,31 @@ func BenchmarkScanSteadyState(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		_, _, _, _ = idx.scan(context.Background(), dir, ignore)
+	}
+}
+
+func BenchmarkIgnoreMatcher(b *testing.B) {
+	patterns := []string{
+		"*.class", "*.o", "*.pyc", "*.swp", "*.swo",
+		".git/", ".svn/", "node_modules/", "__pycache__/",
+		"target/", "build/", "dist/", ".gradle/",
+		"**/test-output/**", "!important.class",
+	}
+	m := newIgnoreMatcher(patterns)
+	paths := []string{
+		"src/main/java/com/example/App.java",
+		"src/main/java/com/example/App.class",
+		"build/libs/app.jar",
+		"node_modules/lodash/index.js",
+		"deep/nested/path/to/some/file.txt",
+		".git/objects/pack/pack-abc.idx",
+		"important.class",
+	}
+	b.ResetTimer()
+	for b.Loop() {
+		for _, p := range paths {
+			m.shouldIgnore(p, false)
+		}
 	}
 }
 
