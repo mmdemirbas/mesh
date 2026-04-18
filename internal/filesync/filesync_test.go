@@ -4186,6 +4186,30 @@ func BenchmarkScanSteadyState(b *testing.B) {
 	}
 }
 
+// BenchmarkScanDeepTree measures scan with many directories (100 dirs × 10 files)
+// to exercise the parallel directory walker (P20c). The directory-to-file ratio
+// is high, which is where concurrent ReadDir calls help most.
+func BenchmarkScanDeepTree(b *testing.B) {
+	dir := b.TempDir()
+	for d := range 100 {
+		subdir := filepath.Join(dir, fmt.Sprintf("d%02d", d/10), fmt.Sprintf("sub%02d", d%10))
+		_ = os.MkdirAll(subdir, 0750)
+		for f := range 10 {
+			data := make([]byte, 1024)
+			for i := range data {
+				data[i] = byte((d*10 + f + i) % 251)
+			}
+			_ = os.WriteFile(filepath.Join(subdir, fmt.Sprintf("f%02d.dat", f)), data, 0600)
+		}
+	}
+	ignore := &ignoreMatcher{}
+	b.ResetTimer()
+	for b.Loop() {
+		idx := newFileIndex()
+		_, _, _, _ = idx.scan(context.Background(), dir, ignore)
+	}
+}
+
 func BenchmarkIgnoreMatcher(b *testing.B) {
 	patterns := []string{
 		"*.class", "*.o", "*.pyc", "*.swp", "*.swo",

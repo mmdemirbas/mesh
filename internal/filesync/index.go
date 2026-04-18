@@ -371,7 +371,7 @@ func (idx *FileIndex) setEntry(key string, entry FileEntry) {
 // for triage. Zero-valued fields mean "phase did not run" (e.g. deletions
 // are skipped on WalkDir error).
 type ScanStats struct {
-	WalkDuration   time.Duration // total time inside filepath.WalkDir
+	WalkDuration   time.Duration // total time in directory walk (parallel ReadDir + entry processing)
 	HashDuration   time.Duration // cumulative time spent in hashFile
 	StatDuration   time.Duration // cumulative time spent in d.Info()
 	IgnoreDuration time.Duration // cumulative time spent in ignore.shouldIgnore
@@ -422,6 +422,138 @@ type pendingHash struct {
 // SSD parallelism and multi-core SHA-256.
 var scanHashWorkers = min(runtime.GOMAXPROCS(0), 8)
 
+// scanWalkWorkers is the number of parallel directory readers (P20c).
+// Concurrent ReadDir calls help on NFS/FUSE where per-call latency is
+// high, and on SSDs where multiple outstanding I/O requests are cheap.
+var scanWalkWorkers = min(runtime.GOMAXPROCS(0), 8)
+
+// walkFile is a non-directory entry discovered by the parallel walker.
+type walkFile struct {
+	rel     string
+	absPath string
+	name    string
+	info    fs.FileInfo // nil when infoErr is set
+	infoErr error       // non-nil when d.Info() failed
+}
+
+// walkDirResult is the output of reading a single directory in the parallel
+// walker. It contains the classified contents: files, subdirectories to
+// recurse into, and lightweight per-directory stats.
+type walkDirResult struct {
+	// dirRel is the relative path of the directory itself (empty for root).
+	dirRel string
+	// readErr is non-nil when os.ReadDir failed for this directory.
+	readErr error
+	// subdirs are non-ignored child directories to recurse into.
+	subdirs []dirJob
+	// files are non-ignored, non-symlink file entries with stat results.
+	files []walkFile
+	// conflicts are relative paths of Syncthing-style conflict files.
+	conflicts []string
+	// Per-directory stats accumulated by the worker.
+	entriesVisited  int
+	dirsIgnored     int
+	filesIgnored    int
+	dirsWalked      int
+	symlinksSkipped int
+	tempCleaned     int
+	ignoreDuration  time.Duration
+	statDuration    time.Duration
+}
+
+// dirJob is a directory waiting to be read by a parallel walk worker.
+type dirJob struct {
+	absPath string
+	relDir  string
+}
+
+// readDirEntries reads a single directory and classifies its entries.
+// It is called from worker goroutines and does not touch shared state.
+func readDirEntries(ctx context.Context, job dirJob, ignore *ignoreMatcher, tempCutoff time.Time) walkDirResult {
+	res := walkDirResult{dirRel: job.relDir}
+
+	entries, readErr := os.ReadDir(job.absPath)
+	if readErr != nil {
+		res.readErr = readErr
+		return res
+	}
+
+	for _, d := range entries {
+		if ctx.Err() != nil {
+			// Context cancelled mid-directory: discard partial results so the
+			// consumer doesn't recurse into a non-deterministic subset of
+			// subdirs. Propagate as readErr so the consumer protects children.
+			res.subdirs = nil
+			res.files = nil
+			res.conflicts = nil
+			res.readErr = ctx.Err()
+			return res
+		}
+		res.entriesVisited++
+
+		// B17: normalize name to NFC so macOS NFD paths match Windows.
+		name := norm.NFC.String(d.Name())
+		absPath := filepath.Join(job.absPath, d.Name()) // OS name for I/O
+		var rel string
+		if job.relDir == "" {
+			rel = name
+		} else {
+			rel = job.relDir + "/" + name
+		}
+
+		isDir := d.IsDir()
+
+		// P8: Clean stale temp files inline.
+		if !isDir && (strings.HasPrefix(name, ".mesh-tmp-") || strings.HasSuffix(name, ".mesh-delta-tmp")) {
+			if info, infoErr := d.Info(); infoErr == nil && info.ModTime().Before(tempCutoff) {
+				if os.Remove(absPath) == nil {
+					res.tempCleaned++
+				}
+			}
+			continue
+		}
+
+		// Ignore check (read-only, safe for concurrent use).
+		ignStart := time.Now()
+		skip := ignore.shouldIgnore(rel, isDir)
+		res.ignoreDuration += time.Since(ignStart)
+		if skip {
+			if isDir {
+				res.dirsIgnored++
+			} else {
+				res.filesIgnored++
+			}
+			continue
+		}
+
+		if isDir {
+			res.dirsWalked++
+			res.subdirs = append(res.subdirs, dirJob{absPath: absPath, relDir: rel})
+			continue
+		}
+
+		// Skip symlinks.
+		if d.Type()&fs.ModeSymlink != 0 {
+			res.symlinksSkipped++
+			continue
+		}
+
+		// Stat the file (I/O happens in the worker, not the consumer).
+		statStart := time.Now()
+		info, infoErr := d.Info()
+		res.statDuration += time.Since(statStart)
+
+		wf := walkFile{rel: rel, absPath: absPath, name: name, info: info, infoErr: infoErr}
+		res.files = append(res.files, wf)
+
+		if isConflictFile(name) {
+			res.conflicts = append(res.conflicts, rel)
+		}
+	}
+
+	return res
+}
+
 // scan walks the folder, updates the index, cleans stale temp files, and
 // returns whether any files changed, the active (non-deleted) file count,
 // and the number of directories walked (excluding the root and ignored subtrees).
@@ -433,7 +565,7 @@ func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignor
 // scanWithStats is scan with detailed per-phase instrumentation. Callers that
 // want evidence (runScan) use this; tests keep the simpler signature.
 //
-//nolint:gocyclo // scan is a single-pass WalkDir; splitting it would hurt locality more than it helps.
+//nolint:gocyclo // scan orchestrates parallel walk + hash pipeline; splitting would hurt locality.
 func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, ignore *ignoreMatcher, maxFiles int) (changed bool, activeCount, dirCount int, stats ScanStats, conflicts []string, err error) {
 	changed = false
 
@@ -465,139 +597,135 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	}
 	var pending []pendingHash
 
+	// P20c: parallel directory walk. Worker goroutines read directories
+	// concurrently; a single consumer goroutine (below) processes the
+	// results and updates all shared state (seen, errorPaths, idx.Files).
 	walkStart := time.Now()
-	err = filepath.WalkDir(folderRoot, func(path string, d fs.DirEntry, walkErr error) error {
-		if ctx.Err() != nil {
-			return ctx.Err() // bail out on shutdown
+	resultCh := make(chan walkDirResult, scanWalkWorkers*2)
+	var outstanding sync.WaitGroup
+
+	// walkWorker reads directories from the sem-bounded pool and sends results.
+	sem := make(chan struct{}, scanWalkWorkers)
+	walkOne := func(job dirJob) {
+		sem <- struct{}{} // acquire
+		dr := readDirEntries(ctx, job, ignore, tempCutoff)
+		<-sem // release
+		resultCh <- dr
+	}
+
+	// Seed with root directory.
+	outstanding.Add(1)
+	go walkOne(dirJob{absPath: folderRoot, relDir: ""})
+
+	// Closer: when all directories have been processed, close the channel.
+	go func() {
+		outstanding.Wait()
+		close(resultCh)
+	}()
+
+	// Consumer: process results and submit subdirectory jobs. All shared
+	// state mutations (seen, errorPaths, idx.Files, pending) happen here.
+	capExceeded := false
+	for dr := range resultCh {
+		// Submit subdirectories BEFORE calling Done, so outstanding never
+		// hits zero prematurely.
+		for _, sub := range dr.subdirs {
+			outstanding.Add(1)
+			go walkOne(sub)
 		}
-		stats.EntriesVisited++
-		if walkErr != nil {
-			// H1: the entry exists on disk but we can't read it. Mark it in
-			// seen (so the tombstone phase doesn't treat it as deleted) and
-			// record it as an error path for per-file suppression.
-			if rel, relErr := filepath.Rel(folderRoot, path); relErr == nil {
-				rel = filepath.ToSlash(rel)
-				rel = norm.NFC.String(rel)
-				if rel != "." {
-					seen[rel] = struct{}{}
-					errorPaths[rel] = struct{}{}
-					// If this is a directory, its children won't be walked.
-					// Protect all known children from tombstoning by adding
-					// them to seen (they still exist on disk, we just can't
-					// traverse into the parent).
-					dirPrefix := rel + "/"
-					for child := range idx.Files {
-						if strings.HasPrefix(child, dirPrefix) {
-							seen[child] = struct{}{}
-							errorPaths[child] = struct{}{}
-						}
+		outstanding.Done()
+
+		// Merge per-directory stats.
+		stats.EntriesVisited += dr.entriesVisited
+		stats.DirsIgnored += dr.dirsIgnored
+		stats.FilesIgnored += dr.filesIgnored
+		stats.DirsWalked += dr.dirsWalked
+		stats.SymlinksSkipped += dr.symlinksSkipped
+		stats.TempCleaned += dr.tempCleaned
+		stats.IgnoreDuration += dr.ignoreDuration
+		stats.StatDuration += dr.statDuration
+		dirCount += dr.dirsWalked
+
+		// Handle directory read errors.
+		if dr.readErr != nil {
+			// Context cancellation → propagate as scan error, don't treat
+			// as a directory I/O failure.
+			if ctx.Err() != nil {
+				err = ctx.Err()
+				continue
+			}
+			// H1: the directory was unreadable. Protect it and all known
+			// children from tombstoning.
+			if dr.dirRel != "" {
+				seen[dr.dirRel] = struct{}{}
+				errorPaths[dr.dirRel] = struct{}{}
+				dirPrefix := dr.dirRel + "/"
+				for child := range idx.Files {
+					if strings.HasPrefix(child, dirPrefix) {
+						seen[child] = struct{}{}
+						errorPaths[child] = struct{}{}
 					}
 				}
 			}
 			stats.StatErrors++
-			return nil
+			continue
 		}
 
-		// P8: Clean stale temp files during the walk instead of a separate traversal.
-		name := d.Name()
-		if !d.IsDir() && (strings.HasPrefix(name, ".mesh-tmp-") || strings.HasSuffix(name, ".mesh-delta-tmp")) {
-			if info, infoErr := d.Info(); infoErr == nil && info.ModTime().Before(tempCutoff) {
-				if os.Remove(path) == nil {
-					stats.TempCleaned++
+		// Process file entries.
+		conflicts = append(conflicts, dr.conflicts...)
+
+		for _, wf := range dr.files {
+			if capExceeded {
+				break
+			}
+			if len(seen) >= maxFiles {
+				capExceeded = true
+				err = errIndexCapExceeded
+				break
+			}
+			seen[wf.rel] = struct{}{}
+
+			if wf.infoErr != nil {
+				stats.StatErrors++
+				errorPaths[wf.rel] = struct{}{}
+				continue
+			}
+
+			existing, exists := idx.Files[wf.rel]
+			mtimeNS := wf.info.ModTime().UnixNano()
+			size := wf.info.Size()
+			mode := uint32(wf.info.Mode().Perm())
+
+			// Fast path: skip hashing if size and mtime are unchanged.
+			if exists && !existing.Deleted && existing.Size == size && existing.MtimeNS == mtimeNS {
+				if existing.Mode != mode {
+					existing.Mode = mode
+					idx.Files[wf.rel] = existing
 				}
+				stats.FastPathHits++
+				continue
 			}
-			return nil
+
+			// Collect for hash pool — submitted after the walk loop to
+			// avoid deadlock: sending to hashCh here would block the
+			// consumer that drains resultCh, stalling walk workers.
+			hResultCh := make(chan hashResult, 1)
+			pending = append(pending, pendingHash{
+				rel: wf.rel, absPath: wf.absPath,
+				size: size, mtimeNS: mtimeNS, mode: mode,
+				exists: exists, old: existing,
+				result: hResultCh,
+			})
 		}
-
-		rel, relErr := filepath.Rel(folderRoot, path)
-		if relErr != nil {
-			return nil
-		}
-		// Normalize to forward slashes for cross-platform consistency.
-		rel = filepath.ToSlash(rel)
-		// B17: normalize to NFC so macOS NFD paths match Windows NFC paths.
-		rel = norm.NFC.String(rel)
-		if rel == "." {
-			return nil
-		}
-
-		isDir := d.IsDir()
-
-		ignStart := time.Now()
-		skip := ignore.shouldIgnore(rel, isDir)
-		stats.IgnoreDuration += time.Since(ignStart)
-		if skip {
-			if isDir {
-				stats.DirsIgnored++
-				return filepath.SkipDir
-			}
-			stats.FilesIgnored++
-			return nil
-		}
-
-		if isDir {
-			dirCount++
-			stats.DirsWalked++
-			return nil
-		}
-
-		// Skip symlinks.
-		if d.Type()&fs.ModeSymlink != 0 {
-			stats.SymlinksSkipped++
-			return nil
-		}
-
-		// Collect Syncthing-style conflict files during the main walk so the
-		// admin UI doesn't need a second full-tree traversal per scan.
-		// Conflict files are still tracked as normal files (they remain on
-		// disk and get synced like any other file).
-		if isConflictFile(name) {
-			conflicts = append(conflicts, rel)
-		}
-
-		if len(seen) >= maxFiles {
-			return errIndexCapExceeded
-		}
-		seen[rel] = struct{}{}
-
-		statStart := time.Now()
-		info, err := d.Info()
-		stats.StatDuration += time.Since(statStart)
-		if err != nil {
-			stats.StatErrors++
-			errorPaths[rel] = struct{}{}
-			return nil
-		}
-
-		existing, exists := idx.Files[rel]
-		mtimeNS := info.ModTime().UnixNano()
-		size := info.Size()
-		mode := uint32(info.Mode().Perm())
-
-		// Fast path: skip hashing if size and mtime are unchanged.
-		// Mode is not checked here — a chmod alone doesn't change content,
-		// so we update it without rehashing.
-		if exists && !existing.Deleted && existing.Size == size && existing.MtimeNS == mtimeNS {
-			if existing.Mode != mode {
-				existing.Mode = mode
-				idx.Files[rel] = existing
-			}
-			stats.FastPathHits++
-			return nil
-		}
-
-		// P20a: submit to parallel hash pool instead of hashing inline.
-		resultCh := make(chan hashResult, 1)
-		pending = append(pending, pendingHash{
-			rel: rel, absPath: path,
-			size: size, mtimeNS: mtimeNS, mode: mode,
-			exists: exists, old: existing,
-			result: resultCh,
-		})
-		hashCh <- hashJob{absPath: path, result: resultCh}
-		return nil
-	})
+	}
 	stats.WalkDuration = time.Since(walkStart)
+
+	// P20a: submit all hash jobs now that the walk is complete and
+	// resultCh is drained. This avoids the deadlock where sending to
+	// hashCh blocks the only consumer of resultCh.
+	for i := range pending {
+		hashCh <- hashJob{absPath: pending[i].absPath, result: pending[i].result}
+	}
 
 	// P20a: close the hash channel and wait for all workers to finish.
 	close(hashCh)
@@ -722,7 +850,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 
 // hashFile computes the SHA-256 hex digest of a file.
 func hashFile(path string) (string, error) {
-	f, err := os.Open(path) //nolint:gosec // G304: path comes from filepath.WalkDir within a user-configured folder
+	f, err := os.Open(path) //nolint:gosec // G304: path comes from scan walk within a user-configured folder
 	if err != nil {
 		return "", err
 	}
