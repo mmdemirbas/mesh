@@ -66,6 +66,7 @@ type Component struct {
 	BoundAddr      string    `json:"bound_addr"`                // active resolved listener address
 	PeerAddr       string    `json:"peer_addr"`                 // resolved remote peer address (connections)
 	TLSFingerprint string    `json:"tls_fingerprint,omitempty"` // "sha256:<hex>" for TLS-enabled components
+	TLSStatus      string    `json:"tls_status,omitempty"`      // "encrypted", "encrypted · verified", "CERT MISMATCH"
 	FileCount      int       `json:"file_count,omitempty"`      // tracked file count (filesync folders)
 	TotalSize      int64     `json:"total_size,omitempty"`      // total bytes of tracked files (filesync)
 	LastSync       time.Time `json:"last_sync"`                 // last successful sync time (filesync)
@@ -142,6 +143,16 @@ func (s *State) UpdateTLSFingerprint(compType, id, fingerprint string) {
 	key := compType + ":" + id
 	comp := s.components[key]
 	comp.TLSFingerprint = fingerprint
+	comp.LastUpdated = time.Now()
+	s.components[key] = comp
+}
+
+func (s *State) UpdateTLSStatus(compType, id, tlsStatus string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := compType + ":" + id
+	comp := s.components[key]
+	comp.TLSStatus = tlsStatus
 	comp.LastUpdated = time.Now()
 	s.components[key] = comp
 }

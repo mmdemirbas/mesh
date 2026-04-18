@@ -547,20 +547,20 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 				addRow("   ", "⌁", cGray+comp.Message+cReset, "", "", "", "", metricsSnapshot{})
 			}
 
-			type peerEntry struct{ addr, label string }
+			type peerEntry struct{ addr, label, tlsStatus string }
 			var peerList []peerEntry
 			prefix := "clipsync-peer:" + cs.Bind + "|"
 			if activeState != nil {
 				for k, comp := range activeState {
 					if after, ok := strings.CutPrefix(k, prefix); ok {
-						peerList = append(peerList, peerEntry{after, comp.Message})
+						peerList = append(peerList, peerEntry{after, comp.Message, comp.TLSStatus})
 					}
 				}
 				sort.Slice(peerList, func(i, j int) bool { return compareAddr(peerList[i].addr, peerList[j].addr) })
 			} else {
 				for _, def := range cs.StaticPeers {
 					for _, addr := range def.Addresses {
-						peerList = append(peerList, peerEntry{addr, "static"})
+						peerList = append(peerList, peerEntry{addr, "static", ""})
 					}
 				}
 			}
@@ -569,7 +569,8 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 				if p.label == "static" {
 					icon = "·"
 				}
-				addRow("   ", icon, colorAddr(p.addr), "", cGray+p.label+cReset, "", "", metricsSnapshot{})
+				tlsLabel := formatTLSStatus(p.tlsStatus)
+				addRow("   ", icon, colorAddr(p.addr), "", cGray+p.label+cReset, tlsLabel, "", metricsSnapshot{})
 			}
 		}
 		addHeader("")
@@ -674,12 +675,18 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 							if name == "" {
 								name = peerAddr
 							}
-							switch pComp.Status {
-							case state.Connected:
-								peers[name] = cGreen + "●" + cReset
-							case state.Retrying:
+							switch {
+							case pComp.TLSStatus == "CERT MISMATCH":
+								peers[name] = cRed + "●" + cReset
+							case pComp.Status == state.Connected:
+								if pComp.TLSStatus == "encrypted · verified" {
+									peers[name] = cGreen + "●✓" + cReset
+								} else {
+									peers[name] = cGreen + "●" + cReset
+								}
+							case pComp.Status == state.Retrying:
 								peers[name] = cYellow + "●" + cReset
-							case state.Connecting:
+							case pComp.Status == state.Connecting:
 								peers[name] = cBlink + cYellow + "●" + cReset
 							default:
 								peers[name] = "○"

@@ -126,6 +126,10 @@ type Node struct {
 	// the appropriate TLS config. Read-only after Start().
 	peerClients map[string]*http.Client
 
+	// peerHasFingerprint records which static peer addresses have a configured
+	// TLS fingerprint (for TLS status label: "encrypted · verified" vs "encrypted").
+	peerHasFingerprint map[string]bool
+
 	// defaultClient is used for dynamic/unknown peer addresses (no fingerprint).
 	defaultClient *http.Client
 
@@ -214,6 +218,7 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 		Transport: &http.Transport{TLSClientConfig: tlsutil.ClientTLS("")},
 	}
 	peerClients := make(map[string]*http.Client)
+	peerHasFingerprint := make(map[string]bool)
 	for _, def := range cfg.StaticPeers {
 		for _, addr := range def.Addresses {
 			if _, exists := peerClients[addr]; exists {
@@ -223,24 +228,28 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 				Timeout:   2 * time.Minute,
 				Transport: &http.Transport{TLSClientConfig: tlsutil.ClientTLS(def.TLSFingerprint)},
 			}
+			if def.TLSFingerprint != "" {
+				peerHasFingerprint[addr] = true
+			}
 		}
 	}
 
 	n := &Node{
-		ctx:            ctx,
-		config:         cfg,
-		id:             generateID(),
-		port:           port,
-		maxFileSize:    maxFileSize,
-		maxReqBodySize: maxFileSize * 20 * 4 / 3,
-		peers:          make(map[string]time.Time),
-		peerHashes:     make(map[string]string),
-		tlsFingerprint: serverFP,
-		peerClients:    peerClients,
-		defaultClient:  defaultClient,
-		serverCert:     serverCert,
-		filesDir:       filesDir,
-		notifyCh:       make(chan struct{}, 1),
+		ctx:                ctx,
+		config:             cfg,
+		id:                 generateID(),
+		port:               port,
+		maxFileSize:        maxFileSize,
+		maxReqBodySize:     maxFileSize * 20 * 4 / 3,
+		peers:              make(map[string]time.Time),
+		peerHashes:         make(map[string]string),
+		tlsFingerprint:     serverFP,
+		peerClients:        peerClients,
+		peerHasFingerprint: peerHasFingerprint,
+		defaultClient:      defaultClient,
+		serverCert:         serverCert,
+		filesDir:           filesDir,
+		notifyCh:           make(chan struct{}, 1),
 	}
 
 	n.purgeFilesDir() // remove any files left over from a previous session
@@ -403,6 +412,13 @@ func (n *Node) clientForPeer(addr string) *http.Client {
 		return c
 	}
 	return n.defaultClient
+}
+
+func (n *Node) tlsStatusFor(addr string) string {
+	if n.peerHasFingerprint[addr] {
+		return "encrypted · verified"
+	}
+	return "encrypted"
 }
 
 func (n *Node) canSendTo(_ string, _ bool) bool { return true }
@@ -621,6 +637,9 @@ func (n *Node) postHTTP(addr string, data []byte) {
 	resp, err := n.clientForPeer(addr).Do(req)
 	if err != nil {
 		slog.Debug("HTTP push to peer failed", "peer", cleanLogStr(addr), "bytes", len(data), "error", err)
+		if strings.Contains(err.Error(), "fingerprint mismatch") {
+			state.Global.UpdateTLSStatus("clipsync-peer", n.config.Bind+"|"+addr, "CERT MISMATCH")
+		}
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -629,6 +648,7 @@ func (n *Node) postHTTP(addr string, data []byte) {
 		return
 	}
 	slog.Debug("HTTP push to peer ok", "peer", cleanLogStr(addr), "status", resp.StatusCode, "bytes", len(data))
+	state.Global.UpdateTLSStatus("clipsync-peer", n.config.Bind+"|"+addr, n.tlsStatusFor(addr))
 }
 
 // cleanLogStr replaces ASCII control characters (including newlines) with '?'

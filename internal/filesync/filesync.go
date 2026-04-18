@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -549,6 +550,10 @@ type Node struct {
 	// appropriate TLS fingerprint for that peer. Read-only after Start().
 	peerClients map[string]*http.Client
 
+	// peerHasFingerprint records which peer addresses have a configured
+	// TLS fingerprint (for TLS status label: "encrypted · verified" vs "encrypted").
+	peerHasFingerprint map[string]bool
+
 	// defaultClient is used for peer addresses not in peerClients.
 	defaultClient *http.Client
 
@@ -573,6 +578,13 @@ func (n *Node) clientForPeer(addr string) *http.Client {
 		return c
 	}
 	return n.defaultClient
+}
+
+func (n *Node) tlsStatusFor(addr string) string {
+	if n.peerHasFingerprint[addr] {
+		return "encrypted · verified"
+	}
+	return "encrypted"
 }
 
 // Start initializes and runs the filesync node. Blocks until ctx is cancelled.
@@ -629,6 +641,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	}
 	defaultClient := &http.Client{Transport: newTransport(tlsutil.ClientTLS(""))}
 	peerClients := make(map[string]*http.Client)
+	peerHasFingerprint := make(map[string]bool)
 	fpToClient := make(map[string]*http.Client)
 	for _, fcfg := range cfg.ResolvedFolders {
 		for i, addr := range fcfg.Peers {
@@ -638,6 +651,9 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			fp := ""
 			if i < len(fcfg.PeerFingerprints) {
 				fp = fcfg.PeerFingerprints[i]
+			}
+			if fp != "" {
+				peerHasFingerprint[addr] = true
 			}
 			if c, exists := fpToClient[fp]; exists {
 				peerClients[addr] = c
@@ -650,15 +666,16 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	}
 
 	n := &Node{
-		cfg:            cfg,
-		deviceID:       deviceID,
-		dataDir:        dataDir,
-		folders:        make(map[string]*folderState),
-		tlsFingerprint: serverFP,
-		peerClients:    peerClients,
-		defaultClient:  defaultClient,
-		scanTrigger:    make(chan struct{}, 1),
-		firstScanDone:  make(chan struct{}),
+		cfg:                cfg,
+		deviceID:           deviceID,
+		dataDir:            dataDir,
+		folders:            make(map[string]*folderState),
+		tlsFingerprint:     serverFP,
+		peerClients:        peerClients,
+		peerHasFingerprint: peerHasFingerprint,
+		defaultClient:      defaultClient,
+		scanTrigger:        make(chan struct{}, 1),
+		firstScanDone:      make(chan struct{}),
 	}
 
 	// Set up bandwidth limiter.
@@ -1258,6 +1275,9 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	if err != nil {
 		slog.Debug("sync failed", "folder", folderID, "peer", peerAddr, "error", err)
 		state.Global.Update("filesync-peer", stateKey, state.Retrying, err.Error())
+		if strings.Contains(err.Error(), "fingerprint mismatch") {
+			state.Global.UpdateTLSStatus("filesync-peer", stateKey, "CERT MISMATCH")
+		}
 		fs.indexMu.Lock()
 		fs.peerLastError[peerAddr] = err.Error()
 		fs.indexMu.Unlock()
@@ -1281,6 +1301,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		"duration", time.Since(syncStart))
 
 	state.Global.Update("filesync-peer", stateKey, state.Connected, "")
+	state.Global.UpdateTLSStatus("filesync-peer", stateKey, n.tlsStatusFor(peerAddr))
 
 	// Detect peer restart: if remote sequence dropped below what we last saw,
 	// reset tracking and request a full exchange on the next cycle.

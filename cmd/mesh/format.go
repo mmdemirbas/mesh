@@ -449,6 +449,20 @@ func compareAddr(a, b string) bool {
 	return makeAddrKey(a).less(makeAddrKey(b))
 }
 
+// formatTLSStatus returns a colored label for a TLS status value, or "" if empty.
+func formatTLSStatus(s string) string {
+	switch s {
+	case "encrypted · verified":
+		return cGreen + "encrypted · verified" + cReset
+	case "encrypted":
+		return cGray + "encrypted" + cReset
+	case "CERT MISMATCH":
+		return cRed + "CERT MISMATCH" + cReset
+	default:
+		return ""
+	}
+}
+
 // directionSymbol returns a compact symbol for a filesync direction mode.
 func directionSymbol(dir string) string {
 	switch dir {
