@@ -1630,6 +1630,9 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					// C2: post-write verification on network filesystems.
 					if fs.isNetworkFS {
 						if err := verifyPostWrite(fs.root, action.Path, action.RemoteHash, folderID, &fs.retries, &fs.indexMu); err != nil {
+							// Conflict rename already succeeded — clean up the
+							// displaced local to avoid orphaned conflict files.
+							_ = fs.root.Remove(conflictRelPath)
 							failMu.Lock()
 							failedSeqs = append(failedSeqs, action.RemoteSequence)
 							failMu.Unlock()
