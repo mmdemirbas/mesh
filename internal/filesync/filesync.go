@@ -804,6 +804,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	ln := tls.NewListener(tcpLn, tlsutil.ServerTLS(serverCert))
 
 	slog.Info("filesync listening", "bind", ln.Addr().String(), "device_id", deviceID, "folders", len(cfg.ResolvedFolders), "tls_fingerprint", serverFP)
+	state.Global.UpdateTLSFingerprint("filesync", cfg.Bind, serverFP)
 
 	var wg sync.WaitGroup
 

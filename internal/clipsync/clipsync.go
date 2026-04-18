@@ -257,6 +257,7 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 	m := state.Global.GetMetrics("clipsync", cfg.Bind)
 	m.StartTime.Store(time.Now().UnixNano())
 	state.Global.Update("clipsync", cfg.Bind, state.Listening, "")
+	state.Global.UpdateTLSFingerprint("clipsync", cfg.Bind, serverFP)
 	for _, def := range cfg.StaticPeers {
 		for _, addr := range def.Addresses {
 			state.Global.Update("clipsync-peer", cfg.Bind+"|"+addr, state.Connected, "static")

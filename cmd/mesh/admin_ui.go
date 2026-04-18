@@ -1959,13 +1959,16 @@ function renderStats() {
   const anyScanning = folders.some(f => f.scanning);
   const healthColor = (hasErr || conflicts.length > 0) ? 'var(--red)' : anyScanning ? 'var(--cyan)' : totalQuarantine > 0 ? 'var(--yellow)' : 'var(--green)';
   const healthLabel = (hasErr || conflicts.length > 0) ? 'Error' : anyScanning ? 'Scanning' : totalQuarantine > 0 ? 'Degraded' : 'Healthy';
+  const fsFP = Object.values(state).find(c => c.type === 'filesync')?.tls_fingerprint || '';
+  const fsFPStat = fsFP ? stat('TLS Fingerprint', fsFP.replace('sha256:',''), 'sha256', 'var(--green)') : '';
   setHTML('fs-stats',
     stat('Sync Health', healthLabel, '', healthColor) +
     stat('Folders', folders.length, '') +
     stat('Total Files', totalFiles.toLocaleString(), '') +
     stat('Total Size', fmtBytes(totalBytes), '') +
     stat('Conflicts', conflicts.length, '', conflicts.length > 0 ? 'var(--red)' : 'var(--green)') +
-    stat('Quarantined', totalQuarantine, '', totalQuarantine > 0 ? 'var(--yellow)' : 'var(--green)'));
+    stat('Quarantined', totalQuarantine, '', totalQuarantine > 0 ? 'var(--yellow)' : 'var(--green)') +
+    fsFPStat);
 }
 
 function stat(label, value, sub, color) {
@@ -2999,9 +3002,12 @@ function renderClipsync() {
   const sends = clipActivities.filter(a => a.direction === 'send').length;
   const recvs = clipActivities.filter(a => a.direction === 'receive').length;
   const totalSize = clipActivities.reduce((s,a) => s + (a.size||0), 0);
+  const csFP = Object.values(state).find(c => c.type === 'clipsync')?.tls_fingerprint || '';
+  const fpStat = csFP ? stat('TLS Fingerprint', csFP.replace('sha256:',''), 'sha256', 'var(--green)') : '';
   setHTML('cs-stats',
     stat('Total Events', clipActivities.length, sends+' sent, '+recvs+' received') +
-    stat('Total Size', fmtBytes(totalSize), ''));
+    stat('Total Size', fmtBytes(totalSize), '') +
+    fpStat);
 
   TF.setRows('cs', clipActivities);
   setHTML('cs-thead', TF.thead('cs'));

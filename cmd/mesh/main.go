@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"github.com/mmdemirbas/mesh/internal/gateway"
 	"github.com/mmdemirbas/mesh/internal/proxy"
 	"github.com/mmdemirbas/mesh/internal/state"
+	"github.com/mmdemirbas/mesh/internal/tlsutil"
 	"github.com/mmdemirbas/mesh/internal/tunnel"
 	"golang.org/x/term"
 )
@@ -823,12 +825,25 @@ func statusCmd(nodeNames []string, configPath string, watch bool) {
 	}
 }
 
+// certFingerprint loads an existing cert from certPath/keyPath and returns its
+// fingerprint. Returns "(not yet generated)" if the cert does not exist yet.
+func certFingerprint(certPath, keyPath string) string {
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return "(not yet generated)"
+	}
+	return tlsutil.Fingerprint(cert)
+}
+
 func configCmd(nodeNames []string, configPath string) {
 	allCfgs, err := config.LoadUnvalidated(configPath)
 	if err != nil {
 		fmt.Printf("%s⨯ Could not load configuration: %v%s\n", cRed, err, cReset)
 		os.Exit(1)
 	}
+
+	home, _ := os.UserHomeDir()
+	tlsDir := filepath.Join(home, ".mesh", "tls")
 
 	exitCode := 0
 	for _, name := range nodeNames {
@@ -844,6 +859,34 @@ func configCmd(nodeNames []string, configPath string) {
 		}
 		s, _ := renderStatus(cfg, nil, nil, name)
 		fmt.Print(s)
+
+		// Print TLS fingerprints for each filesync/clipsync component.
+		var tlsLines []string
+		for _, fs := range cfg.Filesync {
+			certPath, keyPath := fs.TLS.CertFile, fs.TLS.KeyFile
+			if certPath == "" {
+				certPath = filepath.Join(tlsDir, "filesync.crt")
+				keyPath = filepath.Join(tlsDir, "filesync.key")
+			}
+			fp := certFingerprint(certPath, keyPath)
+			tlsLines = append(tlsLines, fmt.Sprintf("  filesync (%s): %s%s%s", fs.Bind, cCyan, fp, cReset))
+		}
+		for _, cs := range cfg.Clipsync {
+			certPath, keyPath := cs.TLS.CertFile, cs.TLS.KeyFile
+			if certPath == "" {
+				certPath = filepath.Join(tlsDir, "clipsync.crt")
+				keyPath = filepath.Join(tlsDir, "clipsync.key")
+			}
+			fp := certFingerprint(certPath, keyPath)
+			tlsLines = append(tlsLines, fmt.Sprintf("  clipsync (%s): %s%s%s", cs.Bind, cCyan, fp, cReset))
+		}
+		if len(tlsLines) > 0 {
+			fmt.Printf("%sTLS fingerprints:%s\n", cBold, cReset)
+			for _, l := range tlsLines {
+				fmt.Println(l)
+			}
+			fmt.Println()
+		}
 	}
 	if exitCode != 0 {
 		os.Exit(exitCode)

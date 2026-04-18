@@ -59,16 +59,17 @@ func (m *Metrics) Reset() {
 }
 
 type Component struct {
-	Type        string    `json:"type"`                 // "proxy", "relay", "server", "connection"
-	ID          string    `json:"id"`                   // unique identifier
-	Status      Status    `json:"status"`               // current status
-	Message     string    `json:"message"`              // error or target info
-	BoundAddr   string    `json:"bound_addr"`           // active resolved listener address
-	PeerAddr    string    `json:"peer_addr"`            // resolved remote peer address (connections)
-	FileCount   int       `json:"file_count,omitempty"` // tracked file count (filesync folders)
-	TotalSize   int64     `json:"total_size,omitempty"` // total bytes of tracked files (filesync)
-	LastSync    time.Time `json:"last_sync"`            // last successful sync time (filesync)
-	LastUpdated time.Time `json:"last_updated"`         // used by TTL eviction
+	Type           string    `json:"type"`                      // "proxy", "relay", "server", "connection"
+	ID             string    `json:"id"`                        // unique identifier
+	Status         Status    `json:"status"`                    // current status
+	Message        string    `json:"message"`                   // error or target info
+	BoundAddr      string    `json:"bound_addr"`                // active resolved listener address
+	PeerAddr       string    `json:"peer_addr"`                 // resolved remote peer address (connections)
+	TLSFingerprint string    `json:"tls_fingerprint,omitempty"` // "sha256:<hex>" for TLS-enabled components
+	FileCount      int       `json:"file_count,omitempty"`      // tracked file count (filesync folders)
+	TotalSize      int64     `json:"total_size,omitempty"`      // total bytes of tracked files (filesync)
+	LastSync       time.Time `json:"last_sync"`                 // last successful sync time (filesync)
+	LastUpdated    time.Time `json:"last_updated"`              // used by TTL eviction
 }
 
 type State struct {
@@ -131,6 +132,16 @@ func (s *State) UpdateLastSync(compType, id string, t time.Time) {
 	key := compType + ":" + id
 	comp := s.components[key]
 	comp.LastSync = t
+	comp.LastUpdated = time.Now()
+	s.components[key] = comp
+}
+
+func (s *State) UpdateTLSFingerprint(compType, id, fingerprint string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := compType + ":" + id
+	comp := s.components[key]
+	comp.TLSFingerprint = fingerprint
 	comp.LastUpdated = time.Now()
 	s.components[key] = comp
 }
