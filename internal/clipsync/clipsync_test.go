@@ -606,35 +606,7 @@ func newTestNode(t *testing.T, _ []string) (*Node, string, func()) {
 		w.Header().Set("Content-Type", "application/x-protobuf")
 		_, _ = w.Write(data)
 	})
-	mux.HandleFunc("/discover", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if !n.canReceiveFrom(r.RemoteAddr) {
-			http.Error(w, "Forbidden by ACL", http.StatusForbidden)
-			return
-		}
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1024))
-		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		var msg pb.DiscoverRequest
-		if err := proto.Unmarshal(body, &msg); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		if msg.GetId() == n.id {
-			return
-		}
-		if !n.groupOverlaps(msg.GetGroup()) {
-			return
-		}
-		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		peerAddr := net.JoinHostPort(host, fmt.Sprintf("%d", msg.GetPort()))
-		n.registerPeer(peerAddr, msg.GetHash(), "http")
-	})
+	mux.HandleFunc("/discover", n.serveDiscover)
 	fileServer := http.StripPrefix("/files/", http.FileServer(http.Dir(n.filesDir)))
 	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
 		if !n.canReceiveFrom(r.RemoteAddr) {
@@ -1876,5 +1848,59 @@ func TestSyncEndpoint_RejectsOversizedBody(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d for oversized body", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+// --- S11: SSRF prevention — beacon port validation ---
+
+func TestDiscoverEndpoint_RejectsPrivilegedPort(t *testing.T) {
+	t.Parallel()
+	n, url, cleanup := newTestNode(t, []string{"all"})
+	defer cleanup()
+	n.config.LANDiscoveryGroup = []string{"all"}
+
+	for _, port := range []int32{0, 1, 80, 443, 1023} {
+		body, _ := proto.Marshal(&pb.DiscoverRequest{
+			Id: "remote-node", Port: port, Hash: "hash-abc", Group: "all",
+		})
+		resp, err := http.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("port %d: POST /discover failed: %v", port, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("port %d: status = %d, want %d", port, resp.StatusCode, http.StatusBadRequest)
+		}
+	}
+
+	n.peersMu.RLock()
+	defer n.peersMu.RUnlock()
+	if len(n.peers) != 0 {
+		t.Errorf("peer count = %d, want 0 (privileged ports must be rejected)", len(n.peers))
+	}
+}
+
+func TestDiscoverEndpoint_AcceptsValidPort(t *testing.T) {
+	t.Parallel()
+	n, url, cleanup := newTestNode(t, []string{"all"})
+	defer cleanup()
+	n.config.LANDiscoveryGroup = []string{"all"}
+
+	body, _ := proto.Marshal(&pb.DiscoverRequest{
+		Id: "remote-node", Port: 7755, Hash: "hash-abc", Group: "all",
+	})
+	resp, err := http.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /discover failed: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	n.peersMu.RLock()
+	defer n.peersMu.RUnlock()
+	if len(n.peers) != 1 {
+		t.Errorf("peer count = %d, want 1 (valid port should be accepted)", len(n.peers))
 	}
 }

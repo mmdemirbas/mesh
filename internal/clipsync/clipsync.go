@@ -60,6 +60,12 @@ const (
 	// Kept very low — typical LAN setups have 2-10 peers.
 	maxPeers = 32
 
+	// minBeaconPort / maxBeaconPort bound the port value accepted from
+	// untrusted UDP beacons and HTTP discover requests (S11: SSRF prevention).
+	// Unprivileged ports only; 0 and privileged ports are never valid for mesh.
+	minBeaconPort = 1024
+	maxBeaconPort = 65535
+
 	// activityHistorySize is the number of recent clipboard activities to retain.
 	activityHistorySize = 20
 )
@@ -391,6 +397,46 @@ func (n *Node) primaryGroup() string {
 	return ""
 }
 
+// serveDiscover handles POST /discover — HTTP-based peer registration used
+// when UDP unicast replies are blocked by firewalls.
+func (n *Node) serveDiscover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !n.canReceiveFrom(r.RemoteAddr) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1024))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	var msg pb.DiscoverRequest
+	if err := proto.Unmarshal(body, &msg); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if msg.GetId() == n.id {
+		return // self-discovery
+	}
+	if !n.groupOverlaps(msg.GetGroup()) {
+		return // different group
+	}
+	// S11: reject out-of-range ports from untrusted discover request.
+	if p := msg.GetPort(); p < minBeaconPort || p > maxBeaconPort {
+		http.Error(w, "invalid port", http.StatusBadRequest)
+		return
+	}
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	peerAddr := net.JoinHostPort(host, fmt.Sprintf("%d", msg.GetPort()))
+	_, needsPull := n.registerPeer(peerAddr, msg.GetHash(), "http")
+	if needsPull {
+		go n.pullHTTP(peerAddr)
+	}
+}
+
 // containsIP checks if the IP in host matches any entry in the slice,
 // handling IPv6-mapped IPv4 addresses (e.g., "::ffff:192.168.1.5" matches "192.168.1.5").
 func containsIP(slice []string, host string) bool {
@@ -694,39 +740,7 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 	// HTTP-based peer discovery for firewall-blocked networks.
 	// When a peer discovers us via UDP, it calls this endpoint so we
 	// also register it — even if our UDP replies cannot reach it.
-	mux.HandleFunc("/discover", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if !n.canReceiveFrom(r.RemoteAddr) {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1024))
-		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		var msg pb.DiscoverRequest
-		if err := proto.Unmarshal(body, &msg); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		if msg.GetId() == n.id {
-			return // self-discovery
-		}
-		if !n.groupOverlaps(msg.GetGroup()) {
-			return // different group
-		}
-		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		peerAddr := net.JoinHostPort(host, fmt.Sprintf("%d", msg.GetPort()))
-
-		_, needsPull := n.registerPeer(peerAddr, msg.GetHash(), "http")
-		if needsPull {
-			go n.pullHTTP(peerAddr)
-		}
-	})
+	mux.HandleFunc("/discover", n.serveDiscover)
 
 	// Serve files for peers to download, with ACL check
 	fileServer := http.StripPrefix("/files/", http.FileServer(http.Dir(n.filesDir)))
@@ -1350,6 +1364,11 @@ func (n *Node) runUDPServer(ctx context.Context, magicHeader string, port int) {
 
 		// 5. Zero-allocation IP extraction (bypasses SplitHostPort overhead)
 		if remoteAddr == nil || remoteAddr.IP == nil {
+			continue
+		}
+		// S11: reject out-of-range ports from untrusted beacon to prevent SSRF.
+		if p := msg.GetPort(); p < minBeaconPort || p > maxBeaconPort {
+			slog.Debug("clipsync: dropping beacon with invalid port", "port", p, "peer", remoteAddr.IP)
 			continue
 		}
 		peerAddr := fmt.Sprintf("%s:%d", remoteAddr.IP.String(), msg.GetPort())
