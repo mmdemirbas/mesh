@@ -23,7 +23,7 @@ When working on items from this plan, follow these rules:
 
 **Post-batch review:** After completing a batch of features or fixes, run a code review across all modified files before moving on. The B1-B6 incident showed that focused feature work introduced 6 bugs in adjacent code: a blocking call in a request loop, a double-close without sync.Once, a compile-time constant that should have been runtime, a wrong relative path, a missing SIGWINCH handler, and an incorrect defer order. All were found only by a systematic post-batch review — none would have been caught by feature-level testing alone.
 
-**Move done items to DONE.md:** When a roadmap item is finished, remove it from PLAN.md (the table row and any detail section) and append it to DONE.md under the matching tier heading. Keeps PLAN.md focused on what is still in flight; DONE.md is the audit trail.
+**Done items:** When a roadmap item is finished, remove it from PLAN.md (the table row and any detail section). Git history is the audit trail.
 
 ---
 
@@ -116,18 +116,16 @@ When a node receives a beacon, it uses `msg.GetPort()` to construct the peer's H
 
 **Effort:** S — a single validation check on `msg.GetPort()` in the beacon handler.
 
-### Correctness Gaps (from FILESYNC-GAPS.md audit)
-
-Source: gap analysis auditing filesync against Syncthing's battle-tested implementation (RESEARCH-SYNCTHING.md §17-18). Prioritized by data resilience risk.
+### Correctness Gaps (from gap analysis vs Syncthing — see docs/research/)
 
 | ID | Priority | Item | Notes |
 |----|----------|------|-------|
-| [G1](#g1-preserve-mtime-on-downloaded-files) | P0 | Preserve mtime on downloaded files | Downloaded files get wall-clock mtime, defeating fast-path. Chtimes before rename. |
-| [G2](#g2-disk-space-pre-check) | P0 | Disk space pre-check before temp file write | Full disk shows as hash mismatch. statvfs before write. |
-| [G3](#g3-folder-health-marker) | P0 | Folder health marker (.meshfolder) | Detect unmounted/missing folder root before sync. |
-| [G4](#g4-conflict-file-count-limit) | P2 | Conflict file count limit per path | Unbounded .sync-conflict-* accumulation. Cap at 10, prune oldest. |
-| [G5](#g5-exponential-backoff-on-pull-failure) | P2 | Exponential backoff on pull failure | Replace all-or-nothing quarantine with progressive backoff. |
-| [G6](#g6-in_q_overflow-immediate-rescan) | P1 | IN_Q_OVERFLOW triggers immediate rescan | fsnotify errors don't trigger rescan. Up to 60s blind window. |
+| G1 | P0 | Preserve mtime on downloaded files | Downloaded files get wall-clock mtime, defeating fast-path scan. Chtimes before rename. |
+| G2 | P2 | Disk space pre-check before temp file write | Best-effort: clearer error message ("disk full" vs "hash mismatch"). Inherently racy. |
+| G3 | P0 | Folder device-ID guard | Record filesystem device ID at first scan; refuse to sync if device changes (detects unmounted/remounted path). No marker files in synced tree. |
+| G4 | P2 | Conflict file count limit per path | Unbounded .sync-conflict-* accumulation. Cap at 10, prune oldest. |
+| G5 | P2 | Exponential backoff on pull failure | Replace all-or-nothing 3-strike quarantine with progressive backoff + reset on reconnect. |
+| G6 | P1 | IN_Q_OVERFLOW triggers immediate rescan | fsnotify errors don't trigger rescan. Up to 60s blind window. |
 
 ### Performance
 
@@ -165,7 +163,7 @@ Source: perf-log analysis (client-perf.jsonl 1511 lines / server-perf.jsonl 355 
 
 **PB: Skip unchanged peer persist** — **DONE** (already addressed by P17a). `persistFolder` uses `indexDirty`/`peersDirty` flags and skips serialization when nothing changed.
 
-PC, PD, PE done — see DONE.md.
+PC, PD, PE done.
 
 #### PF: Trie-Based Ignore with Cursor Propagation
 
@@ -176,7 +174,7 @@ PC, PD, PE done — see DONE.md.
 - **Risk:** Medium — complex implementation, must exactly match gitignore semantics. Extensive test suite required.
 - **Phase:** 2. Design before implement.
 
-PG, PH, PI, PJ done — see DONE.md.
+PG, PH, PI, PJ done.
 
 #### PK: Clone Elimination (COW)
 
@@ -431,7 +429,7 @@ PG, PH, PI, PJ done — see DONE.md.
 
 Autonomous deep audit. The first three items (B7–B9) already have failing tests committed on `main` in TDD style; fixes land as separate commits per bug. H1–H14 are hunt tasks — directed audits of the codebase that a Claude session can work through sequentially, writing a failing test for every finding and fixing it in a follow-up commit.
 
-**Entry point.** The user invokes this tier by task ID in a clean context. The Claude reads this entire section, starts at [Autonomous Run Protocol](#tier-5-autonomous-run-protocol), then works through [Known Bugs](#tier-5-known-bugs) first and [Hunt Tasks](#tier-5-hunt-tasks) second. Progress is recorded by moving items to DONE.md as each is completed. The session stops only for the exit conditions in the protocol.
+**Entry point.** The user invokes this tier by task ID in a clean context. The Claude reads this entire section, starts at [Autonomous Run Protocol](#tier-5-autonomous-run-protocol), then works through [Known Bugs](#tier-5-known-bugs) first and [Hunt Tasks](#tier-5-hunt-tasks) second. The session stops only for the exit conditions in the protocol.
 
 ### Tier 5 Autonomous Run Protocol
 
@@ -445,11 +443,6 @@ Read this before starting any work in Tier 5.
 4. Never squash (a) and (b) into one commit — the point is that `git bisect` can confirm (a) reproduces and (b) fixes.
 5. Every commit runs `task check` (or `FAST=1 task check` while iterating). Do not present commits that fail the gate.
 6. When a hunt turns up zero findings after the methodology has been applied in full, land a short `docs: <Hn> audit — no findings` commit with a one-paragraph note in the hunt's detail section below. Don't skip silently.
-
-**Move-to-DONE cadence:**
-
-- The moment a bug is fixed and committed, move its row from Tier 5 to DONE.md (per the implementation guideline). The hunt ID stays in Tier 5 until every follow-up bug from that hunt is fixed AND the "no more findings" commit is landed.
-- DONE.md entries for B7–B9 should reference the commit hash of the failing-test commit and the fix commit.
 
 **Stop conditions.** Pause and ask the user only when:
 
@@ -471,11 +464,11 @@ For anything else — code reads, additional test cases, refactors that preserve
 
 ### Tier 5 Known Bugs
 
-All B7–B9 fixed. See DONE.md.
+All B7–B9 fixed.
 
 ### Tier 5 Hunt Tasks
 
-All hunt tasks (H1–H34) completed. See DONE.md.
+All hunt tasks (H1–H34) completed.
 
 ### F3: SSH client subcommands
 
@@ -590,11 +583,13 @@ All hunt tasks (H1–H34) completed. See DONE.md.
 
 ---
 
-## Done
+## Ignored
 
-See [DONE.md](DONE.md).
+Items considered and deliberately skipped.
 
----
+| ID | Item | Reason |
+|----|------|--------|
+| RD1 | Static IP fallbacks for `.local` targets | DNS result cache (P15, `384423c`) already does this dynamically via `resolvedAddrCache`. Hardcoding IPs is fragile (DHCP leases change) and redundant. |
 
 ---
 
