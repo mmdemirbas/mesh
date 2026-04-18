@@ -409,6 +409,7 @@ func downloadBundle(ctx context.Context, client *http.Client, peerAddr, folderID
 	tr := tar.NewReader(gr)
 
 	received := make(map[string]bool, len(entries))
+	suffix := peerSuffix(peerAddr)
 
 	for {
 		hdr, err := tr.Next()
@@ -430,7 +431,6 @@ func downloadBundle(ctx context.Context, client *http.Client, peerAddr, folderID
 		}
 
 		// Write to temp, hash during copy.
-		suffix := peerSuffix(peerAddr)
 		tmpName := fmt.Sprintf(".mesh-tmp-%s-%s", filepath.Base(hdr.Name), suffix)
 		tmpDir := filepath.Dir(hdr.Name)
 		tmpRelPath := filepath.Join(tmpDir, tmpName)

@@ -1295,11 +1295,17 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		return
 	}
 
-	downloads := countActions(actions, ActionDownload)
-	conflicts := countActions(actions, ActionConflict)
-	deletes := countActions(actions, ActionDelete)
+	var downloads, conflicts, deletes int
 	var totalBytes int64
 	for _, a := range actions {
+		switch a.Action {
+		case ActionDownload:
+			downloads++
+		case ActionConflict:
+			conflicts++
+		case ActionDelete:
+			deletes++
+		}
 		totalBytes += a.RemoteSize
 	}
 	slog.Info("sync actions", "folder", folderID, "peer", peerAddr, "downloads", downloads, "conflicts", conflicts, "deletes", deletes)
@@ -2001,17 +2007,6 @@ func localMtime(fs *folderState, relPath string) int64 {
 		return entry.MtimeNS
 	}
 	return 0
-}
-
-// countActions counts entries with the given action type.
-func countActions(actions []DiffEntry, action DiffAction) int {
-	count := 0
-	for _, a := range actions {
-		if a.Action == action {
-			count++
-		}
-	}
-	return count
 }
 
 // generateDeviceID creates a random 16-character hex device identifier.

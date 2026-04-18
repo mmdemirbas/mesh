@@ -122,6 +122,18 @@ When a node receives a beacon, it uses `msg.GetPort()` to construct the peer's H
 |------|-----------|----------------------------------------------|-------|
 | [P3](#p3-adaptive-watchscan) | filesync | Adaptive watch/scan | Self-tuning heuristic. Design below. |
 | P14  | tunnel | Parallel target probing (Happy Eyeballs) | Stagger-start all targets concurrently in `probeTarget` instead of sequential. First to connect wins, respecting target order preference within a short tie-break window. Reduces worst-case probe time from sum(timeouts) to max(stagger, fastest_target). Nice-to-have. |
+| [PA](#pa-pe-phase-1--low-hanging-fruit) | filesync | Cache peerSuffix per sync cycle | SHA-256 recomputed per download; cache once per peer. Phase 1. |
+| [PA](#pa-pe-phase-1--low-hanging-fruit) | filesync | Single-pass action counting | 4 passes over actions slice → 1. Phase 1. |
+| [PA](#pa-pe-phase-1--low-hanging-fruit) | filesync | Single map lookup in handleBundle | Double map lookup in protocol.go. Phase 1. |
+| [PF](#pf-trie-based-ignore-with-cursor-propagation) | filesync | Trie-based ignore with cursor propagation | Segment trie replaces linear pattern scan. Phase 2. |
+| [PG](#pg-secondary-sequence-index) | filesync | Secondary sequence index for O(log N) delta exchange | Sorted-by-seq slice avoids full map iteration. Phase 2. |
+| [PH](#ph-incremental-hashing-via-sha-256-state-checkpoint) | filesync | Incremental hashing via SHA-256 state checkpoint | Skip re-hashing unchanged prefix of appended files. Phase 2. |
+| [PI](#pi-sha-256-as-32byte) | filesync | SHA-256 as [32]byte in FileEntry | Eliminates hex encode/decode and 340k string allocs per exchange. Phase 2. |
+| [PJ](#pj-sync-failure-reasons-in-perf-log) | filesync | Sync failure reasons in perf log | Currently 70% sync failures with no reason. Phase 2. |
+| [PK](#pk-clone-elimination-cow) | filesync | Clone elimination (COW or change-map) | O(N) index clone → O(1) snapshot. Phase 3. |
+| [PL](#pl-incremental-deletion-detection) | filesync | Incremental deletion detection | O(N) full-index scan → track via fsnotify/scan diff. Phase 3. |
+| [PM](#pm-directory-keyed-child-index) | filesync | Directory-keyed child index for error protection | O(N×M) error-path scan → O(children). Phase 3. |
+| [PN](#pn-incremental-recomputecache) | filesync | Incremental recomputeCache | O(N) rebuild → incremental update on swap. Phase 3. |
 
 #### P3: Adaptive Watch/Scan
 
@@ -138,6 +150,108 @@ Goal: dynamically watch frequently-changing paths with fsnotify, poll the rest. 
 - *Directory deletion:* fsnotify Remove event; stale cleanup (5-min interval) as safety net.
 - *Large initial scan:* No promotions on first scan. Second scan begins adaptive behavior.
 - *Watch limit pressure:* Sort by frequency, promote top N that fit.
+
+#### PA–PE: Phase 1 — Low-Hanging Fruit
+
+Source: perf-log analysis (client-perf.jsonl 1511 lines / server-perf.jsonl 355 lines, 15 folders, 310k files) + deep algorithmic audit. These items have clear wins with minimal risk.
+
+**PA: Move ignore check before stat** — **DONE** (already addressed by P20c parallel walker). The walker in `readDirEntries` already evaluates `ignore.shouldIgnore()` at line 519, before `d.Info()` stat at line 544. No work needed.
+
+**PB: Skip unchanged peer persist** — **DONE** (already addressed by P17a). `persistFolder` uses `indexDirty`/`peersDirty` flags and skips serialization when nothing changed.
+
+**PC: Cache peerSuffix per sync cycle**
+
+- **Problem:** `peerSuffix(peerAddr)` computes `sha256.Sum256([]byte(peerAddr))` on every call. In `downloadBundle`, this runs once per file in the tar stream. For a 1000-file bundle, that's 1000 redundant SHA-256 computations of the same 20-byte address string.
+- **Solution:** Compute once at the top of each download function and pass the suffix through. The three call sites are `downloadToVerifiedTemp` (line 79), `downloadFileDelta` (line 299), and `downloadBundle` (line 433).
+- **Expected gain:** Eliminates ~N SHA-256 calls per bundle transfer. Small absolute saving but zero-risk cleanup.
+
+**PD: Single-pass action counting**
+
+- **Problem:** `filesync.go:1298-1304` makes 3 `countActions()` calls (each O(N) over the actions slice) plus a separate loop for `totalBytes`. 4 passes total.
+- **Solution:** Replace with a single loop that counts downloads, conflicts, deletes, and sums bytes in one pass.
+- **Expected gain:** 4N → N iterations. For 310k-file folders with large action lists, this is measurable.
+
+**PE: Single map lookup in handleBundle**
+
+- **Problem:** `protocol.go:472-475` checks `folder.index.Files[p]` twice — once with `, ok` and once to read `.Deleted`. Two map lookups per path.
+- **Solution:** Use `entry, ok := folder.index.Files[p]; ok && !entry.Deleted` pattern.
+- **Expected gain:** Halves map lookups in the bundle handler hot path. Small but correct.
+
+#### PF: Trie-Based Ignore with Cursor Propagation
+
+- **Problem:** Ignore matching is the #1 scan bottleneck (3.6s per scan on the 310k-file client). Current `shouldIgnore` evaluates patterns linearly — O(P) per path segment where P = pattern count. For deep trees this is O(depth × P) per file.
+- **Solution:** Build a segment-based trie from all ignore patterns at config load time. Each trie node holds: `{children map[string]*trieNode, wildcardChildren []*trieNode, terminal bool, negate bool}`. During filesystem walk, propagate a *cursor* (pointer into the trie) from parent to child directory. Each directory descent is O(1) amortized trie lookup + wildcard fan-out instead of re-evaluating all patterns from scratch.
+- **Design notes:** Gitignore semantics require: (1) later rules override earlier, (2) negation patterns un-ignore, (3) directory-only patterns (trailing `/`), (4) `**` matches zero or more segments. The trie handles these by storing rule priority and checking negate flags at terminals. `**` nodes create self-loops (cursor stays at same node AND advances to child).
+- **Expected gain:** 10-100x for deep trees with many patterns. For shallow trees with few patterns, overhead is comparable to linear scan.
+- **Risk:** Medium — complex implementation, must exactly match gitignore semantics. Extensive test suite required.
+- **Phase:** 2. Design before implement.
+
+#### PG: Secondary Sequence Index
+
+- **Problem:** `buildIndexExchange` (filesync.go:1842) iterates the full `Files` map to find entries with `Sequence > lastSentSeq`. For a 310k-entry index, this is 306M map iterations per hour (perf log data).
+- **Solution:** Maintain a secondary slice sorted by sequence number. On each scan, append new/updated entries. For delta exchange, binary-search to find the start position, then iterate only the tail.
+- **Data structure:** `[]seqEntry` where `seqEntry = {Sequence int64, Path string}`. Sorted by Sequence. Binary search via `sort.Search`. Updated in `bumpSequence`.
+- **Expected gain:** O(log N + delta) instead of O(N) per exchange. For steady-state syncs (delta << N), this is orders of magnitude faster.
+- **Risk:** Must keep the secondary index in sync with the primary map. Deletions create tombstone entries that need periodic compaction.
+- **Phase:** 2.
+
+#### PH: Incremental Hashing via SHA-256 State Checkpoint
+
+- **Problem:** Files that grow by appending (logs, databases, journals) are fully re-hashed on every scan. A 1 GB log file that grew by 4 KB still costs a full 1 GB read + hash.
+- **Solution:** Go's `crypto/sha256` implements `encoding.BinaryMarshaler`. After hashing a file, serialize the hasher state (`h.(encoding.BinaryMarshaler).MarshalBinary()`) and store it alongside the file entry. On the next scan, if the file's size grew and mtime changed but the first `previousSize` bytes are presumed unchanged (same inode, size ≥ previous), restore the hasher state, seek to `previousSize`, and hash only the appended bytes.
+- **Validation:** After incremental hash, if the result differs from a full hash of a random sample (1 in 100 files), log a warning and fall back to full hash. This catches filesystem-level corruption or partial overwrites.
+- **Storage:** Add `HashState []byte` field to `FileEntry` (gob-encoded sha256 internal state, ~100 bytes). Only populated for files above a size threshold (e.g., 1 MB) to avoid bloating small-file indexes.
+- **Expected gain:** For append-only workloads (log directories), reduces hash I/O from O(filesize) to O(delta). A 1 GB file with 4 KB append: 250,000x less I/O.
+- **Risk:** Medium — relies on append-only assumption. Files modified in the middle (random writes) produce wrong incremental hashes. The validation sample catches this statistically.
+- **Phase:** 2.
+
+#### PI: SHA-256 as [32]byte
+
+- **Problem:** `FileEntry.SHA256` is `string` (hex-encoded, 64 chars). Every index exchange encodes/decodes 310k hex strings. Each string allocation is 64 bytes + header.
+- **Solution:** Store as `[32]byte` in memory. Encode to hex only at serialization boundaries (YAML persist, protobuf exchange, log output).
+- **Expected gain:** Eliminates 340k string allocations per exchange. Halves hash storage (32 bytes vs 64 chars + 16 bytes header). Faster comparison (`==` on [32]byte vs string).
+- **Risk:** Medium — touches every hash comparison and serialization site. Requires custom YAML marshaler.
+- **Phase:** 2.
+
+#### PJ: Sync Failure Reasons in Perf Log
+
+- **Problem:** Perf logs show 70% sync failure rate but no failure reason. Debugging requires correlating with the main log file.
+- **Solution:** Add `failure_reason` field to perf log sync events. Capture the first error from each failed sync cycle.
+- **Expected gain:** Direct diagnosis from perf logs without log correlation.
+- **Risk:** Low.
+- **Phase:** 2.
+
+#### PK: Clone Elimination (COW)
+
+- **Problem:** `FileIndex.clone()` (index.go:89-97) copies the entire `Files` map on every persist snapshot. For 310k entries, this is ~50 MB allocation per persist.
+- **Solution:** Copy-on-write: `clone()` returns a read-only reference sharing the underlying map. Mutations go through a change-set overlay. Flatten on persist.
+- **Expected gain:** O(1) snapshot instead of O(N) copy. For the client's 15 folders, eliminates ~750 MB/hr of transient allocations.
+- **Risk:** High — COW adds complexity to every map access. Bugs manifest as data corruption.
+- **Phase:** 3.
+
+#### PL: Incremental Deletion Detection
+
+- **Problem:** Deletion detection (index.go:834-848) iterates the full index to find entries not seen in the current scan. O(N) per scan.
+- **Solution:** Track "seen" paths during scan in a set. After scan, iterate only the set difference. Or: use fsnotify DELETE events to mark deletions immediately, with periodic full scan as safety net.
+- **Expected gain:** Reduces deletion detection from O(N) to O(deleted) in the common case (few deletions).
+- **Risk:** Low-medium. fsnotify can miss events; the periodic scan safety net is essential.
+- **Phase:** 3.
+
+#### PM: Directory-Keyed Child Index
+
+- **Problem:** Error-path protection (index.go:665-670) scans the full index to find children of a failed directory. O(N×M) where M = failed directories.
+- **Solution:** Maintain a `dirChildren map[string][]string` secondary index. On scan, populate incrementally. On error, look up O(children) instead of O(N).
+- **Expected gain:** O(children) vs O(N) per failed directory. Rarely hit in practice but prevents pathological slowdowns.
+- **Risk:** Low — secondary index is append-only during scan.
+- **Phase:** 3.
+
+#### PN: Incremental recomputeCache
+
+- **Problem:** `recomputeCache` (index.go:340-350) rebuilds the entire `liveFiles` set from the full index after every swap. O(N).
+- **Solution:** Track additions/removals during scan diff and apply incrementally to the cache.
+- **Expected gain:** O(delta) vs O(N) per scan cycle.
+- **Risk:** Low — cache is advisory (used for `claimPath` dedup). Stale entries cause redundant downloads, not data loss.
+- **Phase:** 3.
 
 ### UX & CLI
 

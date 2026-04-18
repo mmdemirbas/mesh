@@ -472,7 +472,7 @@ func (s *server) handleBundle(w http.ResponseWriter, r *http.Request) {
 	folder.indexMu.RLock()
 	indexedPaths := make(map[string]bool, len(req.Paths))
 	for _, p := range req.Paths {
-		if _, ok := folder.index.Files[p]; ok && !folder.index.Files[p].Deleted {
+		if entry, ok := folder.index.Files[p]; ok && !entry.Deleted {
 			indexedPaths[p] = true
 		}
 	}
