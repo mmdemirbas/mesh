@@ -28,7 +28,26 @@ import (
 const (
 	maxTempFileAge  = 24 * time.Hour
 	maxSyncFileSize = 4 * 1024 * 1024 * 1024 // 4 GB per file
+	diskSpaceMargin = 64 * 1024 * 1024       // G2: 64 MB safety margin on disk space checks
 )
+
+// checkDiskSpace returns an error if the filesystem containing path has less
+// than needed+diskSpaceMargin bytes available. Returns nil when the check
+// cannot be performed (unsupported platform, stat error) — best effort only.
+func checkDiskSpace(path string, needed int64) error {
+	if needed <= 0 {
+		return nil
+	}
+	avail, ok := availableBytes(path)
+	if !ok {
+		return nil
+	}
+	required := uint64(needed) + diskSpaceMargin
+	if avail < required {
+		return fmt.Errorf("insufficient disk space: need %d bytes, have %d bytes available", required, avail)
+	}
+	return nil
+}
 
 // peerSuffix returns a short deterministic suffix for a peer address, used
 // to isolate per-peer temp files and prevent concurrent download corruption.
@@ -108,6 +127,13 @@ func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, 
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("peer returned %d for %s", resp.StatusCode, relPath)
+	}
+
+	// G2: pre-flight disk space check. ContentLength is the remaining bytes
+	// to download (already excludes the resumed offset). Best-effort: skip
+	// when Content-Length is absent (-1) or platform is unsupported.
+	if err := checkDiskSpace(root.Name(), resp.ContentLength); err != nil {
+		return "", fmt.Errorf("download %s: %w", relPath, err)
 	}
 
 	// Open temp file for writing (append if resuming).
@@ -425,6 +451,13 @@ func downloadBundle(ctx context.Context, client *http.Client, peerAddr, folderID
 		}
 
 		if err := validateRelPath(hdr.Name); err != nil {
+			continue
+		}
+
+		// G2: pre-flight disk space check per bundle entry.
+		if err := checkDiskSpace(root.Name(), hdr.Size); err != nil {
+			slog.Warn("bundle disk space check failed, skipping entry",
+				"folder", folderID, "path", hdr.Name, "error", err)
 			continue
 		}
 

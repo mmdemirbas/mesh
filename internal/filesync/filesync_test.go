@@ -5849,6 +5849,63 @@ func TestFolderDeviceID(t *testing.T) {
 	}
 }
 
+// --- G2: disk space pre-check tests ---
+
+func TestAvailableBytes_ReturnsNonZeroForRealDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	avail, ok := availableBytes(dir)
+	if !ok {
+		t.Skip("availableBytes not supported on this platform")
+	}
+	if avail == 0 {
+		t.Fatal("available bytes should be > 0 for a real directory")
+	}
+}
+
+func TestCheckDiskSpace_SkipsWhenNeededIsZero(t *testing.T) {
+	t.Parallel()
+	// needed=0 should always pass regardless of disk state.
+	if err := checkDiskSpace(t.TempDir(), 0); err != nil {
+		t.Errorf("checkDiskSpace with 0 bytes should not fail: %v", err)
+	}
+}
+
+func TestCheckDiskSpace_SkipsWhenNeededIsNegative(t *testing.T) {
+	t.Parallel()
+	// negative needed (e.g., missing Content-Length = -1) should be skipped.
+	if err := checkDiskSpace(t.TempDir(), -1); err != nil {
+		t.Errorf("checkDiskSpace with -1 bytes should not fail: %v", err)
+	}
+}
+
+func TestCheckDiskSpace_PassesWhenEnoughSpace(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Asking for 1 byte should always pass on a real machine.
+	if err := checkDiskSpace(dir, 1); err != nil {
+		t.Errorf("checkDiskSpace with 1 byte should pass on a real machine: %v", err)
+	}
+}
+
+func TestCheckDiskSpace_FailsWhenInsufficientSpace(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	avail, ok := availableBytes(dir)
+	if !ok {
+		t.Skip("availableBytes not supported on this platform")
+	}
+	// Ask for more than what's available — should fail with clear error.
+	needed := int64(avail + diskSpaceMargin + 1)
+	err := checkDiskSpace(dir, needed)
+	if err == nil {
+		t.Fatal("checkDiskSpace should fail when needed > available")
+	}
+	if !strings.Contains(err.Error(), "insufficient disk space") {
+		t.Errorf("error should mention insufficient disk space, got: %v", err)
+	}
+}
+
 // --- G4: conflict file pruning tests ---
 
 func TestPruneConflicts_BelowCap(t *testing.T) {

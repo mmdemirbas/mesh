@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+
+	"golang.org/x/sys/windows"
 )
 
 // folderDeviceID returns the volume serial number for the given path.
@@ -38,4 +40,18 @@ func folderDeviceID(path string) (uint64, error) {
 		return 0, fmt.Errorf("GetFileInformationByHandle: %w", err)
 	}
 	return uint64(info.VolumeSerialNumber), nil
+}
+
+// availableBytes returns the number of bytes available for unprivileged
+// writes in the filesystem containing path. Returns (0, false) on error.
+func availableBytes(path string) (uint64, bool) {
+	pathp, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return 0, false
+	}
+	var free, total, totalFree uint64
+	if err := windows.GetDiskFreeSpaceEx(pathp, &free, &total, &totalFree); err != nil {
+		return 0, false
+	}
+	return free, true
 }
