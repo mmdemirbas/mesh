@@ -8,12 +8,16 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
+
+const maxConflictsPerFile = 10
 
 // resolveConflict determines which version of a file wins (local vs remote)
 // and returns the winner ("local" or "remote") along with the conflict file
@@ -122,6 +126,73 @@ func joinOriginal(dir, name string) string {
 		return name
 	}
 	return filepath.ToSlash(filepath.Join(dir, name))
+}
+
+// pruneConflicts removes the oldest conflict files for a given original path
+// when the count exceeds maxConflictsPerFile. Uses os.Root for safe path access.
+func pruneConflicts(root *os.Root, conflictRelPath string) {
+	origRel, ok := OriginalPathFromConflict(conflictRelPath)
+	if !ok {
+		return
+	}
+
+	dir := filepath.Dir(origRel)
+	dirToRead := dir
+	if dirToRead == "." {
+		dirToRead = "."
+	}
+
+	f, err := root.Open(dirToRead)
+	if err != nil {
+		return
+	}
+	entries, err := f.ReadDir(-1)
+	_ = f.Close()
+	if err != nil {
+		return
+	}
+
+	// Collect conflict files for the same original.
+	type conflictInfo struct {
+		relPath string
+		mtime   time.Time
+	}
+	var conflicts []conflictInfo
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		entryRel := e.Name()
+		if dir != "." {
+			entryRel = filepath.ToSlash(filepath.Join(dir, e.Name()))
+		}
+		if orig, ok := OriginalPathFromConflict(entryRel); ok && orig == origRel {
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			conflicts = append(conflicts, conflictInfo{relPath: entryRel, mtime: info.ModTime()})
+		}
+	}
+
+	if len(conflicts) <= maxConflictsPerFile {
+		return
+	}
+
+	// Sort by mtime ascending (oldest first).
+	slices.SortFunc(conflicts, func(a, b conflictInfo) int {
+		return a.mtime.Compare(b.mtime)
+	})
+
+	// Delete oldest until we're at the cap.
+	toDelete := len(conflicts) - maxConflictsPerFile
+	for i := range toDelete {
+		if err := root.Remove(conflicts[i].relPath); err != nil {
+			slog.Warn("prune conflict file", "path", conflicts[i].relPath, "error", err)
+		} else {
+			slog.Info("pruned old conflict file", "path", conflicts[i].relPath)
+		}
+	}
 }
 
 // --- Conflict diff types and computation ---

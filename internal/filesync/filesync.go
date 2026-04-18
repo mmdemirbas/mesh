@@ -1725,6 +1725,9 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					fs.indexMu.Unlock()
 					fs.metrics.FilesConflicted.Add(1)
 					fs.metrics.BytesDownloaded.Add(action.RemoteSize)
+
+					// G4: prune old conflict files to prevent unbounded accumulation.
+					pruneConflicts(fs.root, conflictRelPath)
 				} else {
 					// H7: local wins — let lastSeenSeq advance past this
 					// entry. If the remote later modifies the file (new

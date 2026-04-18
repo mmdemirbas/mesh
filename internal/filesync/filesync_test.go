@@ -5673,6 +5673,156 @@ func TestMtimePreservation_ScanFastPath(t *testing.T) {
 	}
 }
 
+// --- G4: conflict file pruning tests ---
+
+func TestPruneConflicts_BelowCap(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root := openTestRoot(t, dir)
+
+	// Create original and a few conflict files (below cap).
+	writeFile(t, dir, "report.txt", "original")
+	for i := range 3 {
+		name := fmt.Sprintf("report.sync-conflict-20250601-10%02d00-dev123-%08x.txt", i, i)
+		writeFile(t, dir, name, fmt.Sprintf("conflict-%d", i))
+	}
+
+	pruneConflicts(root, "report.sync-conflict-20250601-100000-dev123-00000000.txt")
+
+	// All 3 should remain (below maxConflictsPerFile=10).
+	entries, _ := os.ReadDir(dir)
+	conflictCount := 0
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".sync-conflict-") {
+			conflictCount++
+		}
+	}
+	if conflictCount != 3 {
+		t.Errorf("expected 3 conflict files, got %d", conflictCount)
+	}
+}
+
+func TestPruneConflicts_ExceedsCap(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root := openTestRoot(t, dir)
+
+	// Create original file.
+	writeFile(t, dir, "data.txt", "original")
+
+	// Create 12 conflict files with ascending mtimes.
+	var names []string
+	baseTime := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := range 12 {
+		name := fmt.Sprintf("data.sync-conflict-20250601-10%02d00-dev123-%08x.txt", i, i)
+		writeFile(t, dir, name, fmt.Sprintf("conflict-%d", i))
+		mt := baseTime.Add(time.Duration(i) * time.Hour)
+		if err := os.Chtimes(filepath.Join(dir, name), mt, mt); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+
+	pruneConflicts(root, names[11])
+
+	// Should have pruned 2 oldest, leaving 10.
+	entries, _ := os.ReadDir(dir)
+	var remaining []string
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".sync-conflict-") {
+			remaining = append(remaining, e.Name())
+		}
+	}
+	if len(remaining) != maxConflictsPerFile {
+		t.Errorf("expected %d conflict files after pruning, got %d: %v",
+			maxConflictsPerFile, len(remaining), remaining)
+	}
+
+	// The 2 oldest (i=0, i=1) should be gone.
+	for _, e := range remaining {
+		if e == names[0] || e == names[1] {
+			t.Errorf("oldest conflict file %q should have been pruned", e)
+		}
+	}
+}
+
+func TestPruneConflicts_SubdirectoryConflicts(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root := openTestRoot(t, dir)
+
+	// Conflict files in a subdirectory.
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "sub/notes.md", "original")
+
+	baseTime := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := range 12 {
+		name := fmt.Sprintf("sub/notes.sync-conflict-20250601-10%02d00-dev123-%08x.md", i, i)
+		writeFile(t, dir, name, fmt.Sprintf("conflict-%d", i))
+		mt := baseTime.Add(time.Duration(i) * time.Hour)
+		if err := os.Chtimes(filepath.Join(dir, name), mt, mt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pruneConflicts(root, "sub/notes.sync-conflict-20250601-101100-dev123-0000000b.md")
+
+	entries, _ := os.ReadDir(filepath.Join(dir, "sub"))
+	conflictCount := 0
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".sync-conflict-") {
+			conflictCount++
+		}
+	}
+	if conflictCount != maxConflictsPerFile {
+		t.Errorf("expected %d conflict files in sub/, got %d", maxConflictsPerFile, conflictCount)
+	}
+}
+
+func TestPruneConflicts_DoesNotPruneDifferentOriginal(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root := openTestRoot(t, dir)
+
+	// Create conflicts for two different original files.
+	writeFile(t, dir, "alpha.txt", "original-alpha")
+	writeFile(t, dir, "beta.txt", "original-beta")
+
+	baseTime := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := range 12 {
+		name := fmt.Sprintf("alpha.sync-conflict-20250601-10%02d00-dev123-%08x.txt", i, i)
+		writeFile(t, dir, name, fmt.Sprintf("alpha-conflict-%d", i))
+		mt := baseTime.Add(time.Duration(i) * time.Hour)
+		_ = os.Chtimes(filepath.Join(dir, name), mt, mt)
+	}
+	for i := range 5 {
+		name := fmt.Sprintf("beta.sync-conflict-20250601-10%02d00-dev123-%08x.txt", i, i)
+		writeFile(t, dir, name, fmt.Sprintf("beta-conflict-%d", i))
+	}
+
+	pruneConflicts(root, "alpha.sync-conflict-20250601-101100-dev123-0000000b.txt")
+
+	// alpha: pruned to 10.  beta: untouched at 5.
+	entries, _ := os.ReadDir(dir)
+	alphaCount, betaCount := 0, 0
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "alpha.sync-conflict-") {
+			alphaCount++
+		}
+		if strings.Contains(e.Name(), "beta.sync-conflict-") {
+			betaCount++
+		}
+	}
+	if alphaCount != maxConflictsPerFile {
+		t.Errorf("expected %d alpha conflicts, got %d", maxConflictsPerFile, alphaCount)
+	}
+	if betaCount != 5 {
+		t.Errorf("expected 5 beta conflicts (untouched), got %d", betaCount)
+	}
+}
+
 func BenchmarkHashFile(b *testing.B) {
 	dir := b.TempDir()
 	path := filepath.Join(dir, "bench.dat")
