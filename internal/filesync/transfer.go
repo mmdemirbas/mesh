@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -314,6 +316,29 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 	}
 
 	return relPath, nil
+}
+
+// verifyPostWrite re-reads the file at relPath and compares its hash against
+// expectedHash. Used on network filesystems (C2) where write-back caching can
+// silently corrupt data. Returns nil when the hash matches. On mismatch,
+// records a retry so the file is re-downloaded on the next sync cycle.
+func verifyPostWrite(root *os.Root, relPath, expectedHash, folderID string, retries *retryTracker, indexMu *sync.RWMutex) error {
+	actualHash, err := hashFileRoot(root, relPath)
+	if err != nil {
+		slog.Error("C2: post-write verification failed: cannot re-read file",
+			"folder", folderID, "path", relPath, "error", err)
+		return fmt.Errorf("post-write verify read: %w", err)
+	}
+	if actualHash != expectedHash {
+		slog.Error("C2: post-write verification failed: data corruption detected",
+			"folder", folderID, "path", relPath,
+			"expected", expectedHash, "actual", actualHash)
+		indexMu.Lock()
+		retries.record(relPath, expectedHash)
+		indexMu.Unlock()
+		return fmt.Errorf("post-write hash mismatch for %s: expected %s, got %s", relPath, expectedHash, actualHash)
+	}
+	return nil
 }
 
 // deleteFile removes a local file within the root.

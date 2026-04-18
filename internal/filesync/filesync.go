@@ -404,12 +404,13 @@ type folderState struct {
 	retries         retryTracker
 	// H3: inFlight tracks paths currently being downloaded so concurrent
 	// peer goroutines skip the same path. Protected by inFlightMu.
-	inFlightMu sync.Mutex
-	inFlight   map[string]bool
-	persistMu  sync.Mutex        // N10: serializes persistFolder calls
-	indexDirty bool              // P17a: true when file index changed since last persist
-	peersDirty bool              // P17a: true when peer state changed since last persist
-	metrics    FolderSyncMetrics // lock-free counters for Prometheus
+	inFlightMu  sync.Mutex
+	inFlight    map[string]bool
+	persistMu   sync.Mutex        // N10: serializes persistFolder calls
+	indexDirty  bool              // P17a: true when file index changed since last persist
+	peersDirty  bool              // P17a: true when peer state changed since last persist
+	isNetworkFS bool              // C2: true when folder root is on a network filesystem
+	metrics     FolderSyncMetrics // lock-free counters for Prometheus
 }
 
 // claimPath attempts to mark a path as in-flight for download. Returns false
@@ -652,6 +653,13 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			inFlight:      make(map[string]bool),
 		}
 		n.folders[fcfg.ID] = fs
+
+		// C2: detect network filesystem at startup.
+		if fsType, isNet := detectNetworkFS(fcfg.Path); isNet {
+			fs.isNetworkFS = true
+			slog.Warn("folder root is on a network filesystem — sync durability depends on mount options",
+				"folder", fcfg.ID, "path", fcfg.Path, "fstype", fsType)
+		}
 
 		if fcfg.Direction == "disabled" {
 			state.Global.Update("filesync-folder", fcfg.ID, state.Connected, "disabled")
@@ -1371,6 +1379,17 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				slog.Debug("file downloaded", "folder", folderID, "path", action.Path,
 					"peer", peerAddr, "size", action.RemoteSize, "duration", time.Since(dlStart))
 
+				// C2: post-write verification on network filesystems.
+				if fs.isNetworkFS {
+					if err := verifyPostWrite(fs.root, action.Path, action.RemoteHash, folderID, &fs.retries, &fs.indexMu); err != nil {
+						failMu.Lock()
+						failedSeqs = append(failedSeqs, action.RemoteSequence)
+						failMu.Unlock()
+						fs.metrics.SyncErrors.Add(1)
+						return
+					}
+				}
+
 				// L1: apply file permissions from remote (default 0644).
 				fileMode := os.FileMode(action.RemoteMode)
 				if fileMode == 0 {
@@ -1513,6 +1532,17 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						failMu.Unlock()
 						fs.metrics.SyncErrors.Add(1)
 						return
+					}
+
+					// C2: post-write verification on network filesystems.
+					if fs.isNetworkFS {
+						if err := verifyPostWrite(fs.root, action.Path, action.RemoteHash, folderID, &fs.retries, &fs.indexMu); err != nil {
+							failMu.Lock()
+							failedSeqs = append(failedSeqs, action.RemoteSequence)
+							failMu.Unlock()
+							fs.metrics.SyncErrors.Add(1)
+							return
+						}
 					}
 
 					// L1: apply file permissions from remote.

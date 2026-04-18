@@ -1876,6 +1876,66 @@ func TestConflictAutoResolve_EmptyRemoteHash(t *testing.T) {
 	}
 }
 
+// --- C2: Network filesystem detection + post-write verification ---
+
+func TestDetectNetworkFS_LocalPath(t *testing.T) {
+	t.Parallel()
+	fsType, isNet := detectNetworkFS(t.TempDir())
+	if isNet {
+		t.Fatalf("expected local temp dir to not be network FS, got fstype=%q", fsType)
+	}
+}
+
+func TestVerifyPostWrite_HashMatch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root := openTestRoot(t, dir)
+	content := []byte("verified content")
+	writeFile(t, dir, "good.txt", string(content))
+	h := sha256.Sum256(content)
+	expected := hex.EncodeToString(h[:])
+
+	var mu sync.RWMutex
+	retries := retryTracker{}
+	err := verifyPostWrite(root, "good.txt", expected, "test-folder", &retries, &mu)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(retries.counts) > 0 {
+		t.Fatal("expected no retries recorded")
+	}
+}
+
+func TestVerifyPostWrite_HashMismatch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root := openTestRoot(t, dir)
+	writeFile(t, dir, "bad.txt", "actual content")
+
+	var mu sync.RWMutex
+	retries := retryTracker{}
+	err := verifyPostWrite(root, "bad.txt", "0000000000000000000000000000000000000000000000000000000000000000", "test-folder", &retries, &mu)
+	if err == nil {
+		t.Fatal("expected error for hash mismatch")
+	}
+	if len(retries.counts) == 0 {
+		t.Fatal("expected retry to be recorded on hash mismatch")
+	}
+}
+
+func TestVerifyPostWrite_FileNotFound(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root := openTestRoot(t, dir)
+
+	var mu sync.RWMutex
+	retries := retryTracker{}
+	err := verifyPostWrite(root, "nonexistent.txt", "abc123", "test-folder", &retries, &mu)
+	if err == nil {
+		t.Fatal("expected error for missing file")
+	}
+}
+
 // B17: verify that NFD paths (macOS HFS+ decomposition) are normalized to
 // NFC during scan, preventing cross-platform duplicates.
 func TestScanNormalizesNFD(t *testing.T) {
