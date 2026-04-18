@@ -270,7 +270,14 @@ func (fw *folderWatcher) run(ctx context.Context) {
 			if !ok {
 				return
 			}
-			slog.Warn("fsnotify error (falling back to periodic scan)", "error", err)
+			slog.Warn("fsnotify error, triggering immediate rescan", "error", err)
+			// G6: on inotify queue overflow or other watcher errors,
+			// trigger an immediate full rescan instead of waiting up
+			// to one periodic interval (default 60s).
+			select {
+			case fw.dirtyCh <- struct{}{}:
+			default:
+			}
 
 		case <-debounceC:
 			debounceTimer = nil
