@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -580,6 +579,12 @@ func (n *Node) clientForPeer(addr string) *http.Client {
 	return n.defaultClient
 }
 
+// tlsStatusFor returns the label shown after a successful exchange with the
+// peer at addr. "verified" means the HTTP client for this peer was built with
+// a VerifyPeerCertificate callback that checks the configured fingerprint —
+// because the caller only invokes this on the success path, the handshake (and
+// thus the fingerprint check) already passed. Call sites must not use this on
+// the error path; CERT MISMATCH is set there explicitly.
 func (n *Node) tlsStatusFor(addr string) string {
 	if n.peerHasFingerprint[addr] {
 		return "encrypted · verified"
@@ -1275,7 +1280,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	if err != nil {
 		slog.Debug("sync failed", "folder", folderID, "peer", peerAddr, "error", err)
 		state.Global.Update("filesync-peer", stateKey, state.Retrying, err.Error())
-		if strings.Contains(err.Error(), "fingerprint mismatch") {
+		if errors.Is(err, tlsutil.ErrFingerprintMismatch) {
 			state.Global.UpdateTLSStatus("filesync-peer", stateKey, "CERT MISMATCH")
 		}
 		fs.indexMu.Lock()

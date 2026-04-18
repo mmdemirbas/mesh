@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -414,6 +415,12 @@ func (n *Node) clientForPeer(addr string) *http.Client {
 	return n.defaultClient
 }
 
+// tlsStatusFor returns the label shown after a successful push to the peer at
+// addr. "verified" means the HTTP client for this peer was built with a
+// VerifyPeerCertificate callback that checks the configured fingerprint —
+// because the caller only invokes this on the success path, the handshake (and
+// thus the fingerprint check) already passed. Call sites must not use this on
+// the error path; CERT MISMATCH is set there explicitly.
 func (n *Node) tlsStatusFor(addr string) string {
 	if n.peerHasFingerprint[addr] {
 		return "encrypted · verified"
@@ -637,7 +644,7 @@ func (n *Node) postHTTP(addr string, data []byte) {
 	resp, err := n.clientForPeer(addr).Do(req)
 	if err != nil {
 		slog.Debug("HTTP push to peer failed", "peer", cleanLogStr(addr), "bytes", len(data), "error", err)
-		if strings.Contains(err.Error(), "fingerprint mismatch") {
+		if errors.Is(err, tlsutil.ErrFingerprintMismatch) {
 			state.Global.UpdateTLSStatus("clipsync-peer", n.config.Bind+"|"+addr, "CERT MISMATCH")
 		}
 		return
