@@ -537,9 +537,9 @@ func TestCheckHash(t *testing.T) {
 
 // --- HTTP protocol & sync integration tests ---
 
-// newTestNode creates a minimal Node with an HTTP server for testing sync endpoints.
+// newTestNode creates a minimal Node with a TLS HTTP server for testing sync endpoints.
 // Returns the node, its base URL, and a cleanup function.
-func newTestNode(t *testing.T, _ []string) (*Node, string, func()) {
+func newTestNode(t *testing.T, _ []string) (*Node, string, *http.Client, func()) {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -558,7 +558,7 @@ func newTestNode(t *testing.T, _ []string) (*Node, string, func()) {
 		maxReqBodySize: defaultMaxSyncFileSize * 20 * 4 / 3,
 		peers:          make(map[string]time.Time),
 		peerHashes:     make(map[string]string),
-		httpClient:     &http.Client{Timeout: 5 * time.Second},
+		defaultClient:  &http.Client{Timeout: 5 * time.Second},
 		filesDir:       dir,
 		notifyCh:       make(chan struct{}, 1),
 	}
@@ -616,13 +616,14 @@ func newTestNode(t *testing.T, _ []string) (*Node, string, func()) {
 		fileServer.ServeHTTP(w, r)
 	})
 
-	srv := httptest.NewServer(mux)
-	return n, srv.URL, srv.Close
+	srv := httptest.NewTLSServer(mux)
+	n.defaultClient = srv.Client()
+	return n, srv.URL, srv.Client(), srv.Close
 }
 
 func TestSyncEndpoint_PushFormats(t *testing.T) {
 	t.Parallel()
-	n, url, cleanup := newTestNode(t, []string{"all"})
+	n, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
 	payload := &pb.SyncPayload{
@@ -632,7 +633,7 @@ func TestSyncEndpoint_PushFormats(t *testing.T) {
 	}
 	data, _ := proto.Marshal(payload)
 
-	resp, err := http.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(data))
+	resp, err := client.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("POST /sync failed: %v", err)
 	}
@@ -655,7 +656,7 @@ func TestSyncEndpoint_PushFilesEmbedded(t *testing.T) {
 	// This tests the one-way connectivity case:
 	// the sender embeds file data directly in the POST payload
 	// so the receiver doesn't need to pull files back.
-	n, url, cleanup := newTestNode(t, []string{"all"})
+	n, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
 	fileContent := []byte("file content from one-way peer")
@@ -666,7 +667,7 @@ func TestSyncEndpoint_PushFilesEmbedded(t *testing.T) {
 	}
 	data, _ := proto.Marshal(payload)
 
-	resp, err := http.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(data))
+	resp, err := client.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("POST /sync failed: %v", err)
 	}
@@ -687,7 +688,7 @@ func TestSyncEndpoint_PushFilesEmbedded(t *testing.T) {
 
 func TestSyncEndpoint_PushFilesEmbedded_MultipleFiles(t *testing.T) {
 	t.Parallel()
-	n, url, cleanup := newTestNode(t, []string{"all"})
+	n, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
 	payload := &pb.SyncPayload{
@@ -698,7 +699,7 @@ func TestSyncEndpoint_PushFilesEmbedded_MultipleFiles(t *testing.T) {
 	}
 	data, _ := proto.Marshal(payload)
 
-	resp, err := http.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(data))
+	resp, err := client.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("POST /sync failed: %v", err)
 	}
@@ -720,7 +721,7 @@ func TestSyncEndpoint_PushFilesWithoutData_PullBack(t *testing.T) {
 	t.Parallel()
 	// This tests the two-way case: receiver can reach the sender,
 	// so files are NOT embedded — the receiver pulls them via /files/.
-	n, url, cleanup := newTestNode(t, []string{"all"})
+	n, url, _, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
 	// Pre-stage a file on the "sender" node's filesDir so /files/ can serve it
@@ -737,7 +738,7 @@ func TestSyncEndpoint_PushFilesWithoutData_PullBack(t *testing.T) {
 	// processPayload will try to downloadFile from peerHostPort.
 	// Since peerHostPort will be the test server, we need to call processPayload
 	// directly with the correct peer address.
-	_, port, _ := net.SplitHostPort(strings.TrimPrefix(url, "http://"))
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(url, "https://"))
 	peerHostPort := net.JoinHostPort("127.0.0.1", port)
 
 	n.processPayload(payload, 0, peerHostPort)
@@ -754,7 +755,7 @@ func TestSyncEndpoint_PushFilesWithoutData_PullBack(t *testing.T) {
 
 func TestClipEndpoint_ReturnsLastPayload(t *testing.T) {
 	t.Parallel()
-	n, url, cleanup := newTestNode(t, []string{"all"})
+	n, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
 	// Set a payload via Broadcast (simulates local clipboard change)
@@ -768,7 +769,7 @@ func TestClipEndpoint_ReturnsLastPayload(t *testing.T) {
 	n.lastPayload = data
 	n.stateMu.Unlock()
 
-	resp, err := http.Get(url + "/clip")
+	resp, err := client.Get(url + "/clip")
 	if err != nil {
 		t.Fatalf("GET /clip failed: %v", err)
 	}
@@ -795,10 +796,10 @@ func TestClipEndpoint_ReturnsLastPayload(t *testing.T) {
 
 func TestClipEndpoint_EmptyReturns404(t *testing.T) {
 	t.Parallel()
-	_, url, cleanup := newTestNode(t, []string{"all"})
+	_, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
-	resp, err := http.Get(url + "/clip")
+	resp, err := client.Get(url + "/clip")
 	if err != nil {
 		t.Fatalf("GET /clip failed: %v", err)
 	}
@@ -810,13 +811,13 @@ func TestClipEndpoint_EmptyReturns404(t *testing.T) {
 
 func TestFilesEndpoint_ServesFiles(t *testing.T) {
 	t.Parallel()
-	n, url, cleanup := newTestNode(t, []string{"all"})
+	n, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
 	content := []byte("served file content")
 	_ = os.WriteFile(filepath.Join(n.filesDir, "test.txt"), content, 0600)
 
-	resp, err := http.Get(url + "/files/test.txt")
+	resp, err := client.Get(url + "/files/test.txt")
 	if err != nil {
 		t.Fatalf("GET /files/test.txt failed: %v", err)
 	}
@@ -832,7 +833,7 @@ func TestFilesEndpoint_ServesFiles(t *testing.T) {
 
 func TestSyncEndpoint_RejectsPathTraversal(t *testing.T) {
 	t.Parallel()
-	n, url, cleanup := newTestNode(t, []string{"all"})
+	n, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
 	payload := &pb.SyncPayload{
@@ -842,7 +843,7 @@ func TestSyncEndpoint_RejectsPathTraversal(t *testing.T) {
 	}
 	data, _ := proto.Marshal(payload)
 
-	resp, err := http.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(data))
+	resp, err := client.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("POST /sync failed: %v", err)
 	}
@@ -862,21 +863,22 @@ func TestPostHTTP_UsesZeroCopyReader(t *testing.T) {
 	t.Parallel()
 	// Verify postHTTP sends the exact bytes without copying
 	var received []byte
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received, _ = io.ReadAll(r.Body)
 	}))
 	defer srv.Close()
 
 	n := &Node{
-		ctx:        context.Background(),
-		config:     config.ClipsyncCfg{},
-		httpClient: &http.Client{Timeout: 5 * time.Second},
+		ctx:           context.Background(),
+		config:        config.ClipsyncCfg{},
+		peerClients:   make(map[string]*http.Client),
+		defaultClient: srv.Client(),
 	}
 
 	data, _ := proto.Marshal(&pb.SyncPayload{
 		Formats: []*pb.ClipFormat{{MimeType: "text/plain", Data: []byte("hello")}},
 	})
-	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "https://"))
 	n.postHTTP(net.JoinHostPort("127.0.0.1", port), data)
 
 	if len(received) == 0 {
@@ -887,12 +889,12 @@ func TestPostHTTP_UsesZeroCopyReader(t *testing.T) {
 func TestBroadcast_SetsLastPayload(t *testing.T) {
 	t.Parallel()
 	n := &Node{
-		ctx:        context.Background(),
-		config:     config.ClipsyncCfg{},
-		peers:      make(map[string]time.Time),
-		peerHashes: make(map[string]string),
-		httpClient: &http.Client{Timeout: 5 * time.Second},
-		notifyCh:   make(chan struct{}, 1),
+		ctx:           context.Background(),
+		config:        config.ClipsyncCfg{},
+		peers:         make(map[string]time.Time),
+		peerHashes:    make(map[string]string),
+		defaultClient: &http.Client{Timeout: 5 * time.Second},
+		notifyCh:      make(chan struct{}, 1),
 	}
 
 	payload := &pb.SyncPayload{
@@ -924,25 +926,26 @@ func TestBroadcast_SetsLastPayload(t *testing.T) {
 func TestBroadcast_PushesToPeers(t *testing.T) {
 	t.Parallel()
 	receivedCh := make(chan []byte, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data, _ := io.ReadAll(r.Body)
 		receivedCh <- data
 	}))
 	defer srv.Close()
 
-	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "https://"))
 	peerAddr := net.JoinHostPort("127.0.0.1", port)
 
 	cfg := config.ClipsyncCfg{
 		StaticPeers: map[string]config.PeerDef{"peer1": {Addresses: []string{peerAddr}}},
 	}
 	n := &Node{
-		ctx:        context.Background(),
-		config:     cfg,
-		peers:      make(map[string]time.Time),
-		peerHashes: make(map[string]string),
-		httpClient: &http.Client{Timeout: 5 * time.Second},
-		notifyCh:   make(chan struct{}, 1),
+		ctx:           context.Background(),
+		config:        cfg,
+		peers:         make(map[string]time.Time),
+		peerHashes:    make(map[string]string),
+		peerClients:   map[string]*http.Client{peerAddr: srv.Client()},
+		defaultClient: srv.Client(),
+		notifyCh:      make(chan struct{}, 1),
 	}
 
 	payload := &pb.SyncPayload{
@@ -980,6 +983,8 @@ func TestBroadcast_DoesNotEchoBackToOrigin(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// Parse port from the plain HTTP URL — this test only checks that NO request
+	// is made (origin suppression), so TLS vs HTTP doesn't matter here.
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
 	peerAddr := net.JoinHostPort("127.0.0.1", port)
 
@@ -987,12 +992,13 @@ func TestBroadcast_DoesNotEchoBackToOrigin(t *testing.T) {
 		StaticPeers: map[string]config.PeerDef{"peer1": {Addresses: []string{peerAddr}}},
 	}
 	n := &Node{
-		ctx:        context.Background(),
-		config:     cfg,
-		peers:      make(map[string]time.Time),
-		peerHashes: make(map[string]string),
-		httpClient: &http.Client{Timeout: 5 * time.Second},
-		notifyCh:   make(chan struct{}, 1),
+		ctx:           context.Background(),
+		config:        cfg,
+		peers:         make(map[string]time.Time),
+		peerHashes:    make(map[string]string),
+		peerClients:   map[string]*http.Client{peerAddr: http.DefaultClient},
+		defaultClient: http.DefaultClient,
+		notifyCh:      make(chan struct{}, 1),
 	}
 
 	// Simulate that we received this payload from the same peer
@@ -1030,7 +1036,7 @@ func TestBroadcast_EchoSuppressionIPv6Canonical(t *testing.T) {
 		},
 		peers:      make(map[string]time.Time),
 		peerHashes: make(map[string]string),
-		httpClient: &http.Client{
+		defaultClient: &http.Client{
 			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				calls.Add(1)
 				return &http.Response{
@@ -1163,7 +1169,7 @@ func TestLoadFormatsFromDir_IgnoresUnknownFiles(t *testing.T) {
 
 func TestPullHTTP(t *testing.T) {
 	t.Parallel()
-	n, url, cleanup := newTestNode(t, []string{"all"})
+	n, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
 	// Set last payload (simulating a clipboard state on the "sender")
@@ -1175,19 +1181,21 @@ func TestPullHTTP(t *testing.T) {
 	n.lastPayload = data
 	n.stateMu.Unlock()
 
-	// Create a receiver node that pulls from the sender
+	// Create a receiver node that pulls from the sender.
+	// Use the TLS client from newTestNode so pullHTTP can reach the TLS server.
 	receiverDir := t.TempDir()
 	receiver := &Node{
 		ctx:            context.Background(),
 		config:         config.ClipsyncCfg{},
 		maxFileSize:    defaultMaxSyncFileSize,
 		maxReqBodySize: defaultMaxSyncFileSize * 20 * 4 / 3,
-		httpClient:     &http.Client{Timeout: 5 * time.Second},
+		peerClients:    make(map[string]*http.Client),
+		defaultClient:  client,
 		filesDir:       receiverDir,
 		notifyCh:       make(chan struct{}, 1),
 	}
 
-	_, port, _ := net.SplitHostPort(strings.TrimPrefix(url, "http://"))
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(url, "https://"))
 	peerAddr := net.JoinHostPort("127.0.0.1", port)
 
 	receiver.pullHTTP(peerAddr)
@@ -1203,7 +1211,7 @@ func TestPullHTTP(t *testing.T) {
 
 func TestPullHTTP_NoContent(t *testing.T) {
 	t.Parallel()
-	_, url, cleanup := newTestNode(t, []string{"all"})
+	_, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 	// lastPayload is nil → /clip returns 404
 
@@ -1212,12 +1220,13 @@ func TestPullHTTP_NoContent(t *testing.T) {
 		config:         config.ClipsyncCfg{},
 		maxFileSize:    defaultMaxSyncFileSize,
 		maxReqBodySize: defaultMaxSyncFileSize * 20 * 4 / 3,
-		httpClient:     &http.Client{Timeout: 5 * time.Second},
+		peerClients:    make(map[string]*http.Client),
+		defaultClient:  client,
 		filesDir:       t.TempDir(),
 		notifyCh:       make(chan struct{}, 1),
 	}
 
-	_, port, _ := net.SplitHostPort(strings.TrimPrefix(url, "http://"))
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(url, "https://"))
 	receiver.pullHTTP(net.JoinHostPort("127.0.0.1", port))
 
 	// Should not crash and lastWrittenHash should remain empty
@@ -1469,7 +1478,7 @@ func TestPeerHashesEvictedWithPeers(t *testing.T) {
 
 func TestDiscoverEndpoint_RegistersPeer(t *testing.T) {
 	t.Parallel()
-	n, url, cleanup := newTestNode(t, nil)
+	n, url, client, cleanup := newTestNode(t, nil)
 	defer cleanup()
 	n.config.LANDiscoveryGroup = []string{"default"}
 
@@ -1477,7 +1486,7 @@ func TestDiscoverEndpoint_RegistersPeer(t *testing.T) {
 		Id: "remote-node", Port: 7755, Hash: "hash-abc", Group: "default",
 	})
 
-	resp, err := http.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
+	resp, err := client.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /discover failed: %v", err)
 	}
@@ -1501,7 +1510,7 @@ func TestDiscoverEndpoint_RegistersPeer(t *testing.T) {
 
 func TestDiscoverEndpoint_RejectsSelf(t *testing.T) {
 	t.Parallel()
-	n, url, cleanup := newTestNode(t, []string{"all"})
+	n, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
 	// Send discover with the node's own ID — should be ignored.
@@ -1509,7 +1518,7 @@ func TestDiscoverEndpoint_RejectsSelf(t *testing.T) {
 		Id: n.id, Port: 7755,
 	})
 
-	resp, err := http.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
+	resp, err := client.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /discover failed: %v", err)
 	}
@@ -1524,10 +1533,10 @@ func TestDiscoverEndpoint_RejectsSelf(t *testing.T) {
 
 func TestDiscoverEndpoint_RejectsGET(t *testing.T) {
 	t.Parallel()
-	_, url, cleanup := newTestNode(t, []string{"all"})
+	_, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
-	resp, err := http.Get(url + "/discover")
+	resp, err := client.Get(url + "/discover")
 	if err != nil {
 		t.Fatalf("GET /discover failed: %v", err)
 	}
@@ -1539,7 +1548,7 @@ func TestDiscoverEndpoint_RejectsGET(t *testing.T) {
 
 func TestDiscoverEndpoint_RejectsDifferentGroup(t *testing.T) {
 	t.Parallel()
-	n, url, cleanup := newTestNode(t, []string{"all"})
+	n, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
 	// Node has empty group (default). Send discover with a different group.
@@ -1547,7 +1556,7 @@ func TestDiscoverEndpoint_RejectsDifferentGroup(t *testing.T) {
 		Id: "remote-node", Port: 7755, Hash: "hash-abc", Group: "team-beta",
 	})
 
-	resp, err := http.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
+	resp, err := client.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /discover failed: %v", err)
 	}
@@ -1562,7 +1571,7 @@ func TestDiscoverEndpoint_RejectsDifferentGroup(t *testing.T) {
 
 func TestDiscoverEndpoint_AcceptsSameGroup(t *testing.T) {
 	t.Parallel()
-	n, url, cleanup := newTestNode(t, []string{"all"})
+	n, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 	n.config.LANDiscoveryGroup = []string{"team-alpha"}
 
@@ -1570,7 +1579,7 @@ func TestDiscoverEndpoint_AcceptsSameGroup(t *testing.T) {
 		Id: "remote-node", Port: 7755, Hash: "hash-abc", Group: "team-alpha",
 	})
 
-	resp, err := http.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
+	resp, err := client.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /discover failed: %v", err)
 	}
@@ -1586,7 +1595,7 @@ func TestDiscoverEndpoint_AcceptsSameGroup(t *testing.T) {
 func TestRegisterPeerHTTP_SendsDiscoverRequest(t *testing.T) {
 	t.Parallel()
 	var received atomic.Value
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/discover" || r.Method != http.MethodPost {
 			http.Error(w, "unexpected", http.StatusBadRequest)
 			return
@@ -1596,15 +1605,16 @@ func TestRegisterPeerHTTP_SendsDiscoverRequest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "https://"))
 	peerAddr := net.JoinHostPort("127.0.0.1", port)
 
 	n := &Node{
-		ctx:        context.Background(),
-		id:         "sender-node",
-		port:       7755,
-		config:     config.ClipsyncCfg{LANDiscoveryGroup: []string{"my-group"}},
-		httpClient: &http.Client{Timeout: 5 * time.Second},
+		ctx:           context.Background(),
+		id:            "sender-node",
+		port:          7755,
+		config:        config.ClipsyncCfg{LANDiscoveryGroup: []string{"my-group"}},
+		peerClients:   map[string]*http.Client{peerAddr: srv.Client()},
+		defaultClient: srv.Client(),
 	}
 	n.lastHash = "myhash"
 
@@ -1830,7 +1840,7 @@ func TestMaxReqBodySize_ScalesWithMaxFileSize(t *testing.T) {
 // enforces the maxReqBodySize limit and rejects payloads that exceed it.
 func TestSyncEndpoint_RejectsOversizedBody(t *testing.T) {
 	t.Parallel()
-	n, url, cleanup := newTestNode(t, []string{"all"})
+	n, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 
 	// Create a payload larger than the default maxReqBodySize.
@@ -1840,7 +1850,7 @@ func TestSyncEndpoint_RejectsOversizedBody(t *testing.T) {
 	n.maxReqBodySize = 100 // 100 bytes
 
 	body := make([]byte, 200)
-	resp, err := http.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(body))
+	resp, err := client.Post(url+"/sync", "application/x-protobuf", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /sync failed: %v", err)
 	}
@@ -1855,7 +1865,7 @@ func TestSyncEndpoint_RejectsOversizedBody(t *testing.T) {
 
 func TestDiscoverEndpoint_RejectsPrivilegedPort(t *testing.T) {
 	t.Parallel()
-	n, url, cleanup := newTestNode(t, []string{"all"})
+	n, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 	n.config.LANDiscoveryGroup = []string{"all"}
 
@@ -1863,7 +1873,7 @@ func TestDiscoverEndpoint_RejectsPrivilegedPort(t *testing.T) {
 		body, _ := proto.Marshal(&pb.DiscoverRequest{
 			Id: "remote-node", Port: port, Hash: "hash-abc", Group: "all",
 		})
-		resp, err := http.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
+		resp, err := client.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
 		if err != nil {
 			t.Fatalf("port %d: POST /discover failed: %v", port, err)
 		}
@@ -1882,14 +1892,14 @@ func TestDiscoverEndpoint_RejectsPrivilegedPort(t *testing.T) {
 
 func TestDiscoverEndpoint_AcceptsValidPort(t *testing.T) {
 	t.Parallel()
-	n, url, cleanup := newTestNode(t, []string{"all"})
+	n, url, client, cleanup := newTestNode(t, []string{"all"})
 	defer cleanup()
 	n.config.LANDiscoveryGroup = []string{"all"}
 
 	body, _ := proto.Marshal(&pb.DiscoverRequest{
 		Id: "remote-node", Port: 7755, Hash: "hash-abc", Group: "all",
 	})
-	resp, err := http.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
+	resp, err := client.Post(url+"/discover", "application/x-protobuf", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /discover failed: %v", err)
 	}

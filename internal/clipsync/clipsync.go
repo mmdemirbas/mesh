@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -31,6 +32,7 @@ import (
 	"github.com/mmdemirbas/mesh/internal/gziputil"
 	"github.com/mmdemirbas/mesh/internal/nodeutil"
 	"github.com/mmdemirbas/mesh/internal/state"
+	"github.com/mmdemirbas/mesh/internal/tlsutil"
 )
 
 func gzipEncode(data []byte) ([]byte, error) {
@@ -117,8 +119,20 @@ type Node struct {
 	peerHashes map[string]string    // Tracks last seen hash per peer
 	peersMu    sync.RWMutex
 
-	httpClient *http.Client
-	filesDir   string
+	// tlsFingerprint is the SHA-256 fingerprint of this node's server cert.
+	tlsFingerprint string
+
+	// peerClients maps static peer address to a per-peer http.Client carrying
+	// the appropriate TLS config. Read-only after Start().
+	peerClients map[string]*http.Client
+
+	// defaultClient is used for dynamic/unknown peer addresses (no fingerprint).
+	defaultClient *http.Client
+
+	// serverCert is the TLS certificate used by this node's HTTP server.
+	serverCert tls.Certificate
+
+	filesDir string
 
 	stateMu         sync.Mutex
 	lastHash        string
@@ -172,6 +186,46 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 		maxFileSize = parsed
 	}
 
+	// Resolve TLS certificate for this node's HTTP server.
+	meshDir := filepath.Join(home, ".mesh")
+	tlsDir := filepath.Join(meshDir, "tls")
+	var serverCert tls.Certificate
+	var serverFP string
+	if cfg.TLS.CertFile != "" && cfg.TLS.KeyFile != "" {
+		serverCert, err = tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load clipsync TLS cert: %w", err)
+		}
+		serverFP = tlsutil.Fingerprint(serverCert)
+	} else {
+		serverCert, serverFP, err = tlsutil.AutoCert(
+			filepath.Join(tlsDir, "clipsync.crt"),
+			filepath.Join(tlsDir, "clipsync.key"),
+			"mesh-clipsync",
+		)
+		if err != nil {
+			return nil, fmt.Errorf("auto-cert clipsync: %w", err)
+		}
+	}
+
+	// Build per-peer HTTP clients for static peers.
+	defaultClient := &http.Client{
+		Timeout:   2 * time.Minute,
+		Transport: &http.Transport{TLSClientConfig: tlsutil.ClientTLS("")},
+	}
+	peerClients := make(map[string]*http.Client)
+	for _, def := range cfg.StaticPeers {
+		for _, addr := range def.Addresses {
+			if _, exists := peerClients[addr]; exists {
+				continue
+			}
+			peerClients[addr] = &http.Client{
+				Timeout:   2 * time.Minute,
+				Transport: &http.Transport{TLSClientConfig: tlsutil.ClientTLS(def.TLSFingerprint)},
+			}
+		}
+	}
+
 	n := &Node{
 		ctx:            ctx,
 		config:         cfg,
@@ -181,7 +235,10 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 		maxReqBodySize: maxFileSize * 20 * 4 / 3,
 		peers:          make(map[string]time.Time),
 		peerHashes:     make(map[string]string),
-		httpClient:     &http.Client{Timeout: 2 * time.Minute},
+		tlsFingerprint: serverFP,
+		peerClients:    peerClients,
+		defaultClient:  defaultClient,
+		serverCert:     serverCert,
 		filesDir:       filesDir,
 		notifyCh:       make(chan struct{}, 1),
 	}
@@ -338,6 +395,15 @@ func formatBytes(b int64) string {
 
 // canSendTo returns whether the node should push clipboard data to addr.
 // Sending is always allowed — the target is already in our configured/discovered peer list.
+// clientForPeer returns the http.Client for the given peer address,
+// carrying the TLS config appropriate for that peer (fingerprint or encrypt-only).
+func (n *Node) clientForPeer(addr string) *http.Client {
+	if c, ok := n.peerClients[addr]; ok {
+		return c
+	}
+	return n.defaultClient
+}
+
 func (n *Node) canSendTo(_ string, _ bool) bool { return true }
 
 // canReceiveFrom returns whether the node should accept clipboard data from addr.
@@ -544,14 +610,14 @@ func (n *Node) postHTTP(addr string, data []byte) {
 	timeout := 5*time.Second + time.Duration(len(data)/(5<<20))*time.Second
 	ctx, cancel := context.WithTimeout(n.ctx, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/sync", addr), bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://%s/sync", addr), bytes.NewReader(data))
 	if err != nil {
 		slog.Warn("Invalid peer address for sync push", "peer", cleanLogStr(addr), "error", err)
 		return
 	}
 	req.ContentLength = int64(len(data))
 	req.Header.Set("Content-Encoding", "gzip")
-	resp, err := n.httpClient.Do(req)
+	resp, err := n.clientForPeer(addr).Do(req)
 	if err != nil {
 		slog.Debug("HTTP push to peer failed", "peer", cleanLogStr(addr), "bytes", len(data), "error", err)
 		return
@@ -646,11 +712,11 @@ func (n *Node) pullHTTP(peerAddr string) {
 	slog.Debug("Making outbound HTTP GET pull request", "peer", cleanLogStr(peerAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
 	ctx, cancel := context.WithTimeout(n.ctx, 5*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://%s/clip", peerAddr), nil) //nolint:gosec // G704: peer addresses are user-configured, not untrusted input
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://%s/clip", peerAddr), nil) //nolint:gosec // G704: peer addresses are user-configured, not untrusted input
 	if err != nil {
 		return
 	}
-	resp, err := n.httpClient.Do(req)
+	resp, err := n.clientForPeer(peerAddr).Do(req)
 	if err != nil {
 		slog.Debug("Failed to pull from peer", "peer", cleanLogStr(peerAddr), "error", err) //nolint:gosec // G706: sanitized via cleanLogStr
 		return
@@ -759,13 +825,19 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 	})
 
 	srv := &http.Server{
-		Addr:              n.config.Bind,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      2 * time.Minute,
 		IdleTimeout:       60 * time.Second,
 	}
+
+	tcpLn, err := net.Listen("tcp", n.config.Bind)
+	if err != nil {
+		slog.Error("Clipsync HTTP listener failed", "bind", n.config.Bind, "error", err)
+		return
+	}
+	ln := tls.NewListener(tcpLn, tlsutil.ServerTLS(n.serverCert))
 
 	go func() {
 		<-ctx.Done()
@@ -774,8 +846,8 @@ func (n *Node) runHTTPServer(ctx context.Context) {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	slog.Info("Clipsync HTTP listening", "bind", n.config.Bind)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	slog.Info("Clipsync HTTP listening", "bind", ln.Addr().String(), "tls_fingerprint", n.tlsFingerprint)
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		slog.Error("Clipsync HTTP server failed", "error", err)
 	}
 }
@@ -788,7 +860,7 @@ func (n *Node) downloadFile(fileID, fileName, peerAddr string) error {
 		return fmt.Errorf("unsafe file name: %q", fileName)
 	}
 
-	resp, err := n.httpClient.Get(fmt.Sprintf("http://%s/files/%s", peerAddr, safeID)) //nolint:gosec // G704: peer addresses are user-configured, not untrusted input
+	resp, err := n.clientForPeer(peerAddr).Get(fmt.Sprintf("https://%s/files/%s", peerAddr, safeID)) //nolint:gosec // G704: peer addresses are user-configured, not untrusted input
 	if err != nil {
 		return err
 	}
@@ -1600,12 +1672,12 @@ func (n *Node) registerPeerHTTP(peerAddr string) {
 
 	reqCtx, cancel := context.WithTimeout(n.ctx, 5*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, "POST", fmt.Sprintf("http://%s/discover", peerAddr), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(reqCtx, "POST", fmt.Sprintf("https://%s/discover", peerAddr), bytes.NewReader(body))
 	if err != nil {
 		return
 	}
 	req.Header.Set("Content-Type", "application/x-protobuf")
-	resp, err := n.httpClient.Do(req)
+	resp, err := n.clientForPeer(peerAddr).Do(req)
 	if err != nil {
 		slog.Debug("HTTP peer registration failed", "peer", peerAddr, "error", err)
 		return
