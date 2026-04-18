@@ -45,12 +45,12 @@ type FileEntry struct {
 
 	// PH: incremental hashing state for append-only optimization.
 	// HashState is the serialized sha256 internal state after hashing
-	// HashedBytes bytes. On the next scan, if the file grew (size >
-	// HashedBytes) without other changes, the hasher is restored and
-	// only the appended bytes are hashed. Only stored for files >=
-	// minIncrementalHashSize to avoid bloating small-file indexes.
+	// HashedBytes bytes. PrefixCheck holds the last prefixCheckSize bytes
+	// of the hashed region for boundary verification on the next scan.
+	// Only stored for files >= minIncrementalHashSize.
 	HashState   []byte `yaml:"hash_state,omitempty"`
 	HashedBytes int64  `yaml:"hashed_bytes,omitempty"`
+	PrefixCheck []byte `yaml:"prefix_check,omitempty"`
 }
 
 // FileIndex is the in-memory index for a single folder.
@@ -438,13 +438,15 @@ type hashJob struct {
 	savedState  []byte // PH: serialized hasher state for incremental hashing
 	hashedBytes int64  // PH: bytes covered by savedState
 	newSize     int64  // PH: current file size
+	prefixCheck []byte // PH: boundary bytes for truncate+regrow detection
 }
 
 // hashResult carries the SHA-256 hex string or an error from a worker.
 type hashResult struct {
-	hash      string
-	err       error
-	hashState []byte // PH: serialized hasher state after hashing
+	hash        string
+	err         error
+	hashState   []byte // PH: serialized hasher state after hashing
+	prefixCheck []byte // PH: boundary bytes captured after hashing
 }
 
 // pendingHash records metadata captured during the walk for a file that
@@ -634,8 +636,8 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		go func() {
 			defer hashWg.Done()
 			for job := range hashCh {
-				h, st, hErr := hashFileIncremental(job.absPath, job.savedState, job.hashedBytes, job.newSize)
-				hashResults[job.idx] = hashResult{hash: h, err: hErr, hashState: st}
+				h, st, pc, hErr := hashFileIncremental(job.absPath, job.savedState, job.hashedBytes, job.newSize, job.prefixCheck)
+				hashResults[job.idx] = hashResult{hash: h, err: hErr, hashState: st, prefixCheck: pc}
 			}
 		}()
 	}
@@ -781,6 +783,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		if p.exists && !p.old.Deleted && len(p.old.HashState) > 0 && p.size > p.old.HashedBytes {
 			job.savedState = p.old.HashState
 			job.hashedBytes = p.old.HashedBytes
+			job.prefixCheck = p.old.PrefixCheck
 		}
 		hashCh <- job
 	}
@@ -818,6 +821,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			entry.Mode = p.mode
 			entry.HashState = r.hashState
 			entry.HashedBytes = p.size
+			entry.PrefixCheck = r.prefixCheck
 			idx.Files[p.rel] = entry
 			continue
 		}
@@ -831,6 +835,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			Mode:        p.mode,
 			HashState:   r.hashState,
 			HashedBytes: p.size,
+			PrefixCheck: r.prefixCheck,
 		}
 		changed = true
 	}
@@ -931,17 +936,24 @@ func hashFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// prefixCheckSize is the number of bytes verified at the boundary before
+// using incremental hashing. This catches truncate+regrow scenarios where
+// the file prefix was silently replaced.
+const prefixCheckSize = 4096
+
 // hashFileIncremental computes the SHA-256 digest, optionally resuming from
 // a previously saved hasher state. Returns the hex digest and the serialized
 // hasher state for the next incremental run.
 //
 // Incremental path is taken when: (1) savedState is non-empty, (2) the file
-// grew (newSize > hashedBytes), and (3) newSize >= minIncrementalHashSize.
-// Otherwise, a full hash is computed.
-func hashFileIncremental(path string, savedState []byte, hashedBytes, newSize int64) (hexHash string, state []byte, err error) {
+// grew (newSize > hashedBytes), (3) newSize >= minIncrementalHashSize, and
+// (4) the boundary region (last prefixCheckSize bytes of the previously-hashed
+// content) matches the saved prefixCheck. Condition (4) catches truncate+regrow
+// where the file was rewritten with different content.
+func hashFileIncremental(path string, savedState []byte, hashedBytes, newSize int64, prefixCheck []byte) (hexHash string, state []byte, newPrefixCheck []byte, err error) {
 	f, err := os.Open(path) //nolint:gosec // G304: path comes from scan walk within a user-configured folder
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	defer func() { _ = f.Close() }()
 
@@ -949,34 +961,47 @@ func hashFileIncremental(path string, savedState []byte, hashedBytes, newSize in
 	h.Reset()
 	defer sha256Pool.Put(h)
 
-	incremental := len(savedState) > 0 && newSize > hashedBytes && newSize >= minIncrementalHashSize
+	incremental := len(savedState) > 0 && newSize > hashedBytes && newSize >= minIncrementalHashSize && len(prefixCheck) > 0
+	if incremental {
+		// Verify the boundary region before trusting saved state.
+		checkOffset := hashedBytes - int64(len(prefixCheck))
+		if checkOffset < 0 {
+			checkOffset = 0
+		}
+		checkLen := int(hashedBytes - checkOffset)
+		buf := make([]byte, checkLen)
+		n, readErr := f.ReadAt(buf, checkOffset)
+		if readErr != nil || n != checkLen || !bytes.Equal(buf[:n], prefixCheck) {
+			incremental = false // prefix changed — fall back to full hash
+		}
+	}
+
 	if incremental {
 		if um, ok := h.(encoding.BinaryUnmarshaler); ok {
 			if restoreErr := um.UnmarshalBinary(savedState); restoreErr == nil {
-				// Seek past the already-hashed prefix.
 				if _, seekErr := f.Seek(hashedBytes, io.SeekStart); seekErr == nil {
 					if _, cpErr := io.Copy(h, f); cpErr != nil {
-						return "", nil, cpErr
+						return "", nil, nil, cpErr
 					}
 					hexHash = hex.EncodeToString(h.Sum(nil))
-					// Save state for next run.
 					if m, mok := h.(encoding.BinaryMarshaler); mok {
 						state, _ = m.MarshalBinary()
 					}
-					return hexHash, state, nil
+					newPrefixCheck = capturePrefixCheck(f, newSize)
+					return hexHash, state, newPrefixCheck, nil
 				}
 			}
 		}
 		// Fall through to full hash on any restore/seek failure.
 		h.Reset()
 		if _, seekErr := f.Seek(0, io.SeekStart); seekErr != nil {
-			return "", nil, seekErr
+			return "", nil, nil, seekErr
 		}
 	}
 
 	// Full hash.
 	if _, err := io.Copy(h, f); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	hexHash = hex.EncodeToString(h.Sum(nil))
 
@@ -985,8 +1010,25 @@ func hashFileIncremental(path string, savedState []byte, hashedBytes, newSize in
 		if m, ok := h.(encoding.BinaryMarshaler); ok {
 			state, _ = m.MarshalBinary()
 		}
+		newPrefixCheck = capturePrefixCheck(f, newSize)
 	}
-	return hexHash, state, nil
+	return hexHash, state, newPrefixCheck, nil
+}
+
+// capturePrefixCheck reads the last prefixCheckSize bytes of the file (or
+// all of it if shorter) for use as a boundary verification on the next
+// incremental hash.
+func capturePrefixCheck(f *os.File, size int64) []byte {
+	checkLen := int64(prefixCheckSize)
+	if size < checkLen {
+		checkLen = size
+	}
+	buf := make([]byte, checkLen)
+	n, err := f.ReadAt(buf, size-checkLen)
+	if err != nil || int64(n) != checkLen {
+		return nil
+	}
+	return buf
 }
 
 // DiffAction represents what to do with a file during sync.

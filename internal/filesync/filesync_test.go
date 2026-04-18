@@ -2576,12 +2576,15 @@ func TestHashFileIncremental(t *testing.T) {
 	}
 
 	// Full hash — get the state.
-	hash1, state1, err := hashFileIncremental(path, nil, 0, int64(len(initial)))
+	hash1, state1, pc1, err := hashFileIncremental(path, nil, 0, int64(len(initial)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(state1) == 0 {
 		t.Fatal("expected non-empty hash state for large file")
+	}
+	if len(pc1) == 0 {
+		t.Fatal("expected non-empty prefix check for large file")
 	}
 
 	// Verify against hashFile.
@@ -2597,7 +2600,7 @@ func TestHashFileIncremental(t *testing.T) {
 	}
 
 	// Incremental hash — should produce correct result.
-	hash2, state2, err := hashFileIncremental(path, state1, int64(len(initial)), int64(len(appended)))
+	hash2, state2, pc2, err := hashFileIncremental(path, state1, int64(len(initial)), int64(len(appended)), pc1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2610,18 +2613,66 @@ func TestHashFileIncremental(t *testing.T) {
 	if len(state2) == 0 {
 		t.Fatal("expected state after incremental hash")
 	}
+	if len(pc2) == 0 {
+		t.Fatal("expected prefix check after incremental hash")
+	}
 
 	// File below threshold — no state saved.
 	smallPath := filepath.Join(dir, "small.txt")
 	if err := os.WriteFile(smallPath, []byte("tiny"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_, smallState, err := hashFileIncremental(smallPath, nil, 0, 4)
+	_, smallState, smallPC, err := hashFileIncremental(smallPath, nil, 0, 4, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(smallState) != 0 {
 		t.Error("expected no hash state for small file")
+	}
+	if len(smallPC) != 0 {
+		t.Error("expected no prefix check for small file")
+	}
+}
+
+func TestHashFileIncremental_TruncateRegrow(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "log.txt")
+
+	// Write initial content (above threshold).
+	initial := strings.Repeat("X", minIncrementalHashSize+200)
+	if err := os.WriteFile(path, []byte(initial), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Full hash to get state + prefix check.
+	hash1, state1, pc1, err := hashFileIncremental(path, nil, 0, int64(len(initial)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Truncate and rewrite with DIFFERENT content, same or larger size.
+	// This simulates log rotation where the file is truncated then grows back.
+	replaced := strings.Repeat("Y", minIncrementalHashSize+300)
+	if err := os.WriteFile(path, []byte(replaced), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Incremental hash with stale state — prefix check should detect mismatch
+	// and fall back to full rehash, producing correct results.
+	hash2, _, _, err := hashFileIncremental(path, state1, int64(len(initial)), int64(len(replaced)), pc1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Must match a fresh full hash of the new content.
+	expectedFull, _ := hashFile(path)
+	if hash2 != expectedFull {
+		t.Errorf("truncate+regrow: hash %q != full hash %q", hash2, expectedFull)
+	}
+	// Must differ from the original hash (content is different).
+	if hash2 == hash1 {
+		t.Error("truncate+regrow: hash should differ from original")
 	}
 }
 
