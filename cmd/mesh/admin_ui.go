@@ -811,6 +811,7 @@ select option { background: var(--bg-card); color: var(--text); }
   <button class="tab" role="tab" aria-selected="false" data-tab="clipsync" id="tab-clipsync" aria-controls="p-clipsync">Clipsync</button>
   <button class="tab" role="tab" aria-selected="false" data-tab="filesync" id="tab-filesync" aria-controls="p-filesync">Filesync</button>
   <button class="tab" role="tab" aria-selected="false" data-tab="gateway" id="tab-gateway" aria-controls="p-gateway">Gateway</button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="perf" id="tab-perf" aria-controls="p-perf">Perf</button>
   <div class="tab-sep" role="separator"></div>
   <button class="tab" role="tab" aria-selected="false" data-tab="logs" id="tab-logs" aria-controls="p-logs">Logs</button>
   <button class="tab" role="tab" aria-selected="false" data-tab="metrics" id="tab-metrics" aria-controls="p-metrics">Metrics</button>
@@ -932,6 +933,91 @@ select option { background: var(--bg-card); color: var(--text); }
         <table>
           <thead id="fsa-thead"><tr><th>Direction</th><th>Folder</th><th>Peer</th><th>Files</th><th>Size</th><th>Time</th><th>Error</th></tr></thead>
           <tbody id="fsa-body"><tr class="loading-row"><td colspan="6">Loading activity…</td></tr></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Performance panel -->
+  <div class="panel" id="p-perf" role="tabpanel" aria-labelledby="tab-perf">
+    <div class="stats" id="perf-stats"></div>
+    <div class="chart-grid" id="perf-charts">
+      <div class="chart-card">
+        <div class="chart-title">Scan Duration</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--cyan)"><span id="perf-scan-walk">0</span> <span style="font-size:11px;color:var(--text-muted)">walk ms</span></div>
+          <div class="chart-value" style="color:var(--green)"><span id="perf-scan-hash">0</span> <span style="font-size:11px;color:var(--text-muted)">hash ms</span></div>
+        </div>
+        <canvas class="chart-canvas" id="perf-chart-scan" aria-label="Scan duration chart"></canvas>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Sync Duration</div>
+        <div class="chart-value" id="perf-sync-dur" style="margin-bottom:8px">0 ms</div>
+        <canvas class="chart-canvas" id="perf-chart-sync" aria-label="Sync duration chart"></canvas>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Heap / Sys Memory</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--green)"><span id="perf-heap-val">0</span> <span style="font-size:11px;color:var(--text-muted)">heap MB</span></div>
+          <div class="chart-value" style="color:var(--purple)"><span id="perf-sys-val">0</span> <span style="font-size:11px;color:var(--text-muted)">sys MB</span></div>
+        </div>
+        <canvas class="chart-canvas" id="perf-chart-mem" aria-label="Memory chart"></canvas>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Goroutines / FDs</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--cyan)"><span id="perf-gor-val">0</span> <span style="font-size:11px;color:var(--text-muted)">goroutines</span></div>
+          <div class="chart-value" style="color:var(--yellow)"><span id="perf-fd-val">0</span> <span style="font-size:11px;color:var(--text-muted)">FDs</span></div>
+        </div>
+        <canvas class="chart-canvas" id="perf-chart-gor" aria-label="Goroutines chart"></canvas>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span>Recent Scans</span>
+        <select id="perf-scan-folder" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
+          <option value="">All folders</option>
+        </select>
+      </div>
+      <div class="card-body">
+        <div class="table-scroll">
+        <table>
+          <thead><tr><th>Time</th><th>Folder</th><th>Walk</th><th>Hash</th><th>Stat</th><th>Snap</th><th>Files</th><th>Hashed</th><th>Deleted</th><th>Changed</th></tr></thead>
+          <tbody id="perf-scan-body"><tr class="loading-row"><td colspan="10">Loading…</td></tr></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span>Recent Syncs</span></div>
+      <div class="card-body">
+        <div class="table-scroll">
+        <table>
+          <thead><tr><th>Time</th><th>Folder</th><th>Peer</th><th>Duration</th><th>Remote</th><th>DL</th><th>Conflicts</th><th>Deletes</th><th>Failed</th></tr></thead>
+          <tbody id="perf-sync-body"><tr class="loading-row"><td colspan="9">Loading…</td></tr></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span>Recent Persists</span></div>
+      <div class="card-body">
+        <div class="table-scroll">
+        <table>
+          <thead><tr><th>Time</th><th>Folder</th><th>Index ms</th><th>Peers ms</th><th>Entries</th><th>Skipped</th></tr></thead>
+          <tbody id="perf-persist-body"><tr class="loading-row"><td colspan="6">Loading…</td></tr></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span>Process Snapshots</span></div>
+      <div class="card-body">
+        <div class="table-scroll">
+        <table>
+          <thead><tr><th>Time</th><th>Heap MB</th><th>Sys MB</th><th>Goroutines</th><th>FDs</th><th>GC Pause</th><th>Folders</th></tr></thead>
+          <tbody id="perf-snap-body"><tr class="loading-row"><td colspan="7">Loading…</td></tr></tbody>
         </table>
         </div>
       </div>
@@ -1273,7 +1359,7 @@ select option { background: var(--bg-card); color: var(--text); }
 
 <script>
 // --- State ---
-let state = {}, logs = [], folders = [], conflicts = [], clipActivities = [], fsActivities = [], metricsText = '', gatewayAudit = [], gwStats = null, gwSubview = 'overview', gwWindow = '24h', fsMetrics = {};
+let state = {}, logs = [], folders = [], conflicts = [], clipActivities = [], fsActivities = [], metricsText = '', gatewayAudit = [], gwStats = null, gwSubview = 'overview', gwWindow = '24h', fsMetrics = {}, perfEvents = [];
 function gwBucket(w) { return w === '1h' ? 'minute' : w === '24h' ? 'hour' : w === '7d' ? 'hour' : 'day'; }
 let logLevel = 'all';
 let logMode = 'recent'; // 'recent' (ring buffer) or 'file' (full log file)
@@ -1472,6 +1558,9 @@ function tick() {
         if (gwSubview === 'overview') renderGatewayOverview();
       }).catch(fail('gw-stats'));
     }
+  }
+  if (activeTab === 'perf') {
+    fetch('/api/perf?limit=2000').then(r=>ok(r)).then(r=>r.json()).then(v => { perfEvents = v; renderPerf(); }).catch(fail('perf'));
   }
 }
 
@@ -2594,6 +2683,119 @@ function renderFsTabCharts() {
   } else { sc.style.display = 'none'; }
 }
 
+// --- Performance tab ---
+const perfChartHist = { walkMs:[], hashMs:[], syncMs:[], heapMb:[], sysMb:[], goroutines:[], fds:[] };
+const PERF_HIST_LEN = 60;
+function pushPerfHist(k, v) { perfChartHist[k].push(v); if (perfChartHist[k].length > PERF_HIST_LEN) perfChartHist[k].shift(); }
+
+function renderPerf() {
+  if (!perfEvents || !perfEvents.length) return;
+  const scans = perfEvents.filter(e => e.event === 'scan');
+  const syncs = perfEvents.filter(e => e.event === 'sync');
+  const persists = perfEvents.filter(e => e.event === 'persist');
+  const snaps = perfEvents.filter(e => e.event === 'snapshot');
+
+  // KPI cards from latest events
+  const lastScan = scans.length ? scans[scans.length - 1] : null;
+  const lastSync = syncs.length ? syncs[syncs.length - 1] : null;
+  const lastSnap = snaps.length ? snaps[snaps.length - 1] : null;
+  const scanTotal = lastScan ? (lastScan.walk_ms + lastScan.hash_ms + lastScan.stat_ms + (lastScan.ignore_ms||0) + (lastScan.deletion_ms||0)).toFixed(0) : '-';
+  const syncDur = lastSync ? lastSync.duration_ms.toFixed(0) : '-';
+  const heapMb = lastSnap ? lastSnap.heap_mb : '-';
+  const sysMb = lastSnap ? lastSnap.sys_mb : '-';
+  const gor = lastSnap ? lastSnap.goroutines : '-';
+  const fds = lastSnap ? (lastSnap.open_fds >= 0 ? lastSnap.open_fds : 'n/a') : '-';
+  setHTML('perf-stats',
+    stat('Last Scan', scanTotal + ' ms', lastScan ? lastScan.folder : '') +
+    stat('Last Sync', syncDur + ' ms', lastSync ? lastSync.folder + ' → ' + lastSync.peer : '') +
+    stat('Heap', heapMb + ' MB', '') +
+    stat('Sys', sysMb + ' MB', '') +
+    stat('Goroutines', gor, '') +
+    stat('FDs', fds, '')
+  );
+
+  // Build chart histories from snapshot events
+  perfChartHist.heapMb = snaps.slice(-PERF_HIST_LEN).map(s => s.heap_mb);
+  perfChartHist.sysMb = snaps.slice(-PERF_HIST_LEN).map(s => s.sys_mb);
+  perfChartHist.goroutines = snaps.slice(-PERF_HIST_LEN).map(s => s.goroutines);
+  perfChartHist.fds = snaps.slice(-PERF_HIST_LEN).map(s => s.open_fds >= 0 ? s.open_fds : 0);
+  perfChartHist.walkMs = scans.slice(-PERF_HIST_LEN).map(s => s.walk_ms);
+  perfChartHist.hashMs = scans.slice(-PERF_HIST_LEN).map(s => s.hash_ms);
+  perfChartHist.syncMs = syncs.slice(-PERF_HIST_LEN).map(s => s.duration_ms);
+
+  // Chart values
+  if (lastScan) {
+    document.getElementById('perf-scan-walk').textContent = lastScan.walk_ms.toFixed(0);
+    document.getElementById('perf-scan-hash').textContent = lastScan.hash_ms.toFixed(0);
+  }
+  if (lastSync) document.getElementById('perf-sync-dur').textContent = lastSync.duration_ms.toFixed(0) + ' ms';
+  if (lastSnap) {
+    document.getElementById('perf-heap-val').textContent = lastSnap.heap_mb;
+    document.getElementById('perf-sys-val').textContent = lastSnap.sys_mb;
+    document.getElementById('perf-gor-val').textContent = lastSnap.goroutines;
+    document.getElementById('perf-fd-val').textContent = lastSnap.open_fds >= 0 ? lastSnap.open_fds : 'n/a';
+  }
+  drawChart('perf-chart-scan', [perfChartHist.walkMs, perfChartHist.hashMs], ['#22d3ee', '#34d399']);
+  drawChart('perf-chart-sync', [perfChartHist.syncMs], ['#a78bfa']);
+  drawChart('perf-chart-mem', [perfChartHist.heapMb, perfChartHist.sysMb], ['#34d399', '#a78bfa']);
+  drawChart('perf-chart-gor', [perfChartHist.goroutines, perfChartHist.fds], ['#22d3ee', '#facc15']);
+
+  // Folder filter for scans
+  const sel = document.getElementById('perf-scan-folder');
+  const curVal = sel.value;
+  const folderIds = [...new Set(scans.map(s => s.folder))].sort();
+  if (sel.options.length !== folderIds.length + 1) {
+    sel.innerHTML = '<option value="">All folders</option>' + folderIds.map(f => '<option value="'+x(f)+'">'+x(f)+'</option>').join('');
+    sel.value = curVal;
+  }
+  const filterFolder = sel.value;
+
+  // Scans table (most recent first)
+  const filteredScans = filterFolder ? scans.filter(s => s.folder === filterFolder) : scans;
+  const scanRows = filteredScans.slice(-50).reverse().map(s => {
+    const total = s.walk_ms + s.hash_ms + s.stat_ms;
+    const cls = total > 10000 ? ' style="color:var(--red)"' : total > 5000 ? ' style="color:var(--yellow)"' : '';
+    return '<tr><td>'+fmtPerfTs(s.ts)+'</td><td>'+x(s.folder)+'</td>'+
+      '<td'+cls+'>'+s.walk_ms.toFixed(0)+'</td><td'+cls+'>'+s.hash_ms.toFixed(0)+'</td><td>'+s.stat_ms.toFixed(0)+'</td>'+
+      '<td>'+(s.snapshot_ms||0).toFixed(0)+'</td><td>'+s.active_files+'</td><td>'+s.files_hashed+'</td>'+
+      '<td>'+(s.deletions||0)+'</td><td>'+(s.changed?'<span style="color:var(--green)">yes</span>':'no')+'</td></tr>';
+  }).join('');
+  setHTML('perf-scan-body', scanRows || '<tr><td colspan="10" style="text-align:center;color:var(--text-muted)">No scan events</td></tr>');
+
+  // Syncs table
+  const syncRows = syncs.slice(-50).reverse().map(s => {
+    const cls = s.failed > 0 ? ' style="color:var(--red)"' : '';
+    return '<tr><td>'+fmtPerfTs(s.ts)+'</td><td>'+x(s.folder)+'</td><td>'+x(s.peer)+'</td>'+
+      '<td>'+s.duration_ms.toFixed(0)+' ms</td><td>'+s.remote_entries+'</td>'+
+      '<td>'+(s.downloads||0)+'</td><td>'+(s.conflicts||0)+'</td><td>'+(s.deletes||0)+'</td>'+
+      '<td'+cls+'>'+(s.failed||0)+'</td></tr>';
+  }).join('');
+  setHTML('perf-sync-body', syncRows || '<tr><td colspan="9" style="text-align:center;color:var(--text-muted)">No sync events</td></tr>');
+
+  // Persists table
+  const persistRows = persists.slice(-30).reverse().map(s => {
+    return '<tr><td>'+fmtPerfTs(s.ts)+'</td><td>'+x(s.folder)+'</td>'+
+      '<td>'+s.index_ms.toFixed(1)+'</td><td>'+s.peers_ms.toFixed(1)+'</td>'+
+      '<td>'+s.index_bytes+'</td><td>'+(s.skipped_index?'<span style="color:var(--green)">yes</span>':'no')+'</td></tr>';
+  }).join('');
+  setHTML('perf-persist-body', persistRows || '<tr><td colspan="6" style="text-align:center;color:var(--text-muted)">No persist events</td></tr>');
+
+  // Snapshots table
+  const snapRows = snaps.slice(-20).reverse().map(s => {
+    const folderInfo = (s.folders||[]).map(f => x(f.id)+': '+f.active+' files, '+fmtBytes(f.total_bytes)).join('; ');
+    return '<tr><td>'+fmtPerfTs(s.ts)+'</td><td>'+s.heap_mb+'</td><td>'+s.sys_mb+'</td>'+
+      '<td>'+s.goroutines+'</td><td>'+(s.open_fds>=0?s.open_fds:'n/a')+'</td>'+
+      '<td>'+(s.gc_pause_us||0)+' \u00B5s</td><td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+x(folderInfo)+'">'+x(folderInfo||'-')+'</td></tr>';
+  }).join('');
+  setHTML('perf-snap-body', snapRows || '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">No snapshots</td></tr>');
+}
+
+function fmtPerfTs(ts) {
+  if (!ts) return '-';
+  const d = new Date(ts);
+  return d.toLocaleTimeString()+'.'+String(d.getMilliseconds()).padStart(3,'0');
+}
+
 function renderCompTraffic() {
   const el = document.getElementById('met-comp-body');
   if (!el) return;
@@ -2760,6 +2962,7 @@ const endpoints = [
   {method:'GET', path:'/api/filesync/conflicts', desc:'Conflict files as JSON array: folder_id, path.'},
   {method:'GET', path:'/api/filesync/conflicts/diff?folder=ID&path=REL', desc:'Diff between a conflict file and its original. Returns: conflict_path, original_path, original_exists, is_binary, conflict/original metadata (size, mtime, sha256), lines (op: equal/add/delete + text), truncated.'},
   {method:'GET', path:'/api/filesync/activity', desc:'Recent sync activities as JSON array: time, folder, peer, direction, files, bytes, error. Last 50 entries.'},
+  {method:'GET', path:'/api/perf?limit=500&event=scan|sync|persist|snapshot', desc:'Performance events from JSONL perf log. Returns last N events (max 5000). Filter by event type.'},
   {method:'GET', path:'/api/gateway/audit?gateway=NAME&limit=N&session=&model=&outcome=&since=&until=&min_tokens=', desc:'Recent audit rows. Filters: session (12-char hex from messages[0] hash), model, outcome (ok|error|truncated|client_cancelled), since/until (RFC3339), min_tokens (req+resp pair total). Returns paired rows.'},
   {method:'GET', path:'/api/gateway/audit/pair?gateway=NAME&id=N&run=HEX', desc:'Full request and response rows for a single audit pair. Required: gateway, id, run. Used by the detail card to fetch bodies on demand.'},
   {method:'GET', path:'/api/gateway/audit/stats?gateway=NAME&window=24h&bucket=hour&session=&model=', desc:'Aggregated counters: totals (input/output/cache/reasoning tokens, cache_hit_ratio), by_model, by_session, time series. Window: 1h|24h|7d|30d|all|<duration>. Bucket: minute|hour|day.'},
