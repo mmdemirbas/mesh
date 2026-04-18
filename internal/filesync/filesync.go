@@ -1354,6 +1354,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					ExpectedHash: a.RemoteHash,
 					RemoteSize:   a.RemoteSize,
 					RemoteMode:   a.RemoteMode,
+					RemoteMtime:  a.RemoteMtime,
 				})
 			}
 		}
@@ -1524,6 +1525,12 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					}
 				}
 
+				// G1: preserve remote mtime so the next scan's fast-path skip works.
+				if action.RemoteMtime > 0 {
+					mt := time.Unix(0, action.RemoteMtime)
+					_ = fs.root.Chtimes(action.Path, mt, mt)
+				}
+
 				// L1: apply file permissions from remote (default 0644).
 				fileMode := os.FileMode(action.RemoteMode)
 				if fileMode == 0 {
@@ -1573,6 +1580,11 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				// conflict file needed, no download.
 				if !action.RemoteHash.IsZero() {
 					if localHash, hashErr := hashFileRoot(fs.root, action.Path); hashErr == nil && localHash == action.RemoteHash {
+						// G1: set disk mtime to match index so next scan uses fast-path.
+						if action.RemoteMtime > 0 {
+							mt := time.Unix(0, action.RemoteMtime)
+							_ = fs.root.Chtimes(action.Path, mt, mt)
+						}
 						fs.indexMu.Lock()
 						fs.index.Sequence++
 						fs.index.setEntry(action.Path, FileEntry{
@@ -1685,6 +1697,12 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 							fs.metrics.SyncErrors.Add(1)
 							return
 						}
+					}
+
+					// G1: preserve remote mtime so the next scan's fast-path skip works.
+					if action.RemoteMtime > 0 {
+						mt := time.Unix(0, action.RemoteMtime)
+						_ = fs.root.Chtimes(action.Path, mt, mt)
 					}
 
 					// L1: apply file permissions from remote.

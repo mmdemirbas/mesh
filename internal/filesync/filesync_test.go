@@ -5474,6 +5474,205 @@ func TestMultiPageIndex_TotalFileCap(t *testing.T) {
 	}
 }
 
+// --- G1: mtime preservation tests ---
+
+func TestDownloadFile_PreservesMtime(t *testing.T) {
+	t.Parallel()
+	content := "hello mtime world"
+	serverDir := t.TempDir()
+	writeFile(t, serverDir, "data.txt", content)
+
+	expectedHash, err := hashFile(filepath.Join(serverDir, "data.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set a known mtime on the server file (1 hour ago).
+	remoteMtime := time.Now().Add(-1 * time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(filepath.Join(serverDir, "data.txt"), remoteMtime, remoteMtime); err != nil {
+		t.Fatal(err)
+	}
+
+	n := &Node{
+		cfg:      testCfg(serverDir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test",
+	}
+	n.folders["test"] = &folderState{
+		cfg:  testFolderCfg(serverDir, "127.0.0.1"),
+		root: openTestRoot(t, serverDir),
+	}
+	srv := httptest.NewServer((&server{node: n}).handler())
+	defer srv.Close()
+
+	clientDir := t.TempDir()
+	clientRoot := openTestRoot(t, clientDir)
+
+	// Download the file.
+	relPath, err := downloadFile(t.Context(), &http.Client{},
+		srv.Listener.Addr().String(), "test", "data.txt", expectedHash, clientRoot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// downloadFile itself does NOT call Chtimes — the caller (syncFolder) does.
+	// Simulate what syncFolder does after downloadFile returns.
+	mt := remoteMtime
+	if err := clientRoot.Chtimes(relPath, mt, mt); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify disk mtime matches remote.
+	info, err := os.Stat(filepath.Join(clientDir, relPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	diskMtime := info.ModTime().Truncate(time.Second)
+	if !diskMtime.Equal(remoteMtime) {
+		t.Errorf("disk mtime = %v, want %v", diskMtime, remoteMtime)
+	}
+}
+
+func TestDownloadBundle_PreservesMtime(t *testing.T) {
+	t.Parallel()
+	serverDir := t.TempDir()
+	clientDir := t.TempDir()
+
+	// Create files on the server side with distinct mtimes.
+	type fileData struct {
+		content string
+		hash    Hash256
+		mtime   time.Time
+	}
+	files := make(map[string]fileData)
+	for i := range 3 {
+		name := fmt.Sprintf("f%d.txt", i)
+		content := fmt.Sprintf("content-%d", i)
+		writeFile(t, serverDir, name, content)
+		h := sha256.Sum256([]byte(content))
+		mt := time.Date(2025, 6, 15, 10, i, 0, 0, time.UTC)
+		if err := os.Chtimes(filepath.Join(serverDir, name), mt, mt); err != nil {
+			t.Fatal(err)
+		}
+		files[name] = fileData{content: content, hash: Hash256(h), mtime: mt}
+	}
+
+	// Build server index.
+	idx := newFileIndex()
+	for name, fd := range files {
+		idx.setEntry(name, FileEntry{
+			Size:   int64(len(fd.content)),
+			SHA256: fd.hash,
+		})
+	}
+
+	n := &Node{
+		cfg:      testCfg(serverDir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg:   testFolderCfg(serverDir, "127.0.0.1"),
+		root:  openTestRoot(t, serverDir),
+		index: idx,
+	}
+	srv := httptest.NewServer((&server{node: n}).handler())
+	defer srv.Close()
+
+	// Build entries with remote mtime.
+	var entries []bundleEntry
+	for name, fd := range files {
+		entries = append(entries, bundleEntry{
+			Path:         name,
+			ExpectedHash: fd.hash,
+			RemoteSize:   int64(len(fd.content)),
+			RemoteMtime:  fd.mtime.UnixNano(),
+		})
+	}
+
+	clientRoot := openTestRoot(t, clientDir)
+	ok, retry := downloadBundle(t.Context(), http.DefaultClient,
+		srv.Listener.Addr().String(), "test", entries, clientRoot, nil)
+
+	if len(retry) != 0 {
+		t.Errorf("expected 0 retries, got %d", len(retry))
+	}
+	if len(ok) != 3 {
+		t.Fatalf("expected 3 successful downloads, got %d", len(ok))
+	}
+
+	// Verify each file's mtime on disk matches RemoteMtime.
+	for name, fd := range files {
+		info, err := os.Stat(filepath.Join(clientDir, name))
+		if err != nil {
+			t.Errorf("stat %s: %v", name, err)
+			continue
+		}
+		diskMtime := info.ModTime().Truncate(time.Second)
+		wantMtime := fd.mtime.Truncate(time.Second)
+		if !diskMtime.Equal(wantMtime) {
+			t.Errorf("%s: disk mtime = %v, want %v", name, diskMtime, wantMtime)
+		}
+	}
+}
+
+func TestMtimePreservation_ScanFastPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	content := "fast path test data"
+	writeFile(t, dir, "stable.txt", content)
+
+	h, err := hashFile(filepath.Join(dir, "stable.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set a specific mtime (simulating what G1 Chtimes does after download).
+	remoteMtime := time.Date(2025, 3, 20, 14, 30, 0, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(dir, "stable.txt"), remoteMtime, remoteMtime); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build an index with matching mtime (as syncFolder would set after download).
+	idx := newFileIndex()
+	info, _ := os.Stat(filepath.Join(dir, "stable.txt"))
+	idx.setEntry("stable.txt", FileEntry{
+		Size:    info.Size(),
+		MtimeNS: info.ModTime().UnixNano(),
+		SHA256:  h,
+		Mode:    uint32(info.Mode().Perm()),
+	})
+
+	ignore := newIgnoreMatcher(nil)
+
+	// First scan — index already has correct entry, should fast-path skip.
+	_, _, _, stats, _, scanErr := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	if scanErr != nil {
+		t.Fatal(scanErr)
+	}
+
+	// Fast-path means no hashing — the file was skipped because mtime+size match.
+	if stats.FilesHashed != 0 {
+		t.Errorf("expected 0 files hashed (fast-path), got %d", stats.FilesHashed)
+	}
+
+	// Now simulate the bug this fix prevents: set a different mtime on disk
+	// (as would happen without Chtimes — rename gives wall-clock mtime).
+	wallClock := time.Now()
+	if err := os.Chtimes(filepath.Join(dir, "stable.txt"), wallClock, wallClock); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second scan — mtime mismatch forces a re-hash even though content is unchanged.
+	_, _, _, stats2, _, scanErr2 := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	if scanErr2 != nil {
+		t.Fatal(scanErr2)
+	}
+	if stats2.FilesHashed != 1 {
+		t.Errorf("expected 1 file hashed (mtime mismatch), got %d", stats2.FilesHashed)
+	}
+}
+
 func BenchmarkHashFile(b *testing.B) {
 	dir := b.TempDir()
 	path := filepath.Join(dir, "bench.dat")

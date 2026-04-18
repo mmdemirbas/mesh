@@ -324,6 +324,7 @@ type bundleEntry struct {
 	ExpectedHash Hash256
 	RemoteSize   int64
 	RemoteMode   uint32
+	RemoteMtime  int64 // G1: nanosecond mtime from remote index
 }
 
 // bundleBatches partitions entries into batches of at most maxBundlePaths
@@ -463,6 +464,12 @@ func downloadBundle(ctx context.Context, client *http.Client, peerAddr, folderID
 		if err := renameReplaceRoot(root, tmpRelPath, hdr.Name); err != nil {
 			_ = root.Remove(tmpRelPath)
 			continue
+		}
+
+		// G1: preserve remote mtime so the next scan's fast-path skip works.
+		if e.RemoteMtime > 0 {
+			mt := time.Unix(0, e.RemoteMtime)
+			_ = root.Chtimes(hdr.Name, mt, mt)
 		}
 
 		// Apply permissions.
