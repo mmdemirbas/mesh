@@ -1414,6 +1414,32 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				}
 				defer func() { <-sem }()
 
+				// C1: same-hash conflict resolution. Re-hash the local file
+				// from disk (never trust cached index hash) and compare with
+				// the remote hash. If identical, adopt remote metadata — no
+				// conflict file needed, no download.
+				if action.RemoteHash != "" {
+					if localHash, hashErr := hashFileRoot(fs.root, action.Path); hashErr == nil && localHash == action.RemoteHash {
+						fs.indexMu.Lock()
+						fs.index.Sequence++
+						fs.index.setEntry(action.Path, FileEntry{
+							Size:     action.RemoteSize,
+							MtimeNS:  action.RemoteMtime,
+							SHA256:   action.RemoteHash,
+							Sequence: fs.index.Sequence,
+							Mode:     action.RemoteMode,
+						})
+						fs.indexMu.Unlock()
+						slog.Info("conflict auto-resolved: identical content",
+							"folder", folderID, "path", action.Path, "peer", peerAddr)
+						perfEmit(map[string]any{
+							"event": "conflict_resolved", "folder": folderID,
+							"path": action.Path, "peer": peerAddr, "hash": localHash[:16],
+						})
+						return
+					}
+				}
+
 				remoteDeviceID := remoteIdx.GetDeviceId()
 				winner, conflictRelPath := resolveConflict(fs.root, action.Path, lmtime, action.RemoteMtime, remoteDeviceID)
 				slog.Debug("conflict resolved",

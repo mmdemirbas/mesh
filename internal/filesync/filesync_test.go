@@ -3,6 +3,8 @@ package filesync
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1736,6 +1738,141 @@ func TestConflictResolution_FailedDownloadPreservesLocal(t *testing.T) {
 	}
 	if string(data) != "precious local content" {
 		t.Errorf("local file content changed: got %q", string(data))
+	}
+}
+
+// C1: when both sides modify a file to identical content, diff() produces
+// ActionConflict but the sync path should auto-resolve by re-hashing from disk.
+// This test verifies the precondition (diff produces conflict) and the hash
+// comparison logic that the sync path uses.
+func TestConflictAutoResolve_SameHash(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// Scenario: file was at "version 1" when last scanned. Both sides then
+	// modified it to "version 2" (identical content). The local index still
+	// has the old hash from version 1, so diff() sees different hashes and
+	// produces ActionConflict. But the on-disk file matches the remote.
+	finalContent := "version 2 — identical on both sides\n"
+	writeFile(t, dir, "shared.txt", finalContent)
+
+	oldHash := sha256.Sum256([]byte("version 1 — old content\n"))
+	oldHashStr := hex.EncodeToString(oldHash[:])
+
+	newHash := sha256.Sum256([]byte(finalContent))
+	newHashStr := hex.EncodeToString(newHash[:])
+
+	// Local index: stale hash from version 1, seq=10 > lastSeenSeq=5.
+	localIdx := newFileIndex()
+	localIdx.Sequence = 10
+	localIdx.setEntry("shared.txt", FileEntry{
+		Size: 24, MtimeNS: time.Now().Add(-2 * time.Hour).UnixNano(),
+		SHA256: oldHashStr, Sequence: 10,
+	})
+
+	// Remote index: has the new hash from version 2.
+	remoteIdx := &FileIndex{
+		Sequence: 20,
+		Files: map[string]FileEntry{
+			"shared.txt": {
+				Size: int64(len(finalContent)), MtimeNS: time.Now().Add(-1 * time.Hour).UnixNano(),
+				SHA256: newHashStr, Sequence: 20,
+			},
+		},
+	}
+
+	// diff() produces ActionConflict: local hash (old) != remote hash (new),
+	// and local seq (10) > lastSeenSeq (5) → both sides modified.
+	actions := localIdx.diff(remoteIdx, 5, "send-receive")
+	if len(actions) != 1 {
+		t.Fatalf("expected 1 action, got %d", len(actions))
+	}
+	if actions[0].Action != ActionConflict {
+		t.Fatalf("expected ActionConflict, got %v", actions[0].Action)
+	}
+
+	// C1 guard: re-hash local file from disk — should match remote hash
+	// because the on-disk file is version 2 (same as remote).
+	root := openTestRoot(t, dir)
+	diskHash, err := hashFileRoot(root, "shared.txt")
+	if err != nil {
+		t.Fatalf("hashFileRoot: %v", err)
+	}
+	if diskHash != actions[0].RemoteHash {
+		t.Fatalf("on-disk hash should match remote for auto-resolve: disk=%s remote=%s", diskHash, actions[0].RemoteHash)
+	}
+}
+
+// C1: when both sides modify a file to different content, the conflict
+// must NOT be auto-resolved.
+func TestConflictAutoResolve_DifferentHash(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "diverged.txt", "local version\n")
+
+	remoteContent := "remote version\n"
+	rh := sha256.Sum256([]byte(remoteContent))
+	remoteHash := hex.EncodeToString(rh[:])
+
+	lh := sha256.Sum256([]byte("local version\n"))
+	localIdxHash := hex.EncodeToString(lh[:])
+
+	localIdx := newFileIndex()
+	localIdx.Sequence = 10
+	localIdx.setEntry("diverged.txt", FileEntry{
+		Size: 14, MtimeNS: time.Now().UnixNano(),
+		SHA256: localIdxHash, Sequence: 10,
+	})
+
+	remoteIdx := &FileIndex{
+		Sequence: 20,
+		Files: map[string]FileEntry{
+			"diverged.txt": {
+				Size: int64(len(remoteContent)), MtimeNS: time.Now().UnixNano(),
+				SHA256: remoteHash, Sequence: 20,
+			},
+		},
+	}
+
+	actions := localIdx.diff(remoteIdx, 5, "send-receive")
+	if len(actions) != 1 || actions[0].Action != ActionConflict {
+		t.Fatalf("expected ActionConflict, got %v", actions)
+	}
+
+	// C1 guard: re-hash from disk — should NOT match remote hash.
+	root := openTestRoot(t, dir)
+	diskHash, err := hashFileRoot(root, "diverged.txt")
+	if err != nil {
+		t.Fatalf("hashFileRoot: %v", err)
+	}
+	if diskHash == actions[0].RemoteHash {
+		t.Fatal("hashes should differ — conflict must not be auto-resolved")
+	}
+}
+
+// C1: when remote hash is empty, conflict must NOT be auto-resolved.
+func TestConflictAutoResolve_EmptyRemoteHash(t *testing.T) {
+	t.Parallel()
+	localIdx := newFileIndex()
+	localIdx.Sequence = 10
+	localIdx.setEntry("file.txt", FileEntry{
+		Size: 5, MtimeNS: time.Now().UnixNano(),
+		SHA256: "abc123", Sequence: 10,
+	})
+	remoteIdx := &FileIndex{
+		Sequence: 20,
+		Files: map[string]FileEntry{
+			"file.txt": {Size: 5, MtimeNS: time.Now().UnixNano(), SHA256: "", Sequence: 20},
+		},
+	}
+	// diff sees different hashes ("abc123" vs "") → ActionConflict
+	actions := localIdx.diff(remoteIdx, 5, "send-receive")
+	if len(actions) != 1 || actions[0].Action != ActionConflict {
+		t.Fatalf("expected ActionConflict, got %v", actions)
+	}
+	// C1 guard: empty remote hash → must NOT auto-resolve
+	if actions[0].RemoteHash != "" {
+		t.Fatal("expected empty remote hash")
 	}
 }
 
