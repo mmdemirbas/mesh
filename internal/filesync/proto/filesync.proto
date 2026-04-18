@@ -27,6 +27,13 @@ message FileInfo {
   uint32 mode      = 7;           // Unix permission bits (e.g., 0644)
 }
 
+// BundleRequest lists file paths to download in a single round-trip (P19).
+// Response is a tar+gzip stream; files absent from the tar are retried individually.
+message BundleRequest {
+  string folder_id     = 1;
+  repeated string paths = 2;
+}
+
 // BlockSignatures is sent by the receiver to request a block-level delta.
 // Each entry is the SHA-256 hash of a fixed-size block of the local file.
 message BlockSignatures {

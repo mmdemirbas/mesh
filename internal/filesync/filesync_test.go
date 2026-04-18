@@ -1,7 +1,9 @@
 package filesync
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -1936,6 +1938,390 @@ func TestVerifyPostWrite_FileNotFound(t *testing.T) {
 	}
 }
 
+// --- P19: Bundle transfer tests ---
+
+func TestBundleBatches(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		entries []bundleEntry
+		want    []int // expected batch sizes
+	}{
+		{
+			name:    "empty",
+			entries: nil,
+			want:    nil,
+		},
+		{
+			name: "single batch under limits",
+			entries: func() []bundleEntry {
+				e := make([]bundleEntry, 50)
+				for i := range e {
+					e[i] = bundleEntry{Path: fmt.Sprintf("f%d", i), RemoteSize: 1000}
+				}
+				return e
+			}(),
+			want: []int{50},
+		},
+		{
+			name: "split by count at 1000",
+			entries: func() []bundleEntry {
+				e := make([]bundleEntry, 2500)
+				for i := range e {
+					e[i] = bundleEntry{Path: fmt.Sprintf("f%d", i), RemoteSize: 100}
+				}
+				return e
+			}(),
+			want: []int{1000, 1000, 500},
+		},
+		{
+			name: "split by total bytes",
+			entries: func() []bundleEntry {
+				// 3 files of 60MB each = 180MB > maxBundleTotal (128MB)
+				return []bundleEntry{
+					{Path: "a", RemoteSize: 60 * 1024 * 1024},
+					{Path: "b", RemoteSize: 60 * 1024 * 1024},
+					{Path: "c", RemoteSize: 60 * 1024 * 1024},
+				}
+			}(),
+			want: []int{2, 1}, // a+b=120MB fits, c starts new batch
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			batches := bundleBatches(tc.entries)
+			if len(batches) != len(tc.want) {
+				t.Fatalf("got %d batches, want %d", len(batches), len(tc.want))
+			}
+			for i, b := range batches {
+				if len(b) != tc.want[i] {
+					t.Errorf("batch %d: got %d entries, want %d", i, len(b), tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestHandleBundle_RoundTrip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// Create test files.
+	files := map[string]string{
+		"small/a.txt": "content-a",
+		"small/b.txt": "content-b",
+		"small/c.txt": "content-c",
+	}
+	for path, content := range files {
+		writeFile(t, dir, path, content)
+	}
+
+	// Build index with file entries.
+	idx := newFileIndex()
+	for path, content := range files {
+		h := sha256.Sum256([]byte(content))
+		idx.setEntry(path, FileEntry{
+			Size:   int64(len(content)),
+			SHA256: hex.EncodeToString(h[:]),
+		})
+	}
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg:   testFolderCfg(dir, "127.0.0.1"),
+		root:  openTestRoot(t, dir),
+		index: idx,
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// Build bundle request.
+	reqMsg := &pb.BundleRequest{
+		FolderId: "test",
+		Paths:    []string{"small/a.txt", "small/b.txt", "small/c.txt"},
+	}
+	reqData, _ := proto.Marshal(reqMsg)
+
+	resp := bundlePost(t, ts.URL, reqData)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+	}
+
+	// Decode tar+gzip response (Accept-Encoding: gzip prevents auto-decompress).
+	gr, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = gr.Close() }()
+	tr := tar.NewReader(gr)
+
+	received := make(map[string]string)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := io.ReadAll(tr)
+		received[hdr.Name] = string(data)
+	}
+
+	if len(received) != 3 {
+		t.Fatalf("expected 3 files in tar, got %d: %v", len(received), received)
+	}
+	for path, want := range files {
+		if got, ok := received[path]; !ok {
+			t.Errorf("missing %s from tar", path)
+		} else if got != want {
+			t.Errorf("%s: got %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestDownloadBundle_Integration(t *testing.T) {
+	t.Parallel()
+	serverDir := t.TempDir()
+	clientDir := t.TempDir()
+
+	// Create files on the server side.
+	type fileData struct {
+		content string
+		hash    string
+	}
+	files := make(map[string]fileData)
+	for i := range 10 {
+		name := fmt.Sprintf("file%d.txt", i)
+		content := fmt.Sprintf("content-of-file-%d", i)
+		writeFile(t, serverDir, name, content)
+		h := sha256.Sum256([]byte(content))
+		files[name] = fileData{content: content, hash: hex.EncodeToString(h[:])}
+	}
+
+	// Build server index.
+	idx := newFileIndex()
+	for name, fd := range files {
+		idx.setEntry(name, FileEntry{
+			Size:   int64(len(fd.content)),
+			SHA256: fd.hash,
+		})
+	}
+
+	n := &Node{
+		cfg:        testCfg(serverDir, "127.0.0.1"),
+		folders:    make(map[string]*folderState),
+		deviceID:   "test-device",
+		httpClient: http.DefaultClient,
+	}
+	n.folders["test"] = &folderState{
+		cfg:   testFolderCfg(serverDir, "127.0.0.1"),
+		root:  openTestRoot(t, serverDir),
+		index: idx,
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// Build entries for download.
+	var entries []bundleEntry
+	for name, fd := range files {
+		entries = append(entries, bundleEntry{
+			Path:         name,
+			ExpectedHash: fd.hash,
+			RemoteSize:   int64(len(fd.content)),
+		})
+	}
+
+	clientRoot := openTestRoot(t, clientDir)
+	ok, retry := downloadBundle(t.Context(), http.DefaultClient, ts.Listener.Addr().String(), "test", entries, clientRoot, nil)
+
+	if len(retry) != 0 {
+		t.Errorf("expected 0 retries, got %d", len(retry))
+	}
+	if len(ok) != 10 {
+		t.Fatalf("expected 10 successful downloads, got %d", len(ok))
+	}
+
+	// Verify files on disk.
+	for name, fd := range files {
+		data, err := os.ReadFile(filepath.Join(clientDir, name))
+		if err != nil {
+			t.Errorf("read %s: %v", name, err)
+			continue
+		}
+		if string(data) != fd.content {
+			t.Errorf("%s: got %q, want %q", name, data, fd.content)
+		}
+	}
+}
+
+func TestHandleBundle_PathTraversal(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	idx := newFileIndex()
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg:   testFolderCfg(dir, "127.0.0.1"),
+		root:  openTestRoot(t, dir),
+		index: idx,
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	reqMsg := &pb.BundleRequest{
+		FolderId: "test",
+		Paths:    []string{"../../../etc/passwd", "normal.txt"},
+	}
+	reqData, _ := proto.Marshal(reqMsg)
+
+	resp := bundlePost(t, ts.URL, reqData)
+	defer func() { _ = resp.Body.Close() }()
+
+	// Should get 200 with an empty tar (traversal paths are silently skipped,
+	// and normal.txt is not in the index).
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	gr, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = gr.Close() }()
+	tr := tar.NewReader(gr)
+
+	count := 0
+	for {
+		_, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		count++
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 files in tar, got %d", count)
+	}
+}
+
+func TestHandleBundle_TooManyPaths(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg:   testFolderCfg(dir, "127.0.0.1"),
+		root:  openTestRoot(t, dir),
+		index: newFileIndex(),
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	paths := make([]string, maxBundlePaths+1)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("file%d.txt", i)
+	}
+	reqMsg := &pb.BundleRequest{
+		FolderId: "test",
+		Paths:    paths,
+	}
+	reqData, _ := proto.Marshal(reqMsg)
+
+	resp := bundlePost(t, ts.URL, reqData)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestDownloadBundle_HashMismatch(t *testing.T) {
+	t.Parallel()
+	serverDir := t.TempDir()
+	clientDir := t.TempDir()
+
+	writeFile(t, serverDir, "good.txt", "correct")
+	writeFile(t, serverDir, "bad.txt", "actual-content")
+
+	goodH := sha256.Sum256([]byte("correct"))
+	badH := sha256.Sum256([]byte("actual-content"))
+
+	idx := newFileIndex()
+	idx.setEntry("good.txt", FileEntry{Size: 7, SHA256: hex.EncodeToString(goodH[:])})
+	idx.setEntry("bad.txt", FileEntry{Size: 14, SHA256: hex.EncodeToString(badH[:])})
+
+	n := &Node{
+		cfg:      testCfg(serverDir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg:   testFolderCfg(serverDir, "127.0.0.1"),
+		root:  openTestRoot(t, serverDir),
+		index: idx,
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	entries := []bundleEntry{
+		{Path: "good.txt", ExpectedHash: hex.EncodeToString(goodH[:]), RemoteSize: 7},
+		{Path: "bad.txt", ExpectedHash: "0000000000000000000000000000000000000000000000000000000000000000", RemoteSize: 14},
+	}
+
+	clientRoot := openTestRoot(t, clientDir)
+	ok, retry := downloadBundle(t.Context(), http.DefaultClient, ts.Listener.Addr().String(), "test", entries, clientRoot, nil)
+
+	if len(ok) != 1 || ok[0] != "good.txt" {
+		t.Errorf("expected [good.txt] ok, got %v", ok)
+	}
+	if len(retry) != 1 || retry[0].Path != "bad.txt" {
+		t.Errorf("expected [bad.txt] retry, got %v", retry)
+	}
+
+	// Verify good.txt was written.
+	data, err := os.ReadFile(filepath.Join(clientDir, "good.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "correct" {
+		t.Errorf("good.txt: got %q, want %q", data, "correct")
+	}
+
+	// Verify bad.txt was NOT written (temp file cleaned up).
+	if _, err := os.Stat(filepath.Join(clientDir, "bad.txt")); !os.IsNotExist(err) {
+		t.Error("bad.txt should not exist on disk after hash mismatch")
+	}
+}
+
 // B17: verify that NFD paths (macOS HFS+ decomposition) are normalized to
 // NFC during scan, preventing cross-platform duplicates.
 func TestScanNormalizesNFD(t *testing.T) {
@@ -3677,6 +4063,23 @@ func testFolderCfg(dir, peerIP string) config.FolderCfg {
 		Direction: "send-receive",
 		Peers:     []string{peerIP + ":7756"},
 	}
+}
+
+// bundlePost sends a POST to /bundle with Accept-Encoding: gzip to prevent
+// Go's http.Transport from auto-decompressing the gzip response.
+func bundlePost(t *testing.T, baseURL string, body []byte) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/bundle", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	req.Header.Set("Accept-Encoding", "gzip")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
 }
 
 // openTestRoot opens an os.Root for a temp dir, with automatic cleanup.

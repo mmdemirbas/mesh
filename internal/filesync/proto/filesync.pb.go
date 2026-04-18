@@ -224,6 +224,60 @@ func (x *FileInfo) GetMode() uint32 {
 	return 0
 }
 
+// BundleRequest lists file paths to download in a single round-trip (P19).
+// Response is a tar+gzip stream; files absent from the tar are retried individually.
+type BundleRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	FolderId      string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
+	Paths         []string               `protobuf:"bytes,2,rep,name=paths,proto3" json:"paths,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BundleRequest) Reset() {
+	*x = BundleRequest{}
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BundleRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BundleRequest) ProtoMessage() {}
+
+func (x *BundleRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BundleRequest.ProtoReflect.Descriptor instead.
+func (*BundleRequest) Descriptor() ([]byte, []int) {
+	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *BundleRequest) GetFolderId() string {
+	if x != nil {
+		return x.FolderId
+	}
+	return ""
+}
+
+func (x *BundleRequest) GetPaths() []string {
+	if x != nil {
+		return x.Paths
+	}
+	return nil
+}
+
 // BlockSignatures is sent by the receiver to request a block-level delta.
 // Each entry is the SHA-256 hash of a fixed-size block of the local file.
 type BlockSignatures struct {
@@ -239,7 +293,7 @@ type BlockSignatures struct {
 
 func (x *BlockSignatures) Reset() {
 	*x = BlockSignatures{}
-	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[2]
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -251,7 +305,7 @@ func (x *BlockSignatures) String() string {
 func (*BlockSignatures) ProtoMessage() {}
 
 func (x *BlockSignatures) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[2]
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -264,7 +318,7 @@ func (x *BlockSignatures) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BlockSignatures.ProtoReflect.Descriptor instead.
 func (*BlockSignatures) Descriptor() ([]byte, []int) {
-	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{2}
+	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *BlockSignatures) GetFolderId() string {
@@ -307,7 +361,7 @@ func (x *BlockSignatures) GetBlockHashes() [][]byte {
 type DeltaResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	FileSize      int64                  `protobuf:"varint,1,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"`      // Total remote file size
-	FileSha256    []byte                 `protobuf:"bytes,2,opt,name=file_sha256,json=fileSha256,proto3" json:"file_sha256,omitempty"` // SHA-256 of the complete remote file
+	FileSha256    []byte                 `protobuf:"bytes,2,opt,name=file_sha256,json=fileSha256,proto3" json:"file_sha256,omitempty"` // Deprecated (L7): receiver verifies hash independently. Kept for wire compat.
 	Blocks        []*DeltaBlock          `protobuf:"bytes,3,rep,name=blocks,proto3" json:"blocks,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -315,7 +369,7 @@ type DeltaResponse struct {
 
 func (x *DeltaResponse) Reset() {
 	*x = DeltaResponse{}
-	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[3]
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -327,7 +381,7 @@ func (x *DeltaResponse) String() string {
 func (*DeltaResponse) ProtoMessage() {}
 
 func (x *DeltaResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[3]
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -340,7 +394,7 @@ func (x *DeltaResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeltaResponse.ProtoReflect.Descriptor instead.
 func (*DeltaResponse) Descriptor() ([]byte, []int) {
-	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{3}
+	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *DeltaResponse) GetFileSize() int64 {
@@ -375,7 +429,7 @@ type DeltaBlock struct {
 
 func (x *DeltaBlock) Reset() {
 	*x = DeltaBlock{}
-	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[4]
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -387,7 +441,7 @@ func (x *DeltaBlock) String() string {
 func (*DeltaBlock) ProtoMessage() {}
 
 func (x *DeltaBlock) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[4]
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -400,7 +454,7 @@ func (x *DeltaBlock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeltaBlock.ProtoReflect.Descriptor instead.
 func (*DeltaBlock) Descriptor() ([]byte, []int) {
-	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{4}
+	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *DeltaBlock) GetIndex() int64 {
@@ -440,7 +494,10 @@ const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
 	"\x06sha256\x18\x04 \x01(\fR\x06sha256\x12\x18\n" +
 	"\adeleted\x18\x05 \x01(\bR\adeleted\x12\x1a\n" +
 	"\bsequence\x18\x06 \x01(\x03R\bsequence\x12\x12\n" +
-	"\x04mode\x18\a \x01(\rR\x04mode\"\xa1\x01\n" +
+	"\x04mode\x18\a \x01(\rR\x04mode\"B\n" +
+	"\rBundleRequest\x12\x1b\n" +
+	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12\x14\n" +
+	"\x05paths\x18\x02 \x03(\tR\x05paths\"\xa1\x01\n" +
 	"\x0fBlockSignatures\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12\x1d\n" +
@@ -470,17 +527,18 @@ func file_internal_filesync_proto_filesync_proto_rawDescGZIP() []byte {
 	return file_internal_filesync_proto_filesync_proto_rawDescData
 }
 
-var file_internal_filesync_proto_filesync_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_internal_filesync_proto_filesync_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_internal_filesync_proto_filesync_proto_goTypes = []any{
 	(*IndexExchange)(nil),   // 0: filesync.IndexExchange
 	(*FileInfo)(nil),        // 1: filesync.FileInfo
-	(*BlockSignatures)(nil), // 2: filesync.BlockSignatures
-	(*DeltaResponse)(nil),   // 3: filesync.DeltaResponse
-	(*DeltaBlock)(nil),      // 4: filesync.DeltaBlock
+	(*BundleRequest)(nil),   // 2: filesync.BundleRequest
+	(*BlockSignatures)(nil), // 3: filesync.BlockSignatures
+	(*DeltaResponse)(nil),   // 4: filesync.DeltaResponse
+	(*DeltaBlock)(nil),      // 5: filesync.DeltaBlock
 }
 var file_internal_filesync_proto_filesync_proto_depIdxs = []int32{
 	1, // 0: filesync.IndexExchange.files:type_name -> filesync.FileInfo
-	4, // 1: filesync.DeltaResponse.blocks:type_name -> filesync.DeltaBlock
+	5, // 1: filesync.DeltaResponse.blocks:type_name -> filesync.DeltaBlock
 	2, // [2:2] is the sub-list for method output_type
 	2, // [2:2] is the sub-list for method input_type
 	2, // [2:2] is the sub-list for extension type_name
@@ -499,7 +557,7 @@ func file_internal_filesync_proto_filesync_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_filesync_proto_filesync_proto_rawDesc), len(file_internal_filesync_proto_filesync_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -1319,11 +1319,104 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	var failMu sync.Mutex
 	var failedSeqs []int64
 
+	// P19: bundle transfer for small download actions. Partition into
+	// small (≤4 MB) and the rest. Small files are batched into tar+gzip
+	// bundles to eliminate per-file HTTP round-trips.
+	bundledPaths := make(map[string]bool)
+	{
+		var smallEntries []bundleEntry
+		for _, a := range actions {
+			if a.Action == ActionDownload && a.RemoteSize > 0 && a.RemoteSize <= maxBundleFileSize {
+				// Pre-check: skip quarantined and in-flight.
+				fs.indexMu.RLock()
+				q := fs.retries.quarantined(a.Path, a.RemoteHash)
+				fs.indexMu.RUnlock()
+				if q {
+					continue
+				}
+				smallEntries = append(smallEntries, bundleEntry{
+					Path:         a.Path,
+					ExpectedHash: a.RemoteHash,
+					RemoteSize:   a.RemoteSize,
+					RemoteMode:   a.RemoteMode,
+				})
+			}
+		}
+
+		if len(smallEntries) >= 2 { // only batch when there's something to batch
+			batches := bundleBatches(smallEntries)
+			for _, batch := range batches {
+				if ctx.Err() != nil {
+					break
+				}
+				// Claim all paths in this batch.
+				var claimed []bundleEntry
+				for _, e := range batch {
+					if fs.claimPath(e.Path) {
+						claimed = append(claimed, e)
+					}
+				}
+				if len(claimed) == 0 {
+					continue
+				}
+
+				ok, retry := downloadBundle(ctx, n.httpClient, peerAddr, folderID, claimed, fs.root, n.rateLimiter)
+				for _, path := range ok {
+					bundledPaths[path] = true
+					fs.releasePath(path)
+				}
+				for _, e := range retry {
+					fs.releasePath(e.Path)
+				}
+
+				// Update index for successful bundle downloads.
+				if len(ok) > 0 {
+					// Build lookup for action metadata.
+					actionMap := make(map[string]DiffEntry, len(actions))
+					for _, a := range actions {
+						if a.Action == ActionDownload {
+							actionMap[a.Path] = a
+						}
+					}
+					fs.indexMu.Lock()
+					for _, path := range ok {
+						a := actionMap[path]
+						fs.index.Sequence++
+						fs.index.setEntry(path, FileEntry{
+							Size:     a.RemoteSize,
+							MtimeNS:  a.RemoteMtime,
+							SHA256:   a.RemoteHash,
+							Sequence: fs.index.Sequence,
+							Mode:     a.RemoteMode,
+						})
+						fs.retries.clear(path)
+					}
+					fs.indexMu.Unlock()
+
+					m := state.Global.GetMetrics("filesync", n.cfg.Bind)
+					for _, path := range ok {
+						a := actionMap[path]
+						m.BytesRx.Add(a.RemoteSize)
+						fs.metrics.FilesDownloaded.Add(1)
+						fs.metrics.BytesDownloaded.Add(a.RemoteSize)
+					}
+				}
+				slog.Info("bundle download", "folder", folderID, "peer", peerAddr,
+					"requested", len(claimed), "ok", len(ok), "retry", len(retry))
+			}
+		}
+	}
+
 	var wg sync.WaitGroup
 	var skippedQuarantine int
 	for _, action := range actions {
 		if ctx.Err() != nil {
 			break
+		}
+
+		// P19: skip actions already handled by bundle download.
+		if bundledPaths[action.Path] {
+			continue
 		}
 
 		// SR12: skip files quarantined after repeated failures.

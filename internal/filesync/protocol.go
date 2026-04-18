@@ -1,7 +1,9 @@
 package filesync
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -47,10 +49,13 @@ func writeProtoGzip(w http.ResponseWriter, msg proto.Message) error {
 }
 
 const (
-	maxIndexPayload = 10 * 1024 * 1024 // 10 MB — per-page limit
-	indexPageSize   = 10_000           // max files per index page
-	pendingTTL      = 5 * time.Minute  // stale pending exchange cleanup threshold
-	maxTotalPages   = 200              // caps incoming TotalPages to prevent OOM (200 × 10k = 2M files)
+	maxBundlePaths    = 1000              // P19: max files per bundle request
+	maxBundleFileSize = 4 * 1024 * 1024   // P19: 4 MB — files larger go through individual download
+	maxBundleTotal    = 128 * 1024 * 1024 // P19: 128 MB — total response body cap
+	maxIndexPayload   = 10 * 1024 * 1024  // 10 MB — per-page limit
+	indexPageSize     = 10_000            // max files per index page
+	pendingTTL        = 5 * time.Minute   // stale pending exchange cleanup threshold
+	maxTotalPages     = 200               // caps incoming TotalPages to prevent OOM (200 × 10k = 2M files)
 )
 
 // server handles filesync HTTP endpoints.
@@ -98,6 +103,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/index", s.handleIndex)
 	mux.HandleFunc("/file", s.handleFile)
 	mux.HandleFunc("/delta", s.handleDelta)
+	mux.HandleFunc("/bundle", s.handleBundle)
 	mux.HandleFunc("/status", s.handleStatus)
 	return mux
 }
@@ -406,6 +412,124 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 	writer := newRateLimitedWriter(r.Context(), w, s.node.rateLimiter)
 	n, _ := io.Copy(writer, f)
 	if n > 0 {
+		folder.metrics.BytesUploaded.Add(n)
+	}
+}
+
+// handleBundle serves multiple small files in a single tar+gzip response (P19).
+// POST /bundle — body: BundleRequest (protobuf, gzip), response: tar+gzip stream.
+// Files that can't be read are silently skipped; the client detects missing
+// entries by comparing received tar paths against the request.
+func (s *server) handleBundle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if _, ok := s.validatePeer(w, r); !ok {
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxIndexPayload))
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	decoded, err := gzipDecode(body)
+	if err != nil {
+		// Try raw (non-compressed).
+		decoded = body
+	}
+
+	var req pb.BundleRequest
+	if err := proto.Unmarshal(decoded, &req); err != nil {
+		http.Error(w, "unmarshal: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Paths) > maxBundlePaths {
+		http.Error(w, fmt.Sprintf("too many paths: %d > %d", len(req.Paths), maxBundlePaths), http.StatusBadRequest)
+		return
+	}
+
+	folder := s.node.findFolder(req.FolderId)
+	if folder == nil {
+		http.Error(w, "unknown folder", http.StatusNotFound)
+		return
+	}
+
+	switch folder.cfg.Direction {
+	case "receive-only":
+		http.Error(w, "folder is receive-only", http.StatusForbidden)
+		return
+	case "disabled":
+		http.Error(w, "folder is disabled", http.StatusForbidden)
+		return
+	}
+
+	// Build set of indexed paths to prevent probing for arbitrary files.
+	folder.indexMu.RLock()
+	indexedPaths := make(map[string]bool, len(req.Paths))
+	for _, p := range req.Paths {
+		if _, ok := folder.index.Files[p]; ok && !folder.index.Files[p].Deleted {
+			indexedPaths[p] = true
+		}
+	}
+	folder.indexMu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/x-tar")
+	w.Header().Set("Content-Encoding", "gzip")
+	gw := gzip.NewWriter(w)
+	defer func() { _ = gw.Close() }()
+	tw := tar.NewWriter(gw)
+	defer func() { _ = tw.Close() }()
+
+	writer := newRateLimitedWriter(r.Context(), tw, s.node.rateLimiter)
+	var totalBytes int64
+
+	for _, relPath := range req.Paths {
+		if err := validateRelPath(relPath); err != nil {
+			continue
+		}
+		if !indexedPaths[relPath] {
+			continue
+		}
+
+		f, err := folder.root.Open(relPath)
+		if err != nil {
+			continue
+		}
+		info, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			continue
+		}
+		size := info.Size()
+		if size > maxBundleFileSize {
+			_ = f.Close()
+			continue
+		}
+		if totalBytes+size > maxBundleTotal {
+			_ = f.Close()
+			break
+		}
+
+		hdr := &tar.Header{
+			Name: relPath,
+			Size: size,
+			Mode: int64(info.Mode() & os.ModePerm),
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			_ = f.Close()
+			break
+		}
+		n, err := io.Copy(writer, f)
+		_ = f.Close()
+		if err != nil {
+			break
+		}
+		totalBytes += n
 		folder.metrics.BytesUploaded.Add(n)
 	}
 }
