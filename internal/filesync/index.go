@@ -395,7 +395,7 @@ type ScanStats struct {
 // hashJob is a file path to hash, sent from the walk to the worker pool.
 type hashJob struct {
 	absPath string
-	result  chan hashResult
+	idx     int // index into the shared results slice
 }
 
 // hashResult carries the SHA-256 hex string or an error from a worker.
@@ -405,7 +405,8 @@ type hashResult struct {
 }
 
 // pendingHash records metadata captured during the walk for a file that
-// needs hashing. The hash result is delivered via the result channel.
+// needs hashing. The hash result is read from the shared results slice
+// by index after all workers finish.
 type pendingHash struct {
 	rel     string
 	absPath string
@@ -414,7 +415,6 @@ type pendingHash struct {
 	mode    uint32
 	exists  bool      // true if the file was already in the index
 	old     FileEntry // previous index entry (valid only when exists)
-	result  chan hashResult
 }
 
 // scanHashWorkers is the number of parallel hash workers. Capped at 8 to
@@ -504,7 +504,7 @@ func readDirEntries(ctx context.Context, job dirJob, ignore *ignoreMatcher, temp
 		isDir := d.IsDir()
 
 		// P8: Clean stale temp files inline.
-		if !isDir && (strings.HasPrefix(name, ".mesh-tmp-") || strings.HasSuffix(name, ".mesh-delta-tmp")) {
+		if !isDir && (strings.HasPrefix(name, ".mesh-tmp-") || strings.Contains(name, ".mesh-delta-tmp-")) {
 			if info, infoErr := d.Info(); infoErr == nil && info.ModTime().Before(tempCutoff) {
 				if os.Remove(absPath) == nil {
 					res.tempCleaned++
@@ -584,6 +584,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	// P20a: parallel hash worker pool. Files that miss the fast path
 	// (stat changed) are sent to workers; results are drained after the walk.
 	hashCh := make(chan hashJob, 64)
+	var hashResults []hashResult // pre-allocated after walk, indexed by hashJob.idx
 	var hashWg sync.WaitGroup
 	for range scanHashWorkers {
 		hashWg.Add(1)
@@ -591,7 +592,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			defer hashWg.Done()
 			for job := range hashCh {
 				h, hErr := hashFile(job.absPath)
-				job.result <- hashResult{h, hErr}
+				hashResults[job.idx] = hashResult{h, hErr}
 			}
 		}()
 	}
@@ -709,22 +710,26 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			// Collect for hash pool — submitted after the walk loop to
 			// avoid deadlock: sending to hashCh here would block the
 			// consumer that drains resultCh, stalling walk workers.
-			hResultCh := make(chan hashResult, 1)
 			pending = append(pending, pendingHash{
 				rel: wf.rel, absPath: wf.absPath,
 				size: size, mtimeNS: mtimeNS, mode: mode,
 				exists: exists, old: existing,
-				result: hResultCh,
 			})
 		}
 	}
 	stats.WalkDuration = time.Since(walkStart)
 
+	// F4: pre-allocate results slice so workers write by index instead
+	// of allocating a channel per file. Safe without synchronization
+	// because each worker writes to a distinct index and the consumer
+	// reads only after hashWg.Wait().
+	hashResults = make([]hashResult, len(pending))
+
 	// P20a: submit all hash jobs now that the walk is complete and
 	// resultCh is drained. This avoids the deadlock where sending to
 	// hashCh blocks the only consumer of resultCh.
 	for i := range pending {
-		hashCh <- hashJob{absPath: pending[i].absPath, result: pending[i].result}
+		hashCh <- hashJob{absPath: pending[i].absPath, idx: i}
 	}
 
 	// P20a: close the hash channel and wait for all workers to finish.
@@ -733,8 +738,8 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 
 	// P20a: drain hash results and update index sequentially.
 	hashDrainStart := time.Now()
-	for _, p := range pending {
-		r := <-p.result
+	for i, p := range pending {
+		r := hashResults[i]
 		if r.err != nil {
 			stats.HashErrors++
 			errorPaths[p.rel] = struct{}{}
@@ -1067,7 +1072,7 @@ func cleanTempFiles(folderRoot string, maxAge time.Duration) {
 			return nil
 		}
 		name := d.Name()
-		if !strings.HasPrefix(name, ".mesh-tmp-") && !strings.HasSuffix(name, ".mesh-delta-tmp") {
+		if !strings.HasPrefix(name, ".mesh-tmp-") && !strings.Contains(name, ".mesh-delta-tmp-") {
 			return nil
 		}
 		info, infoErr := d.Info()

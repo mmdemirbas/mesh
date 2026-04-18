@@ -112,8 +112,10 @@ type deltaBlock struct {
 
 // applyDelta reconstructs a file by copying unchanged blocks from the old file
 // and overwriting changed blocks from the delta. Returns the path to a temp file.
-func applyDelta(oldPath, destPath string, blockSize, remoteFileSize int64, blocks []deltaBlock) (string, error) {
-	tmpPath := destPath + ".mesh-delta-tmp"
+// F5: peerID is appended to the temp name to prevent concurrent peers from
+// clobbering each other's delta temp files for the same path.
+func applyDelta(oldPath, destPath, peerID string, blockSize, remoteFileSize int64, blocks []deltaBlock) (string, error) {
+	tmpPath := destPath + ".mesh-delta-tmp-" + peerID
 
 	out, err := os.Create(tmpPath) //nolint:gosec // G304: destPath validated by caller
 	if err != nil {
@@ -146,8 +148,9 @@ func applyDelta(oldPath, destPath string, blockSize, remoteFileSize int64, block
 
 // applyDeltaRoot is the os.Root-safe variant of applyDelta.
 // Returns the relative temp path within root.
-func applyDeltaRoot(root *os.Root, relPath string, blockSize, remoteFileSize int64, blocks []deltaBlock) (string, error) {
-	tmpRelPath := relPath + ".mesh-delta-tmp"
+// F5: peerID prevents concurrent peers from clobbering the same temp file.
+func applyDeltaRoot(root *os.Root, relPath, peerID string, blockSize, remoteFileSize int64, blocks []deltaBlock) (string, error) {
+	tmpRelPath := relPath + ".mesh-delta-tmp-" + peerID
 
 	out, err := root.Create(tmpRelPath)
 	if err != nil {
@@ -187,14 +190,22 @@ func assembleDelta(out, old *os.File, blockSize, remoteFileSize int64, blocks []
 
 	buf := make([]byte, blockSize)
 	totalBlocks := (remoteFileSize + blockSize - 1) / blockSize
+	// F6: track the old file's logical read position to skip unnecessary
+	// seeks when blocks are read sequentially.
+	oldPos := int64(0)
 	for i := range totalBlocks {
 		if data, ok := changed[i]; ok {
 			if _, err := out.Write(data); err != nil {
 				return fmt.Errorf("write delta block %d: %w", i, err)
 			}
+			// old file wasn't read — position unchanged, but next
+			// unchanged block needs a seek because we skipped one.
 		} else {
-			if _, err := old.Seek(i*blockSize, io.SeekStart); err != nil {
-				return fmt.Errorf("seek old block %d: %w", i, err)
+			want := i * blockSize
+			if oldPos != want {
+				if _, err := old.Seek(want, io.SeekStart); err != nil {
+					return fmt.Errorf("seek old block %d: %w", i, err)
+				}
 			}
 			n, err := io.ReadFull(old, buf)
 			if n > 0 {
@@ -205,6 +216,7 @@ func assembleDelta(out, old *os.File, blockSize, remoteFileSize int64, blocks []
 			if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 				return fmt.Errorf("read old block %d: %w", i, err)
 			}
+			oldPos = want + int64(n)
 		}
 	}
 
