@@ -527,7 +527,9 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	if err != nil {
 		return fmt.Errorf("user home dir: %w", err)
 	}
-	dataDir := filepath.Join(home, ".mesh", "filesync")
+	meshDir := filepath.Join(home, ".mesh")
+	dataDir := filepath.Join(meshDir, "filesync")
+	initPerfLog(meshDir)
 
 	n := &Node{
 		cfg:      cfg,
@@ -769,6 +771,22 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		n.syncLoop(ctx)
 	}()
 
+	// Periodic performance snapshots (process-level metrics).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		snapTicker := time.NewTicker(1 * time.Minute)
+		defer snapTicker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-snapTicker.C:
+				perfSnapshot(n.folders)
+			}
+		}
+	}()
+
 	// Run initial scan (all folders).
 	n.runScan(ctx, nil)
 	close(n.firstScanDone)
@@ -782,6 +800,8 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 
 	// Close idle HTTP connections after all goroutines have stopped.
 	n.httpClient.CloseIdleConnections()
+
+	closePerfLog()
 
 	// L5: close os.Root handles.
 	for _, fs := range n.folders {
@@ -972,6 +992,7 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 			"active_files", count,
 			"changed", changed,
 		)
+		perfScan(id, stats, countAfterSwap, dirs, changed, ms(snapDuration), ms(purgeDuration), ms(swapDuration))
 
 		// Always log the first scan per folder at INFO so a single run gives
 		// baseline evidence (walk/hash time, file counts, FD-pressure phase)
@@ -1137,10 +1158,11 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	fs.indexMu.Lock()
 	delete(fs.peerLastError, peerAddr)
 	fs.indexMu.Unlock()
+	remoteEntries := len(remoteIdx.GetFiles())
 	fs.metrics.IndexExchanges.Add(1)
 	slog.Debug("index exchange complete",
 		"folder", folderID, "peer", peerAddr,
-		"remote_seq", remoteIdx.GetSequence(), "remote_entries", len(remoteIdx.GetFiles()),
+		"remote_seq", remoteIdx.GetSequence(), "remote_entries", remoteEntries,
 		"duration", time.Since(syncStart))
 
 	state.Global.Update("filesync-peer", stateKey, state.Connected, "")
@@ -1617,6 +1639,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	slog.Debug("sync cycle complete", "folder", folderID, "peer", peerAddr,
 		"duration", syncDuration, "downloads", downloads, "conflicts", conflicts,
 		"deletes", deletes, "errors", len(failedSeqs), "bytes", totalBytes)
+	perfSync(folderID, peerAddr, remoteEntries, downloads, conflicts, deletes, len(failedSeqs), ms(syncDuration))
 }
 
 // buildIndexExchange creates a protobuf IndexExchange from the local index.
@@ -1724,13 +1747,18 @@ func (n *Node) persistFolder(folderID string, force bool) {
 	fs.indexMu.Unlock()
 
 	if !saveIndex && !savePeers {
+		perfPersist(folderID, 0, 0, 0, true)
 		return
 	}
 
+	persistStart := time.Now()
 	fs.indexMu.RLock()
 	defer fs.indexMu.RUnlock()
 
+	var indexBytes int
+	var indexMs float64
 	if saveIndex {
+		idxStart := time.Now()
 		idxPath := filepath.Join(n.dataDir, folderID, "index.yaml")
 		if err := fs.index.save(idxPath); err != nil {
 			slog.Warn("failed to save index", "folder", folderID, "error", err)
@@ -1740,14 +1768,21 @@ func (n *Node) persistFolder(folderID string, force bool) {
 			fs.indexMu.Unlock()
 			fs.indexMu.RLock()
 		}
+		indexMs = ms(time.Since(idxStart))
+		indexBytes = len(fs.index.Files) // approximate: entry count, not bytes
 	}
 
+	var peersMs float64
 	if savePeers {
+		peersStart := time.Now()
 		peersPath := filepath.Join(n.dataDir, folderID, "peers.yaml")
 		if err := savePeerStates(peersPath, fs.peers); err != nil {
 			slog.Warn("failed to save peer states", "folder", folderID, "error", err)
 		}
+		peersMs = ms(time.Since(peersStart))
 	}
+	_ = persistStart // used only for timing context
+	perfPersist(folderID, indexBytes, indexMs, peersMs, !saveIndex)
 }
 
 // protoToFileIndex converts a protobuf IndexExchange to our internal FileIndex.
