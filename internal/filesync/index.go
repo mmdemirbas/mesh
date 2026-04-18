@@ -743,6 +743,8 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			mode := uint32(wf.info.Mode().Perm())
 
 			// Fast path: skip hashing if size and mtime are unchanged.
+			// Direct idx.Files assignment OK here — scanWithStats bulk-rebuilds
+			// seqIndex and cachedCount/cachedSize at the end.
 			if exists && !existing.Deleted && existing.Size == size && existing.MtimeNS == mtimeNS {
 				if existing.Mode != mode {
 					existing.Mode = mode

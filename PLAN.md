@@ -122,14 +122,8 @@ When a node receives a beacon, it uses `msg.GetPort()` to construct the peer's H
 |------|-----------|----------------------------------------------|-------|
 | [P3](#p3-adaptive-watchscan) | filesync | Adaptive watch/scan | Self-tuning heuristic. Design below. |
 | P14  | tunnel | Parallel target probing (Happy Eyeballs) | Stagger-start all targets concurrently in `probeTarget` instead of sequential. First to connect wins, respecting target order preference within a short tie-break window. Reduces worst-case probe time from sum(timeouts) to max(stagger, fastest_target). Nice-to-have. |
-| [PA](#pa-pe-phase-1--low-hanging-fruit) | filesync | Cache peerSuffix per sync cycle | SHA-256 recomputed per download; cache once per peer. Phase 1. |
-| [PA](#pa-pe-phase-1--low-hanging-fruit) | filesync | Single-pass action counting | 4 passes over actions slice → 1. Phase 1. |
-| [PA](#pa-pe-phase-1--low-hanging-fruit) | filesync | Single map lookup in handleBundle | Double map lookup in protocol.go. Phase 1. |
 | [PF](#pf-trie-based-ignore-with-cursor-propagation) | filesync | Trie-based ignore with cursor propagation | Segment trie replaces linear pattern scan. Phase 2. |
-| [PG](#pg-secondary-sequence-index) | filesync | Secondary sequence index for O(log N) delta exchange | Sorted-by-seq slice avoids full map iteration. Phase 2. |
-| [PH](#ph-incremental-hashing-via-sha-256-state-checkpoint) | filesync | Incremental hashing via SHA-256 state checkpoint | Skip re-hashing unchanged prefix of appended files. Phase 2. |
 | [PI](#pi-sha-256-as-32byte) | filesync | SHA-256 as [32]byte in FileEntry | Eliminates hex encode/decode and 340k string allocs per exchange. Phase 2. |
-| [PJ](#pj-sync-failure-reasons-in-perf-log) | filesync | Sync failure reasons in perf log | Currently 70% sync failures with no reason. Phase 2. |
 | [PK](#pk-clone-elimination-cow) | filesync | Clone elimination (COW or change-map) | O(N) index clone → O(1) snapshot. Phase 3. |
 | [PL](#pl-incremental-deletion-detection) | filesync | Incremental deletion detection | O(N) full-index scan → track via fsnotify/scan diff. Phase 3. |
 | [PM](#pm-directory-keyed-child-index) | filesync | Directory-keyed child index for error protection | O(N×M) error-path scan → O(children). Phase 3. |
@@ -159,23 +153,7 @@ Source: perf-log analysis (client-perf.jsonl 1511 lines / server-perf.jsonl 355 
 
 **PB: Skip unchanged peer persist** — **DONE** (already addressed by P17a). `persistFolder` uses `indexDirty`/`peersDirty` flags and skips serialization when nothing changed.
 
-**PC: Cache peerSuffix per sync cycle**
-
-- **Problem:** `peerSuffix(peerAddr)` computes `sha256.Sum256([]byte(peerAddr))` on every call. In `downloadBundle`, this runs once per file in the tar stream. For a 1000-file bundle, that's 1000 redundant SHA-256 computations of the same 20-byte address string.
-- **Solution:** Compute once at the top of each download function and pass the suffix through. The three call sites are `downloadToVerifiedTemp` (line 79), `downloadFileDelta` (line 299), and `downloadBundle` (line 433).
-- **Expected gain:** Eliminates ~N SHA-256 calls per bundle transfer. Small absolute saving but zero-risk cleanup.
-
-**PD: Single-pass action counting**
-
-- **Problem:** `filesync.go:1298-1304` makes 3 `countActions()` calls (each O(N) over the actions slice) plus a separate loop for `totalBytes`. 4 passes total.
-- **Solution:** Replace with a single loop that counts downloads, conflicts, deletes, and sums bytes in one pass.
-- **Expected gain:** 4N → N iterations. For 310k-file folders with large action lists, this is measurable.
-
-**PE: Single map lookup in handleBundle**
-
-- **Problem:** `protocol.go:472-475` checks `folder.index.Files[p]` twice — once with `, ok` and once to read `.Deleted`. Two map lookups per path.
-- **Solution:** Use `entry, ok := folder.index.Files[p]; ok && !entry.Deleted` pattern.
-- **Expected gain:** Halves map lookups in the bundle handler hot path. Small but correct.
+PC, PD, PE done — see DONE.md.
 
 #### PF: Trie-Based Ignore with Cursor Propagation
 
@@ -186,24 +164,7 @@ Source: perf-log analysis (client-perf.jsonl 1511 lines / server-perf.jsonl 355 
 - **Risk:** Medium — complex implementation, must exactly match gitignore semantics. Extensive test suite required.
 - **Phase:** 2. Design before implement.
 
-#### PG: Secondary Sequence Index
-
-- **Problem:** `buildIndexExchange` (filesync.go:1842) iterates the full `Files` map to find entries with `Sequence > lastSentSeq`. For a 310k-entry index, this is 306M map iterations per hour (perf log data).
-- **Solution:** Maintain a secondary slice sorted by sequence number. On each scan, append new/updated entries. For delta exchange, binary-search to find the start position, then iterate only the tail.
-- **Data structure:** `[]seqEntry` where `seqEntry = {Sequence int64, Path string}`. Sorted by Sequence. Binary search via `sort.Search`. Updated in `bumpSequence`.
-- **Expected gain:** O(log N + delta) instead of O(N) per exchange. For steady-state syncs (delta << N), this is orders of magnitude faster.
-- **Risk:** Must keep the secondary index in sync with the primary map. Deletions create tombstone entries that need periodic compaction.
-- **Phase:** 2.
-
-#### PH: Incremental Hashing via SHA-256 State Checkpoint
-
-- **Problem:** Files that grow by appending (logs, databases, journals) are fully re-hashed on every scan. A 1 GB log file that grew by 4 KB still costs a full 1 GB read + hash.
-- **Solution:** Go's `crypto/sha256` implements `encoding.BinaryMarshaler`. After hashing a file, serialize the hasher state (`h.(encoding.BinaryMarshaler).MarshalBinary()`) and store it alongside the file entry. On the next scan, if the file's size grew and mtime changed but the first `previousSize` bytes are presumed unchanged (same inode, size ≥ previous), restore the hasher state, seek to `previousSize`, and hash only the appended bytes.
-- **Validation:** After incremental hash, if the result differs from a full hash of a random sample (1 in 100 files), log a warning and fall back to full hash. This catches filesystem-level corruption or partial overwrites.
-- **Storage:** Add `HashState []byte` field to `FileEntry` (gob-encoded sha256 internal state, ~100 bytes). Only populated for files above a size threshold (e.g., 1 MB) to avoid bloating small-file indexes.
-- **Expected gain:** For append-only workloads (log directories), reduces hash I/O from O(filesize) to O(delta). A 1 GB file with 4 KB append: 250,000x less I/O.
-- **Risk:** Medium — relies on append-only assumption. Files modified in the middle (random writes) produce wrong incremental hashes. The validation sample catches this statistically.
-- **Phase:** 2.
+PG, PH, PJ done — see DONE.md.
 
 #### PI: SHA-256 as [32]byte
 
@@ -211,14 +172,6 @@ Source: perf-log analysis (client-perf.jsonl 1511 lines / server-perf.jsonl 355 
 - **Solution:** Store as `[32]byte` in memory. Encode to hex only at serialization boundaries (YAML persist, protobuf exchange, log output).
 - **Expected gain:** Eliminates 340k string allocations per exchange. Halves hash storage (32 bytes vs 64 chars + 16 bytes header). Faster comparison (`==` on [32]byte vs string).
 - **Risk:** Medium — touches every hash comparison and serialization site. Requires custom YAML marshaler.
-- **Phase:** 2.
-
-#### PJ: Sync Failure Reasons in Perf Log
-
-- **Problem:** Perf logs show 70% sync failure rate but no failure reason. Debugging requires correlating with the main log file.
-- **Solution:** Add `failure_reason` field to perf log sync events. Capture the first error from each failed sync cycle.
-- **Expected gain:** Direct diagnosis from perf logs without log correlation.
-- **Risk:** Low.
 - **Phase:** 2.
 
 #### PK: Clone Elimination (COW)

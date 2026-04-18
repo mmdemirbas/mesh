@@ -369,3 +369,14 @@ e2e/
 | SR1  | Per-folder scan trigger | fsnotify events now track which folder root was affected. `scanLoop` passes dirty roots to `runScan`, which skips unaffected folders. Periodic ticker still scans all folders as safety net. |
 | SR2  | Configurable max fsnotify watches | `max_watches` in `FilesyncCfg` (default 4096). Passed through to `newFolderWatcher`. Users with sufficient FD headroom can raise it. |
 | SR12 | Per-file retry limit with quarantine | Files failing 3 times in a row are quarantined — skipped until the remote version changes (new hash resets counter). Quarantine count exposed in folder status API. |
+
+## Filesync Performance (Phase 1–2)
+
+| ID | Item | Notes |
+|----|------|-------|
+| PC | Cache peerSuffix per sync cycle | `suffix := peerSuffix(peerAddr)` moved before the loop in `downloadBundle`. One SHA-256 per sync instead of per file. |
+| PD | Single-pass action counting | Replaced 3 `countActions()` calls + separate `totalBytes` loop with a single switch-based pass. Removed dead `countActions` function. |
+| PE | Single map lookup in handleBundle | `protocol.go`: `if entry, ok := folder.index.Files[p]; ok && !entry.Deleted` instead of double lookup. |
+| PG | Secondary sequence index for O(log N) delta exchange | `seqIndex []seqEntry` sorted by sequence. `buildIndexExchange` uses `sort.Search` to binary-search the start position. Stale entries filtered by cross-checking `Files` map. `rebuildSeqIndex()` called after scan swap and index load. |
+| PH | Incremental hashing via SHA-256 state checkpoint | `hashFileIncremental` saves/restores SHA-256 hasher state via `encoding.BinaryMarshaler`. 4096-byte prefix boundary check prevents truncate+regrow hash corruption. `FileEntry` carries `HashState`, `HashedBytes`, `PrefixCheck`. Threshold: 1 MB. |
+| PJ | Sync failure reasons in perf log | `firstFailReason` captured at all 11 `failMu.Lock()` sites. Passed to `perfSync` and emitted as `failure_reason` field in JSONL. |
