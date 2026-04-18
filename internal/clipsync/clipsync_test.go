@@ -436,7 +436,7 @@ func TestCanReceiveFrom(t *testing.T) {
 	t.Parallel()
 	n := &Node{
 		config: config.ClipsyncCfg{
-			StaticPeers: []string{"10.0.0.5:7755"},
+			StaticPeers: map[string]config.PeerDef{"peer1": {Addresses: []string{"10.0.0.5:7755"}}},
 		},
 		peers: make(map[string]time.Time),
 	}
@@ -480,7 +480,7 @@ func TestCanReceiveFrom_IPv6Canonical(t *testing.T) {
 			t.Parallel()
 			n := &Node{peers: make(map[string]time.Time)}
 			if tt.staticPeer != "" {
-				n.config = config.ClipsyncCfg{StaticPeers: []string{tt.staticPeer}}
+				n.config = config.ClipsyncCfg{StaticPeers: map[string]config.PeerDef{"peer1": {Addresses: []string{tt.staticPeer}}}}
 			} else {
 				// dynamic peer seeded in expanded form; request arrives short.
 				n.peers["[2001:db8:0:0:0:0:0:2]:7755"] = time.Now()
@@ -934,7 +934,7 @@ func TestBroadcast_PushesToPeers(t *testing.T) {
 	peerAddr := net.JoinHostPort("127.0.0.1", port)
 
 	cfg := config.ClipsyncCfg{
-		StaticPeers: []string{peerAddr},
+		StaticPeers: map[string]config.PeerDef{"peer1": {Addresses: []string{peerAddr}}},
 	}
 	n := &Node{
 		ctx:        context.Background(),
@@ -984,7 +984,7 @@ func TestBroadcast_DoesNotEchoBackToOrigin(t *testing.T) {
 	peerAddr := net.JoinHostPort("127.0.0.1", port)
 
 	cfg := config.ClipsyncCfg{
-		StaticPeers: []string{peerAddr},
+		StaticPeers: map[string]config.PeerDef{"peer1": {Addresses: []string{peerAddr}}},
 	}
 	n := &Node{
 		ctx:        context.Background(),
@@ -1026,7 +1026,7 @@ func TestBroadcast_EchoSuppressionIPv6Canonical(t *testing.T) {
 	n := &Node{
 		ctx: context.Background(),
 		config: config.ClipsyncCfg{
-			StaticPeers: []string{"[2001:DB8::1]:7755"}, // mixed case
+			StaticPeers: map[string]config.PeerDef{"peer1": {Addresses: []string{"[2001:DB8::1]:7755"}}}, // mixed case
 		},
 		peers:      make(map[string]time.Time),
 		peerHashes: make(map[string]string),

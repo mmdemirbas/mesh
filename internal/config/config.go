@@ -105,22 +105,45 @@ type Connection struct {
 	Forwards []ForwardSet `yaml:"forwards,omitempty"`
 }
 
+// TLSCfg holds optional paths to a user-provided TLS certificate and key.
+// When omitted, each component auto-generates and persists its own ECDSA P-256 cert.
+type TLSCfg struct {
+	// CertFile is the path to a PEM-encoded TLS certificate. Auto-generated if empty.
+	CertFile string `yaml:"cert_file,omitempty"`
+	// KeyFile is the path to the PEM-encoded private key. Required when CertFile is set.
+	KeyFile string `yaml:"key_file,omitempty"`
+}
+
+// PeerDef defines a named peer: one or more addresses (for failover) and an
+// optional TLS fingerprint for cert pinning. Used by both filesync and clipsync.
+type PeerDef struct {
+	// Addresses is the list of host:port addresses to try in order.
+	Addresses []string `yaml:"addresses"`
+	// TLSFingerprint is the expected "sha256:<hex>" cert fingerprint of this peer.
+	// When set, connections to this peer are rejected if the cert does not match.
+	// Leave empty to encrypt without verifying peer identity.
+	TLSFingerprint string `yaml:"tls_fingerprint,omitempty"`
+}
+
 // ClipsyncCfg represents the YAML configuration structure.
 type ClipsyncCfg struct {
-	Bind              string   `yaml:"bind"`                          // e.g., "0.0.0.0:7755"
-	LANDiscoveryGroup []string `yaml:"lan_discovery_group,omitempty"` // Group names for LAN discovery. Empty disables dynamic discovery. Peers with no overlapping group ignore each other.
-	StaticPeers       []string `yaml:"static_peers,omitempty"`
-	PollInterval      string   `yaml:"poll_interval,omitempty"`      // Clipboard polling interval (e.g., "3s", "5s"). Default: "3s"
-	FileCopy          bool     `yaml:"file_copy,omitempty"`          // Enable file/image copy between machines. When false (default), only text/HTML/RTF clipboard formats are synced.
-	MaxFileCopySize   string   `yaml:"max_file_copy_size,omitempty"` // Per-file size limit for file copy (e.g., "50MB", "100MB"). Default: "50MB"
+	Bind              string             `yaml:"bind"`                          // e.g., "0.0.0.0:7755"
+	LANDiscoveryGroup []string           `yaml:"lan_discovery_group,omitempty"` // Group names for LAN discovery. Empty disables dynamic discovery. Peers with no overlapping group ignore each other.
+	StaticPeers       map[string]PeerDef `yaml:"static_peers,omitempty"`
+	TLS               TLSCfg             `yaml:"tls,omitempty"`
+	PollInterval      string             `yaml:"poll_interval,omitempty"`      // Clipboard polling interval (e.g., "3s", "5s"). Default: "3s"
+	FileCopy          bool               `yaml:"file_copy,omitempty"`          // Enable file/image copy between machines. When false (default), only text/HTML/RTF clipboard formats are synced.
+	MaxFileCopySize   string             `yaml:"max_file_copy_size,omitempty"` // Per-file size limit for file copy (e.g., "50MB", "100MB"). Default: "50MB"
 }
 
 // FilesyncCfg configures a folder synchronization instance.
 type FilesyncCfg struct {
 	// Network address for the filesync HTTP server (e.g., "0.0.0.0:7756").
 	Bind string `yaml:"bind"`
-	// Named peer definitions. Key is a short nickname, value is a list of addresses.
-	Peers map[string][]string `yaml:"peers,omitempty"`
+	// TLS certificate configuration. Auto-generated if omitted.
+	TLS TLSCfg `yaml:"tls,omitempty"`
+	// Named peer definitions. Key is a short nickname.
+	Peers map[string]PeerDef `yaml:"peers,omitempty"`
 	// Default values applied to all folders unless overridden per-folder.
 	Defaults FilesyncDefaults `yaml:"defaults,omitempty"`
 	// Folders to synchronize. Key is a human-readable folder ID (must match on all peers).
@@ -193,6 +216,10 @@ type FolderCfg struct {
 	// the same index — preserved so the UI can display "name (addr)" without
 	// reverse-mapping.
 	PeerNames []string
+	// PeerFingerprints is parallel to Peers (same length, same index). Each
+	// entry is the expected TLS fingerprint for the peer at the same index.
+	// Empty string means no fingerprint pinning for that peer.
+	PeerFingerprints []string
 	// AllowedPeerHosts is the IP set (one entry per resolved address) used
 	// by filesync.isPeerConfigured to validate incoming HTTP requests.
 	// Populated from Peers at Resolve() time: hostnames are expanded via
@@ -226,14 +253,16 @@ func (c *FilesyncCfg) Resolve() error {
 		// Resolve peer names to addresses.
 		var resolvedPeers []string
 		var resolvedPeerNames []string
+		var resolvedPeerFingerprints []string
 		for _, name := range peerNames {
-			addrs, ok := c.Peers[name]
+			def, ok := c.Peers[name]
 			if !ok {
 				return fmt.Errorf("folder %q: unknown peer %q", id, name)
 			}
-			for _, a := range addrs {
+			for _, a := range def.Addresses {
 				resolvedPeers = append(resolvedPeers, a)
 				resolvedPeerNames = append(resolvedPeerNames, name)
+				resolvedPeerFingerprints = append(resolvedPeerFingerprints, def.TLSFingerprint)
 			}
 		}
 
@@ -258,6 +287,7 @@ func (c *FilesyncCfg) Resolve() error {
 			Path:             expandHome(raw.Path),
 			Peers:            resolvedPeers,
 			PeerNames:        resolvedPeerNames,
+			PeerFingerprints: resolvedPeerFingerprints,
 			AllowedPeerHosts: nil, // resolved lazily at runtime by filesync.Start
 			Direction:        direction,
 			IgnorePatterns:   patterns,

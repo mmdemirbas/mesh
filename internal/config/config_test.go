@@ -306,7 +306,9 @@ func TestClipsyncCfgUnmarshalYAMLWithGroups(t *testing.T) {
 	input := []byte(`
 bind: "0.0.0.0:7755"
 lan_discovery_group: ["team-alpha", "team-beta"]
-static_peers: ["10.0.0.1:7755"]
+static_peers:
+  peer1:
+    addresses: ["10.0.0.1:7755"]
 `)
 
 	var cfg ClipsyncCfg
@@ -317,8 +319,9 @@ static_peers: ["10.0.0.1:7755"]
 	if len(cfg.LANDiscoveryGroup) != 2 || cfg.LANDiscoveryGroup[0] != "team-alpha" {
 		t.Errorf("LANDiscoveryGroup = %v, want [team-alpha, team-beta]", cfg.LANDiscoveryGroup)
 	}
-	if len(cfg.StaticPeers) != 1 || cfg.StaticPeers[0] != "10.0.0.1:7755" {
-		t.Errorf("StaticPeers = %v, want [10.0.0.1:7755]", cfg.StaticPeers)
+	def, ok := cfg.StaticPeers["peer1"]
+	if !ok || len(def.Addresses) != 1 || def.Addresses[0] != "10.0.0.1:7755" {
+		t.Errorf("StaticPeers = %v, want peer1 -> [10.0.0.1:7755]", cfg.StaticPeers)
 	}
 }
 
@@ -799,7 +802,7 @@ func TestValidate_FilesyncMaxConcurrentZero(t *testing.T) {
 	fsCfg := FilesyncCfg{
 		Bind:          "0.0.0.0:7756",
 		MaxConcurrent: 0,
-		Peers:         map[string][]string{"peer1": {"192.168.1.10:7756"}},
+		Peers:         map[string]PeerDef{"peer1": {Addresses: []string{"192.168.1.10:7756"}}},
 		Folders: map[string]FolderCfgRaw{
 			"docs": {Path: t.TempDir()},
 		},
@@ -862,7 +865,7 @@ func TestValidate_FilesyncOverlappingPaths(t *testing.T) {
 	fsCfg := FilesyncCfg{
 		Bind:          "0.0.0.0:7756",
 		MaxConcurrent: 4,
-		Peers:         map[string][]string{"p1": {"10.0.0.1:7756"}},
+		Peers:         map[string]PeerDef{"p1": {Addresses: []string{"10.0.0.1:7756"}}},
 		Folders: map[string]FolderCfgRaw{
 			"parent": {Path: dir, Peers: []string{"p1"}},
 			"child":  {Path: sub, Peers: []string{"p1"}},
@@ -887,7 +890,7 @@ func TestValidate_FilesyncDuplicatePaths(t *testing.T) {
 	fsCfg := FilesyncCfg{
 		Bind:          "0.0.0.0:7756",
 		MaxConcurrent: 4,
-		Peers:         map[string][]string{"p1": {"10.0.0.1:7756"}},
+		Peers:         map[string]PeerDef{"p1": {Addresses: []string{"10.0.0.1:7756"}}},
 		Folders: map[string]FolderCfgRaw{
 			"a": {Path: dir, Peers: []string{"p1"}},
 			"b": {Path: dir, Peers: []string{"p1"}},
@@ -913,7 +916,7 @@ func TestValidate_FilesyncNonOverlappingPaths(t *testing.T) {
 	fsCfg := FilesyncCfg{
 		Bind:          "0.0.0.0:7756",
 		MaxConcurrent: 4,
-		Peers:         map[string][]string{"p1": {"10.0.0.1:7756"}},
+		Peers:         map[string]PeerDef{"p1": {Addresses: []string{"10.0.0.1:7756"}}},
 		Folders: map[string]FolderCfgRaw{
 			"a": {Path: dir1, Peers: []string{"p1"}},
 			"b": {Path: dir2, Peers: []string{"p1"}},
@@ -939,7 +942,7 @@ func TestFilesyncResolve(t *testing.T) {
 			name: "basic resolution with defaults",
 			cfg: FilesyncCfg{
 				Bind:  "0.0.0.0:7756",
-				Peers: map[string][]string{"hw": {"10.0.0.1:7756"}},
+				Peers: map[string]PeerDef{"hw": {Addresses: []string{"10.0.0.1:7756"}}},
 				Defaults: FilesyncDefaults{
 					Peers:          []string{"hw"},
 					Direction:      "send-only",
@@ -972,9 +975,9 @@ func TestFilesyncResolve(t *testing.T) {
 			name: "folder overrides peers and direction",
 			cfg: FilesyncCfg{
 				Bind: "0.0.0.0:7756",
-				Peers: map[string][]string{
-					"hw":  {"10.0.0.1:7756"},
-					"mbp": {"10.0.0.2:7756"},
+				Peers: map[string]PeerDef{
+					"hw":  {Addresses: []string{"10.0.0.1:7756"}},
+					"mbp": {Addresses: []string{"10.0.0.2:7756"}},
 				},
 				Defaults: FilesyncDefaults{
 					Peers:     []string{"hw"},
@@ -1002,7 +1005,7 @@ func TestFilesyncResolve(t *testing.T) {
 			name: "ignore patterns extend defaults",
 			cfg: FilesyncCfg{
 				Bind:  "0.0.0.0:7756",
-				Peers: map[string][]string{"hw": {"10.0.0.1:7756"}},
+				Peers: map[string]PeerDef{"hw": {Addresses: []string{"10.0.0.1:7756"}}},
 				Defaults: FilesyncDefaults{
 					Peers:          []string{"hw"},
 					IgnorePatterns: []string{".DS_Store", "*.tmp"},
@@ -1031,7 +1034,7 @@ func TestFilesyncResolve(t *testing.T) {
 			name: "direction defaults to send-receive",
 			cfg: FilesyncCfg{
 				Bind:  "0.0.0.0:7756",
-				Peers: map[string][]string{"hw": {"10.0.0.1:7756"}},
+				Peers: map[string]PeerDef{"hw": {Addresses: []string{"10.0.0.1:7756"}}},
 				Defaults: FilesyncDefaults{
 					Peers: []string{"hw"},
 				},
@@ -1049,7 +1052,7 @@ func TestFilesyncResolve(t *testing.T) {
 			name: "multi-address peer expands",
 			cfg: FilesyncCfg{
 				Bind:  "0.0.0.0:7756",
-				Peers: map[string][]string{"hw": {"10.0.0.1:7756", "10.0.0.2:7756"}},
+				Peers: map[string]PeerDef{"hw": {Addresses: []string{"10.0.0.1:7756", "10.0.0.2:7756"}}},
 				Defaults: FilesyncDefaults{
 					Peers: []string{"hw"},
 				},
@@ -1067,7 +1070,7 @@ func TestFilesyncResolve(t *testing.T) {
 			name: "unknown peer name",
 			cfg: FilesyncCfg{
 				Bind:  "0.0.0.0:7756",
-				Peers: map[string][]string{"hw": {"10.0.0.1:7756"}},
+				Peers: map[string]PeerDef{"hw": {Addresses: []string{"10.0.0.1:7756"}}},
 				Defaults: FilesyncDefaults{
 					Peers: []string{"unknown"},
 				},
@@ -1081,7 +1084,7 @@ func TestFilesyncResolve(t *testing.T) {
 			name: "folder-level unknown peer name",
 			cfg: FilesyncCfg{
 				Bind:  "0.0.0.0:7756",
-				Peers: map[string][]string{"hw": {"10.0.0.1:7756"}},
+				Peers: map[string]PeerDef{"hw": {Addresses: []string{"10.0.0.1:7756"}}},
 				Folders: map[string]FolderCfgRaw{
 					"code": {Path: "/tmp/code", Peers: []string{"missing"}},
 				},
@@ -1092,7 +1095,7 @@ func TestFilesyncResolve(t *testing.T) {
 			name: "dry-run direction resolves",
 			cfg: FilesyncCfg{
 				Bind:  "0.0.0.0:7756",
-				Peers: map[string][]string{"hw": {"10.0.0.1:7756"}},
+				Peers: map[string]PeerDef{"hw": {Addresses: []string{"10.0.0.1:7756"}}},
 				Defaults: FilesyncDefaults{
 					Peers:     []string{"hw"},
 					Direction: "dry-run",
@@ -1129,7 +1132,7 @@ func TestFilesyncResolve(t *testing.T) {
 			name: "sorted by ID",
 			cfg: FilesyncCfg{
 				Bind:     "0.0.0.0:7756",
-				Peers:    map[string][]string{"hw": {"10.0.0.1:7756"}},
+				Peers:    map[string]PeerDef{"hw": {Addresses: []string{"10.0.0.1:7756"}}},
 				Defaults: FilesyncDefaults{Peers: []string{"hw"}},
 				Folders: map[string]FolderCfgRaw{
 					"zebra":  {Path: "/tmp/z"},
@@ -1178,8 +1181,10 @@ func TestFilesyncYAMLParsing(t *testing.T) {
 bind: "0.0.0.0:7756"
 scan_interval: "3600s"
 peers:
-  hw: ["10.0.0.1:7756"]
-  mbp: ["10.0.0.2:7756", "10.0.0.3:7756"]
+  hw:
+    addresses: ["10.0.0.1:7756"]
+  mbp:
+    addresses: ["10.0.0.2:7756", "10.0.0.3:7756"]
 defaults:
   peers: ["hw"]
   direction: "send-receive"

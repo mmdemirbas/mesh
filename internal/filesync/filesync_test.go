@@ -3681,8 +3681,8 @@ func TestPeerMatchesAddr_HostnameResolution(t *testing.T) {
 	}
 
 	cfg := config.FilesyncCfg{
-		Peers: map[string][]string{
-			"server": {hostname + ":7756"},
+		Peers: map[string]config.PeerDef{
+			"server": {Addresses: []string{hostname + ":7756"}},
 		},
 		Folders: map[string]config.FolderCfgRaw{
 			"docs": {
@@ -4603,7 +4603,7 @@ func testCfg(dir, peerIP string) config.FilesyncCfg {
 		Bind:          "0.0.0.0:0",
 		MaxConcurrent: 4,
 		ScanInterval:  "60s",
-		Peers:         map[string][]string{"peer": {peerIP + ":7756"}},
+		Peers:         map[string]config.PeerDef{"peer": {Addresses: []string{peerIP + ":7756"}}},
 		Defaults:      config.FilesyncDefaults{Peers: []string{"peer"}},
 		Folders: map[string]config.FolderCfgRaw{
 			"test": {Path: dir},

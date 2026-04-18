@@ -2104,7 +2104,7 @@ func TestRenderStatus_FilesyncSingleLinePerFolder(t *testing.T) {
 		Filesync: []config.FilesyncCfg{
 			{
 				Bind:  "0.0.0.0:7756",
-				Peers: map[string][]string{"mbp": {"192.168.68.134:7756"}, "hw": {"192.168.68.111:7756"}},
+				Peers: map[string]config.PeerDef{"mbp": {Addresses: []string{"192.168.68.134:7756"}}, "hw": {Addresses: []string{"192.168.68.111:7756"}}},
 				ResolvedFolders: []config.FolderCfg{
 					{ID: "code", Path: "/home/user/code", Peers: []string{"192.168.68.134:7756", "192.168.68.111:7756"}, PeerNames: []string{"mbp", "hw"}, Direction: "send-receive"},
 					{ID: "docs", Path: "/home/user/docs", Peers: []string{"192.168.68.134:7756"}, PeerNames: []string{"mbp"}, Direction: "send-only"},
@@ -2198,7 +2198,7 @@ func TestRenderStatus_FilesyncPeerColumnAlignment_EastAsian(t *testing.T) {
 		Filesync: []config.FilesyncCfg{
 			{
 				Bind:  "0.0.0.0:7756",
-				Peers: map[string][]string{"mbp": {"10.0.0.1:7756"}},
+				Peers: map[string]config.PeerDef{"mbp": {Addresses: []string{"10.0.0.1:7756"}}},
 				ResolvedFolders: []config.FolderCfg{
 					{ID: "code", Path: `C:\Users\user\code`, Peers: []string{"10.0.0.1:7756"}, PeerNames: []string{"mbp"}, Direction: "send-receive"},
 					{ID: "documents", Path: `C:\Users\user\Documents`, Peers: []string{"10.0.0.1:7756"}, PeerNames: []string{"mbp"}, Direction: "send-receive"},
@@ -2276,7 +2276,7 @@ func TestRenderStatus_FilesyncStatusPaddingWithMetrics(t *testing.T) {
 		Filesync: []config.FilesyncCfg{
 			{
 				Bind:  "0.0.0.0:7756",
-				Peers: map[string][]string{"mbp": {"127.0.0.1:27756"}},
+				Peers: map[string]config.PeerDef{"mbp": {Addresses: []string{"127.0.0.1:27756"}}},
 				ResolvedFolders: []config.FolderCfg{
 					{ID: "code", Path: `C:\Users\mwx1313262\code`, Peers: []string{"127.0.0.1:27756"}, PeerNames: []string{"mbp"}, Direction: "dry-run"},
 					{ID: "hw-Desktop", Path: `C:\Users\mwx1313262\Desktop`, Peers: []string{"127.0.0.1:27756"}, PeerNames: []string{"mbp"}, Direction: "dry-run"},
@@ -2368,7 +2368,7 @@ func TestRenderStatus_FilesyncPeerColumnAlignment(t *testing.T) {
 		Filesync: []config.FilesyncCfg{
 			{
 				Bind:  "0.0.0.0:7756",
-				Peers: map[string][]string{"hw": {"127.0.0.1:17756"}, "lenovo": {"10.0.0.2:7756"}},
+				Peers: map[string]config.PeerDef{"hw": {Addresses: []string{"127.0.0.1:17756"}}, "lenovo": {Addresses: []string{"10.0.0.2:7756"}}},
 				ResolvedFolders: []config.FolderCfg{
 					{ID: "code", Path: "/home/user/code", Peers: []string{"127.0.0.1:17756"}, PeerNames: []string{"hw"}, Direction: "dry-run"},
 					{ID: "mesh-code", Path: "/home/user/dev/mesh", Peers: []string{"127.0.0.1:17756", "10.0.0.2:7756"}, PeerNames: []string{"hw", "lenovo"}, Direction: "dry-run"},

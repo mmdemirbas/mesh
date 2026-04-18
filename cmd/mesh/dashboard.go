@@ -558,8 +558,10 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 				}
 				sort.Slice(peerList, func(i, j int) bool { return compareAddr(peerList[i].addr, peerList[j].addr) })
 			} else {
-				for _, addr := range cs.StaticPeers {
-					peerList = append(peerList, peerEntry{addr, "static"})
+				for _, def := range cs.StaticPeers {
+					for _, addr := range def.Addresses {
+						peerList = append(peerList, peerEntry{addr, "static"})
+					}
 				}
 			}
 			for _, p := range peerList {
@@ -581,8 +583,8 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 
 			// Build reverse map: peer address → peer name for display.
 			addrToName := make(map[string]string)
-			for name, addrs := range fs.Peers {
-				for _, addr := range addrs {
+			for name, def := range fs.Peers {
+				for _, addr := range def.Addresses {
 					addrToName[addr] = name
 				}
 			}

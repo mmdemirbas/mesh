@@ -200,8 +200,10 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 	m := state.Global.GetMetrics("clipsync", cfg.Bind)
 	m.StartTime.Store(time.Now().UnixNano())
 	state.Global.Update("clipsync", cfg.Bind, state.Listening, "")
-	for _, addr := range cfg.StaticPeers {
-		state.Global.Update("clipsync-peer", cfg.Bind+"|"+addr, state.Connected, "static")
+	for _, def := range cfg.StaticPeers {
+		for _, addr := range def.Addresses {
+			state.Global.Update("clipsync-peer", cfg.Bind+"|"+addr, state.Connected, "static")
+		}
 	}
 
 	activeNodes.Register(n)
@@ -353,9 +355,11 @@ func (n *Node) canReceiveFrom(remoteAddr string) bool {
 		return true
 	}
 	// Check static peers.
-	for _, peer := range n.config.StaticPeers {
-		if peerHostEqual(peer, host) {
-			return true
+	for _, def := range n.config.StaticPeers {
+		for _, peer := range def.Addresses {
+			if peerHostEqual(peer, host) {
+				return true
+			}
 		}
 	}
 	// Check dynamically discovered peers.
@@ -499,15 +503,17 @@ func (n *Node) Broadcast(payload *pb.SyncPayload) {
 	n.peersMu.RUnlock()
 
 	// Send to Static Peers (SSH Tunnels or explicit IP)
-	for _, addr := range n.config.StaticPeers {
-		if isEchoOrigin(addr, origin) {
-			skippedEcho++
-			continue // don't echo back to the peer we received from
-		}
-		if n.canSendTo(addr, false) {
-			slog.Debug("Pushing payload via HTTP POST to static peer", "peer", addr)
-			go n.postHTTP(addr, data)
-			pushed++
+	for _, def := range n.config.StaticPeers {
+		for _, addr := range def.Addresses {
+			if isEchoOrigin(addr, origin) {
+				skippedEcho++
+				continue // don't echo back to the peer we received from
+			}
+			if n.canSendTo(addr, false) {
+				slog.Debug("Pushing payload via HTTP POST to static peer", "peer", addr)
+				go n.postHTTP(addr, data)
+				pushed++
+			}
 		}
 	}
 	if pushed == 0 {
