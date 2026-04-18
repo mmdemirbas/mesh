@@ -2564,6 +2564,67 @@ func TestHashFileRoot(t *testing.T) {
 	}
 }
 
+func TestHashFileIncremental(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "log.txt")
+
+	// Write initial content (above threshold).
+	initial := strings.Repeat("A", minIncrementalHashSize+100)
+	if err := os.WriteFile(path, []byte(initial), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Full hash — get the state.
+	hash1, state1, err := hashFileIncremental(path, nil, 0, int64(len(initial)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state1) == 0 {
+		t.Fatal("expected non-empty hash state for large file")
+	}
+
+	// Verify against hashFile.
+	expected, _ := hashFile(path)
+	if hash1 != expected {
+		t.Errorf("full incremental hash %q != hashFile %q", hash1, expected)
+	}
+
+	// Append data.
+	appended := initial + "BBBB"
+	if err := os.WriteFile(path, []byte(appended), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Incremental hash — should produce correct result.
+	hash2, state2, err := hashFileIncremental(path, state1, int64(len(initial)), int64(len(appended)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify against full hash.
+	expectedFull, _ := hashFile(path)
+	if hash2 != expectedFull {
+		t.Errorf("incremental hash %q != full hash %q", hash2, expectedFull)
+	}
+	if len(state2) == 0 {
+		t.Fatal("expected state after incremental hash")
+	}
+
+	// File below threshold — no state saved.
+	smallPath := filepath.Join(dir, "small.txt")
+	if err := os.WriteFile(smallPath, []byte("tiny"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, smallState, err := hashFileIncremental(smallPath, nil, 0, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(smallState) != 0 {
+		t.Error("expected no hash state for small file")
+	}
+}
+
 func TestApplyDelta(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

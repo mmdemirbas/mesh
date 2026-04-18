@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding"
 	"encoding/gob"
 	"encoding/hex"
 	"errors"
@@ -41,6 +42,15 @@ type FileEntry struct {
 	Deleted  bool   `yaml:"deleted,omitempty"`
 	Sequence int64  `yaml:"sequence"`
 	Mode     uint32 `yaml:"mode,omitempty"` // L1: Unix permission bits (e.g., 0644)
+
+	// PH: incremental hashing state for append-only optimization.
+	// HashState is the serialized sha256 internal state after hashing
+	// HashedBytes bytes. On the next scan, if the file grew (size >
+	// HashedBytes) without other changes, the hasher is restored and
+	// only the appended bytes are hashed. Only stored for files >=
+	// minIncrementalHashSize to avoid bloating small-file indexes.
+	HashState   []byte `yaml:"hash_state,omitempty"`
+	HashedBytes int64  `yaml:"hashed_bytes,omitempty"`
 }
 
 // FileIndex is the in-memory index for a single folder.
@@ -423,14 +433,18 @@ type ScanStats struct {
 
 // hashJob is a file path to hash, sent from the walk to the worker pool.
 type hashJob struct {
-	absPath string
-	idx     int // index into the shared results slice
+	absPath     string
+	idx         int    // index into the shared results slice
+	savedState  []byte // PH: serialized hasher state for incremental hashing
+	hashedBytes int64  // PH: bytes covered by savedState
+	newSize     int64  // PH: current file size
 }
 
 // hashResult carries the SHA-256 hex string or an error from a worker.
 type hashResult struct {
-	hash string
-	err  error
+	hash      string
+	err       error
+	hashState []byte // PH: serialized hasher state after hashing
 }
 
 // pendingHash records metadata captured during the walk for a file that
@@ -620,8 +634,8 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		go func() {
 			defer hashWg.Done()
 			for job := range hashCh {
-				h, hErr := hashFile(job.absPath)
-				hashResults[job.idx] = hashResult{h, hErr}
+				h, st, hErr := hashFileIncremental(job.absPath, job.savedState, job.hashedBytes, job.newSize)
+				hashResults[job.idx] = hashResult{hash: h, err: hErr, hashState: st}
 			}
 		}()
 	}
@@ -761,7 +775,14 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	// resultCh is drained. This avoids the deadlock where sending to
 	// hashCh blocks the only consumer of resultCh.
 	for i := range pending {
-		hashCh <- hashJob{absPath: pending[i].absPath, idx: i}
+		p := pending[i]
+		job := hashJob{absPath: p.absPath, idx: i, newSize: p.size}
+		// PH: pass saved hash state for incremental hashing.
+		if p.exists && !p.old.Deleted && len(p.old.HashState) > 0 && p.size > p.old.HashedBytes {
+			job.savedState = p.old.HashState
+			job.hashedBytes = p.old.HashedBytes
+		}
+		hashCh <- job
 	}
 
 	// P20a: close the hash channel and wait for all workers to finish.
@@ -795,17 +816,21 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			entry.MtimeNS = p.mtimeNS
 			entry.Size = p.size
 			entry.Mode = p.mode
+			entry.HashState = r.hashState
+			entry.HashedBytes = p.size
 			idx.Files[p.rel] = entry
 			continue
 		}
 
 		idx.Sequence++
 		idx.Files[p.rel] = FileEntry{
-			Size:     p.size,
-			MtimeNS:  p.mtimeNS,
-			SHA256:   r.hash,
-			Sequence: idx.Sequence,
-			Mode:     p.mode,
+			Size:        p.size,
+			MtimeNS:     p.mtimeNS,
+			SHA256:      r.hash,
+			Sequence:    idx.Sequence,
+			Mode:        p.mode,
+			HashState:   r.hashState,
+			HashedBytes: p.size,
 		}
 		changed = true
 	}
@@ -886,6 +911,10 @@ var sha256Pool = sync.Pool{
 	New: func() any { return sha256.New() },
 }
 
+// minIncrementalHashSize is the minimum file size for storing hash state.
+// Files below this threshold are fully re-hashed every scan (cheap enough).
+const minIncrementalHashSize = 1 << 20 // 1 MB
+
 // hashFile computes the SHA-256 hex digest of a file.
 func hashFile(path string) (string, error) {
 	f, err := os.Open(path) //nolint:gosec // G304: path comes from scan walk within a user-configured folder
@@ -900,6 +929,64 @@ func hashFile(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// hashFileIncremental computes the SHA-256 digest, optionally resuming from
+// a previously saved hasher state. Returns the hex digest and the serialized
+// hasher state for the next incremental run.
+//
+// Incremental path is taken when: (1) savedState is non-empty, (2) the file
+// grew (newSize > hashedBytes), and (3) newSize >= minIncrementalHashSize.
+// Otherwise, a full hash is computed.
+func hashFileIncremental(path string, savedState []byte, hashedBytes, newSize int64) (hexHash string, state []byte, err error) {
+	f, err := os.Open(path) //nolint:gosec // G304: path comes from scan walk within a user-configured folder
+	if err != nil {
+		return "", nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	h := sha256Pool.Get().(hash.Hash)
+	h.Reset()
+	defer sha256Pool.Put(h)
+
+	incremental := len(savedState) > 0 && newSize > hashedBytes && newSize >= minIncrementalHashSize
+	if incremental {
+		if um, ok := h.(encoding.BinaryUnmarshaler); ok {
+			if restoreErr := um.UnmarshalBinary(savedState); restoreErr == nil {
+				// Seek past the already-hashed prefix.
+				if _, seekErr := f.Seek(hashedBytes, io.SeekStart); seekErr == nil {
+					if _, cpErr := io.Copy(h, f); cpErr != nil {
+						return "", nil, cpErr
+					}
+					hexHash = hex.EncodeToString(h.Sum(nil))
+					// Save state for next run.
+					if m, mok := h.(encoding.BinaryMarshaler); mok {
+						state, _ = m.MarshalBinary()
+					}
+					return hexHash, state, nil
+				}
+			}
+		}
+		// Fall through to full hash on any restore/seek failure.
+		h.Reset()
+		if _, seekErr := f.Seek(0, io.SeekStart); seekErr != nil {
+			return "", nil, seekErr
+		}
+	}
+
+	// Full hash.
+	if _, err := io.Copy(h, f); err != nil {
+		return "", nil, err
+	}
+	hexHash = hex.EncodeToString(h.Sum(nil))
+
+	// Save state for files above the threshold.
+	if newSize >= minIncrementalHashSize {
+		if m, ok := h.(encoding.BinaryMarshaler); ok {
+			state, _ = m.MarshalBinary()
+		}
+	}
+	return hexHash, state, nil
 }
 
 // DiffAction represents what to do with a file during sync.
