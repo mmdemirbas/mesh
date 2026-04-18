@@ -802,14 +802,10 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	// suppress all tombstones — the scan is likely seeing a systemic failure
 	// (NFS flap, permission reset) rather than individual file issues.
 	totalErrors := len(errorPaths)
-	// Use live (non-tombstone) file count as denominator so old tombstones
-	// don't inflate the threshold and make bulk suppression harder to trigger.
-	liveFiles := 0
-	for _, e := range idx.Files {
-		if !e.Deleted {
-			liveFiles++
-		}
-	}
+	// Use live file count from the walk (len(seen)) as denominator so old
+	// tombstones don't inflate the threshold. This is O(1) — the seen map
+	// was populated during the walk.
+	liveFiles := len(seen)
 	bulkFailure := totalErrors > 100 || (liveFiles > 0 && totalErrors*10 > liveFiles)
 	if bulkFailure {
 		slog.Warn("scan had bulk errors, suppressing all deletion detection",

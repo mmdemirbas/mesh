@@ -205,16 +205,10 @@ func (s *server) handleMultiPageIndex(w http.ResponseWriter, req *pb.IndexExchan
 
 	key := req.GetDeviceId() + "|" + folderID
 
-	// Evict stale pending exchange if present.
-	if v, ok := s.pending.Load(key); ok {
-		pe := v.(*pendingExchange)
-		pe.mu.Lock()
-		stale := time.Since(pe.createdAt) > pendingTTL
-		pe.mu.Unlock()
-		if stale {
-			s.pending.Delete(key)
-		}
-	}
+	// F8: stale pending exchanges are cleaned up by evictStalePending
+	// (periodic goroutine). Removing the per-handler eviction avoids a
+	// race where page N evicts a live exchange that page N-1 just created,
+	// silently discarding the already-accumulated files.
 
 	totalPages := req.GetTotalPages()
 	if totalPages > maxTotalPages {

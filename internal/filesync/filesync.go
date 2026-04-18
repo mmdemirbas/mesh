@@ -1344,6 +1344,13 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		}
 
 		if len(smallEntries) >= 2 { // only batch when there's something to batch
+			// F7: build action lookup once, not per batch.
+			actionMap := make(map[string]DiffEntry, len(actions))
+			for _, a := range actions {
+				if a.Action == ActionDownload {
+					actionMap[a.Path] = a
+				}
+			}
 			batches := bundleBatches(smallEntries)
 			for _, batch := range batches {
 				if ctx.Err() != nil {
@@ -1369,15 +1376,29 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					fs.releasePath(e.Path)
 				}
 
-				// Update index for successful bundle downloads.
-				if len(ok) > 0 {
-					// Build lookup for action metadata.
-					actionMap := make(map[string]DiffEntry, len(actions))
+				// F2: record failed bundle entries so safeSeq does not
+				// advance LastSeenSequence past unprocessed files. Without
+				// this, retry entries whose individual download also fails
+				// (e.g., claimPath collision) are silently skipped on the
+				// next sync cycle because diff() sees their sequence as
+				// already processed.
+				if len(retry) > 0 {
+					// Build actionMap to look up RemoteSequence.
+					retryMap := make(map[string]bool, len(retry))
+					for _, e := range retry {
+						retryMap[e.Path] = true
+					}
+					failMu.Lock()
 					for _, a := range actions {
-						if a.Action == ActionDownload {
-							actionMap[a.Path] = a
+						if retryMap[a.Path] {
+							failedSeqs = append(failedSeqs, a.RemoteSequence)
 						}
 					}
+					failMu.Unlock()
+				}
+
+				// Update index for successful bundle downloads.
+				if len(ok) > 0 {
 					fs.indexMu.Lock()
 					for _, path := range ok {
 						a := actionMap[path]
@@ -1903,37 +1924,49 @@ func (n *Node) persistFolder(folderID string, force bool) {
 		return
 	}
 
-	persistStart := time.Now()
+	// F1: snapshot under RLock, then release and serialize outside the
+	// lock. This avoids holding indexMu.RLock across disk I/O (which
+	// blocks scan swap and download index updates for the full fsync
+	// duration) and eliminates the fragile RUnlock→Lock→Unlock→RLock
+	// dance on save failure.
+	var idxSnapshot *FileIndex
+	var peersSnapshot map[string]PeerState
 	fs.indexMu.RLock()
-	defer fs.indexMu.RUnlock()
+	if saveIndex {
+		idxSnapshot = fs.index.clone()
+	}
+	if savePeers {
+		peersSnapshot = make(map[string]PeerState, len(fs.peers))
+		for k, v := range fs.peers {
+			peersSnapshot[k] = v
+		}
+	}
+	fs.indexMu.RUnlock()
 
 	var indexBytes int
 	var indexMs float64
 	if saveIndex {
 		idxStart := time.Now()
 		idxPath := filepath.Join(n.dataDir, folderID, "index.yaml")
-		if err := fs.index.save(idxPath); err != nil {
+		if err := idxSnapshot.save(idxPath); err != nil {
 			slog.Warn("failed to save index", "folder", folderID, "error", err)
-			fs.indexMu.RUnlock()
 			fs.indexMu.Lock()
 			fs.indexDirty = true // retry next time
 			fs.indexMu.Unlock()
-			fs.indexMu.RLock()
 		}
 		indexMs = ms(time.Since(idxStart))
-		indexBytes = len(fs.index.Files) // approximate: entry count, not bytes
+		indexBytes = len(idxSnapshot.Files)
 	}
 
 	var peersMs float64
 	if savePeers {
 		peersStart := time.Now()
 		peersPath := filepath.Join(n.dataDir, folderID, "peers.yaml")
-		if err := savePeerStates(peersPath, fs.peers); err != nil {
+		if err := savePeerStates(peersPath, peersSnapshot); err != nil {
 			slog.Warn("failed to save peer states", "folder", folderID, "error", err)
 		}
 		peersMs = ms(time.Since(peersStart))
 	}
-	_ = persistStart // used only for timing context
 	perfPersist(folderID, indexBytes, indexMs, peersMs, !saveIndex)
 }
 
