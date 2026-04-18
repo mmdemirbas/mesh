@@ -75,6 +75,9 @@ my-vps-tunnel-service:
       # max_bandwidth: "50MB"  # Throttle to 50 MB/s (default: unlimited)
 
       # Named peer definitions. Key is a short nickname.
+      # Note: peer state is keyed by IP. If you replace hardware at the same
+      # IP, delete ~/.mesh/filesync/<folder>/peers.yaml on the other side
+      # to avoid stale sequence numbers causing missed updates.
       peers:
         desktop: ["192.168.1.10:7756"]
         laptop:  ["127.0.0.1:17756"]    # Behind NAT via SSH tunnel

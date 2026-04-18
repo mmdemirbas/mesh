@@ -41,7 +41,7 @@ message BlockSignatures {
 // and remote versions of a file.
 message DeltaResponse {
   int64  file_size    = 1;         // Total remote file size
-  bytes  file_sha256  = 2;         // SHA-256 of the complete remote file
+  bytes  file_sha256  = 2;         // Deprecated (L7): receiver verifies hash independently. Kept for wire compat.
   repeated DeltaBlock blocks = 3;
 }
 

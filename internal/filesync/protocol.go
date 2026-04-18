@@ -500,22 +500,17 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get full-file hash for verification (fi already from stat above).
-	fileHash, err := hashFile(fullPath)
-	if err != nil {
-		http.Error(w, "hash file: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	// Build response.
 	pbBlocks := make([]*pb.DeltaBlock, len(delta))
 	for i, b := range delta {
 		pbBlocks[i] = &pb.DeltaBlock{Index: b.index, Data: b.data}
 	}
 	resp := &pb.DeltaResponse{
-		FileSize:   fi.Size(),
-		FileSha256: hexToBytes(fileHash),
-		Blocks:     pbBlocks,
+		FileSize: fi.Size(),
+		Blocks:   pbBlocks,
+		// L7: FileSha256 removed — receiver verifies hash independently
+		// after applying the delta. Field 2 kept reserved in proto for
+		// backward compatibility.
 	}
 
 	data, err := proto.Marshal(resp)

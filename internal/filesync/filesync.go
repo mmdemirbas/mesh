@@ -1068,6 +1068,15 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	folderID := fs.cfg.ID
 	stateKey := folderID + "|" + peerAddr
 
+	// L6: verify folder root still exists before syncing. If the folder was
+	// unmounted or deleted after startup, downloading files would recreate
+	// the directory tree via MkdirAll — producing a zombie folder.
+	if _, err := os.Stat(fs.cfg.Path); err != nil {
+		slog.Warn("folder root gone, skipping sync", "folder", folderID, "path", fs.cfg.Path, "error", err)
+		state.Global.Update("filesync-folder", folderID, state.Failed, "path missing")
+		return
+	}
+
 	syncStart := time.Now()
 	state.Global.Update("filesync-folder", folderID, state.Connecting, "syncing with "+peerAddr)
 
