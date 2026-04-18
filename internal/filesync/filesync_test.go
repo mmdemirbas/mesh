@@ -3734,6 +3734,147 @@ func TestHandleFile_RejectsDisabled(t *testing.T) {
 	}
 }
 
+// T1: direction enforcement for /bundle and /delta endpoints.
+func TestHandleBundle_RejectsReceiveOnly(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "data.txt", "content")
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg: config.FolderCfg{
+			ID:        "test",
+			Path:      dir,
+			Direction: "receive-only",
+			Peers:     []string{"127.0.0.1:7756"},
+		},
+		root: openTestRoot(t, dir),
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	reqMsg := &pb.BundleRequest{FolderId: "test", Paths: []string{"data.txt"}}
+	reqData, _ := proto.Marshal(reqMsg)
+	resp := bundlePost(t, ts.URL, reqData)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 for receive-only bundle, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandleBundle_RejectsDisabled(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "data.txt", "content")
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg: config.FolderCfg{
+			ID:        "test",
+			Path:      dir,
+			Direction: "disabled",
+		},
+		root: openTestRoot(t, dir),
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	reqMsg := &pb.BundleRequest{FolderId: "test", Paths: []string{"data.txt"}}
+	reqData, _ := proto.Marshal(reqMsg)
+	resp := bundlePost(t, ts.URL, reqData)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 for disabled bundle, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandleDelta_RejectsReceiveOnly(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "data.bin", "AAAA")
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg: config.FolderCfg{
+			ID:        "test",
+			Path:      dir,
+			Direction: "receive-only",
+			Peers:     []string{"127.0.0.1:7756"},
+		},
+		root: openTestRoot(t, dir),
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req := &pb.BlockSignatures{FolderId: "test", Path: "data.bin", BlockSize: 4}
+	reqData, _ := proto.Marshal(req)
+	resp, err := http.Post(ts.URL+"/delta", "application/x-protobuf", bytes.NewReader(reqData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 for receive-only delta, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandleDelta_RejectsDisabled(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "data.bin", "AAAA")
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg: config.FolderCfg{
+			ID:        "test",
+			Path:      dir,
+			Direction: "disabled",
+		},
+		root: openTestRoot(t, dir),
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req := &pb.BlockSignatures{FolderId: "test", Path: "data.bin", BlockSize: 4}
+	reqData, _ := proto.Marshal(req)
+	resp, err := http.Post(ts.URL+"/delta", "application/x-protobuf", bytes.NewReader(reqData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 for disabled delta, got %d", resp.StatusCode)
+	}
+}
+
 func TestDryRunComputesDiffWithoutExecution(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -3831,6 +3972,157 @@ func TestHandleIndex_UnknownFolder(t *testing.T) {
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404 for unknown folder, got %d", resp.StatusCode)
+	}
+}
+
+// T2: maxTotalPages cap rejects inflated page counts.
+func TestHandleIndex_RejectsExcessiveTotalPages(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg:   testFolderCfg(dir, "127.0.0.1"),
+		index: newFileIndex(),
+		peers: make(map[string]PeerState),
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req := &pb.IndexExchange{
+		DeviceId:   "peer",
+		FolderId:   "test",
+		TotalPages: maxTotalPages + 1,
+		Page:       0,
+	}
+	data, _ := proto.Marshal(req)
+	resp, err := http.Post(ts.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for excessive totalPages, got %d", resp.StatusCode)
+	}
+}
+
+// T3: client-side bundle tar path traversal — tar entries with ".." must not escape root.
+func TestDownloadBundle_PathTraversalInTarEntry(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "legit.txt", "ok")
+
+	idx := newFileIndex()
+	h := sha256.Sum256([]byte("ok"))
+	idx.setEntry("legit.txt", FileEntry{Size: 2, SHA256: hex.EncodeToString(h[:])})
+	// Also add a traversal path to the index so the server would try to serve it.
+	idx.setEntry("../escape.txt", FileEntry{Size: 7, SHA256: "deadbeef"})
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg:   testFolderCfg(dir, "127.0.0.1"),
+		root:  openTestRoot(t, dir),
+		index: idx,
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// Request bundle containing the traversal path.
+	reqMsg := &pb.BundleRequest{FolderId: "test", Paths: []string{"../escape.txt"}}
+	reqData, _ := proto.Marshal(reqMsg)
+	resp := bundlePost(t, ts.URL, reqData)
+	defer func() { _ = resp.Body.Close() }()
+
+	// The server should either reject the path or the file simply won't be
+	// found (os.Root prevents traversal). Either way, no file should be served.
+	if resp.StatusCode == http.StatusOK {
+		gr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return // empty/invalid response is fine
+		}
+		defer func() { _ = gr.Close() }()
+		tr := tar.NewReader(gr)
+		for {
+			hdr, err := tr.Next()
+			if err != nil {
+				break
+			}
+			if strings.Contains(hdr.Name, "..") {
+				t.Errorf("tar entry with traversal path should not be served: %s", hdr.Name)
+			}
+		}
+	}
+}
+
+// T4: evictStalePending removes expired multi-page exchanges.
+func TestEvictStalePending(t *testing.T) {
+	t.Parallel()
+	srv := &server{node: &Node{
+		cfg:      testCfg(t.TempDir(), "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}}
+
+	// Store a "stale" pending exchange.
+	srv.pending.Store("stale|test", &pendingExchange{
+		totalPages: 2,
+		deviceID:   "stale",
+		folderID:   "test",
+		received:   map[int32]bool{0: true},
+		createdAt:  time.Now().Add(-2 * pendingTTL),
+	})
+	// Store a "fresh" pending exchange.
+	srv.pending.Store("fresh|test", &pendingExchange{
+		totalPages: 2,
+		deviceID:   "fresh",
+		folderID:   "test",
+		received:   map[int32]bool{0: true},
+		createdAt:  time.Now(),
+	})
+
+	srv.evictStalePending()
+
+	if _, ok := srv.pending.Load("stale|test"); ok {
+		t.Error("stale pending exchange should have been evicted")
+	}
+	if _, ok := srv.pending.Load("fresh|test"); !ok {
+		t.Error("fresh pending exchange should not have been evicted")
+	}
+}
+
+// T5: scan context cancellation returns error and produces no partial results.
+func TestScan_ContextCancellation(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Create enough files to make scan non-trivial.
+	for i := range 50 {
+		writeFile(t, dir, fmt.Sprintf("file%d.txt", i), fmt.Sprintf("content-%d", i))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	idx := newFileIndex()
+	_, _, _, scanErr := idx.scan(ctx, dir, &ignoreMatcher{})
+
+	if scanErr == nil {
+		t.Fatal("expected error from cancelled context scan")
+	}
+	if !errors.Is(scanErr, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", scanErr)
 	}
 }
 
