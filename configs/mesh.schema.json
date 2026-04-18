@@ -198,7 +198,9 @@
           "type": "array"
         },
         "direction": {
-          "type": "string"
+          "type": "string",
+          "enum": ["send-receive", "send-only", "receive-only", "dry-run", "disabled"],
+          "description": "Sync direction. receive-only applies remote deletes (files deleted on sender are deleted locally)."
         },
         "ignore_patterns": {
           "items": {
@@ -226,7 +228,9 @@
           "type": "array"
         },
         "direction": {
-          "type": "string"
+          "type": "string",
+          "enum": ["send-receive", "send-only", "receive-only", "dry-run", "disabled"],
+          "description": "Sync direction. receive-only applies remote deletes (files deleted on sender are deleted locally)."
         },
         "ignore_patterns": {
           "items": {

@@ -198,7 +198,11 @@ type FolderCfg struct {
 	// request whose remote address is the IP that "server" resolves to.
 	// IP literals pass through canonicalized via net.ParseIP.String().
 	AllowedPeerHosts []string
-	// Sync direction: "send-receive", "send-only", or "receive-only".
+	// Sync direction: "send-receive" (default), "send-only", "receive-only",
+	// "dry-run", or "disabled".
+	// Note: "receive-only" applies remote deletes — files deleted on the
+	// sender are deleted locally. Use snapshots/versioning if you need
+	// deletion protection.
 	Direction string
 	// Merged ignore patterns (defaults + folder-specific).
 	IgnorePatterns []string

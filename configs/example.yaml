@@ -83,6 +83,8 @@ my-vps-tunnel-service:
       defaults:
         peers: ["desktop"]
         direction: send-receive          # send-receive | send-only | receive-only | dry-run | disabled
+        # Note: receive-only applies remote deletes (files deleted on sender
+        # are deleted locally). Use snapshots/versioning for deletion protection.
         ignore_patterns:                 # Gitignore-style, applied to all folders
           - ".git"
           - "node_modules"
