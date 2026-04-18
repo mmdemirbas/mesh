@@ -516,6 +516,10 @@ type Node struct {
 	// scanTrigger signals the sync loop that a scan completed with changes.
 	scanTrigger chan struct{}
 
+	// firstScanDone is closed after the initial scan completes. L4: syncLoop
+	// waits on this instead of a fixed timer.
+	firstScanDone chan struct{}
+
 	activityMu sync.RWMutex
 	activities []SyncActivity // ring buffer, most recent last
 }
@@ -555,7 +559,8 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 				ExpectContinueTimeout: 1 * time.Second,
 			},
 		},
-		scanTrigger: make(chan struct{}, 1),
+		scanTrigger:   make(chan struct{}, 1),
+		firstScanDone: make(chan struct{}),
 	}
 
 	// Set up bandwidth limiter.
@@ -768,6 +773,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 
 	// Run initial scan (all folders).
 	n.runScan(ctx, nil)
+	close(n.firstScanDone)
 
 	<-ctx.Done()
 
@@ -1008,13 +1014,11 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 
 // syncLoop periodically reconciles with all configured peers.
 func (n *Node) syncLoop(ctx context.Context) {
-	// Short initial delay to allow the first scan to complete.
-	initDelay := time.NewTimer(2 * time.Second)
+	// L4: wait for the initial scan to complete instead of a fixed timer.
 	select {
 	case <-ctx.Done():
-		initDelay.Stop()
 		return
-	case <-initDelay.C:
+	case <-n.firstScanDone:
 	}
 
 	// Sync immediately, then on trigger or timer.
@@ -1317,6 +1321,16 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				slog.Debug("file downloaded", "folder", folderID, "path", action.Path,
 					"peer", peerAddr, "size", action.RemoteSize, "duration", time.Since(dlStart))
 
+				// L1: apply file permissions from remote (default 0644).
+				fileMode := os.FileMode(action.RemoteMode)
+				if fileMode == 0 {
+					fileMode = 0644
+				}
+				destPath, _ := safePath(fs.cfg.Path, action.Path)
+				if destPath != "" {
+					_ = os.Chmod(destPath, fileMode)
+				}
+
 				// Update metrics.
 				m := state.Global.GetMetrics("filesync", n.cfg.Bind)
 				m.BytesRx.Add(action.RemoteSize)
@@ -1331,6 +1345,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					MtimeNS:  action.RemoteMtime,
 					SHA256:   action.RemoteHash,
 					Sequence: fs.index.Sequence,
+					Mode:     action.RemoteMode,
 				}
 				fs.retries.clear(action.Path)
 				fs.indexMu.Unlock()
@@ -1433,6 +1448,13 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						return
 					}
 
+					// L1: apply file permissions from remote.
+					cfMode := os.FileMode(action.RemoteMode)
+					if cfMode == 0 {
+						cfMode = 0644
+					}
+					_ = os.Chmod(destPath, cfMode)
+
 					fs.indexMu.Lock()
 					fs.index.Sequence++
 					fs.index.Files[action.Path] = FileEntry{
@@ -1440,6 +1462,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						MtimeNS:  action.RemoteMtime,
 						SHA256:   action.RemoteHash,
 						Sequence: fs.index.Sequence,
+						Mode:     action.RemoteMode,
 					}
 					fs.retries.clear(action.Path)
 					fs.indexMu.Unlock()
@@ -1591,6 +1614,7 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 			Sha256:   hexToBytes(entry.SHA256),
 			Deleted:  entry.Deleted,
 			Sequence: entry.Sequence,
+			Mode:     entry.Mode,
 		}
 		files = append(files, fi)
 	}
@@ -1674,6 +1698,7 @@ func protoToFileIndex(idx *pb.IndexExchange) *FileIndex {
 			SHA256:   bytesToHex(f.GetSha256()),
 			Deleted:  f.GetDeleted(),
 			Sequence: f.GetSequence(),
+			Mode:     f.GetMode(),
 		}
 	}
 	return fi

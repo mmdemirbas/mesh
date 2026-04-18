@@ -35,6 +35,7 @@ type FileEntry struct {
 	SHA256   string `yaml:"sha256"`
 	Deleted  bool   `yaml:"deleted,omitempty"`
 	Sequence int64  `yaml:"sequence"`
+	Mode     uint32 `yaml:"mode,omitempty"` // L1: Unix permission bits (e.g., 0644)
 }
 
 // FileIndex is the in-memory index for a single folder.
@@ -437,9 +438,16 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		existing, exists := idx.Files[rel]
 		mtimeNS := info.ModTime().UnixNano()
 		size := info.Size()
+		mode := uint32(info.Mode().Perm())
 
-		// Fast path: skip hashing if stat is unchanged.
+		// Fast path: skip hashing if size and mtime are unchanged.
+		// Mode is not checked here — a chmod alone doesn't change content,
+		// so we update it without rehashing.
 		if exists && !existing.Deleted && existing.Size == size && existing.MtimeNS == mtimeNS {
+			if existing.Mode != mode {
+				existing.Mode = mode
+				idx.Files[rel] = existing
+			}
 			stats.FastPathHits++
 			return nil
 		}
@@ -465,9 +473,10 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		}
 
 		if exists && !existing.Deleted && existing.SHA256 == hash {
-			// Content identical despite stat change (e.g., touch). Update stat only.
+			// Content identical despite stat change (e.g., touch, chmod). Update stat only.
 			existing.MtimeNS = mtimeNS
 			existing.Size = size
+			existing.Mode = mode
 			idx.Files[rel] = existing
 			return nil
 		}
@@ -478,6 +487,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			MtimeNS:  mtimeNS,
 			SHA256:   hash,
 			Sequence: idx.Sequence,
+			Mode:     mode,
 		}
 		changed = true
 		return nil
@@ -587,7 +597,8 @@ type DiffEntry struct {
 	RemoteHash     string
 	RemoteSize     int64
 	RemoteMtime    int64
-	RemoteSequence int64 // B9: track for safe LastSeenSequence advancement
+	RemoteMode     uint32 // L1: file permission bits from remote
+	RemoteSequence int64  // B9: track for safe LastSeenSequence advancement
 }
 
 // diff compares the local index with a remote index and produces a list of
@@ -644,6 +655,7 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, direction strin
 				RemoteHash:     rEntry.SHA256,
 				RemoteSize:     rEntry.Size,
 				RemoteMtime:    rEntry.MtimeNS,
+				RemoteMode:     rEntry.Mode,
 				RemoteSequence: rEntry.Sequence,
 			})
 			continue
@@ -663,6 +675,7 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, direction strin
 				RemoteHash:     rEntry.SHA256,
 				RemoteSize:     rEntry.Size,
 				RemoteMtime:    rEntry.MtimeNS,
+				RemoteMode:     rEntry.Mode,
 				RemoteSequence: rEntry.Sequence,
 			})
 		} else {
@@ -673,6 +686,7 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, direction strin
 				RemoteHash:     rEntry.SHA256,
 				RemoteSize:     rEntry.Size,
 				RemoteMtime:    rEntry.MtimeNS,
+				RemoteMode:     rEntry.Mode,
 				RemoteSequence: rEntry.Sequence,
 			})
 		}

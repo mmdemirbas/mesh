@@ -140,6 +140,7 @@ type FileInfo struct {
 	Sha256        []byte                 `protobuf:"bytes,4,opt,name=sha256,proto3" json:"sha256,omitempty"`                   // 32 bytes
 	Deleted       bool                   `protobuf:"varint,5,opt,name=deleted,proto3" json:"deleted,omitempty"`                // Tombstone flag
 	Sequence      int64                  `protobuf:"varint,6,opt,name=sequence,proto3" json:"sequence,omitempty"`              // Per-file monotonic counter
+	Mode          uint32                 `protobuf:"varint,7,opt,name=mode,proto3" json:"mode,omitempty"`                      // Unix permission bits (e.g., 0644)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -212,6 +213,13 @@ func (x *FileInfo) GetDeleted() bool {
 func (x *FileInfo) GetSequence() int64 {
 	if x != nil {
 		return x.Sequence
+	}
+	return 0
+}
+
+func (x *FileInfo) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
 	}
 	return 0
 }
@@ -424,14 +432,15 @@ const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
 	"\vtotal_pages\x18\a \x01(\x05R\n" +
 	"totalPages\x12\x14\n" +
 	"\x05fetch\x18\b \x01(\bR\x05fetch\x12\x14\n" +
-	"\x05epoch\x18\t \x01(\tR\x05epoch\"\x9b\x01\n" +
+	"\x05epoch\x18\t \x01(\tR\x05epoch\"\xaf\x01\n" +
 	"\bFileInfo\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x03R\x04size\x12\x19\n" +
 	"\bmtime_ns\x18\x03 \x01(\x03R\amtimeNs\x12\x16\n" +
 	"\x06sha256\x18\x04 \x01(\fR\x06sha256\x12\x18\n" +
 	"\adeleted\x18\x05 \x01(\bR\adeleted\x12\x1a\n" +
-	"\bsequence\x18\x06 \x01(\x03R\bsequence\"\xa1\x01\n" +
+	"\bsequence\x18\x06 \x01(\x03R\bsequence\x12\x12\n" +
+	"\x04mode\x18\a \x01(\rR\x04mode\"\xa1\x01\n" +
 	"\x0fBlockSignatures\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12\x1d\n" +

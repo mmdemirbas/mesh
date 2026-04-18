@@ -24,6 +24,7 @@ message FileInfo {
   bytes  sha256    = 4;           // 32 bytes
   bool   deleted   = 5;           // Tombstone flag
   int64  sequence  = 6;           // Per-file monotonic counter
+  uint32 mode      = 7;           // Unix permission bits (e.g., 0644)
 }
 
 // BlockSignatures is sent by the receiver to request a block-level delta.

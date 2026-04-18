@@ -112,7 +112,13 @@ func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, 
 		_ = f.Close()
 		return "", fmt.Errorf("write file data: %w", err)
 	}
-	_ = f.Close()
+	// L2: check Close error — on NFS/FUSE the server-side write can fail
+	// here. Without this check, the corrupt temp produces a misleading
+	// "hash mismatch" instead of the real I/O error.
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("close temp file: %w", err)
+	}
 
 	// Verify hash of completed file.
 	actualHash, err := hashFile(tmpPath)
