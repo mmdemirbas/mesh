@@ -721,9 +721,12 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	stats.WalkDuration = time.Since(walkStart)
 
 	// F4: pre-allocate results slice so workers write by index instead
-	// of allocating a channel per file. Safe without synchronization
-	// because each worker writes to a distinct index and the consumer
-	// reads only after hashWg.Wait().
+	// of allocating a channel per file. Safe because:
+	// 1. The slice variable is assigned here before any sends to hashCh;
+	//    the channel send/receive provides happens-before so workers see
+	//    the initialized slice.
+	// 2. Each worker writes to a distinct index (no element contention).
+	// 3. The consumer reads only after hashWg.Wait().
 	hashResults = make([]hashResult, len(pending))
 
 	// P20a: submit all hash jobs now that the walk is complete and

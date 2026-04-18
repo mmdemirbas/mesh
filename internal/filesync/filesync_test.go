@@ -5079,39 +5079,20 @@ func TestSafeSeq_AllZero(t *testing.T) {
 	}
 }
 
-// N7: conflict file collision should generate a unique name.
-func TestConflictFileName_Collision(t *testing.T) {
+// N7/F13: concurrent conflict resolutions must produce unique names.
+func TestConflictFileName_UniqueAcrossCalls(t *testing.T) {
 	t.Parallel()
-	rootDir := t.TempDir()
-	root := openTestRoot(t, rootDir)
+	root := openTestRoot(t, t.TempDir())
 
-	// First conflict.
+	// Two calls within the same second must get different names
+	// (random suffix makes TOCTOU impossible).
 	_, cRelPath1 := resolveConflict(root, "a.txt", 100, 200, "device1")
-	if cRelPath1 == "" {
-		t.Fatal("expected conflict path for remote win")
-	}
-	// Create the conflict file to cause collision.
-	cPath1 := filepath.Join(rootDir, cRelPath1)
-	if err := os.MkdirAll(filepath.Dir(cPath1), 0750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cPath1, []byte("first"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Second conflict with same timestamp (within same second).
 	_, cRelPath2 := resolveConflict(root, "a.txt", 100, 200, "device1")
-	if cRelPath2 == "" {
-		t.Fatal("expected conflict path for remote win")
+	if cRelPath1 == "" || cRelPath2 == "" {
+		t.Fatal("expected conflict paths for remote win")
 	}
 	if cRelPath2 == cRelPath1 {
-		t.Error("N7: second conflict should get a different path")
-	}
-
-	// Original conflict file should be untouched.
-	data, _ := os.ReadFile(cPath1)
-	if string(data) != "first" {
-		t.Error("first conflict file should not be modified")
+		t.Error("F13: two conflict resolutions should get different paths")
 	}
 }
 
