@@ -2024,6 +2024,50 @@ func TestDeltaEndpoint_BlockSizeClamped(t *testing.T) {
 	}
 }
 
+// P18b: verify that setEntry maintains cachedCount/cachedSize correctly
+// through insert, update, and delete operations.
+func TestFileIndex_CachedCountAndSize(t *testing.T) {
+	t.Parallel()
+	idx := newFileIndex()
+	idx.recomputeCache()
+
+	// Insert two active files.
+	idx.setEntry("a.txt", FileEntry{Size: 100})
+	idx.setEntry("b.txt", FileEntry{Size: 200})
+	count, size := idx.activeCountAndSize()
+	if count != 2 || size != 300 {
+		t.Fatalf("after insert: count=%d size=%d, want 2/300", count, size)
+	}
+
+	// Update a file (size change).
+	idx.setEntry("a.txt", FileEntry{Size: 150})
+	count, size = idx.activeCountAndSize()
+	if count != 2 || size != 350 {
+		t.Fatalf("after update: count=%d size=%d, want 2/350", count, size)
+	}
+
+	// Delete a file (tombstone).
+	idx.setEntry("b.txt", FileEntry{Size: 200, Deleted: true})
+	count, size = idx.activeCountAndSize()
+	if count != 1 || size != 150 {
+		t.Fatalf("after delete: count=%d size=%d, want 1/150", count, size)
+	}
+
+	// Re-insert over a tombstone.
+	idx.setEntry("b.txt", FileEntry{Size: 300})
+	count, size = idx.activeCountAndSize()
+	if count != 2 || size != 450 {
+		t.Fatalf("after re-insert: count=%d size=%d, want 2/450", count, size)
+	}
+
+	// Verify recomputeCache matches.
+	idx.recomputeCache()
+	count2, size2 := idx.activeCountAndSize()
+	if count != count2 || size != size2 {
+		t.Fatalf("recompute mismatch: cached=%d/%d recomputed=%d/%d", count, size, count2, size2)
+	}
+}
+
 func TestSafePath(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -3173,7 +3217,7 @@ func TestPersistFolder_Roundtrip(t *testing.T) {
 		},
 	}
 
-	n.persistFolder("docs")
+	n.persistFolder("docs", true)
 
 	// Reload index.
 	loadedIdx, err := loadIndex(filepath.Join(dataDir, "docs", "index.yaml"))
@@ -4099,7 +4143,7 @@ func TestPersistFolder_Concurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			n.persistFolder("test")
+			n.persistFolder("test", true)
 		}()
 	}
 	wg.Wait()

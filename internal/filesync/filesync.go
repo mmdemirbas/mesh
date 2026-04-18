@@ -206,15 +206,7 @@ func GetFolderStatuses() []FolderStatus {
 		for _, id := range ids {
 			fs := n.folders[id]
 			fs.indexMu.RLock()
-			var count int
-			var totalBytes int64
-			for _, e := range fs.index.Files {
-				if e.Deleted {
-					continue
-				}
-				count++
-				totalBytes += e.Size
-			}
+			count, totalBytes := fs.index.activeCountAndSize() // P18b: O(1) cached
 			dirs := fs.dirCount
 			seq := fs.index.Sequence
 			var lastSync time.Time
@@ -415,6 +407,8 @@ type folderState struct {
 	inFlightMu sync.Mutex
 	inFlight   map[string]bool
 	persistMu  sync.Mutex        // N10: serializes persistFolder calls
+	indexDirty bool              // P17a: true when file index changed since last persist
+	peersDirty bool              // P17a: true when peer state changed since last persist
 	metrics    FolderSyncMetrics // lock-free counters for Prometheus
 }
 
@@ -605,6 +599,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			idx = newFileIndex()
 			indexReset = true
 		}
+		idx.recomputeCache() // P18b: initialize cached counters from loaded data
 
 		// Load peer states.
 		peersPath := filepath.Join(dataDir, fcfg.ID, "peers.yaml")
@@ -913,6 +908,7 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 			idxCopy.Sequence = fs.index.Sequence
 		}
 		fs.index = idxCopy
+		fs.index.recomputeCache() // P18b: refresh after scan+merge
 		fs.dirCount = dirs
 		if conflicts != nil {
 			fs.conflicts = conflicts
@@ -920,6 +916,12 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		// M3: maintain removed-peer markers on the live peers map.
 		peersChanged := markRemovedPeers(fs.peers, fs.cfg.Peers)
 		peersChanged = gcRemovedPeers(fs.peers, tombstoneMaxAge) > 0 || peersChanged
+		if changed {
+			fs.indexDirty = true // P17a
+		}
+		if peersChanged {
+			fs.peersDirty = true // P17a
+		}
 		countAfterSwap, totalSize := fs.index.activeCountAndSize()
 		fs.indexMu.Unlock()
 		swapDuration := time.Since(swapStart)
@@ -927,7 +929,7 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		// Persist peer state when M3 maintenance modified it, so changes
 		// survive restarts without waiting for the next syncFolder call.
 		if peersChanged {
-			n.persistFolder(id)
+			n.persistFolder(id, false)
 		}
 
 		fs.initialScanDone.Store(true)
@@ -1169,7 +1171,9 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			LastEpoch:        lastEpoch,
 			PendingEpoch:     pendingEpoch,
 		}
+		fs.peersDirty = true // P17a
 		fs.indexMu.Unlock()
+		n.persistFolder(folderID, false)
 		return
 	}
 
@@ -1244,7 +1248,12 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			LastSync:         time.Now(),
 			LastEpoch:        resolvedEpoch,
 		}
+		fs.peersDirty = true // P17a
 		fs.indexMu.Unlock()
+
+		// P17a: persist peers only (index unchanged); skips the expensive
+		// index serialize for idle folders.
+		n.persistFolder(folderID, false)
 
 		fs.indexMu.RLock()
 		count, totalSize := fs.index.activeCountAndSize()
@@ -1356,13 +1365,13 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				// Update local index and clear retry tracking on success.
 				fs.indexMu.Lock()
 				fs.index.Sequence++
-				fs.index.Files[action.Path] = FileEntry{
+				fs.index.setEntry(action.Path, FileEntry{
 					Size:     action.RemoteSize,
 					MtimeNS:  action.RemoteMtime,
 					SHA256:   action.RemoteHash,
 					Sequence: fs.index.Sequence,
 					Mode:     action.RemoteMode,
-				}
+				})
 				fs.retries.clear(action.Path)
 				fs.indexMu.Unlock()
 
@@ -1467,13 +1476,13 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 					fs.indexMu.Lock()
 					fs.index.Sequence++
-					fs.index.Files[action.Path] = FileEntry{
+					fs.index.setEntry(action.Path, FileEntry{
 						Size:     action.RemoteSize,
 						MtimeNS:  action.RemoteMtime,
 						SHA256:   action.RemoteHash,
 						Sequence: fs.index.Sequence,
 						Mode:     action.RemoteMode,
-					}
+					})
 					fs.retries.clear(action.Path)
 					fs.indexMu.Unlock()
 					fs.metrics.FilesConflicted.Add(1)
@@ -1528,7 +1537,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					entry.Deleted = true
 					entry.MtimeNS = time.Now().UnixNano()
 					entry.Sequence = fs.index.Sequence
-					fs.index.Files[action.Path] = entry
+					fs.index.setEntry(action.Path, entry)
 					fs.indexMu.Unlock()
 					fs.metrics.FilesDeleted.Add(1)
 				}
@@ -1581,10 +1590,19 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		LastSync:         time.Now(),
 		LastEpoch:        resolvedEpoch,
 	}
+	fs.peersDirty = true // P17a: peer state always changes (LastSync)
+	// P17a: mark index dirty only when file actions actually modified it.
+	// Successful downloads/conflicts/deletes each wrote fs.index.Files entries
+	// inside their goroutines. The expensive index serialize is skipped when
+	// only peer bookkeeping (sequence numbers, timestamps) changed.
+	appliedActions := (downloads + conflicts + deletes) - len(failedSeqs)
+	if appliedActions > 0 {
+		fs.indexDirty = true
+	}
 	fs.indexMu.Unlock()
 
 	// Persist index after sync.
-	n.persistFolder(folderID)
+	n.persistFolder(folderID, false)
 
 	fs.indexMu.RLock()
 	count, totalSize := fs.index.activeCountAndSize()
@@ -1612,7 +1630,19 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 	fs.indexMu.RLock()
 	defer fs.indexMu.RUnlock()
 
-	files := make([]*pb.FileInfo, 0, len(fs.index.Files))
+	// P18d: cap pre-allocation for delta exchanges. Full exchanges (sinceSequence==0)
+	// still grow dynamically, but steady-state deltas (few entries) avoid a 168k-slot alloc.
+	cap := len(fs.index.Files)
+	if sinceSequence > 0 {
+		delta := fs.index.Sequence - sinceSequence
+		if delta < int64(cap) {
+			cap = int(delta)
+		}
+		if cap > 1000 {
+			cap = 1000
+		}
+	}
+	files := make([]*pb.FileInfo, 0, cap)
 	for path, entry := range fs.index.Files {
 		if sinceSequence > 0 && entry.Sequence <= sinceSequence {
 			continue
@@ -1659,17 +1689,21 @@ func (n *Node) isPeerConfigured(requestIP string) bool {
 	return false
 }
 
-// persistAll saves all folder indices and peer states to disk.
+// persistAll saves all folder indices and peer states to disk (shutdown path).
 func (n *Node) persistAll() {
 	for id := range n.folders {
-		n.persistFolder(id)
+		n.persistFolder(id, true)
 	}
 }
 
 // persistFolder saves a single folder's index and peer state.
 // N10: serialized via persistMu to prevent concurrent syncFolder
 // goroutines from racing on the same .tmp file.
-func (n *Node) persistFolder(folderID string) {
+// P17a: skips unchanged components. The index file (~30 MB for large folders)
+// is only written when indexDirty is set. Peer state (~1 KB) is always cheap
+// to write but still gated by peersDirty. force=true bypasses both checks
+// (used at shutdown).
+func (n *Node) persistFolder(folderID string, force bool) {
 	fs, ok := n.folders[folderID]
 	if !ok {
 		return
@@ -1678,17 +1712,41 @@ func (n *Node) persistFolder(folderID string) {
 	fs.persistMu.Lock()
 	defer fs.persistMu.Unlock()
 
+	fs.indexMu.Lock()
+	saveIndex := force || fs.indexDirty
+	savePeers := force || fs.peersDirty
+	if saveIndex {
+		fs.indexDirty = false
+	}
+	if savePeers {
+		fs.peersDirty = false
+	}
+	fs.indexMu.Unlock()
+
+	if !saveIndex && !savePeers {
+		return
+	}
+
 	fs.indexMu.RLock()
 	defer fs.indexMu.RUnlock()
 
-	idxPath := filepath.Join(n.dataDir, folderID, "index.yaml")
-	if err := fs.index.save(idxPath); err != nil {
-		slog.Warn("failed to save index", "folder", folderID, "error", err)
+	if saveIndex {
+		idxPath := filepath.Join(n.dataDir, folderID, "index.yaml")
+		if err := fs.index.save(idxPath); err != nil {
+			slog.Warn("failed to save index", "folder", folderID, "error", err)
+			fs.indexMu.RUnlock()
+			fs.indexMu.Lock()
+			fs.indexDirty = true // retry next time
+			fs.indexMu.Unlock()
+			fs.indexMu.RLock()
+		}
 	}
 
-	peersPath := filepath.Join(n.dataDir, folderID, "peers.yaml")
-	if err := savePeerStates(peersPath, fs.peers); err != nil {
-		slog.Warn("failed to save peer states", "folder", folderID, "error", err)
+	if savePeers {
+		peersPath := filepath.Join(n.dataDir, folderID, "peers.yaml")
+		if err := savePeerStates(peersPath, fs.peers); err != nil {
+			slog.Warn("failed to save peer states", "folder", folderID, "error", err)
+		}
 	}
 }
 
@@ -1711,6 +1769,7 @@ func protoToFileIndex(idx *pb.IndexExchange) *FileIndex {
 			Mode:     f.GetMode(),
 		}
 	}
+	fi.recomputeCache() // P18b
 	return fi
 }
 

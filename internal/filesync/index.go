@@ -44,6 +44,12 @@ type FileIndex struct {
 	Sequence int64                `yaml:"sequence"`
 	Epoch    string               `yaml:"epoch,omitempty"` // H2b: random ID, regenerated on index creation
 	Files    map[string]FileEntry `yaml:"files"`
+
+	// P18b: cached active (non-deleted) count and total size, maintained
+	// incrementally by trackAdd/trackRemove. Avoids O(n) iteration on
+	// every sync cycle and admin API call.
+	cachedCount int   `yaml:"-"`
+	cachedSize  int64 `yaml:"-"`
 }
 
 // PeerState tracks per-peer sync progress.
@@ -80,7 +86,9 @@ func (idx *FileIndex) clone() *FileIndex {
 	for k, v := range idx.Files {
 		files[k] = v
 	}
-	return &FileIndex{Path: idx.Path, Sequence: idx.Sequence, Epoch: idx.Epoch, Files: files}
+	c := &FileIndex{Path: idx.Path, Sequence: idx.Sequence, Epoch: idx.Epoch, Files: files,
+		cachedCount: idx.cachedCount, cachedSize: idx.cachedSize}
+	return c
 }
 
 // prevPath returns the backup path for double-write persistence.
@@ -265,7 +273,16 @@ func isNotExist(path string) bool {
 }
 
 // activeCountAndSize returns the number of non-deleted files and their total size.
+// activeCountAndSize returns the cached active file count and total size.
+// P18b: O(1) instead of O(n) — maintained incrementally by setEntry.
 func (idx *FileIndex) activeCountAndSize() (int, int64) {
+	return idx.cachedCount, idx.cachedSize
+}
+
+// recomputeCache recalculates cachedCount/cachedSize from scratch.
+// Called after bulk operations (load, clone, scan swap) where incremental
+// tracking would be error-prone.
+func (idx *FileIndex) recomputeCache() {
 	var count int
 	var size int64
 	for _, e := range idx.Files {
@@ -274,7 +291,24 @@ func (idx *FileIndex) activeCountAndSize() (int, int64) {
 			size += e.Size
 		}
 	}
-	return count, size
+	idx.cachedCount = count
+	idx.cachedSize = size
+}
+
+// setEntry updates a file entry and maintains the cached counters.
+// Must be used instead of direct idx.Files[key] = entry assignment
+// in all mutation paths outside of scanWithStats (which bulk-recomputes).
+func (idx *FileIndex) setEntry(key string, entry FileEntry) {
+	old, exists := idx.Files[key]
+	if exists && !old.Deleted {
+		idx.cachedCount--
+		idx.cachedSize -= old.Size
+	}
+	if !entry.Deleted {
+		idx.cachedCount++
+		idx.cachedSize += entry.Size
+	}
+	idx.Files[key] = entry
 }
 
 // ScanStats captures measurable work performed by a single scan pass so
@@ -327,8 +361,8 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		return false, 0, 0, stats, nil, fmt.Errorf("folder root inaccessible: %w", statErr)
 	}
 
-	seen := make(map[string]struct{})
-	errorPaths := make(map[string]struct{}) // paths with walk/stat/hash errors — exempt from tombstoning
+	seen := make(map[string]struct{}, len(idx.Files)) // P18a: pre-size to avoid rehash cascades
+	errorPaths := make(map[string]struct{})           // paths with walk/stat/hash errors — exempt from tombstoning
 	tempCutoff := time.Now().Add(-maxTempFileAge)
 
 	walkStart := time.Now()
