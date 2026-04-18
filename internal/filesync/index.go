@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -849,6 +850,11 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	return changed, len(seen), dirCount, stats, conflicts, nil
 }
 
+// F12: pool sha256 hashers to avoid 310k+ allocations on cold scans.
+var sha256Pool = sync.Pool{
+	New: func() any { return sha256.New() },
+}
+
 // hashFile computes the SHA-256 hex digest of a file.
 func hashFile(path string) (string, error) {
 	f, err := os.Open(path) //nolint:gosec // G304: path comes from scan walk within a user-configured folder
@@ -856,7 +862,9 @@ func hashFile(path string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
-	h := sha256.New()
+	h := sha256Pool.Get().(hash.Hash)
+	h.Reset()
+	defer sha256Pool.Put(h)
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
 	}

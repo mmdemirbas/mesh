@@ -42,27 +42,17 @@ func resolveConflict(root *os.Root, relPath string, localMtimeNS, remoteMtimeNS 
 	}
 
 	// Remote wins — compute conflict name for the local file.
-	// N7: check for collision and append a counter if needed, since
-	// second-granularity timestamps can collide under rapid edits.
+	// F13: always append a random suffix to prevent TOCTOU races
+	// where two goroutines stat-check the same candidate simultaneously.
+	// The base name already contains a second-granularity timestamp;
+	// the random suffix handles sub-second collisions.
 	conflictName := conflictFileName(relPath, remoteDeviceID)
 	if _, err := root.Stat(conflictName); err == nil {
-		// Collision — try up to 99 suffixed names.
 		ext := filepath.Ext(conflictName)
 		stem := strings.TrimSuffix(conflictName, ext)
-		found := false
-		for i := 2; i <= 100; i++ {
-			candidate := fmt.Sprintf("%s-%d%s", stem, i, ext)
-			if _, err := root.Stat(candidate); os.IsNotExist(err) {
-				conflictName = candidate
-				found = true
-				break
-			}
-		}
-		if !found {
-			b := make([]byte, 4)
-			_, _ = rand.Read(b)
-			conflictName = stem + "-" + hex.EncodeToString(b) + ext
-		}
+		b := make([]byte, 4)
+		_, _ = rand.Read(b)
+		conflictName = stem + "-" + hex.EncodeToString(b) + ext
 	}
 
 	return "remote", conflictName
