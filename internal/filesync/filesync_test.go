@@ -1246,49 +1246,101 @@ func TestScanCapNotExceeded(t *testing.T) {
 
 func TestRetryTracker(t *testing.T) {
 	t.Parallel()
-	var rt retryTracker
+	now := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
+	rt := retryTracker{nowFn: func() time.Time { return now }}
 
 	// Not quarantined initially.
 	if rt.quarantined("a.txt", testHash("hash1")) {
 		t.Fatal("should not be quarantined before any failure")
 	}
 
-	// Record failures up to maxRetries.
-	for i := range maxRetries - 1 {
-		rt.record("a.txt", testHash("hash1"))
-		if rt.quarantined("a.txt", testHash("hash1")) {
-			t.Fatalf("should not be quarantined after %d failures", i+1)
-		}
-	}
+	// First failure: backed off for retryBaseDelay (30s).
 	rt.record("a.txt", testHash("hash1"))
 	if !rt.quarantined("a.txt", testHash("hash1")) {
-		t.Fatal("should be quarantined after maxRetries failures")
+		t.Fatal("should be backed off immediately after first failure")
 	}
 
-	// New remote hash resets quarantine.
+	// Advance past the first backoff window (30s).
+	now = now.Add(retryBaseDelay + time.Second)
+	if rt.quarantined("a.txt", testHash("hash1")) {
+		t.Fatal("should not be backed off after first backoff expires")
+	}
+
+	// Second failure: backoff doubles (60s).
+	rt.record("a.txt", testHash("hash1"))
+	now = now.Add(retryBaseDelay) // only 30s — still in backoff
+	if !rt.quarantined("a.txt", testHash("hash1")) {
+		t.Fatal("should still be backed off (60s window, only 30s elapsed)")
+	}
+	now = now.Add(retryBaseDelay + time.Second) // 61s total
+	if rt.quarantined("a.txt", testHash("hash1")) {
+		t.Fatal("should not be backed off after second backoff expires")
+	}
+
+	// New remote hash resets backoff.
+	rt.record("a.txt", testHash("hash1")) // failure 3
 	if rt.quarantined("a.txt", testHash("hash2")) {
-		t.Fatal("new remote hash should not be quarantined")
+		t.Fatal("new remote hash should not be backed off")
 	}
 
 	// Recording with new hash resets counter.
 	rt.record("a.txt", testHash("hash2"))
+	now = now.Add(retryBaseDelay + time.Second)
 	if rt.quarantined("a.txt", testHash("hash2")) {
-		t.Fatal("should not be quarantined after 1 failure with new hash")
+		t.Fatal("should not be backed off after first backoff with new hash expires")
 	}
 
 	// Clear removes tracking.
+	rt.record("a.txt", testHash("hash2"))
 	rt.clear("a.txt")
 	if rt.quarantined("a.txt", testHash("hash2")) {
-		t.Fatal("should not be quarantined after clear")
+		t.Fatal("should not be backed off after clear")
 	}
 
-	// quarantinedPaths lists quarantined files.
-	for range maxRetries {
-		rt.record("x.txt", testHash("xhash"))
-	}
+	// quarantinedPaths lists backed-off files.
+	rt.record("x.txt", testHash("xhash"))
 	paths := rt.quarantinedPaths()
 	if len(paths) != 1 || paths[0] != "x.txt" {
 		t.Errorf("quarantinedPaths = %v, want [x.txt]", paths)
+	}
+}
+
+func TestBackoffDelay(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		failures int
+		wantMin  time.Duration
+		wantMax  time.Duration
+	}{
+		{0, 0, 0},
+		{1, retryBaseDelay, retryBaseDelay},
+		{2, 2 * retryBaseDelay, 2 * retryBaseDelay},
+		{3, 4 * retryBaseDelay, 4 * retryBaseDelay},
+		{20, retryMaxDelay, retryMaxDelay}, // capped
+	}
+	for _, tt := range tests {
+		d := backoffDelay(tt.failures)
+		if d < tt.wantMin || d > tt.wantMax {
+			t.Errorf("backoffDelay(%d) = %v, want [%v, %v]", tt.failures, d, tt.wantMin, tt.wantMax)
+		}
+	}
+}
+
+func TestRetryTracker_MaxCountCap(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
+	rt := retryTracker{nowFn: func() time.Time { return now }}
+
+	// Record more failures than retryMaxCount.
+	for range retryMaxCount + 10 {
+		now = now.Add(retryMaxDelay + time.Second)
+		rt.record("big.txt", testHash("h"))
+	}
+
+	// Failure count should be capped at retryMaxCount.
+	e := rt.counts["big.txt"]
+	if e.failures != retryMaxCount {
+		t.Errorf("failures = %d, want %d (capped)", e.failures, retryMaxCount)
 	}
 }
 

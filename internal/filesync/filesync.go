@@ -432,21 +432,51 @@ func (fs *folderState) releasePath(path string) {
 	fs.inFlightMu.Unlock()
 }
 
-const maxRetries = 3
+const (
+	// G5: exponential backoff parameters for failed file transfers.
+	retryBaseDelay = 30 * time.Second // first retry after 30s
+	retryMaxDelay  = 30 * time.Minute // cap backoff at 30 minutes
+	retryMaxCount  = 20               // stop tracking after this many failures (prevents map growth)
+)
 
-// retryTracker tracks per-file failure counts to quarantine files that
-// repeatedly fail.  Protected by folderState.indexMu.
+// retryTracker tracks per-file failure counts with exponential backoff.
+// Protected by folderState.indexMu.
 type retryTracker struct {
 	counts map[string]retryEntry // path -> entry
+	nowFn  func() time.Time      // injectable clock for testing
 }
 
 type retryEntry struct {
 	failures   int
-	lastHash   Hash256 // remote hash at last failure — reset when it changes
-	lastFailed time.Time
+	lastHash   Hash256   // remote hash at last failure — reset when it changes
+	lastFailed time.Time // wall-clock time of last failure
 }
 
-// record increments the failure count for path.  If the remote hash changed
+// now returns the current time, using the test clock if set.
+func (rt *retryTracker) now() time.Time {
+	if rt.nowFn != nil {
+		return rt.nowFn()
+	}
+	return time.Now()
+}
+
+// backoffDelay computes the backoff duration for the given failure count.
+// Formula: min(baseDelay * 2^(failures-1), maxDelay).
+func backoffDelay(failures int) time.Duration {
+	if failures <= 0 {
+		return 0
+	}
+	delay := retryBaseDelay
+	for i := 1; i < failures && delay < retryMaxDelay; i++ {
+		delay *= 2
+	}
+	if delay > retryMaxDelay {
+		delay = retryMaxDelay
+	}
+	return delay
+}
+
+// record increments the failure count for path. If the remote hash changed
 // since the last failure, the counter resets (the file was updated upstream).
 func (rt *retryTracker) record(path string, remoteHash Hash256) {
 	if rt.counts == nil {
@@ -457,11 +487,16 @@ func (rt *retryTracker) record(path string, remoteHash Hash256) {
 		e = retryEntry{lastHash: remoteHash}
 	}
 	e.failures++
-	e.lastFailed = time.Now()
+	if e.failures > retryMaxCount {
+		e.failures = retryMaxCount // cap to prevent unbounded growth
+	}
+	e.lastFailed = rt.now()
 	rt.counts[path] = e
 }
 
-// quarantined reports whether the file has exceeded maxRetries.
+// quarantined reports whether the file should be skipped this cycle.
+// Returns true when the backoff period has not yet elapsed since the
+// last failure. A new remote hash always clears the backoff.
 func (rt *retryTracker) quarantined(path string, remoteHash Hash256) bool {
 	if rt.counts == nil {
 		return false
@@ -470,11 +505,11 @@ func (rt *retryTracker) quarantined(path string, remoteHash Hash256) bool {
 	if !ok {
 		return false
 	}
-	// New remote version — not quarantined.
+	// New remote version — backoff resets.
 	if e.lastHash != remoteHash {
 		return false
 	}
-	return e.failures >= maxRetries
+	return rt.now().Sub(e.lastFailed) < backoffDelay(e.failures)
 }
 
 // clear removes a path from tracking (e.g., after a successful sync).
@@ -482,11 +517,12 @@ func (rt *retryTracker) clear(path string) {
 	delete(rt.counts, path)
 }
 
-// quarantinedPaths returns all currently quarantined file paths.
+// quarantinedPaths returns all currently backed-off file paths.
 func (rt *retryTracker) quarantinedPaths() []string {
+	now := rt.now()
 	var out []string
 	for path, e := range rt.counts {
-		if e.failures >= maxRetries {
+		if now.Sub(e.lastFailed) < backoffDelay(e.failures) {
 			out = append(out, path)
 		}
 	}
