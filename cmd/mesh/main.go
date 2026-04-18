@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -826,11 +828,17 @@ func statusCmd(nodeNames []string, configPath string, watch bool) {
 }
 
 // certFingerprint loads an existing cert from certPath/keyPath and returns its
-// fingerprint. Returns "(not yet generated)" if the cert does not exist yet.
+// fingerprint. Returns "(not yet generated)" when either file is missing, and
+// "(load error: ...)" for any other failure (permissions, corrupted PEM,
+// mismatched key/cert pair) so the user sees a real problem instead of
+// believing the cert will be auto-created on next run.
 func certFingerprint(certPath, keyPath string) string {
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
-		return "(not yet generated)"
+		if errors.Is(err, fs.ErrNotExist) {
+			return "(not yet generated)"
+		}
+		return fmt.Sprintf("(load error: %v)", err)
 	}
 	return tlsutil.Fingerprint(cert)
 }
