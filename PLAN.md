@@ -123,7 +123,6 @@ When a node receives a beacon, it uses `msg.GetPort()` to construct the peer's H
 | [P3](#p3-adaptive-watchscan) | filesync | Adaptive watch/scan | Self-tuning heuristic. Design below. |
 | P14  | tunnel | Parallel target probing (Happy Eyeballs) | Stagger-start all targets concurrently in `probeTarget` instead of sequential. First to connect wins, respecting target order preference within a short tie-break window. Reduces worst-case probe time from sum(timeouts) to max(stagger, fastest_target). Nice-to-have. |
 | [PF](#pf-trie-based-ignore-with-cursor-propagation) | filesync | Trie-based ignore with cursor propagation | Segment trie replaces linear pattern scan. Phase 2. |
-| [PI](#pi-sha-256-as-32byte) | filesync | SHA-256 as [32]byte in FileEntry | Eliminates hex encode/decode and 340k string allocs per exchange. Phase 2. |
 | [PK](#pk-clone-elimination-cow) | filesync | Clone elimination (COW or change-map) | O(N) index clone → O(1) snapshot. Phase 3. |
 | [PL](#pl-incremental-deletion-detection) | filesync | Incremental deletion detection | O(N) full-index scan → track via fsnotify/scan diff. Phase 3. |
 | [PM](#pm-directory-keyed-child-index) | filesync | Directory-keyed child index for error protection | O(N×M) error-path scan → O(children). Phase 3. |
@@ -164,15 +163,7 @@ PC, PD, PE done — see DONE.md.
 - **Risk:** Medium — complex implementation, must exactly match gitignore semantics. Extensive test suite required.
 - **Phase:** 2. Design before implement.
 
-PG, PH, PJ done — see DONE.md.
-
-#### PI: SHA-256 as [32]byte
-
-- **Problem:** `FileEntry.SHA256` is `string` (hex-encoded, 64 chars). Every index exchange encodes/decodes 310k hex strings. Each string allocation is 64 bytes + header.
-- **Solution:** Store as `[32]byte` in memory. Encode to hex only at serialization boundaries (YAML persist, protobuf exchange, log output).
-- **Expected gain:** Eliminates 340k string allocations per exchange. Halves hash storage (32 bytes vs 64 chars + 16 bytes header). Faster comparison (`==` on [32]byte vs string).
-- **Risk:** Medium — touches every hash comparison and serialization site. Requires custom YAML marshaler.
-- **Phase:** 2.
+PG, PH, PI, PJ done — see DONE.md.
 
 #### PK: Clone Elimination (COW)
 
