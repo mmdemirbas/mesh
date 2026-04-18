@@ -116,6 +116,19 @@ When a node receives a beacon, it uses `msg.GetPort()` to construct the peer's H
 
 **Effort:** S — a single validation check on `msg.GetPort()` in the beacon handler.
 
+### Correctness Gaps (from FILESYNC-GAPS.md audit)
+
+Source: gap analysis auditing filesync against Syncthing's battle-tested implementation (RESEARCH-SYNCTHING.md §17-18). Prioritized by data resilience risk.
+
+| ID | Priority | Item | Notes |
+|----|----------|------|-------|
+| [G1](#g1-preserve-mtime-on-downloaded-files) | P0 | Preserve mtime on downloaded files | Downloaded files get wall-clock mtime, defeating fast-path. Chtimes before rename. |
+| [G2](#g2-disk-space-pre-check) | P0 | Disk space pre-check before temp file write | Full disk shows as hash mismatch. statvfs before write. |
+| [G3](#g3-folder-health-marker) | P0 | Folder health marker (.meshfolder) | Detect unmounted/missing folder root before sync. |
+| [G4](#g4-conflict-file-count-limit) | P2 | Conflict file count limit per path | Unbounded .sync-conflict-* accumulation. Cap at 10, prune oldest. |
+| [G5](#g5-exponential-backoff-on-pull-failure) | P2 | Exponential backoff on pull failure | Replace all-or-nothing quarantine with progressive backoff. |
+| [G6](#g6-in_q_overflow-immediate-rescan) | P1 | IN_Q_OVERFLOW triggers immediate rescan | fsnotify errors don't trigger rescan. Up to 60s blind window. |
+
 ### Performance
 
 | ID   | Component | Item                                         | Notes |
