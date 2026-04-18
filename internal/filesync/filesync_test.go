@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+	"gopkg.in/yaml.v3"
 
 	"github.com/mmdemirbas/mesh/internal/config"
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
@@ -569,8 +570,11 @@ func TestLoadIndex_FallbackToPrev(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// P17b: save now writes .gob files; corrupt those.
+	gobPath := yamlToGobPath(idxPath)
+
 	// Corrupt primary — backup should still load.
-	if err := os.WriteFile(idxPath, []byte("corrupt!!!"), 0600); err != nil {
+	if err := os.WriteFile(gobPath, []byte("corrupt!!!"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -586,12 +590,75 @@ func TestLoadIndex_FallbackToPrev(t *testing.T) {
 	}
 
 	// Corrupt backup too — should fail.
-	if err := os.WriteFile(prevPath(idxPath), []byte("also corrupt"), 0600); err != nil {
+	if err := os.WriteFile(prevPath(gobPath), []byte("also corrupt"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	_, err = loadIndex(idxPath)
 	if err == nil {
 		t.Error("expected error when both files are corrupt")
+	}
+}
+
+// P17b: verify gob roundtrip preserves all fields.
+func TestLoadIndex_GobRoundtrip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	idxPath := filepath.Join(dir, "index.yaml")
+
+	idx := newFileIndex()
+	idx.Sequence = 42
+	idx.Epoch = "deadbeef12345678"
+	idx.Files["doc.txt"] = FileEntry{Size: 999, MtimeNS: 12345, SHA256: "abc123", Sequence: 10, Mode: 0644}
+	idx.Files["deleted.txt"] = FileEntry{Size: 0, Deleted: true, Sequence: 20}
+	if err := idx.save(idxPath); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := loadIndex(idxPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Sequence != 42 {
+		t.Errorf("sequence = %d, want 42", loaded.Sequence)
+	}
+	if loaded.Epoch != "deadbeef12345678" {
+		t.Errorf("epoch = %q, want deadbeef12345678", loaded.Epoch)
+	}
+	if e, ok := loaded.Files["doc.txt"]; !ok || e.Size != 999 || e.SHA256 != "abc123" || e.Mode != 0644 {
+		t.Errorf("doc.txt mismatch: %+v", e)
+	}
+	if e, ok := loaded.Files["deleted.txt"]; !ok || !e.Deleted {
+		t.Errorf("deleted.txt should be tombstone: %+v", e)
+	}
+}
+
+// P17b: verify migration from YAML to gob (no .gob files → reads .yaml).
+func TestLoadIndex_YAMLMigration(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	idxPath := filepath.Join(dir, "index.yaml")
+
+	// Write YAML directly (simulating a pre-gob installation).
+	idx := newFileIndex()
+	idx.Sequence = 7
+	idx.Files["legacy.txt"] = FileEntry{Size: 100, SHA256: "legacyhash", Sequence: 3}
+	data, err := yaml.Marshal(idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(idxPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := loadIndex(idxPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Sequence != 7 {
+		t.Errorf("sequence = %d, want 7", loaded.Sequence)
+	}
+	if _, ok := loaded.Files["legacy.txt"]; !ok {
+		t.Error("expected legacy.txt from YAML migration")
 	}
 }
 
