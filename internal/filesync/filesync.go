@@ -1322,8 +1322,15 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 	// B9: track failed remote sequences so we don't advance
 	// LastSeenSequence past entries that failed to process.
+	// PJ: capture the first failure reason for the perf log.
 	var failMu sync.Mutex
 	var failedSeqs []int64
+	var firstFailReason string
+	setFailReason := func(reason string) {
+		if firstFailReason == "" {
+			firstFailReason = reason
+		}
+	}
 
 	// P19: bundle transfer for small download actions. Partition into
 	// small (≤4 MB) and the rest. Small files are batched into tar+gzip
@@ -1395,6 +1402,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						retryMap[e.Path] = true
 					}
 					failMu.Lock()
+					setFailReason("bundle retry")
 					for _, a := range actions {
 						if retryMap[a.Path] {
 							failedSeqs = append(failedSeqs, a.RemoteSequence)
@@ -1453,6 +1461,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		if q {
 			skippedQuarantine++
 			failMu.Lock()
+			setFailReason("quarantined")
 			failedSeqs = append(failedSeqs, action.RemoteSequence)
 			failMu.Unlock()
 			continue
@@ -1464,6 +1473,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		if !fs.claimPath(action.Path) {
 			slog.Debug("skipping in-flight path", "folder", folderID, "path", action.Path, "peer", peerAddr)
 			failMu.Lock()
+			setFailReason("in-flight collision")
 			failedSeqs = append(failedSeqs, action.RemoteSequence)
 			failMu.Unlock()
 			continue
@@ -1491,6 +1501,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					fs.retries.record(action.Path, action.RemoteHash)
 					fs.indexMu.Unlock()
 					failMu.Lock()
+					setFailReason("download: " + err.Error())
 					failedSeqs = append(failedSeqs, action.RemoteSequence)
 					failMu.Unlock()
 					fs.metrics.SyncErrors.Add(1)
@@ -1503,6 +1514,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				if fs.isNetworkFS {
 					if err := verifyPostWrite(fs.root, action.Path, action.RemoteHash, folderID, &fs.retries, &fs.indexMu); err != nil {
 						failMu.Lock()
+						setFailReason("post-write verify: " + err.Error())
 						failedSeqs = append(failedSeqs, action.RemoteSequence)
 						failMu.Unlock()
 						fs.metrics.SyncErrors.Add(1)
@@ -1596,6 +1608,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						fs.retries.record(action.Path, action.RemoteHash)
 						fs.indexMu.Unlock()
 						failMu.Lock()
+						setFailReason("conflict download: " + err.Error())
 						failedSeqs = append(failedSeqs, action.RemoteSequence)
 						failMu.Unlock()
 						fs.metrics.SyncErrors.Add(1)
@@ -1611,6 +1624,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 							fs.retries.record(action.Path, action.RemoteHash)
 							fs.indexMu.Unlock()
 							failMu.Lock()
+							setFailReason("conflict mkdir: " + err.Error())
 							failedSeqs = append(failedSeqs, action.RemoteSequence)
 							failMu.Unlock()
 							fs.metrics.SyncErrors.Add(1)
@@ -1624,6 +1638,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						fs.retries.record(action.Path, action.RemoteHash)
 						fs.indexMu.Unlock()
 						failMu.Lock()
+						setFailReason("conflict rename: " + err.Error())
 						failedSeqs = append(failedSeqs, action.RemoteSequence)
 						failMu.Unlock()
 						fs.metrics.SyncErrors.Add(1)
@@ -1648,6 +1663,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						fs.retries.record(action.Path, action.RemoteHash)
 						fs.indexMu.Unlock()
 						failMu.Lock()
+						setFailReason("conflict finalize: " + err.Error())
 						failedSeqs = append(failedSeqs, action.RemoteSequence)
 						failMu.Unlock()
 						fs.metrics.SyncErrors.Add(1)
@@ -1661,6 +1677,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 							// displaced local to avoid orphaned conflict files.
 							_ = fs.root.Remove(conflictRelPath)
 							failMu.Lock()
+							setFailReason("conflict verify: " + err.Error())
 							failedSeqs = append(failedSeqs, action.RemoteSequence)
 							failMu.Unlock()
 							fs.metrics.SyncErrors.Add(1)
@@ -1720,6 +1737,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					fs.retries.record(action.Path, action.RemoteHash)
 					fs.indexMu.Unlock()
 					failMu.Lock()
+					setFailReason("delete: " + err.Error())
 					failedSeqs = append(failedSeqs, action.RemoteSequence)
 					failMu.Unlock()
 					fs.metrics.SyncErrors.Add(1)
@@ -1818,7 +1836,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	slog.Debug("sync cycle complete", "folder", folderID, "peer", peerAddr,
 		"duration", syncDuration, "downloads", downloads, "conflicts", conflicts,
 		"deletes", deletes, "errors", len(failedSeqs), "bytes", totalBytes)
-	perfSync(folderID, peerAddr, remoteEntries, downloads, conflicts, deletes, len(failedSeqs), ms(syncDuration))
+	perfSync(folderID, peerAddr, remoteEntries, downloads, conflicts, deletes, len(failedSeqs), ms(syncDuration), firstFailReason)
 }
 
 // buildIndexExchange creates a protobuf IndexExchange from the local index.

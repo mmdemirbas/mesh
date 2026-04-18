@@ -173,8 +173,8 @@ func perfPersist(folder string, indexBytes int, indexMs, peersMs float64, skippe
 }
 
 // perfSync emits a sync event.
-func perfSync(folder, peer string, remoteEntries, downloads, conflicts, deletes, failed int, durationMs float64) {
-	perfEmit(map[string]any{
+func perfSync(folder, peer string, remoteEntries, downloads, conflicts, deletes, failed int, durationMs float64, firstFailReason string) {
+	m := map[string]any{
 		"event":          "sync",
 		"folder":         folder,
 		"peer":           peer,
@@ -184,7 +184,11 @@ func perfSync(folder, peer string, remoteEntries, downloads, conflicts, deletes,
 		"deletes":        deletes,
 		"failed":         failed,
 		"duration_ms":    durationMs,
-	})
+	}
+	if firstFailReason != "" {
+		m["failure_reason"] = firstFailReason
+	}
+	perfEmit(m)
 }
 
 // perfSnapshot emits a periodic process-level snapshot.
