@@ -1,0 +1,15 @@
+receiver:
+  log_level: info
+  admin_addr: "127.0.0.1:7777"
+  filesync:
+    - bind: "0.0.0.0:7756"
+      scan_interval: "2s"
+      max_concurrent: 2
+      peers:
+        sender: ["SENDER_IP:7756"]
+      defaults:
+        peers: ["sender"]
+        direction: receive-only
+      folders:
+        shared:
+          path: /root/sync
