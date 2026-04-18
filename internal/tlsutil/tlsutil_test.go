@@ -2,6 +2,7 @@ package tlsutil
 
 import (
 	"crypto/tls"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -178,8 +179,8 @@ func TestClientTLS_WrongFingerprint_Rejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("wrong fingerprint should be rejected")
 	}
-	if !strings.Contains(err.Error(), "fingerprint mismatch") {
-		t.Errorf("error should mention fingerprint mismatch, got: %v", err)
+	if !errors.Is(err, ErrFingerprintMismatch) {
+		t.Errorf("error should be ErrFingerprintMismatch, got: %v", err)
 	}
 }
 

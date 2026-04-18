@@ -12,6 +12,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -24,6 +25,12 @@ const (
 	renewBefore    = 30 * 24 * time.Hour       // regenerate within 30 days of expiry
 	fingerprintPfx = "sha256:"
 )
+
+// ErrFingerprintMismatch is returned (wrapped) by the VerifyPeerCertificate
+// callback installed by ClientTLS when the peer's cert does not match the
+// configured fingerprint. Callers detect this with errors.Is to avoid string
+// matching on error text.
+var ErrFingerprintMismatch = errors.New("peer cert fingerprint mismatch")
 
 // AutoCert loads the cert+key at certPath/keyPath. If either file is missing,
 // unreadable, or the cert expires within 30 days, a new ECDSA P-256
@@ -83,7 +90,7 @@ func ClientTLS(fingerprint string) *tls.Config {
 		}
 		got := fingerprintPfx + hex.EncodeToString(sha256sum(rawCerts[0]))
 		if got != want {
-			return fmt.Errorf("peer cert fingerprint mismatch: got %s, want %s", got, want)
+			return fmt.Errorf("%w: got %s, want %s", ErrFingerprintMismatch, got, want)
 		}
 		return nil
 	}
