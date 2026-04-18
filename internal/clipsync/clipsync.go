@@ -488,7 +488,9 @@ func isEchoOrigin(addr, origin string) bool {
 }
 
 func (n *Node) postHTTP(addr string, data []byte) {
-	ctx, cancel := context.WithTimeout(n.ctx, 5*time.Second)
+	// Scale timeout with payload size: 5s base + 1s per 5 MB.
+	timeout := 5*time.Second + time.Duration(len(data)/(5<<20))*time.Second
+	ctx, cancel := context.WithTimeout(n.ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/sync", addr), bytes.NewReader(data))
 	if err != nil {
