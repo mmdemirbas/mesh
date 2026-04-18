@@ -121,7 +121,7 @@ tasks:
     desc: "Run the end-to-end scenario suite against real containers (requires docker)"
     deps: [build:e2e-image]
     cmds:
-      - go test -race -count=1 -tags e2e -timeout 15m ./e2e/...
+      - go test -race -count=1 -tags e2e -timeout 20m ./e2e/...
 
   e2e:churn:
     desc: "Run the heavy filesync churn suite (tag e2e_churn, nightly-grade)"

@@ -20,7 +20,7 @@ import (
 func TestFilesyncTwoPeer(t *testing.T) {
 	requireImage(t, harness.DefaultImage)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	net := harness.NewNetwork(ctx, t)
@@ -138,7 +138,10 @@ func TestFilesyncTwoPeer(t *testing.T) {
 	if err := peer2.WriteFile(ctx, "/root/sync/file-00.txt", []byte("edited on peer2\n"), 0o600); err != nil {
 		t.Fatalf("edit on peer2: %v", err)
 	}
-	harness.Eventually(ctx, t, 30*time.Second, 500*time.Millisecond, "peer1 sees peer2 edit",
+	// peer1 must initiate its own sync to discover peer2's edit; its
+	// scanTrigger won't fire (no local changes), so it waits for the 30s
+	// ticker. Budget two cycles to avoid racing with the tick boundary.
+	harness.Eventually(ctx, t, 75*time.Second, 500*time.Millisecond, "peer1 sees peer2 edit",
 		func() (bool, string) {
 			code, out, err := peer1.Exec(ctx, "cat", "/root/sync/file-00.txt")
 			if err != nil || code != 0 {
@@ -161,7 +164,9 @@ func TestFilesyncTwoPeer(t *testing.T) {
 	if _, _, err := peer1.Exec(ctx, "rm", "/root/sync/file-09.txt"); err != nil {
 		t.Fatalf("delete on peer1: %v", err)
 	}
-	harness.Eventually(ctx, t, 30*time.Second, 500*time.Millisecond, "delete reaches peer2",
+	// Same as Phase 2: peer2 must discover the tombstone via its own sync
+	// cycle (peer1's exchange doesn't push actions to peer2).
+	harness.Eventually(ctx, t, 75*time.Second, 500*time.Millisecond, "delete reaches peer2",
 		func() (bool, string) {
 			code, _, err := peer2.Exec(ctx, "test", "-f", "/root/sync/file-09.txt")
 			if err != nil {
@@ -182,7 +187,11 @@ func TestFilesyncTwoPeer(t *testing.T) {
 	if err := peer1.WriteFile(ctx, "/root/sync/file-01.txt", []byte("peer1 wins\n"), 0o600); err != nil {
 		t.Fatalf("peer1 conflict write: %v", err)
 	}
-	if err := peer2.Start(ctx); err != nil {
+	// Bound the restart so a slow Docker Desktop doesn't consume the
+	// entire test budget.
+	startCtx4, startCancel4 := context.WithTimeout(ctx, 60*time.Second)
+	defer startCancel4()
+	if err := peer2.Start(startCtx4); err != nil {
 		t.Fatalf("start peer2: %v", err)
 	}
 	// Wait for peer2 admin API to come back before driving it.
@@ -218,7 +227,9 @@ func TestFilesyncTwoPeer(t *testing.T) {
 	if err := peer1.WriteFile(ctx, "/root/sync/late.txt", []byte("after peer2 down\n"), 0o600); err != nil {
 		t.Fatalf("late write on peer1: %v", err)
 	}
-	if err := peer2.Start(ctx); err != nil {
+	startCtx5, startCancel5 := context.WithTimeout(ctx, 60*time.Second)
+	defer startCancel5()
+	if err := peer2.Start(startCtx5); err != nil {
 		t.Fatalf("start peer2 (phase 5): %v", err)
 	}
 	harness.Eventually(ctx, t, 60*time.Second, 1*time.Second, "late file reaches peer2 after restart",
