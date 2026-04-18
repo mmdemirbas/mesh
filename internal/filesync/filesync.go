@@ -602,7 +602,8 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			idx = newFileIndex()
 			indexReset = true
 		}
-		idx.recomputeCache() // P18b: initialize cached counters from loaded data
+		idx.recomputeCache()  // P18b: initialize cached counters from loaded data
+		idx.rebuildSeqIndex() // PG: build secondary sequence index
 
 		// Load peer states.
 		peersPath := filepath.Join(dataDir, fcfg.ID, "peers.yaml")
@@ -936,7 +937,8 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 			idxCopy.Sequence = fs.index.Sequence
 		}
 		fs.index = idxCopy
-		fs.index.recomputeCache() // P18b: refresh after scan+merge
+		fs.index.recomputeCache()  // P18b: refresh after scan+merge
+		fs.index.rebuildSeqIndex() // PG: rebuild secondary sequence index
 		fs.dirCount = dirs
 		if conflicts != nil {
 			fs.conflicts = conflicts
@@ -1850,24 +1852,47 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 	fs.indexMu.RLock()
 	defer fs.indexMu.RUnlock()
 
-	// P18d: cap pre-allocation for delta exchanges. Full exchanges (sinceSequence==0)
-	// still grow dynamically, but steady-state deltas (few entries) avoid a 168k-slot alloc.
-	cap := len(fs.index.Files)
-	if sinceSequence > 0 {
-		delta := fs.index.Sequence - sinceSequence
-		if delta < int64(cap) {
-			cap = int(delta)
+	// PG: for delta exchanges, use the secondary sequence index to avoid
+	// iterating the full Files map. Binary search to find the start position,
+	// then iterate only the tail. Stale entries (path updated with newer seq)
+	// are filtered by checking against the Files map.
+	if sinceSequence > 0 && len(fs.index.seqIndex) > 0 {
+		start := sort.Search(len(fs.index.seqIndex), func(i int) bool {
+			return fs.index.seqIndex[i].seq > sinceSequence
+		})
+		tail := fs.index.seqIndex[start:]
+		files := make([]*pb.FileInfo, 0, len(tail))
+		for _, se := range tail {
+			entry, ok := fs.index.Files[se.path]
+			if !ok || entry.Sequence != se.seq {
+				continue // stale secondary index entry
+			}
+			files = append(files, &pb.FileInfo{
+				Path:     se.path,
+				Size:     entry.Size,
+				MtimeNs:  entry.MtimeNS,
+				Sha256:   hexToBytes(entry.SHA256),
+				Deleted:  entry.Deleted,
+				Sequence: entry.Sequence,
+				Mode:     entry.Mode,
+			})
 		}
-		if cap > 1000 {
-			cap = 1000
+		return &pb.IndexExchange{
+			DeviceId: n.deviceID,
+			FolderId: folderID,
+			Sequence: fs.index.Sequence,
+			Epoch:    fs.index.Epoch,
+			Files:    files,
 		}
 	}
-	files := make([]*pb.FileInfo, 0, cap)
+
+	// Full exchange (sinceSequence == 0 or empty seqIndex): iterate all entries.
+	files := make([]*pb.FileInfo, 0, len(fs.index.Files))
 	for path, entry := range fs.index.Files {
 		if sinceSequence > 0 && entry.Sequence <= sinceSequence {
 			continue
 		}
-		fi := &pb.FileInfo{
+		files = append(files, &pb.FileInfo{
 			Path:     path,
 			Size:     entry.Size,
 			MtimeNs:  entry.MtimeNS,
@@ -1875,8 +1900,7 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 			Deleted:  entry.Deleted,
 			Sequence: entry.Sequence,
 			Mode:     entry.Mode,
-		}
-		files = append(files, fi)
+		})
 	}
 
 	return &pb.IndexExchange{

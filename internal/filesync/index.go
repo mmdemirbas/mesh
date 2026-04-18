@@ -55,6 +55,18 @@ type FileIndex struct {
 	// every sync cycle and admin API call.
 	cachedCount int   `yaml:"-"`
 	cachedSize  int64 `yaml:"-"`
+
+	// PG: secondary index sorted by Sequence for O(log N + delta) delta
+	// exchange. May contain stale entries (path updated with a newer
+	// sequence); consumers must verify against Files map. Rebuilt after
+	// scan swap and index load; appended to by setEntry.
+	seqIndex []seqEntry `yaml:"-"`
+}
+
+// seqEntry maps a sequence number to a path for the secondary index.
+type seqEntry struct {
+	seq  int64
+	path string
 }
 
 // PeerState tracks per-peer sync progress.
@@ -350,7 +362,8 @@ func (idx *FileIndex) recomputeCache() {
 	idx.cachedSize = size
 }
 
-// setEntry updates a file entry and maintains the cached counters.
+// setEntry updates a file entry and maintains the cached counters
+// and the secondary sequence index.
 // Must be used instead of direct idx.Files[key] = entry assignment
 // in all mutation paths outside of scanWithStats (which bulk-recomputes).
 func (idx *FileIndex) setEntry(key string, entry FileEntry) {
@@ -364,6 +377,21 @@ func (idx *FileIndex) setEntry(key string, entry FileEntry) {
 		idx.cachedSize += entry.Size
 	}
 	idx.Files[key] = entry
+	// PG: append to secondary index. Stale entries (same path, older seq)
+	// are tolerated and filtered at query time.
+	idx.seqIndex = append(idx.seqIndex, seqEntry{seq: entry.Sequence, path: key})
+}
+
+// rebuildSeqIndex reconstructs the secondary sequence index from the
+// Files map. Called after scan swap and index load.
+func (idx *FileIndex) rebuildSeqIndex() {
+	idx.seqIndex = make([]seqEntry, 0, len(idx.Files))
+	for path, entry := range idx.Files {
+		idx.seqIndex = append(idx.seqIndex, seqEntry{seq: entry.Sequence, path: path})
+	}
+	sort.Slice(idx.seqIndex, func(i, j int) bool {
+		return idx.seqIndex[i].seq < idx.seqIndex[j].seq
+	})
 }
 
 // ScanStats captures measurable work performed by a single scan pass so

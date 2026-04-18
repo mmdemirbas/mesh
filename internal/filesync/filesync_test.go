@@ -3032,19 +3032,19 @@ func TestHandleIndex_DeltaMode(t *testing.T) {
 
 func TestBuildIndexExchange_DeltaFiltering(t *testing.T) {
 	t.Parallel()
+	idx := &FileIndex{
+		Sequence: 10,
+		Files: map[string]FileEntry{
+			"old.txt": {SHA256: "aaa", Sequence: 2},
+			"mid.txt": {SHA256: "bbb", Sequence: 5},
+			"new.txt": {SHA256: "ccc", Sequence: 9},
+		},
+	}
+	idx.rebuildSeqIndex() // PG: enable secondary index path
 	n := &Node{
 		deviceID: "test",
 		folders: map[string]*folderState{
-			"docs": {
-				index: &FileIndex{
-					Sequence: 10,
-					Files: map[string]FileEntry{
-						"old.txt": {SHA256: "aaa", Sequence: 2},
-						"mid.txt": {SHA256: "bbb", Sequence: 5},
-						"new.txt": {SHA256: "ccc", Sequence: 9},
-					},
-				},
-			},
+			"docs": {index: idx},
 		},
 	}
 
@@ -3064,6 +3064,78 @@ func TestBuildIndexExchange_DeltaFiltering(t *testing.T) {
 	delta2 := n.buildIndexExchange("docs", 9)
 	if len(delta2.GetFiles()) != 0 {
 		t.Errorf("delta since=9: expected 0 files, got %d", len(delta2.GetFiles()))
+	}
+}
+
+func TestSeqIndex_SetEntryAppends(t *testing.T) {
+	t.Parallel()
+	idx := newFileIndex()
+
+	// Add entries via setEntry — should append to seqIndex.
+	idx.Sequence = 1
+	idx.setEntry("a.txt", FileEntry{SHA256: "aaa", Sequence: 1})
+	idx.Sequence = 2
+	idx.setEntry("b.txt", FileEntry{SHA256: "bbb", Sequence: 2})
+	idx.Sequence = 3
+	idx.setEntry("c.txt", FileEntry{SHA256: "ccc", Sequence: 3})
+
+	if len(idx.seqIndex) != 3 {
+		t.Fatalf("expected 3 seqIndex entries, got %d", len(idx.seqIndex))
+	}
+
+	// Update a.txt — should create a 4th entry (stale a.txt at seq=1 remains).
+	idx.Sequence = 4
+	idx.setEntry("a.txt", FileEntry{SHA256: "aaa2", Sequence: 4})
+
+	if len(idx.seqIndex) != 4 {
+		t.Fatalf("expected 4 seqIndex entries after update, got %d", len(idx.seqIndex))
+	}
+
+	// Rebuild should compact stale entries.
+	idx.rebuildSeqIndex()
+	if len(idx.seqIndex) != 3 {
+		t.Fatalf("expected 3 seqIndex entries after rebuild, got %d", len(idx.seqIndex))
+	}
+	// Verify sorted order.
+	for i := 1; i < len(idx.seqIndex); i++ {
+		if idx.seqIndex[i].seq <= idx.seqIndex[i-1].seq {
+			t.Errorf("seqIndex not sorted: [%d].seq=%d <= [%d].seq=%d",
+				i, idx.seqIndex[i].seq, i-1, idx.seqIndex[i-1].seq)
+		}
+	}
+}
+
+func TestSeqIndex_DeltaExchangeSkipsStale(t *testing.T) {
+	t.Parallel()
+	idx := &FileIndex{
+		Sequence: 5,
+		Files: map[string]FileEntry{
+			"a.txt": {SHA256: "v2", Sequence: 5}, // updated from seq=1 to seq=5
+			"b.txt": {SHA256: "bbb", Sequence: 3},
+		},
+	}
+	// Simulate stale entry: seqIndex has a.txt at seq=1 (old) and seq=5 (current).
+	idx.seqIndex = []seqEntry{
+		{seq: 1, path: "a.txt"}, // stale
+		{seq: 3, path: "b.txt"},
+		{seq: 5, path: "a.txt"}, // current
+	}
+
+	n := &Node{
+		deviceID: "test",
+		folders:  map[string]*folderState{"f": {index: idx}},
+	}
+
+	// Delta since=2: should get b.txt(3) and a.txt(5), NOT stale a.txt(1).
+	delta := n.buildIndexExchange("f", 2)
+	if len(delta.GetFiles()) != 2 {
+		t.Errorf("expected 2 files, got %d", len(delta.GetFiles()))
+	}
+
+	// Delta since=0: full exchange, should get all 2 files.
+	full := n.buildIndexExchange("f", 0)
+	if len(full.GetFiles()) != 2 {
+		t.Errorf("full: expected 2 files, got %d", len(full.GetFiles()))
 	}
 }
 
