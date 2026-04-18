@@ -90,7 +90,8 @@ type FileEntry struct {
 type FileIndex struct {
 	Path     string               `yaml:"path"`
 	Sequence int64                `yaml:"sequence"`
-	Epoch    string               `yaml:"epoch,omitempty"` // H2b: random ID, regenerated on index creation
+	Epoch    string               `yaml:"epoch,omitempty"`     // H2b: random ID, regenerated on index creation
+	DeviceID uint64               `yaml:"device_id,omitempty"` // G3: filesystem device ID at first scan
 	Files    map[string]FileEntry `yaml:"files"`
 
 	// P18b: cached active (non-deleted) count and total size, maintained
@@ -146,8 +147,8 @@ func (idx *FileIndex) clone() *FileIndex {
 	for k, v := range idx.Files {
 		files[k] = v
 	}
-	c := &FileIndex{Path: idx.Path, Sequence: idx.Sequence, Epoch: idx.Epoch, Files: files,
-		cachedCount: idx.cachedCount, cachedSize: idx.cachedSize}
+	c := &FileIndex{Path: idx.Path, Sequence: idx.Sequence, Epoch: idx.Epoch, DeviceID: idx.DeviceID,
+		Files: files, cachedCount: idx.cachedCount, cachedSize: idx.cachedSize}
 	return c
 }
 
@@ -653,6 +654,20 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	// tombstoned, propagating mass deletion to all peers.
 	if _, statErr := os.Stat(folderRoot); statErr != nil {
 		return false, 0, 0, stats, nil, fmt.Errorf("folder root inaccessible: %w", statErr)
+	}
+
+	// G3: verify the filesystem device ID hasn't changed. A different
+	// device ID means the folder was unmounted and remounted on a
+	// different filesystem — syncing into it would delete all files
+	// (empty folder = mass tombstone) or mix data from two sources.
+	if devID, devErr := folderDeviceID(folderRoot); devErr == nil {
+		if idx.DeviceID == 0 {
+			idx.DeviceID = devID // first scan — record for future checks
+		} else if idx.DeviceID != devID {
+			return false, 0, 0, stats, nil, fmt.Errorf(
+				"folder device ID changed (was %d, now %d) — possible unmount/remount; refusing to scan %s",
+				idx.DeviceID, devID, folderRoot)
+		}
 	}
 
 	seen := make(map[string]struct{}, len(idx.Files)) // P18a: pre-size to avoid rehash cascades

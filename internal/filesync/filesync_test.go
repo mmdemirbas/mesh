@@ -5725,6 +5725,130 @@ func TestMtimePreservation_ScanFastPath(t *testing.T) {
 	}
 }
 
+// --- G3: device ID guard tests ---
+
+func TestDeviceIDGuard_RecordsOnFirstScan(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "file.txt", "data")
+
+	idx := newFileIndex()
+	if idx.DeviceID != 0 {
+		t.Fatal("DeviceID should be 0 before first scan")
+	}
+
+	ignore := newIgnoreMatcher(nil)
+	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if idx.DeviceID == 0 {
+		t.Fatal("DeviceID should be set after first scan")
+	}
+}
+
+func TestDeviceIDGuard_AcceptsSameDevice(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "file.txt", "data")
+
+	idx := newFileIndex()
+	ignore := newIgnoreMatcher(nil)
+
+	// First scan records device ID.
+	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Second scan on same filesystem should succeed.
+	_, _, _, _, _, err = idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	if err != nil {
+		t.Fatal("second scan on same device should succeed:", err)
+	}
+}
+
+func TestDeviceIDGuard_RejectsDifferentDevice(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "file.txt", "data")
+
+	idx := newFileIndex()
+	ignore := newIgnoreMatcher(nil)
+
+	// First scan records device ID.
+	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a device change by modifying the stored device ID.
+	idx.DeviceID = idx.DeviceID + 999
+
+	// Next scan should fail because device ID mismatches.
+	_, _, _, _, _, err = idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	if err == nil {
+		t.Fatal("scan should fail when device ID changes")
+	}
+	if !strings.Contains(err.Error(), "device ID changed") {
+		t.Errorf("error should mention device ID change, got: %v", err)
+	}
+}
+
+func TestDeviceIDGuard_PersistedInIndex(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "file.txt", "data")
+
+	idx := newFileIndex()
+	ignore := newIgnoreMatcher(nil)
+
+	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	originalDeviceID := idx.DeviceID
+
+	// Save and reload through the YAML persistence path.
+	idxPath := filepath.Join(t.TempDir(), "index.yaml")
+	if err := idx.save(idxPath); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := loadIndex(idxPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if loaded.DeviceID != originalDeviceID {
+		t.Errorf("DeviceID not preserved: got %d, want %d", loaded.DeviceID, originalDeviceID)
+	}
+}
+
+func TestFolderDeviceID(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	devID, err := folderDeviceID(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if devID == 0 {
+		t.Fatal("device ID should be non-zero for a real directory")
+	}
+
+	// Same directory should return the same device ID.
+	devID2, err := folderDeviceID(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if devID != devID2 {
+		t.Errorf("device ID should be consistent: got %d and %d", devID, devID2)
+	}
+}
+
 // --- G4: conflict file pruning tests ---
 
 func TestPruneConflicts_BelowCap(t *testing.T) {
