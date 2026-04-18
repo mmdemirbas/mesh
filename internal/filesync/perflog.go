@@ -11,9 +11,8 @@ import (
 )
 
 const (
-	perfLogFile    = "perf.jsonl"
 	perfMaxSize    = 10 * 1024 * 1024 // 10 MB — rotate when exceeded
-	perfMaxBackups = 3                // keep perf.1.jsonl .. perf.3.jsonl
+	perfMaxBackups = 3                // keep <node>-perf.1.jsonl .. <node>-perf.3.jsonl
 )
 
 // perfLogger writes structured JSONL performance events to ~/.mesh/perf.jsonl.
@@ -31,9 +30,11 @@ var globalPerfLog struct {
 }
 
 // initPerfLog initializes the global perf logger. Called once from Start().
-func initPerfLog(meshDir string) {
+// Path: ~/.mesh/log/<nodeName>-perf.jsonl
+func initPerfLog(meshDir, nodeName string) {
 	globalPerfLog.once.Do(func() {
-		path := filepath.Join(meshDir, perfLogFile)
+		logDir := filepath.Join(meshDir, "log")
+		path := filepath.Join(logDir, nodeName+"-perf.jsonl")
 		pl := &perfLogger{path: path}
 		if err := pl.open(); err != nil {
 			// Non-fatal: perf logging is best-effort.

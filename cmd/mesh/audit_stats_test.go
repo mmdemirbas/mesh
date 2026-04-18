@@ -207,7 +207,7 @@ func TestAuditStatsEndpoint(t *testing.T) {
 	name := "stats-endpoint"
 	writeStatsFixture(t, dir, name)
 
-	srv := httptest.NewServer(buildAdminMux(newLogRing(4), ""))
+	srv := httptest.NewServer(buildAdminMux(newLogRing(4), "", ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/gateway/audit/stats?gateway=" + name + "&window=24h&bucket=hour")

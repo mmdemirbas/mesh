@@ -529,7 +529,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	}
 	meshDir := filepath.Join(home, ".mesh")
 	dataDir := filepath.Join(meshDir, "filesync")
-	initPerfLog(meshDir)
+	initPerfLog(meshDir, cfg.NodeName)
 
 	n := &Node{
 		cfg:      cfg,

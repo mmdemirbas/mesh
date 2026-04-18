@@ -107,7 +107,7 @@ func auditTruncationStub(row json.RawMessage) json.RawMessage {
 
 // buildAdminMux returns the HTTP handler for the local admin server.
 // All endpoints are read-only and served on localhost only.
-func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
+func buildAdminMux(ring *logRing, logFilePath, perfLogPath string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Metrics cache: regenerated at most once per 5 seconds.
@@ -466,6 +466,52 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 		_ = json.NewEncoder(w).Encode(activities)
 	})
 
+	// GET /api/perf — recent performance events from the JSONL perf log.
+	// Query params: limit=<N> (default 500, max 5000), event=<type> (scan|sync|persist|snapshot).
+	mux.HandleFunc("/api/perf", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if perfLogPath == "" {
+			_, _ = w.Write([]byte("[]"))
+			return
+		}
+		q := r.URL.Query()
+		limit := 500
+		if v := q.Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = min(n, 5000)
+			}
+		}
+		eventFilter := q.Get("event")
+
+		data, err := os.ReadFile(perfLogPath) //nolint:gosec // G304: path from internal config
+		if err != nil {
+			_, _ = w.Write([]byte("[]"))
+			return
+		}
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		// Take last `limit` lines (most recent events).
+		if len(lines) > limit {
+			lines = lines[len(lines)-limit:]
+		}
+		var events []json.RawMessage
+		for _, line := range lines {
+			if line == "" {
+				continue
+			}
+			if eventFilter != "" {
+				// Quick prefix check to avoid full parse for filtering.
+				if !strings.Contains(line, `"event":"`+eventFilter+`"`) {
+					continue
+				}
+			}
+			events = append(events, json.RawMessage(line))
+		}
+		if events == nil {
+			events = []json.RawMessage{}
+		}
+		_ = json.NewEncoder(w).Encode(events)
+	})
+
 	// GET /api/clipsync/activity — recent clipboard sync activities.
 	mux.HandleFunc("/api/clipsync/activity", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -490,6 +536,7 @@ func buildAdminMux(ring *logRing, logFilePath string) *http.ServeMux {
 	mux.Handle("/ui/logs", uiHandler)
 	mux.Handle("/ui/metrics", uiHandler)
 	mux.Handle("/ui/api", uiHandler)
+	mux.Handle("/ui/perf", uiHandler)
 	mux.Handle("/ui/debug", uiHandler)
 
 	// GET /api/gateway/audit — recent audit rows for one or all gateways.

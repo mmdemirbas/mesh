@@ -139,6 +139,8 @@ type FilesyncCfg struct {
 
 	// ResolvedFolders is populated by Resolve(). Runtime code reads this.
 	ResolvedFolders []FolderCfg `yaml:"-"`
+	// NodeName is the owning node's name. Set at runtime by the caller.
+	NodeName string `yaml:"-"`
 }
 
 // UnmarshalYAML provides default values for FilesyncCfg.

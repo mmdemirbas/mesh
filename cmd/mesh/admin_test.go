@@ -38,7 +38,7 @@ func adminTestSetup(t *testing.T) *logRing {
 
 func TestAdminStateEndpoints(t *testing.T) {
 	ring := adminTestSetup(t)
-	srv := httptest.NewServer(buildAdminMux(ring, ""))
+	srv := httptest.NewServer(buildAdminMux(ring, "", ""))
 	defer srv.Close()
 
 	for _, path := range []string{"/api/state"} {
@@ -79,7 +79,7 @@ func TestAdminLogsEndpoint(t *testing.T) {
 	ring.Write([]byte("\x1b[32mgreen text\x1b[0m\n"))
 	ring.Write([]byte("plain line\n"))
 
-	srv := httptest.NewServer(buildAdminMux(ring, ""))
+	srv := httptest.NewServer(buildAdminMux(ring, "", ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/logs")
@@ -118,7 +118,7 @@ func TestAdminLogsEndpoint(t *testing.T) {
 
 func TestAdminMetricsEndpoint(t *testing.T) {
 	ring := adminTestSetup(t)
-	srv := httptest.NewServer(buildAdminMux(ring, ""))
+	srv := httptest.NewServer(buildAdminMux(ring, "", ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/metrics")
@@ -204,7 +204,7 @@ func TestAdminGatewayAuditEndpoint(t *testing.T) {
 	}, []byte(`{"content":[{"type":"text","text":"hi back"}]}`))
 
 	ring := newLogRing(4)
-	srv := httptest.NewServer(buildAdminMux(ring, ""))
+	srv := httptest.NewServer(buildAdminMux(ring, "", ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/gateway/audit")
@@ -305,7 +305,7 @@ func TestAdminGatewayAuditFilters(t *testing.T) {
 		StartTime: time.Now(), EndTime: time.Now(),
 	}, []byte(`{}`))
 
-	srv := httptest.NewServer(buildAdminMux(newLogRing(4), ""))
+	srv := httptest.NewServer(buildAdminMux(newLogRing(4), "", ""))
 	defer srv.Close()
 
 	type entry struct {
@@ -402,7 +402,7 @@ func TestAdminGatewayAuditPair(t *testing.T) {
 
 	// Discover the run id via the list endpoint so the test is independent of
 	// internal id-generation choices.
-	srv := httptest.NewServer(buildAdminMux(newLogRing(4), ""))
+	srv := httptest.NewServer(buildAdminMux(newLogRing(4), "", ""))
 	defer srv.Close()
 
 	listResp, err := http.Get(srv.URL + "/api/gateway/audit?gateway=" + cfg.Name)
@@ -465,7 +465,7 @@ func TestAdminMetricsGatewayTokens(t *testing.T) {
 	})
 
 	ring := newLogRing(4)
-	srv := httptest.NewServer(buildAdminMux(ring, ""))
+	srv := httptest.NewServer(buildAdminMux(ring, "", ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/metrics")
@@ -495,7 +495,7 @@ func TestAdminMetricsDownComponent(t *testing.T) {
 	})
 
 	ring := newLogRing(4)
-	srv := httptest.NewServer(buildAdminMux(ring, ""))
+	srv := httptest.NewServer(buildAdminMux(ring, "", ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/metrics")
@@ -514,7 +514,7 @@ func TestAdminMetricsDownComponent(t *testing.T) {
 func TestAdminUIEndpoint(t *testing.T) {
 	t.Parallel()
 	ring := newLogRing(4)
-	srv := httptest.NewServer(buildAdminMux(ring, ""))
+	srv := httptest.NewServer(buildAdminMux(ring, "", ""))
 	defer srv.Close()
 
 	for _, path := range []string{"/ui", "/ui/filesync", "/ui/logs", "/ui/api"} {
@@ -545,7 +545,7 @@ func TestAdminUIEndpoint(t *testing.T) {
 // silently revert the detail card to a single <pre> block.
 func TestAdminUIGatewayDetailMarkup(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(buildAdminMux(newLogRing(4), ""))
+	srv := httptest.NewServer(buildAdminMux(newLogRing(4), "", ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/ui/gateway")
@@ -636,7 +636,7 @@ func TestAdminUIGatewayDetailMarkup(t *testing.T) {
 // so the browser never shows a stale version after a binary update.
 func TestAdminUICacheControl(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(buildAdminMux(newLogRing(4), ""))
+	srv := httptest.NewServer(buildAdminMux(newLogRing(4), "", ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/ui/gateway")
@@ -697,7 +697,7 @@ func TestCapAuditRows(t *testing.T) {
 func TestAdminRootRedirect(t *testing.T) {
 	t.Parallel()
 	ring := newLogRing(4)
-	srv := httptest.NewServer(buildAdminMux(ring, ""))
+	srv := httptest.NewServer(buildAdminMux(ring, "", ""))
 	defer srv.Close()
 
 	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -721,7 +721,7 @@ func TestAdminRootRedirect(t *testing.T) {
 func TestAdminLogsEmpty(t *testing.T) {
 	t.Parallel()
 	ring := newLogRing(8)
-	srv := httptest.NewServer(buildAdminMux(ring, ""))
+	srv := httptest.NewServer(buildAdminMux(ring, "", ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/logs")
@@ -742,7 +742,7 @@ func TestAdminLogsEmpty(t *testing.T) {
 func TestAdminServerRandomPortBind(t *testing.T) {
 	t.Parallel()
 	ring := newLogRing(4)
-	mux := buildAdminMux(ring, "")
+	mux := buildAdminMux(ring, "", "")
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -815,7 +815,7 @@ func keys[K comparable, V any](m map[K]V) []K {
 
 func TestAdminHealthz(t *testing.T) {
 	ring := adminTestSetup(t)
-	srv := httptest.NewServer(buildAdminMux(ring, ""))
+	srv := httptest.NewServer(buildAdminMux(ring, "", ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/healthz")

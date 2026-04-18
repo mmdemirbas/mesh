@@ -478,7 +478,13 @@ func upCmd(nodeNames []string, configPath string) {
 				defer func(n string) { _ = os.Remove(portFilePath(n)) }(name)
 			}
 
-			adminSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: buildAdminMux(ring, logFilePath)}
+			// Perf log path: ~/.mesh/log/<node>-perf.jsonl (single node) or empty (multi-node).
+			var perfLogPath string
+			if len(nodeNames) == 1 {
+				home, _ := os.UserHomeDir()
+				perfLogPath = filepath.Join(home, ".mesh", "log", nodeNames[0]+"-perf.jsonl")
+			}
+			adminSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: buildAdminMux(ring, logFilePath, perfLogPath)}
 			go func() { _ = adminSrv.Serve(adminLn) }()
 			context.AfterFunc(ctx, func() {
 				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -550,6 +556,7 @@ func upCmd(nodeNames []string, configPath string) {
 
 		// 4. Filesync
 		for _, fs := range cfg.Filesync {
+			fs.NodeName = nodeName
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
