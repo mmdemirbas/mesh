@@ -33,16 +33,27 @@ func peerSuffix(peerAddr string) string {
 	return hex.EncodeToString(h[:4])
 }
 
+// validateRelPath checks that relPath is a valid relative path without
+// traversal components. This is a fast syntactic check — actual path
+// containment is enforced atomically by os.Root (L5).
+func validateRelPath(relPath string) error {
+	clean := filepath.Clean(filepath.FromSlash(relPath))
+	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || strings.Contains(clean, "\x00") {
+		return fmt.Errorf("invalid file path: %q", relPath)
+	}
+	return nil
+}
+
 // downloadToVerifiedTemp fetches a file from a peer, writes it to a temp file,
-// and verifies the hash. Returns the temp file path without renaming to the
-// final destination. Used by conflict resolution (B13) to ensure the download
-// succeeds before moving the local file aside.
+// and verifies the hash. Returns the relative temp path within root without
+// renaming to the final destination. Used by conflict resolution (B13) to
+// ensure the download succeeds before moving the local file aside.
 //
+// L5: all filesystem operations go through os.Root to prevent symlink TOCTOU.
 // H1: temp file name includes a peer-derived suffix so concurrent downloads
 // of the same file from different peers get separate temp files.
-func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash string, folderRoot string, limiter *rate.Limiter) (string, error) {
-	destPath, err := safePath(folderRoot, relPath)
-	if err != nil {
+func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash string, root *os.Root, limiter *rate.Limiter) (string, error) {
+	if err := validateRelPath(relPath); err != nil {
 		return "", err
 	}
 
@@ -51,19 +62,21 @@ func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, 
 	}
 
 	// Ensure parent directory exists.
-	if err := os.MkdirAll(filepath.Dir(destPath), 0750); err != nil {
-		return "", fmt.Errorf("create parent dir: %w", err)
+	if dir := filepath.Dir(relPath); dir != "." {
+		if err := root.MkdirAll(dir, 0750); err != nil {
+			return "", fmt.Errorf("create parent dir: %w", err)
+		}
 	}
 
 	// Temp file for atomic write + resume.
 	// H1: include peer suffix to prevent concurrent download collision
 	// when multiple peers serve the same file.
 	tmpName := ".mesh-tmp-" + expectedHash[:16] + "-" + peerSuffix(peerAddr)
-	tmpPath := filepath.Join(filepath.Dir(destPath), tmpName)
+	tmpRelPath := filepath.Join(filepath.Dir(relPath), tmpName)
 
 	// Check if we can resume from an existing temp file.
 	var offset int64
-	if info, err := os.Stat(tmpPath); err == nil {
+	if info, err := root.Stat(tmpRelPath); err == nil {
 		offset = info.Size()
 	}
 
@@ -102,7 +115,7 @@ func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, 
 	} else {
 		flag |= os.O_TRUNC
 	}
-	f, err := os.OpenFile(tmpPath, flag, 0600) //nolint:gosec // G304: tmpPath is in user folder
+	f, err := root.OpenFile(tmpRelPath, flag, 0600)
 	if err != nil {
 		return "", fmt.Errorf("open temp file: %w", err)
 	}
@@ -116,46 +129,45 @@ func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, 
 	// here. Without this check, the corrupt temp produces a misleading
 	// "hash mismatch" instead of the real I/O error.
 	if err := f.Close(); err != nil {
-		_ = os.Remove(tmpPath)
+		_ = root.Remove(tmpRelPath)
 		return "", fmt.Errorf("close temp file: %w", err)
 	}
 
 	// Verify hash of completed file.
-	actualHash, err := hashFile(tmpPath)
+	actualHash, err := hashFileRoot(root, tmpRelPath)
 	if err != nil {
-		_ = os.Remove(tmpPath)
+		_ = root.Remove(tmpRelPath)
 		return "", fmt.Errorf("hash temp file: %w", err)
 	}
 	if actualHash != expectedHash {
-		_ = os.Remove(tmpPath)
+		_ = root.Remove(tmpRelPath)
 		return "", fmt.Errorf("hash mismatch for %s: expected %s, got %s", relPath, expectedHash, actualHash)
 	}
 
-	return tmpPath, nil
+	return tmpRelPath, nil
 }
 
 // downloadFile fetches a file from a peer and writes it to the folder.
-// Returns the local path of the completed file.
-func downloadFile(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash string, folderRoot string, limiter *rate.Limiter) (string, error) {
-	tmpPath, err := downloadToVerifiedTemp(ctx, client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
+// Returns the relative path of the completed file within root.
+func downloadFile(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash string, root *os.Root, limiter *rate.Limiter) (string, error) {
+	tmpRelPath, err := downloadToVerifiedTemp(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
 	if err != nil {
 		return "", err
 	}
 
-	destPath, _ := safePath(folderRoot, relPath) // already validated in downloadToVerifiedTemp
-	if err := renameReplace(tmpPath, destPath); err != nil {
-		_ = os.Remove(tmpPath)
+	if err := renameReplaceRoot(root, tmpRelPath, relPath); err != nil {
+		_ = root.Remove(tmpRelPath)
 		return "", fmt.Errorf("rename to final path: %w", err)
 	}
 
-	return destPath, nil
+	return relPath, nil
 }
 
 // safePath validates a relative path against traversal and resolves it within
 // folderRoot. Returns the absolute path or an error.
 //
-// H4: uses EvalSymlinks on both root and path so a symlink inside the folder
-// pointing outside the root is caught by the prefix check.
+// Deprecated: use validateRelPath + os.Root operations instead (L5).
+// Kept for read-only paths in the admin API (conflict diff).
 func safePath(folderRoot, relPath string) (string, error) {
 	clean := filepath.Clean(filepath.FromSlash(relPath))
 	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || strings.Contains(clean, "\x00") {
@@ -198,38 +210,37 @@ func safePath(folderRoot, relPath string) (string, error) {
 // It computes block signatures of the local file, sends them to the peer,
 // and reconstructs the file from unchanged local blocks + received delta blocks.
 // Falls back to full download if the local file doesn't exist.
-func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash, folderRoot string, limiter *rate.Limiter) (string, error) {
-	destPath, err := safePath(folderRoot, relPath)
-	if err != nil {
+func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash string, root *os.Root, limiter *rate.Limiter) (string, error) {
+	if err := validateRelPath(relPath); err != nil {
 		return "", err
 	}
 
 	// If local file doesn't exist, fall back to full download.
-	if _, err := os.Stat(destPath); os.IsNotExist(err) {
-		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
+	if _, err := root.Stat(relPath); os.IsNotExist(err) {
+		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
 	}
 
 	// Compute block signatures of local file.
 	blockSize := int64(defaultBlockSize)
-	localHashes, err := computeBlockSignatures(destPath, blockSize)
+	localHashes, err := computeBlockSignaturesRoot(root, relPath, blockSize)
 	if err != nil {
-		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
+		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
 	}
 
-	localInfo, err := os.Stat(destPath)
+	localInfo, err := root.Stat(relPath)
 	if err != nil {
-		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
+		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
 	}
 
 	// Send block signatures to peer.
-	req := &pb.BlockSignatures{
+	sigReq := &pb.BlockSignatures{
 		FolderId:    folderID,
 		Path:        relPath,
 		BlockSize:   blockSize,
 		FileSize:    localInfo.Size(),
 		BlockHashes: localHashes,
 	}
-	reqData, err := proto.Marshal(req)
+	reqData, err := proto.Marshal(sigReq)
 	if err != nil {
 		return "", fmt.Errorf("marshal block sigs: %w", err)
 	}
@@ -251,7 +262,7 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
+		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
 	}
 
 	// Cap delta response at 256 MB — delta transfers should be much smaller
@@ -280,38 +291,37 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 	}
 
 	// Apply delta to reconstruct the file.
-	tmpPath, err := applyDelta(destPath, destPath, blockSize, remoteFileSize, blocks)
+	tmpRelPath, err := applyDeltaRoot(root, relPath, blockSize, remoteFileSize, blocks)
 	if err != nil {
 		return "", fmt.Errorf("apply delta: %w", err)
 	}
 
 	// Verify hash.
-	actualHash, err := hashFile(tmpPath)
+	actualHash, err := hashFileRoot(root, tmpRelPath)
 	if err != nil {
-		_ = os.Remove(tmpPath)
+		_ = root.Remove(tmpRelPath)
 		return "", fmt.Errorf("hash delta result: %w", err)
 	}
 	if actualHash != expectedHash {
-		_ = os.Remove(tmpPath)
+		_ = root.Remove(tmpRelPath)
 		return "", fmt.Errorf("delta hash mismatch for %s: expected %s, got %s", relPath, expectedHash, actualHash)
 	}
 
 	// Atomic rename.
-	if err := renameReplace(tmpPath, destPath); err != nil {
-		_ = os.Remove(tmpPath)
+	if err := renameReplaceRoot(root, tmpRelPath, relPath); err != nil {
+		_ = root.Remove(tmpRelPath)
 		return "", fmt.Errorf("rename delta result: %w", err)
 	}
 
-	return destPath, nil
+	return relPath, nil
 }
 
-// deleteFile removes a local file, creating a tombstone in the index.
-func deleteFile(folderRoot, relPath string) error {
-	path, err := safePath(folderRoot, relPath)
-	if err != nil {
+// deleteFile removes a local file within the root.
+func deleteFile(root *os.Root, relPath string) error {
+	if err := validateRelPath(relPath); err != nil {
 		return err
 	}
-	err = os.Remove(path)
+	err := root.Remove(relPath)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("delete %s: %w", relPath, err)
 	}

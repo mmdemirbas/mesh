@@ -398,6 +398,7 @@ type FolderSyncMetrics struct {
 // folderState holds runtime state for a single synced folder.
 type folderState struct {
 	cfg             config.FolderCfg
+	root            *os.Root // L5: TOCTOU-safe folder root handle
 	index           *FileIndex
 	ignore          *ignoreMatcher
 	peers           map[string]PeerState      // peerAddr -> state
@@ -581,13 +582,14 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 
 	// Initialize folders.
 	for _, fcfg := range cfg.ResolvedFolders {
-		// Ensure folder root exists. A missing path (e.g. host-specific mount
-		// point not present on this machine) must not abort the whole node —
-		// record the folder as failed and continue so the listener and other
-		// folders come up.
-		if _, err := os.Stat(fcfg.Path); err != nil {
-			slog.Warn("filesync folder path missing, skipping", "folder", fcfg.ID, "path", fcfg.Path, "error", err)
-			state.Global.Update("filesync-folder", fcfg.ID, state.Failed, "path missing: "+err.Error())
+		// L5: open an os.Root handle for TOCTOU-safe file operations.
+		// A missing path (e.g. host-specific mount point not present on this
+		// machine) must not abort the whole node — record the folder as
+		// failed and continue so the listener and other folders come up.
+		folderRoot, rootErr := os.OpenRoot(fcfg.Path)
+		if rootErr != nil {
+			slog.Warn("filesync folder path missing, skipping", "folder", fcfg.ID, "path", fcfg.Path, "error", rootErr)
+			state.Global.Update("filesync-folder", fcfg.ID, state.Failed, "path missing: "+rootErr.Error())
 			for _, peer := range fcfg.Peers {
 				state.Global.Update("filesync-peer", fcfg.ID+"|"+peer, state.Failed, "folder path missing")
 			}
@@ -643,6 +645,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 
 		fs := &folderState{
 			cfg:           fcfg,
+			root:          folderRoot,
 			index:         idx,
 			ignore:        ignore,
 			peers:         peers,
@@ -784,6 +787,13 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 
 	// Close idle HTTP connections after all goroutines have stopped.
 	n.httpClient.CloseIdleConnections()
+
+	// L5: close os.Root handles.
+	for _, fs := range n.folders {
+		if fs.root != nil {
+			_ = fs.root.Close()
+		}
+	}
 
 	// Clean up state.
 	for _, fcfg := range cfg.ResolvedFolders {
@@ -1315,7 +1325,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				defer func() { <-sem }()
 
 				dlStart := time.Now()
-				err := downloadFromPeer(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
+				err := downloadFromPeer(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.root, n.rateLimiter)
 				if err != nil {
 					slog.Warn("download failed", "folder", folderID, "path", action.Path, "peer", peerAddr, "error", err)
 					fs.indexMu.Lock()
@@ -1335,10 +1345,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				if fileMode == 0 {
 					fileMode = 0644
 				}
-				destPath, _ := safePath(fs.cfg.Path, action.Path)
-				if destPath != "" {
-					_ = os.Chmod(destPath, fileMode)
-				}
+				_ = fs.root.Chmod(action.Path, fileMode)
 
 				// Update metrics.
 				m := state.Global.GetMetrics("filesync", n.cfg.Bind)
@@ -1377,7 +1384,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				defer func() { <-sem }()
 
 				remoteDeviceID := remoteIdx.GetDeviceId()
-				winner, conflictPath := resolveConflict(fs.cfg.Path, action.Path, lmtime, action.RemoteMtime, remoteDeviceID)
+				winner, conflictRelPath := resolveConflict(fs.root, action.Path, lmtime, action.RemoteMtime, remoteDeviceID)
 				slog.Debug("conflict resolved",
 					"folder", folderID, "path", action.Path, "winner", winner,
 					"local_mtime", lmtime, "remote_mtime", action.RemoteMtime,
@@ -1386,7 +1393,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					// B13: download remote to verified temp FIRST — local file
 					// stays intact until the download succeeds. If the download
 					// fails, the local file is untouched.
-					tmpPath, err := downloadToVerifiedTemp(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.cfg.Path, n.rateLimiter)
+					tmpRelPath, err := downloadToVerifiedTemp(ctx, n.httpClient, peerAddr, folderID, action.Path, action.RemoteHash, fs.root, n.rateLimiter)
 					if err != nil {
 						slog.Warn("conflict download failed", "folder", folderID, "path", action.Path, "error", err)
 						fs.indexMu.Lock()
@@ -1400,22 +1407,23 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					}
 
 					// Download verified — now safe to rename local to conflict.
-					if err := os.MkdirAll(filepath.Dir(conflictPath), 0750); err != nil {
-						slog.Warn("create conflict dir failed", "folder", folderID, "path", action.Path, "error", err)
-						_ = os.Remove(tmpPath)
-						fs.indexMu.Lock()
-						fs.retries.record(action.Path, action.RemoteHash)
-						fs.indexMu.Unlock()
-						failMu.Lock()
-						failedSeqs = append(failedSeqs, action.RemoteSequence)
-						failMu.Unlock()
-						fs.metrics.SyncErrors.Add(1)
-						return
+					if dir := filepath.Dir(conflictRelPath); dir != "." {
+						if err := fs.root.MkdirAll(dir, 0750); err != nil {
+							slog.Warn("create conflict dir failed", "folder", folderID, "path", action.Path, "error", err)
+							_ = fs.root.Remove(tmpRelPath)
+							fs.indexMu.Lock()
+							fs.retries.record(action.Path, action.RemoteHash)
+							fs.indexMu.Unlock()
+							failMu.Lock()
+							failedSeqs = append(failedSeqs, action.RemoteSequence)
+							failMu.Unlock()
+							fs.metrics.SyncErrors.Add(1)
+							return
+						}
 					}
-					localPath := filepath.Join(fs.cfg.Path, filepath.FromSlash(action.Path))
-					if err := os.Rename(localPath, conflictPath); err != nil {
+					if err := fs.root.Rename(action.Path, conflictRelPath); err != nil {
 						slog.Warn("rename local to conflict failed", "folder", folderID, "path", action.Path, "error", err)
-						_ = os.Remove(tmpPath)
+						_ = fs.root.Remove(tmpRelPath)
 						fs.indexMu.Lock()
 						fs.retries.record(action.Path, action.RemoteHash)
 						fs.indexMu.Unlock()
@@ -1427,25 +1435,18 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					}
 
 					// Move verified temp to final destination.
-					destPath, _ := safePath(fs.cfg.Path, action.Path) // already validated
-					if err := renameReplace(tmpPath, destPath); err != nil {
+					if err := renameReplaceRoot(fs.root, tmpRelPath, action.Path); err != nil {
 						slog.Warn("rename temp to dest failed", "folder", folderID, "path", action.Path, "error", err)
 						// H5: restore local file from conflict name. If restore
-						// also fails, keep tmpPath so the downloaded data is not
-						// lost — the user can recover manually.
-						if restoreErr := os.Rename(conflictPath, localPath); restoreErr != nil {
+						// also fails, keep tmpRelPath so the downloaded data is
+						// not lost — the user can recover manually.
+						if restoreErr := fs.root.Rename(conflictRelPath, action.Path); restoreErr != nil {
 							slog.Error("conflict recovery failed: local file is at conflict path, remote at temp path — manual recovery needed",
 								"folder", folderID, "path", action.Path,
-								"local_at", conflictPath, "remote_at", tmpPath,
+								"conflict_at", conflictRelPath, "temp_at", tmpRelPath,
 								"error", restoreErr)
-							// Do NOT remove tmpPath — preserve both copies for
-							// manual recovery. Do NOT update index — scan will
-							// not find the original path but the file is safe
-							// at conflictPath.
 						} else {
-							// Restore succeeded — local is back at localPath.
-							// Safe to clean up the temp file.
-							_ = os.Remove(tmpPath)
+							_ = fs.root.Remove(tmpRelPath)
 						}
 						fs.indexMu.Lock()
 						fs.retries.record(action.Path, action.RemoteHash)
@@ -1462,7 +1463,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					if cfMode == 0 {
 						cfMode = 0644
 					}
-					_ = os.Chmod(destPath, cfMode)
+					_ = fs.root.Chmod(action.Path, cfMode)
 
 					fs.indexMu.Lock()
 					fs.index.Sequence++
@@ -1503,7 +1504,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				}
 				defer func() { <-sem }()
 
-				if err := deleteFile(fs.cfg.Path, action.Path); err != nil {
+				if err := deleteFile(fs.root, action.Path); err != nil {
 					slog.Warn("delete failed", "folder", folderID, "path", action.Path, "error", err)
 					fs.indexMu.Lock()
 					fs.retries.record(action.Path, action.RemoteHash)

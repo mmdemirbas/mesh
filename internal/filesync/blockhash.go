@@ -3,6 +3,7 @@ package filesync
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -23,7 +24,20 @@ func computeBlockSignatures(path string, blockSize int64) ([][]byte, error) {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
+	return readBlockSigs(f, blockSize)
+}
 
+// computeBlockSignaturesRoot is the os.Root-safe variant of computeBlockSignatures.
+func computeBlockSignaturesRoot(root *os.Root, relPath string, blockSize int64) ([][]byte, error) {
+	f, err := root.Open(relPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return readBlockSigs(f, blockSize)
+}
+
+func readBlockSigs(f *os.File, blockSize int64) ([][]byte, error) {
 	var hashes [][]byte
 	buf := make([]byte, blockSize)
 	for {
@@ -51,7 +65,20 @@ func computeDeltaBlocks(path string, blockSize int64, localHashes [][]byte) ([]d
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
+	return readDeltaBlocks(f, blockSize, localHashes)
+}
 
+// computeDeltaBlocksRoot is the os.Root-safe variant of computeDeltaBlocks.
+func computeDeltaBlocksRoot(root *os.Root, relPath string, blockSize int64, localHashes [][]byte) ([]deltaBlock, error) {
+	f, err := root.Open(relPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return readDeltaBlocks(f, blockSize, localHashes)
+}
+
+func readDeltaBlocks(f *os.File, blockSize int64, localHashes [][]byte) ([]deltaBlock, error) {
 	var blocks []deltaBlock
 	buf := make([]byte, blockSize)
 	idx := 0
@@ -92,70 +119,114 @@ func applyDelta(oldPath, destPath string, blockSize, remoteFileSize int64, block
 	if err != nil {
 		return "", fmt.Errorf("create delta temp: %w", err)
 	}
-	closeOut := true
-	defer func() {
-		if closeOut {
-			_ = out.Close()
-		}
-	}()
 
-	// Build a map of changed blocks for O(1) lookup.
-	changed := make(map[int64][]byte, len(blocks))
-	for _, b := range blocks {
-		changed[b.index] = b.data
-	}
-
-	// Open old file for reading unchanged blocks.
 	old, err := os.Open(oldPath) //nolint:gosec // G304: oldPath validated by caller
 	if err != nil {
+		_ = out.Close()
 		_ = os.Remove(tmpPath)
 		return "", fmt.Errorf("open old file: %w", err)
 	}
-	defer func() { _ = old.Close() }()
 
-	buf := make([]byte, blockSize)
-	totalBlocks := (remoteFileSize + blockSize - 1) / blockSize
-	for i := range totalBlocks {
-		if data, ok := changed[i]; ok {
-			// Use the delta block.
-			if _, err := out.Write(data); err != nil {
-				_ = os.Remove(tmpPath)
-				return "", fmt.Errorf("write delta block %d: %w", i, err)
-			}
-		} else {
-			// Copy unchanged block from old file.
-			if _, err := old.Seek(i*blockSize, io.SeekStart); err != nil {
-				_ = os.Remove(tmpPath)
-				return "", fmt.Errorf("seek old block %d: %w", i, err)
-			}
-			n, err := io.ReadFull(old, buf)
-			if n > 0 {
-				if _, err := out.Write(buf[:n]); err != nil {
-					_ = os.Remove(tmpPath)
-					return "", fmt.Errorf("write old block %d: %w", i, err)
-				}
-			}
-			if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-				_ = os.Remove(tmpPath)
-				return "", fmt.Errorf("read old block %d: %w", i, err)
-			}
-		}
-	}
-
-	// Truncate to exact remote file size (last block may be shorter).
-	if err := out.Truncate(remoteFileSize); err != nil {
+	if err := assembleDelta(out, old, blockSize, remoteFileSize, blocks); err != nil {
+		_ = out.Close()
+		_ = old.Close()
 		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("truncate: %w", err)
+		return "", err
 	}
+	_ = old.Close()
 
 	// Close before returning so caller can rename on Windows.
-	closeOut = false
 	if err := out.Close(); err != nil {
 		_ = os.Remove(tmpPath)
 		return "", fmt.Errorf("close delta temp: %w", err)
 	}
 
 	return tmpPath, nil
+}
+
+// applyDeltaRoot is the os.Root-safe variant of applyDelta.
+// Returns the relative temp path within root.
+func applyDeltaRoot(root *os.Root, relPath string, blockSize, remoteFileSize int64, blocks []deltaBlock) (string, error) {
+	tmpRelPath := relPath + ".mesh-delta-tmp"
+
+	out, err := root.Create(tmpRelPath)
+	if err != nil {
+		return "", fmt.Errorf("create delta temp: %w", err)
+	}
+
+	old, err := root.Open(relPath)
+	if err != nil {
+		_ = out.Close()
+		_ = root.Remove(tmpRelPath)
+		return "", fmt.Errorf("open old file: %w", err)
+	}
+
+	if err := assembleDelta(out, old, blockSize, remoteFileSize, blocks); err != nil {
+		_ = out.Close()
+		_ = old.Close()
+		_ = root.Remove(tmpRelPath)
+		return "", err
+	}
+	_ = old.Close()
+
+	if err := out.Close(); err != nil {
+		_ = root.Remove(tmpRelPath)
+		return "", fmt.Errorf("close delta temp: %w", err)
+	}
+
+	return tmpRelPath, nil
+}
+
+// assembleDelta writes the reconstructed file to out by copying unchanged
+// blocks from old and overwriting changed blocks from the delta slice.
+func assembleDelta(out, old *os.File, blockSize, remoteFileSize int64, blocks []deltaBlock) error {
+	changed := make(map[int64][]byte, len(blocks))
+	for _, b := range blocks {
+		changed[b.index] = b.data
+	}
+
+	buf := make([]byte, blockSize)
+	totalBlocks := (remoteFileSize + blockSize - 1) / blockSize
+	for i := range totalBlocks {
+		if data, ok := changed[i]; ok {
+			if _, err := out.Write(data); err != nil {
+				return fmt.Errorf("write delta block %d: %w", i, err)
+			}
+		} else {
+			if _, err := old.Seek(i*blockSize, io.SeekStart); err != nil {
+				return fmt.Errorf("seek old block %d: %w", i, err)
+			}
+			n, err := io.ReadFull(old, buf)
+			if n > 0 {
+				if _, err := out.Write(buf[:n]); err != nil {
+					return fmt.Errorf("write old block %d: %w", i, err)
+				}
+			}
+			if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+				return fmt.Errorf("read old block %d: %w", i, err)
+			}
+		}
+	}
+
+	if err := out.Truncate(remoteFileSize); err != nil {
+		return fmt.Errorf("truncate: %w", err)
+	}
+	return nil
+}
+
+// hashFileRoot computes the SHA-256 hash of a file via an os.Root handle,
+// preventing symlink TOCTOU (L5).
+func hashFileRoot(root *os.Root, relPath string) (string, error) {
+	f, err := root.Open(relPath)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // hashEqual compares two byte slices for equality.

@@ -371,13 +371,13 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fullPath, err := safePath(folder.cfg.Path, relPath)
-	if err != nil {
+	// L5: use folder's os.Root handle to prevent symlink TOCTOU.
+	if err := validateRelPath(relPath); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	f, err := os.Open(fullPath) //nolint:gosec // G304: validated by safePath
+	f, err := folder.root.Open(relPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -449,8 +449,9 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fullPath, err := safePath(folder.cfg.Path, req.GetPath())
-	if err != nil {
+	// L5: use folder's os.Root handle to prevent symlink TOCTOU.
+	deltaRelPath := req.GetPath()
+	if err := validateRelPath(deltaRelPath); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -474,7 +475,7 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 	// file actually needs. Without this, a peer can claim a tiny blockSize
 	// and send millions of hashes, forcing the server to read the entire
 	// file as 1 KB blocks.
-	fi, err := os.Stat(fullPath)
+	fi, err := folder.root.Stat(deltaRelPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -490,7 +491,7 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Compute delta between our file and the peer's block hashes.
-	delta, err := computeDeltaBlocks(fullPath, blockSize, peerHashes)
+	delta, err := computeDeltaBlocksRoot(folder.root, deltaRelPath, blockSize, peerHashes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -756,8 +757,8 @@ func postIndexAck(ctx context.Context, client *http.Client, peerAddr string, dat
 }
 
 // downloadFromPeer downloads a single file from a peer with resume support.
-func downloadFromPeer(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash, folderRoot string, limiter *rate.Limiter) error {
-	_, err := downloadFileDelta(ctx, client, peerAddr, folderID, relPath, expectedHash, folderRoot, limiter)
+func downloadFromPeer(ctx context.Context, client *http.Client, peerAddr, folderID, relPath, expectedHash string, root *os.Root, limiter *rate.Limiter) error {
+	_, err := downloadFileDelta(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
 	return err
 }
 

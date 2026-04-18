@@ -1576,7 +1576,7 @@ func TestResolveConflict_RemoteWins(t *testing.T) {
 	localMtime := time.Now().Add(-1 * time.Hour).UnixNano()
 	remoteMtime := time.Now().UnixNano()
 
-	winner, conflictPath := resolveConflict(dir, "file.txt", localMtime, remoteMtime, "remote123")
+	winner, conflictPath := resolveConflict(openTestRoot(t, dir), "file.txt", localMtime, remoteMtime, "remote123")
 	if winner != "remote" {
 		t.Errorf("expected remote to win, got %q", winner)
 	}
@@ -1599,7 +1599,7 @@ func TestResolveConflict_LocalWins(t *testing.T) {
 	localMtime := time.Now().UnixNano()
 	remoteMtime := time.Now().Add(-1 * time.Hour).UnixNano()
 
-	winner, conflictPath := resolveConflict(dir, "file.txt", localMtime, remoteMtime, "remote123")
+	winner, conflictPath := resolveConflict(openTestRoot(t, dir), "file.txt", localMtime, remoteMtime, "remote123")
 	if winner != "local" {
 		t.Errorf("expected local to win, got %q", winner)
 	}
@@ -1633,7 +1633,7 @@ func TestResolveConflict_StaleIndexMtime_LocalWritesWinOverRemote(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	winner, _ := resolveConflict(dir, "file.txt", scanTimeMtime, remoteMtime, "remote123")
+	winner, _ := resolveConflict(openTestRoot(t, dir), "file.txt", scanTimeMtime, remoteMtime, "remote123")
 	if winner != "local" {
 		t.Errorf("expected local to win (disk mtime newer than remote), got %q", winner)
 	}
@@ -1653,7 +1653,7 @@ func TestConflictResolution_FailedDownloadPreservesLocal(t *testing.T) {
 	localMtime := time.Now().Add(-1 * time.Hour).UnixNano()
 	remoteMtime := time.Now().UnixNano()
 
-	winner, conflictPath := resolveConflict(dir, "file.txt", localMtime, remoteMtime, "remote123")
+	winner, conflictPath := resolveConflict(openTestRoot(t, dir), "file.txt", localMtime, remoteMtime, "remote123")
 	if winner != "remote" {
 		t.Fatal("expected remote to win for this test setup")
 	}
@@ -1729,7 +1729,7 @@ func TestProtoToFileIndex_NormalizesNFD(t *testing.T) {
 func TestDownloadFile_PathTraversal(t *testing.T) {
 	t.Parallel()
 	client := &http.Client{}
-	_, err := downloadFile(t.Context(), client, "127.0.0.1:9999", "test", "../../../etc/passwd", "abcdef0123456789abcdef0123456789", t.TempDir(), nil)
+	_, err := downloadFile(t.Context(), client, "127.0.0.1:9999", "test", "../../../etc/passwd", "abcdef0123456789abcdef0123456789", openTestRoot(t, t.TempDir()), nil)
 	if err == nil {
 		t.Error("expected error for path traversal")
 	}
@@ -1738,7 +1738,7 @@ func TestDownloadFile_PathTraversal(t *testing.T) {
 func TestDownloadFile_ShortHash(t *testing.T) {
 	t.Parallel()
 	client := &http.Client{}
-	_, err := downloadFile(t.Context(), client, "127.0.0.1:9999", "test", "file.txt", "abc", t.TempDir(), nil)
+	_, err := downloadFile(t.Context(), client, "127.0.0.1:9999", "test", "file.txt", "abc", openTestRoot(t, t.TempDir()), nil)
 	if err == nil {
 		t.Fatal("expected error for short hash")
 	}
@@ -1793,6 +1793,96 @@ func TestComputeDeltaBlocks(t *testing.T) {
 	}
 }
 
+func TestComputeBlockSignaturesRoot(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "data.bin", "AAAABBBBcc")
+	root := openTestRoot(t, dir)
+
+	hashes, err := computeBlockSignaturesRoot(root, "data.bin", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hashes) != 3 {
+		t.Fatalf("expected 3 blocks, got %d", len(hashes))
+	}
+	if hashEqual(hashes[0], hashes[1]) {
+		t.Error("first two blocks should differ")
+	}
+
+	// Path-based and Root-based must produce identical results.
+	pathHashes, _ := computeBlockSignatures(filepath.Join(dir, "data.bin"), 4)
+	for i := range hashes {
+		if !hashEqual(hashes[i], pathHashes[i]) {
+			t.Errorf("block %d: root hash differs from path hash", i)
+		}
+	}
+}
+
+func TestComputeDeltaBlocksRoot(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "old.bin", "AAAABBBBcc")
+	writeFile(t, dir, "new.bin", "AAAAXXXXcc")
+	root := openTestRoot(t, dir)
+
+	oldHashes, _ := computeBlockSignaturesRoot(root, "old.bin", 4)
+	delta, err := computeDeltaBlocksRoot(root, "new.bin", 4, oldHashes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(delta) != 1 {
+		t.Fatalf("expected 1 delta block, got %d", len(delta))
+	}
+	if delta[0].index != 1 {
+		t.Errorf("delta block index = %d, want 1", delta[0].index)
+	}
+	if string(delta[0].data) != "XXXX" {
+		t.Errorf("delta block data = %q, want 'XXXX'", delta[0].data)
+	}
+}
+
+func TestApplyDeltaRoot(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "old.bin", "AAAABBBBcc")
+	root := openTestRoot(t, dir)
+
+	blocks := []deltaBlock{{index: 1, data: []byte("XXXX")}}
+	tmpRelPath, err := applyDeltaRoot(root, "old.bin", 4, 10, blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, tmpRelPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "AAAAXXXXcc" {
+		t.Errorf("delta result = %q, want 'AAAAXXXXcc'", got)
+	}
+	_ = root.Remove(tmpRelPath)
+}
+
+func TestHashFileRoot(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "data.txt", "hello world")
+	root := openTestRoot(t, dir)
+
+	rootHash, err := hashFileRoot(root, "data.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathHash, err2 := hashFile(filepath.Join(dir, "data.txt"))
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+	if rootHash != pathHash {
+		t.Errorf("root hash %q != path hash %q", rootHash, pathHash)
+	}
+}
+
 func TestApplyDelta(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -1838,7 +1928,8 @@ func TestDeltaEndpoint_ReducesTransfer(t *testing.T) {
 		deviceID: "test-device",
 	}
 	n.folders["test"] = &folderState{
-		cfg: testFolderCfg(dir, "127.0.0.1"),
+		cfg:  testFolderCfg(dir, "127.0.0.1"),
+		root: openTestRoot(t, dir),
 	}
 
 	srv := &server{node: n}
@@ -1896,7 +1987,8 @@ func TestDeltaEndpoint_BlockSizeClamped(t *testing.T) {
 		deviceID: "test-device",
 	}
 	n.folders["test"] = &folderState{
-		cfg: testFolderCfg(dir, "127.0.0.1"),
+		cfg:  testFolderCfg(dir, "127.0.0.1"),
+		root: openTestRoot(t, dir),
 	}
 
 	srv := &server{node: n}
@@ -1970,7 +2062,7 @@ func TestDeleteFile(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "a.txt", "content")
 
-	if err := deleteFile(dir, "a.txt"); err != nil {
+	if err := deleteFile(openTestRoot(t, dir), "a.txt"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "a.txt")); !os.IsNotExist(err) {
@@ -1980,7 +2072,7 @@ func TestDeleteFile(t *testing.T) {
 
 func TestDeleteFile_PathTraversal(t *testing.T) {
 	t.Parallel()
-	err := deleteFile(t.TempDir(), "../escape.txt")
+	err := deleteFile(openTestRoot(t, t.TempDir()), "../escape.txt")
 	if err == nil {
 		t.Error("expected error for path traversal")
 	}
@@ -1999,7 +2091,8 @@ func TestHandleFile_ServesContent(t *testing.T) {
 		deviceID: "test-device",
 	}
 	n.folders["test"] = &folderState{
-		cfg: testFolderCfg(dir, "127.0.0.1"),
+		cfg:  testFolderCfg(dir, "127.0.0.1"),
+		root: openTestRoot(t, dir),
 	}
 
 	srv := &server{node: n}
@@ -2027,7 +2120,8 @@ func TestHandleFile_RejectsTraversal(t *testing.T) {
 		deviceID: "test-device",
 	}
 	n.folders["test"] = &folderState{
-		cfg: testFolderCfg(dir, "127.0.0.1"),
+		cfg:  testFolderCfg(dir, "127.0.0.1"),
+		root: openTestRoot(t, dir),
 	}
 
 	srv := &server{node: n}
@@ -2056,7 +2150,8 @@ func TestHandleFile_WithOffset(t *testing.T) {
 		deviceID: "test-device",
 	}
 	n.folders["test"] = &folderState{
-		cfg: testFolderCfg(dir, "127.0.0.1"),
+		cfg:  testFolderCfg(dir, "127.0.0.1"),
+		root: openTestRoot(t, dir),
 	}
 
 	srv := &server{node: n}
@@ -2702,6 +2797,7 @@ func TestTwoNodeSync(t *testing.T) {
 	}
 	nodeB.folders["test"] = &folderState{
 		cfg:   testFolderCfg(dirB, "127.0.0.1"),
+		root:  openTestRoot(t, dirB),
 		index: idxB,
 		peers: make(map[string]PeerState),
 	}
@@ -2717,6 +2813,7 @@ func TestTwoNodeSync(t *testing.T) {
 	}
 	nodeA.folders["test"] = &folderState{
 		cfg:   testFolderCfg(dirA, "127.0.0.1"),
+		root:  openTestRoot(t, dirA),
 		index: idxA,
 		peers: make(map[string]PeerState),
 	}
@@ -2756,7 +2853,7 @@ func TestTwoNodeSync(t *testing.T) {
 		"test",
 		"from-a.txt",
 		actions[0].RemoteHash,
-		dirB,
+		openTestRoot(t, dirB),
 		nil,
 	)
 	if err != nil {
@@ -2797,7 +2894,8 @@ func TestDownloadFile_Resume(t *testing.T) {
 		deviceID: "test",
 	}
 	n.folders["test"] = &folderState{
-		cfg: testFolderCfg(nodeDir, "127.0.0.1"),
+		cfg:  testFolderCfg(nodeDir, "127.0.0.1"),
+		root: openTestRoot(t, nodeDir),
 	}
 	srv := httptest.NewServer((&server{node: n}).handler())
 	defer srv.Close()
@@ -2814,20 +2912,21 @@ func TestDownloadFile_Resume(t *testing.T) {
 	}
 
 	// Download should resume from offset 5.
-	path, err := downloadFile(t.Context(),
+	destRoot := openTestRoot(t, destDir)
+	relPath, err := downloadFile(t.Context(),
 		&http.Client{},
 		peerAddr,
 		"test",
 		"data.txt",
 		expectedHash,
-		destDir,
+		destRoot,
 		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := os.ReadFile(path)
+	got, err := os.ReadFile(filepath.Join(destDir, relPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3272,6 +3371,17 @@ func testFolderCfg(dir, peerIP string) config.FolderCfg {
 	}
 }
 
+// openTestRoot opens an os.Root for a temp dir, with automatic cleanup.
+func openTestRoot(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
+}
+
 func BenchmarkScan(b *testing.B) {
 	dir := b.TempDir()
 	// Create 100 files to scan.
@@ -3476,7 +3586,8 @@ func TestHandleFile_TracksBytesUploaded(t *testing.T) {
 		deviceID: "test-device",
 	}
 	fs := &folderState{
-		cfg: testFolderCfg(dir, "127.0.0.1"),
+		cfg:  testFolderCfg(dir, "127.0.0.1"),
+		root: openTestRoot(t, dir),
 	}
 	n.folders["test"] = fs
 
@@ -3841,14 +3952,16 @@ func TestSafeSeq_AllZero(t *testing.T) {
 // N7: conflict file collision should generate a unique name.
 func TestConflictFileName_Collision(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	rootDir := t.TempDir()
+	root := openTestRoot(t, rootDir)
 
 	// First conflict.
-	_, cPath1 := resolveConflict(root, "a.txt", 100, 200, "device1")
-	if cPath1 == "" {
+	_, cRelPath1 := resolveConflict(root, "a.txt", 100, 200, "device1")
+	if cRelPath1 == "" {
 		t.Fatal("expected conflict path for remote win")
 	}
 	// Create the conflict file to cause collision.
+	cPath1 := filepath.Join(rootDir, cRelPath1)
 	if err := os.MkdirAll(filepath.Dir(cPath1), 0750); err != nil {
 		t.Fatal(err)
 	}
@@ -3857,11 +3970,11 @@ func TestConflictFileName_Collision(t *testing.T) {
 	}
 
 	// Second conflict with same timestamp (within same second).
-	_, cPath2 := resolveConflict(root, "a.txt", 100, 200, "device1")
-	if cPath2 == "" {
+	_, cRelPath2 := resolveConflict(root, "a.txt", 100, 200, "device1")
+	if cRelPath2 == "" {
 		t.Fatal("expected conflict path for remote win")
 	}
-	if cPath2 == cPath1 {
+	if cRelPath2 == cRelPath1 {
 		t.Error("N7: second conflict should get a different path")
 	}
 
@@ -3914,7 +4027,7 @@ func TestDeltaFileSize_Validation(t *testing.T) {
 				"test",
 				"target.txt",
 				"0000000000000000000000000000000000000000000000000000000000000000",
-				destDir,
+				openTestRoot(t, destDir),
 				nil,
 			)
 			if err == nil {
