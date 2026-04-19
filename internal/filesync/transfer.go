@@ -529,7 +529,7 @@ func downloadBundle(ctx context.Context, client *http.Client, peerAddr, folderID
 // expectedHash. Used on network filesystems (C2) where write-back caching can
 // silently corrupt data. Returns nil when the hash matches. On mismatch,
 // records a retry so the file is re-downloaded on the next sync cycle.
-func verifyPostWrite(root *os.Root, relPath string, expectedHash Hash256, folderID string, retries *retryTracker, indexMu *sync.RWMutex) error {
+func verifyPostWrite(root *os.Root, relPath string, expectedHash Hash256, folderID, peerAddr string, retries *retryTracker, indexMu *sync.RWMutex) error {
 	actualHash, err := hashFileRoot(root, relPath)
 	if err != nil {
 		slog.Error("C2: post-write verification failed: cannot re-read file",
@@ -538,10 +538,10 @@ func verifyPostWrite(root *os.Root, relPath string, expectedHash Hash256, folder
 	}
 	if actualHash != expectedHash {
 		slog.Error("C2: post-write verification failed: data corruption detected",
-			"folder", folderID, "path", relPath,
+			"folder", folderID, "path", relPath, "peer", peerAddr,
 			"expected", expectedHash, "actual", actualHash)
 		indexMu.Lock()
-		retries.record(relPath, expectedHash)
+		retries.record(relPath, peerAddr, expectedHash)
 		indexMu.Unlock()
 		return fmt.Errorf("post-write hash mismatch for %s: expected %s, got %s", relPath, expectedHash, actualHash)
 	}

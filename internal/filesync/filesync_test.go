@@ -1419,60 +1419,108 @@ func TestRetryTracker(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
 	rt := retryTracker{nowFn: func() time.Time { return now }}
+	const peer = "peer-1:22000"
 
 	// Not quarantined initially.
-	if rt.quarantined("a.txt", testHash("hash1")) {
+	if rt.quarantined("a.txt", peer, testHash("hash1")) {
 		t.Fatal("should not be quarantined before any failure")
 	}
 
 	// First failure: backed off for retryBaseDelay (30s).
-	rt.record("a.txt", testHash("hash1"))
-	if !rt.quarantined("a.txt", testHash("hash1")) {
+	rt.record("a.txt", peer, testHash("hash1"))
+	if !rt.quarantined("a.txt", peer, testHash("hash1")) {
 		t.Fatal("should be backed off immediately after first failure")
 	}
 
 	// Advance past the first backoff window (30s).
 	now = now.Add(retryBaseDelay + time.Second)
-	if rt.quarantined("a.txt", testHash("hash1")) {
+	if rt.quarantined("a.txt", peer, testHash("hash1")) {
 		t.Fatal("should not be backed off after first backoff expires")
 	}
 
 	// Second failure: backoff doubles (60s).
-	rt.record("a.txt", testHash("hash1"))
+	rt.record("a.txt", peer, testHash("hash1"))
 	now = now.Add(retryBaseDelay) // only 30s — still in backoff
-	if !rt.quarantined("a.txt", testHash("hash1")) {
+	if !rt.quarantined("a.txt", peer, testHash("hash1")) {
 		t.Fatal("should still be backed off (60s window, only 30s elapsed)")
 	}
 	now = now.Add(retryBaseDelay + time.Second) // 61s total
-	if rt.quarantined("a.txt", testHash("hash1")) {
+	if rt.quarantined("a.txt", peer, testHash("hash1")) {
 		t.Fatal("should not be backed off after second backoff expires")
 	}
 
 	// New remote hash resets backoff.
-	rt.record("a.txt", testHash("hash1")) // failure 3
-	if rt.quarantined("a.txt", testHash("hash2")) {
+	rt.record("a.txt", peer, testHash("hash1")) // failure 3
+	if rt.quarantined("a.txt", peer, testHash("hash2")) {
 		t.Fatal("new remote hash should not be backed off")
 	}
 
 	// Recording with new hash resets counter.
-	rt.record("a.txt", testHash("hash2"))
+	rt.record("a.txt", peer, testHash("hash2"))
 	now = now.Add(retryBaseDelay + time.Second)
-	if rt.quarantined("a.txt", testHash("hash2")) {
+	if rt.quarantined("a.txt", peer, testHash("hash2")) {
 		t.Fatal("should not be backed off after first backoff with new hash expires")
 	}
 
-	// Clear removes tracking.
-	rt.record("a.txt", testHash("hash2"))
-	rt.clear("a.txt")
-	if rt.quarantined("a.txt", testHash("hash2")) {
+	// Clear removes tracking for this (path, peer).
+	rt.record("a.txt", peer, testHash("hash2"))
+	rt.clear("a.txt", peer)
+	if rt.quarantined("a.txt", peer, testHash("hash2")) {
 		t.Fatal("should not be backed off after clear")
 	}
 
-	// quarantinedPaths lists backed-off files.
-	rt.record("x.txt", testHash("xhash"))
+	// quarantinedPaths lists backed-off files (deduplicated across peers).
+	rt.record("x.txt", peer, testHash("xhash"))
 	paths := rt.quarantinedPaths()
 	if len(paths) != 1 || paths[0] != "x.txt" {
 		t.Errorf("quarantinedPaths = %v, want [x.txt]", paths)
+	}
+}
+
+// TestRetryTrackerPeerScoped pins C4 option (2): a peer serving a bad copy
+// does not poison the retry budget of other peers for the same (path, hash).
+func TestRetryTrackerPeerScoped(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
+	rt := retryTracker{nowFn: func() time.Time { return now }}
+	h := testHash("bad")
+
+	// Peer A fails 3 times, entering backoff.
+	for range 3 {
+		rt.record("x.txt", "A", h)
+	}
+	if !rt.quarantined("x.txt", "A", h) {
+		t.Fatal("peer A should be quarantined after 3 failures")
+	}
+
+	// Peer B has never failed — must not inherit A's backoff.
+	if rt.quarantined("x.txt", "B", h) {
+		t.Fatal("peer B must not be quarantined because peer A failed")
+	}
+
+	// clear(A) affects only peer A.
+	rt.record("x.txt", "B", h)
+	rt.clear("x.txt", "A")
+	if rt.quarantined("x.txt", "A", h) {
+		t.Fatal("clear(A) should have removed A's entry")
+	}
+	if !rt.quarantined("x.txt", "B", h) {
+		t.Fatal("clear(A) must not affect B's entry")
+	}
+
+	// clearAll(path) sweeps every peer for the path.
+	rt.record("x.txt", "A", h)
+	rt.clearAll("x.txt")
+	if rt.quarantined("x.txt", "A", h) || rt.quarantined("x.txt", "B", h) {
+		t.Fatal("clearAll should have removed every (x.txt, *) entry")
+	}
+
+	// quarantinedPaths dedupes across peers.
+	rt.record("y.txt", "A", h)
+	rt.record("y.txt", "B", h)
+	paths := rt.quarantinedPaths()
+	if len(paths) != 1 || paths[0] != "y.txt" {
+		t.Errorf("quarantinedPaths = %v, want [y.txt]", paths)
 	}
 }
 
@@ -1574,11 +1622,11 @@ func TestRetryTracker_MaxCountCap(t *testing.T) {
 	// Record more failures than retryMaxCount.
 	for range retryMaxCount + 10 {
 		now = now.Add(retryMaxDelay + time.Second)
-		rt.record("big.txt", testHash("h"))
+		rt.record("big.txt", "peer-1", testHash("h"))
 	}
 
 	// Failure count should be capped at retryMaxCount.
-	e := rt.counts["big.txt"]
+	e := rt.counts[retryKey{path: "big.txt", peer: "peer-1"}]
 	if e.failures != retryMaxCount {
 		t.Errorf("failures = %d, want %d (capped)", e.failures, retryMaxCount)
 	}
@@ -2782,7 +2830,7 @@ func TestVerifyPostWrite_HashMatch(t *testing.T) {
 
 	var mu sync.RWMutex
 	retries := retryTracker{}
-	err := verifyPostWrite(root, "good.txt", expected, "test-folder", &retries, &mu)
+	err := verifyPostWrite(root, "good.txt", expected, "test-folder", "peer-A", &retries, &mu)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -2799,7 +2847,7 @@ func TestVerifyPostWrite_HashMismatch(t *testing.T) {
 
 	var mu sync.RWMutex
 	retries := retryTracker{}
-	err := verifyPostWrite(root, "bad.txt", Hash256{}, "test-folder", &retries, &mu)
+	err := verifyPostWrite(root, "bad.txt", Hash256{}, "test-folder", "peer-A", &retries, &mu)
 	if err == nil {
 		t.Fatal("expected error for hash mismatch")
 	}
@@ -2815,7 +2863,7 @@ func TestVerifyPostWrite_FileNotFound(t *testing.T) {
 
 	var mu sync.RWMutex
 	retries := retryTracker{}
-	err := verifyPostWrite(root, "nonexistent.txt", testHash("abc123"), "test-folder", &retries, &mu)
+	err := verifyPostWrite(root, "nonexistent.txt", testHash("abc123"), "test-folder", "peer-A", &retries, &mu)
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}

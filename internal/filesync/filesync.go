@@ -474,11 +474,21 @@ const (
 	retryMaxCount  = 20               // stop tracking after this many failures (prevents map growth)
 )
 
-// retryTracker tracks per-file failure counts with exponential backoff.
-// Protected by folderState.indexMu.
+// retryTracker tracks per-(file, peer) failure counts with exponential
+// backoff. Protected by folderState.indexMu.
+//
+// C4: the key is (path, peer), not path alone. A peer serving a bad copy
+// of a file does not poison the retry budget of other peers — each peer
+// accrues its own backoff window for the same path.
 type retryTracker struct {
-	counts map[string]retryEntry // path -> entry
-	nowFn  func() time.Time      // injectable clock for testing
+	counts map[retryKey]retryEntry // (path, peer) -> entry
+	nowFn  func() time.Time        // injectable clock for testing
+}
+
+// retryKey scopes retry state per (path, peer).
+type retryKey struct {
+	path string
+	peer string
 }
 
 type retryEntry struct {
@@ -511,13 +521,15 @@ func backoffDelay(failures int) time.Duration {
 	return delay
 }
 
-// record increments the failure count for path. If the remote hash changed
-// since the last failure, the counter resets (the file was updated upstream).
-func (rt *retryTracker) record(path string, remoteHash Hash256) {
+// record increments the failure count for (path, peer). If the remote
+// hash changed since the last failure, the counter resets (the file was
+// updated upstream).
+func (rt *retryTracker) record(path, peer string, remoteHash Hash256) {
 	if rt.counts == nil {
-		rt.counts = make(map[string]retryEntry)
+		rt.counts = make(map[retryKey]retryEntry)
 	}
-	e := rt.counts[path]
+	k := retryKey{path: path, peer: peer}
+	e := rt.counts[k]
 	if e.lastHash != remoteHash {
 		e = retryEntry{lastHash: remoteHash}
 	}
@@ -526,17 +538,17 @@ func (rt *retryTracker) record(path string, remoteHash Hash256) {
 		e.failures = retryMaxCount // cap to prevent unbounded growth
 	}
 	e.lastFailed = rt.now()
-	rt.counts[path] = e
+	rt.counts[k] = e
 }
 
-// quarantined reports whether the file should be skipped this cycle.
-// Returns true when the backoff period has not yet elapsed since the
-// last failure. A new remote hash always clears the backoff.
-func (rt *retryTracker) quarantined(path string, remoteHash Hash256) bool {
+// quarantined reports whether the (path, peer) pair should be skipped
+// this cycle. Returns true when the backoff period has not yet elapsed
+// since the last failure. A new remote hash always clears the backoff.
+func (rt *retryTracker) quarantined(path, peer string, remoteHash Hash256) bool {
 	if rt.counts == nil {
 		return false
 	}
-	e, ok := rt.counts[path]
+	e, ok := rt.counts[retryKey{path: path, peer: peer}]
 	if !ok {
 		return false
 	}
@@ -547,19 +559,37 @@ func (rt *retryTracker) quarantined(path string, remoteHash Hash256) bool {
 	return rt.now().Sub(e.lastFailed) < backoffDelay(e.failures)
 }
 
-// clear removes a path from tracking (e.g., after a successful sync).
-func (rt *retryTracker) clear(path string) {
-	delete(rt.counts, path)
+// clear removes (path, peer) from tracking after a successful sync with
+// that peer.
+func (rt *retryTracker) clear(path, peer string) {
+	delete(rt.counts, retryKey{path: path, peer: peer})
 }
 
-// quarantinedPaths returns all currently backed-off file paths.
+// clearAll removes every (path, *) entry. Used when the file has been
+// synced successfully from some peer — any stale quarantine entries on
+// other peers for this version of the file are now moot.
+func (rt *retryTracker) clearAll(path string) {
+	for k := range rt.counts {
+		if k.path == path {
+			delete(rt.counts, k)
+		}
+	}
+}
+
+// quarantinedPaths returns the set of paths with at least one peer in
+// active backoff. Deduplicated across peers — the dashboard shows paths
+// that are currently stalled somewhere.
 func (rt *retryTracker) quarantinedPaths() []string {
 	now := rt.now()
-	var out []string
-	for path, e := range rt.counts {
+	seen := make(map[string]struct{})
+	for k, e := range rt.counts {
 		if now.Sub(e.lastFailed) < backoffDelay(e.failures) {
-			out = append(out, path)
+			seen[k.path] = struct{}{}
 		}
+	}
+	out := make([]string, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
 	}
 	sort.Strings(out)
 	return out
@@ -1721,8 +1751,8 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					Sequence: fs.index.Sequence,
 					Mode:     rp.RemoteMode,
 				})
-				fs.retries.clear(rp.OldPath)
-				fs.retries.clear(rp.NewPath)
+				fs.retries.clearAll(rp.OldPath)
+				fs.retries.clearAll(rp.NewPath)
 				fs.indexMu.Unlock()
 
 				fs.releasePath(rp.OldPath)
@@ -1750,7 +1780,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				}
 				// Pre-check: skip quarantined and in-flight.
 				fs.indexMu.RLock()
-				q := fs.retries.quarantined(a.Path, a.RemoteHash)
+				q := fs.retries.quarantined(a.Path, peerAddr, a.RemoteHash)
 				fs.indexMu.RUnlock()
 				if q {
 					continue
@@ -1833,7 +1863,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 							Sequence: fs.index.Sequence,
 							Mode:     a.RemoteMode,
 						})
-						fs.retries.clear(path)
+						fs.retries.clearAll(path)
 					}
 					fs.indexMu.Unlock()
 
@@ -1870,7 +1900,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 		// SR12: skip files quarantined after repeated failures.
 		fs.indexMu.RLock()
-		q := fs.retries.quarantined(action.Path, action.RemoteHash)
+		q := fs.retries.quarantined(action.Path, peerAddr, action.RemoteHash)
 		fs.indexMu.RUnlock()
 		if q {
 			skippedQuarantine++
@@ -1912,7 +1942,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				if err != nil {
 					slog.Warn("download failed", "folder", folderID, "path", action.Path, "peer", peerAddr, "error", err)
 					fs.indexMu.Lock()
-					fs.retries.record(action.Path, action.RemoteHash)
+					fs.retries.record(action.Path, peerAddr, action.RemoteHash)
 					fs.indexMu.Unlock()
 					failMu.Lock()
 					setFailReason("download: " + err.Error())
@@ -1926,7 +1956,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 				// C2: post-write verification on network filesystems.
 				if fs.isNetworkFS {
-					if err := verifyPostWrite(fs.root, action.Path, action.RemoteHash, folderID, &fs.retries, &fs.indexMu); err != nil {
+					if err := verifyPostWrite(fs.root, action.Path, action.RemoteHash, folderID, peerAddr, &fs.retries, &fs.indexMu); err != nil {
 						failMu.Lock()
 						setFailReason("post-write verify: " + err.Error())
 						failedSeqs = append(failedSeqs, action.RemoteSequence)
@@ -1965,7 +1995,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					Sequence: fs.index.Sequence,
 					Mode:     action.RemoteMode,
 				})
-				fs.retries.clear(action.Path)
+				fs.retries.clearAll(action.Path)
 				fs.indexMu.Unlock()
 
 				slog.Info("synced file", "folder", folderID, "path", action.Path, "peer", peerAddr)
@@ -2030,7 +2060,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					if err != nil {
 						slog.Warn("conflict download failed", "folder", folderID, "path", action.Path, "error", err)
 						fs.indexMu.Lock()
-						fs.retries.record(action.Path, action.RemoteHash)
+						fs.retries.record(action.Path, peerAddr, action.RemoteHash)
 						fs.indexMu.Unlock()
 						failMu.Lock()
 						setFailReason("conflict download: " + err.Error())
@@ -2046,7 +2076,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 							slog.Warn("create conflict dir failed", "folder", folderID, "path", action.Path, "error", err)
 							_ = fs.root.Remove(tmpRelPath)
 							fs.indexMu.Lock()
-							fs.retries.record(action.Path, action.RemoteHash)
+							fs.retries.record(action.Path, peerAddr, action.RemoteHash)
 							fs.indexMu.Unlock()
 							failMu.Lock()
 							setFailReason("conflict mkdir: " + err.Error())
@@ -2060,7 +2090,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						slog.Warn("rename local to conflict failed", "folder", folderID, "path", action.Path, "error", err)
 						_ = fs.root.Remove(tmpRelPath)
 						fs.indexMu.Lock()
-						fs.retries.record(action.Path, action.RemoteHash)
+						fs.retries.record(action.Path, peerAddr, action.RemoteHash)
 						fs.indexMu.Unlock()
 						failMu.Lock()
 						setFailReason("conflict rename: " + err.Error())
@@ -2085,7 +2115,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 							_ = fs.root.Remove(tmpRelPath)
 						}
 						fs.indexMu.Lock()
-						fs.retries.record(action.Path, action.RemoteHash)
+						fs.retries.record(action.Path, peerAddr, action.RemoteHash)
 						fs.indexMu.Unlock()
 						failMu.Lock()
 						setFailReason("conflict finalize: " + err.Error())
@@ -2097,7 +2127,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 					// C2: post-write verification on network filesystems.
 					if fs.isNetworkFS {
-						if err := verifyPostWrite(fs.root, action.Path, action.RemoteHash, folderID, &fs.retries, &fs.indexMu); err != nil {
+						if err := verifyPostWrite(fs.root, action.Path, action.RemoteHash, folderID, peerAddr, &fs.retries, &fs.indexMu); err != nil {
 							// Conflict rename already succeeded — clean up the
 							// displaced local to avoid orphaned conflict files.
 							_ = fs.root.Remove(conflictRelPath)
@@ -2132,7 +2162,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						Sequence: fs.index.Sequence,
 						Mode:     action.RemoteMode,
 					})
-					fs.retries.clear(action.Path)
+					fs.retries.clearAll(action.Path)
 					fs.indexMu.Unlock()
 					fs.metrics.FilesConflicted.Add(1)
 					fs.metrics.BytesDownloaded.Add(action.RemoteSize)
@@ -2168,7 +2198,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				if err := deleteFile(fs.root, action.Path); err != nil {
 					slog.Warn("delete failed", "folder", folderID, "path", action.Path, "error", err)
 					fs.indexMu.Lock()
-					fs.retries.record(action.Path, action.RemoteHash)
+					fs.retries.record(action.Path, peerAddr, action.RemoteHash)
 					fs.indexMu.Unlock()
 					failMu.Lock()
 					setFailReason("delete: " + err.Error())
