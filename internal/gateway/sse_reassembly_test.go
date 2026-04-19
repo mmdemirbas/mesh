@@ -2,6 +2,9 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
+	"math/rand"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -280,5 +283,208 @@ func TestReassembleSSE_EmptyBody(t *testing.T) {
 	}
 	if got := reassembleSSE([]byte(""), APIOpenAI); got != nil {
 		t.Errorf("empty body should return nil, got %+v", got)
+	}
+}
+
+// --- Property tests ---
+//
+// These pin that reassembly is invariant under the two degrees of freedom
+// upstreams actually exercise: unpredictable chunk boundaries inside the
+// text/JSON stream, and variable whitespace between SSE events. A counter-
+// example here would mean a production stream could produce a different
+// stream_summary depending on how the upstream happened to flush buffers.
+
+// randomSplit returns a random partition of s into `parts` non-empty chunks
+// (or as many as fit when rune count < parts). Splits are placed at rune
+// boundaries so multi-byte UTF-8 sequences are never cut mid-byte; real
+// streaming producers respect rune boundaries too.
+func randomSplit(rng *rand.Rand, s string, parts int) []string {
+	runes := []rune(s)
+	if parts <= 1 || len(runes) <= 1 {
+		return []string{s}
+	}
+	if parts > len(runes) {
+		parts = len(runes)
+	}
+	cuts := make([]int, 0, parts-1)
+	seen := map[int]bool{}
+	for len(cuts) < parts-1 {
+		c := 1 + rng.Intn(len(runes)-1)
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		cuts = append(cuts, c)
+	}
+	sort.Ints(cuts)
+	out := make([]string, 0, parts)
+	prev := 0
+	for _, c := range cuts {
+		out = append(out, string(runes[prev:c]))
+		prev = c
+	}
+	out = append(out, string(runes[prev:]))
+	return out
+}
+
+func TestReassembleSSE_Anthropic_TextChunkingInvariance(t *testing.T) {
+	t.Parallel()
+	const golden = "The quick brown fox jumps over 12 lazy dogs. Also: UTF-8 snowman ☃ and emoji 🦊!"
+	// Seeds picked for diversity; reproducible.
+	for _, seed := range []int64{1, 7, 42, 99, 2026} {
+		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
+			t.Parallel()
+			rng := rand.New(rand.NewSource(seed))
+			parts := 1 + rng.Intn(12)
+			chunks := randomSplit(rng, golden, parts)
+
+			var b strings.Builder
+			b.WriteString("event: message_start\n")
+			b.WriteString(`data: {"type":"message_start","message":{"id":"msg_x","model":"m"}}`)
+			b.WriteString("\n\n")
+			b.WriteString("event: content_block_start\n")
+			b.WriteString(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
+			b.WriteString("\n\n")
+			for _, c := range chunks {
+				enc, err := json.Marshal(c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b.WriteString("event: content_block_delta\n")
+				fmt.Fprintf(&b,
+					`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%s}}`,
+					enc)
+				b.WriteString("\n\n")
+			}
+			b.WriteString("event: message_delta\n")
+			b.WriteString(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`)
+			b.WriteString("\n\n")
+
+			got := reassembleSSE([]byte(b.String()), APIAnthropic)
+			if got == nil {
+				t.Fatal("nil summary")
+			}
+			if got.Content != golden {
+				t.Errorf("content mismatch (parts=%d)\ngot  %q\nwant %q", parts, got.Content, golden)
+			}
+			if got.StopReason != "end_turn" {
+				t.Errorf("stop_reason = %q", got.StopReason)
+			}
+		})
+	}
+}
+
+func TestReassembleSSE_Anthropic_ToolArgsChunkingInvariance(t *testing.T) {
+	t.Parallel()
+	// Non-trivial JSON so splits at different offsets exercise the partial_json
+	// buffer. After reassembly, args must parse back to this exact object.
+	want := map[string]any{
+		"query":   "weather in Ankara",
+		"max":     int64(5),
+		"flags":   []any{"verbose", "json"},
+		"deep":    map[string]any{"a": "b", "n": float64(3.14)},
+		"unicode": "snowman ☃",
+	}
+	wantBytes, _ := json.Marshal(want)
+	wantJSON := string(wantBytes)
+
+	for _, seed := range []int64{3, 17, 51, 256, 2026} {
+		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
+			t.Parallel()
+			rng := rand.New(rand.NewSource(seed))
+			parts := 1 + rng.Intn(10)
+			chunks := randomSplit(rng, wantJSON, parts)
+
+			var b strings.Builder
+			b.WriteString("event: content_block_start\n")
+			b.WriteString(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tid_1","name":"search"}}`)
+			b.WriteString("\n\n")
+			for _, c := range chunks {
+				enc, _ := json.Marshal(c)
+				b.WriteString("event: content_block_delta\n")
+				fmt.Fprintf(&b,
+					`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":%s}}`,
+					enc)
+				b.WriteString("\n\n")
+			}
+			b.WriteString("event: content_block_stop\n")
+			b.WriteString(`data: {"type":"content_block_stop","index":0}`)
+			b.WriteString("\n\n")
+
+			got := reassembleSSE([]byte(b.String()), APIAnthropic)
+			if got == nil || len(got.ToolCalls) != 1 {
+				t.Fatalf("summary = %+v", got)
+			}
+			tc := got.ToolCalls[0]
+			if tc.ID != "tid_1" || tc.Name != "search" {
+				t.Errorf("tool_call id/name = %q/%q", tc.ID, tc.Name)
+			}
+			var gotArgs map[string]any
+			if err := json.Unmarshal(tc.Args, &gotArgs); err != nil {
+				t.Fatalf("args not valid JSON after reassembly (parts=%d): %v\nargs=%s", parts, err, tc.Args)
+			}
+			gotCanon, _ := json.Marshal(gotArgs)
+			wantCanon, _ := json.Marshal(want)
+			if string(gotCanon) != string(wantCanon) {
+				t.Errorf("args mismatch (parts=%d)\ngot  %s\nwant %s", parts, gotCanon, wantCanon)
+			}
+		})
+	}
+}
+
+func TestReassembleSSE_OpenAI_ToolArgsChunkingInvariance(t *testing.T) {
+	t.Parallel()
+	want := map[string]any{"q": "hello", "n": float64(42)}
+	wantBytes, _ := json.Marshal(want)
+	wantJSON := string(wantBytes)
+
+	for _, seed := range []int64{5, 11, 88, 777, 2026} {
+		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
+			t.Parallel()
+			rng := rand.New(rand.NewSource(seed))
+			parts := 1 + rng.Intn(8)
+			chunks := randomSplit(rng, wantJSON, parts)
+
+			var b strings.Builder
+			// First chunk carries the id/name; subsequent chunks append args.
+			first := true
+			for _, c := range chunks {
+				var chunk string
+				enc, _ := json.Marshal(c)
+				if first {
+					chunk = fmt.Sprintf(
+						`data: {"id":"cc_1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"f","arguments":%s}}]}}]}`,
+						enc)
+					first = false
+				} else {
+					chunk = fmt.Sprintf(
+						`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":%s}}]}}]}`,
+						enc)
+				}
+				b.WriteString(chunk)
+				b.WriteString("\n\n")
+			}
+			b.WriteString(`data: {"choices":[{"finish_reason":"tool_calls"}]}`)
+			b.WriteString("\n\n")
+			b.WriteString("data: [DONE]\n\n")
+
+			got := reassembleSSE([]byte(b.String()), APIOpenAI)
+			if got == nil || len(got.ToolCalls) != 1 {
+				t.Fatalf("summary = %+v", got)
+			}
+			tc := got.ToolCalls[0]
+			if tc.ID != "call_1" || tc.Name != "f" {
+				t.Errorf("tool_call id/name = %q/%q", tc.ID, tc.Name)
+			}
+			var gotArgs map[string]any
+			if err := json.Unmarshal(tc.Args, &gotArgs); err != nil {
+				t.Fatalf("args not valid JSON (parts=%d): %v\nraw=%s", parts, err, tc.Args)
+			}
+			gotCanon, _ := json.Marshal(gotArgs)
+			wantCanon, _ := json.Marshal(want)
+			if string(gotCanon) != string(wantCanon) {
+				t.Errorf("args mismatch (parts=%d)\ngot  %s\nwant %s", parts, gotCanon, wantCanon)
+			}
+		})
 	}
 }
