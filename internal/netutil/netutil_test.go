@@ -2,6 +2,7 @@ package netutil
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net"
 	"runtime"
@@ -665,5 +666,66 @@ func BenchmarkBiCopy(b *testing.B) {
 		buf := make([]byte, len(payload))
 		_, _ = io.ReadFull(c2, buf)
 		_ = c2.Close()
+	}
+}
+
+// TestListenReusable_ListensAndAccepts pins the trust-boundary contract:
+// ListenReusable returns a working TCP listener, and a client connecting
+// to its reported address gets a single accept.
+func TestListenReusable_ListensAndAccepts(t *testing.T) {
+	t.Parallel()
+	ln, err := ListenReusable(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenReusable: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			close(accepted)
+			return
+		}
+		accepted <- c
+	}()
+
+	client, err := net.DialTimeout("tcp", ln.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	select {
+	case c := <-accepted:
+		if c == nil {
+			t.Fatal("accept returned nil")
+		}
+		_ = c.Close()
+	case <-time.After(2 * time.Second):
+		t.Fatal("accept did not fire within 2s")
+	}
+}
+
+// TestListenReusable_EmptyAddressDefaults pins the documented special
+// case: calling with network="tcp" and address="" binds to 0.0.0.0:0
+// so the OS picks the port. Catches accidental removal of the defaulting
+// branch, which would turn the call into a "missing port" error.
+func TestListenReusable_EmptyAddressDefaults(t *testing.T) {
+	t.Parallel()
+	ln, err := ListenReusable(context.Background(), "tcp", "")
+	if err != nil {
+		t.Fatalf("ListenReusable(empty): %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	host, _, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", ln.Addr().String(), err)
+	}
+	// 0.0.0.0 resolves to an empty host in Addr().String() on some
+	// platforms, or to "0.0.0.0". Either way, it must not be loopback.
+	if host == "127.0.0.1" || host == "::1" {
+		t.Errorf("bind host = %q, expected wildcard bind", host)
 	}
 }
