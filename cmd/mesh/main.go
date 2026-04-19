@@ -708,22 +708,79 @@ func (h *multiHandler) WithGroup(name string) slog.Handler {
 	return &multiHandler{plain: h.plain.WithGroup(name), color: h.color.WithGroup(name)}
 }
 
-func fetchState(nodeName string) map[string]state.Component {
+// metricsWire is the JSON-friendly wire format for state.Metrics, whose
+// atomic fields are not directly serializable. The shape is shared
+// between the admin server (encodes) and the status command (decodes).
+type metricsWire struct {
+	BytesTx       int64 `json:"bytes_tx"`
+	BytesRx       int64 `json:"bytes_rx"`
+	Streams       int32 `json:"streams"`
+	TokensIn      int64 `json:"tokens_in"`
+	TokensOut     int64 `json:"tokens_out"`
+	TokensCacheRd int64 `json:"tokens_cache_rd"`
+	TokensCacheWr int64 `json:"tokens_cache_wr"`
+	TokensReason  int64 `json:"tokens_reason"`
+	StartNano     int64 `json:"start_nano"`
+}
+
+func metricsFromState(m *state.Metrics) metricsWire {
+	return metricsWire{
+		BytesTx:       m.BytesTx.Load(),
+		BytesRx:       m.BytesRx.Load(),
+		Streams:       m.Streams.Load(),
+		TokensIn:      m.TokensIn.Load(),
+		TokensOut:     m.TokensOut.Load(),
+		TokensCacheRd: m.TokensCacheRd.Load(),
+		TokensCacheWr: m.TokensCacheWr.Load(),
+		TokensReason:  m.TokensReason.Load(),
+		StartNano:     m.StartTime.Load(),
+	}
+}
+
+func (w metricsWire) toMetrics() *state.Metrics {
+	m := &state.Metrics{}
+	m.BytesTx.Store(w.BytesTx)
+	m.BytesRx.Store(w.BytesRx)
+	m.Streams.Store(w.Streams)
+	m.TokensIn.Store(w.TokensIn)
+	m.TokensOut.Store(w.TokensOut)
+	m.TokensCacheRd.Store(w.TokensCacheRd)
+	m.TokensCacheWr.Store(w.TokensCacheWr)
+	m.TokensReason.Store(w.TokensReason)
+	m.StartTime.Store(w.StartNano)
+	return m
+}
+
+// fetchStateFull retrieves both components and metrics from the admin
+// API in a single round-trip. Returns an empty-but-non-nil components
+// map on failure so renderStatus falls into the "[starting]" path
+// rather than the "no runtime" path (see getComponentInfo).
+func fetchStateFull(nodeName string) (map[string]state.Component, map[string]*state.Metrics) {
+	empty := map[string]state.Component{}
 	portData, err := os.ReadFile(portFilePath(nodeName))
 	if err != nil {
-		return nil
+		return empty, nil
 	}
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/api/state", string(portData)))
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/api/state/full", string(portData)))
 	if err != nil {
-		return nil
+		return empty, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
-	var s map[string]state.Component
-	_ = json.NewDecoder(resp.Body).Decode(&s)
-	if s == nil {
-		s = map[string]state.Component{}
+	var wire struct {
+		Components map[string]state.Component `json:"components"`
+		Metrics    map[string]metricsWire     `json:"metrics"`
 	}
-	return s
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		return empty, nil
+	}
+	if wire.Components == nil {
+		wire.Components = empty
+	}
+	metrics := make(map[string]*state.Metrics, len(wire.Metrics))
+	for k, v := range wire.Metrics {
+		metrics[k] = v.toMetrics()
+	}
+	return wire.Components, metrics
 }
 
 func statusCmd(nodeNames []string, configPath string, watch bool) {
@@ -770,7 +827,8 @@ func statusCmd(nodeNames []string, configPath string, watch bool) {
 				fmt.Printf("%s⚠ Node %q not found in config%s\n", cYellow, n.name, cReset)
 				continue
 			}
-			s, _ := renderStatus(cfg, fetchState(n.name), nil, n.name)
+			comps, metrics := fetchStateFull(n.name)
+			s, _ := renderStatus(cfg, comps, metrics, n.name)
 			fmt.Print(s)
 		}
 		os.Exit(0)
@@ -801,7 +859,8 @@ func statusCmd(nodeNames []string, configPath string, watch bool) {
 				cGreen, n.pid, cReset, time.Now().Format("15:04:05"))
 			lines = append(lines, header, "")
 			if cfg, ok := allCfgs[n.name]; ok {
-				statusOutput, _ := renderStatus(cfg, fetchState(n.name), nil, n.name)
+				comps, metrics := fetchStateFull(n.name)
+				statusOutput, _ := renderStatus(cfg, comps, metrics, n.name)
 				lines = append(lines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
 			}
 		}

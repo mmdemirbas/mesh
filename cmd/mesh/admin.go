@@ -134,6 +134,22 @@ func buildAdminMux(ring *logRing, logFilePath, perfLogPath string) *http.ServeMu
 		_ = json.NewEncoder(w).Encode(state.Global.Snapshot()) // write error: headers already sent, nothing to do
 	})
 
+	// GET /api/state/full — components + metrics snapshot in a single payload.
+	// Consumed by `mesh status` so the CLI can render per-row tx/rx/streams
+	// without parsing the Prometheus endpoint.
+	mux.HandleFunc("/api/state/full", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		full := state.Global.SnapshotFull()
+		mw := make(map[string]metricsWire, len(full.Metrics))
+		for k, m := range full.Metrics {
+			mw[k] = metricsFromState(m)
+		}
+		_ = json.NewEncoder(w).Encode(struct {
+			Components map[string]state.Component `json:"components"`
+			Metrics    map[string]metricsWire     `json:"metrics"`
+		}{Components: full.Components, Metrics: mw})
+	})
+
 	// GET /api/logs — recent log lines as a JSON string array, ANSI codes stripped.
 	mux.HandleFunc("/api/logs", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

@@ -768,6 +768,69 @@ func TestAdminServerRandomPortBind(t *testing.T) {
 	}
 }
 
+// TestAdminStateFullRoundTrip exercises the /api/state/full endpoint
+// end-to-end: seed a component + metric, encode via the admin handler,
+// decode with the same wire type used by `mesh status`, and verify the
+// reconstructed *state.Metrics carries the same counters back. Pins the
+// serialization contract shared between admin.go and main.go.
+func TestAdminStateFullRoundTrip(t *testing.T) {
+	// Cannot t.Parallel — state.Global is process-wide.
+	state.Global.Update("proxy", "127.0.0.1:1080", state.Listening, "")
+	t.Cleanup(func() {
+		state.Global.Delete("proxy", "127.0.0.1:1080")
+		state.Global.DeleteMetrics("proxy", "127.0.0.1:1080")
+	})
+	m := state.Global.GetMetrics("proxy", "127.0.0.1:1080")
+	m.BytesTx.Store(4096)
+	m.BytesRx.Store(8192)
+	m.Streams.Store(3)
+	m.StartTime.Store(time.Now().Add(-5 * time.Minute).UnixNano())
+
+	ring := newLogRing(4)
+	srv := httptest.NewServer(buildAdminMux(ring, "", ""))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/state/full")
+	if err != nil {
+		t.Fatalf("GET /api/state/full: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var wire struct {
+		Components map[string]state.Component `json:"components"`
+		Metrics    map[string]metricsWire     `json:"metrics"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	comp, ok := wire.Components["proxy:127.0.0.1:1080"]
+	if !ok || comp.Status != state.Listening {
+		t.Errorf("missing/wrong component; got %+v", wire.Components)
+	}
+
+	mw, ok := wire.Metrics["proxy:127.0.0.1:1080"]
+	if !ok {
+		t.Fatalf("missing metrics entry; got %+v", wire.Metrics)
+	}
+	if mw.BytesTx != 4096 || mw.BytesRx != 8192 || mw.Streams != 3 {
+		t.Errorf("wire counters wrong: %+v", mw)
+	}
+
+	reconstructed := mw.toMetrics()
+	if reconstructed.BytesTx.Load() != 4096 ||
+		reconstructed.BytesRx.Load() != 8192 ||
+		reconstructed.Streams.Load() != 3 ||
+		reconstructed.StartTime.Load() != mw.StartNano {
+		t.Errorf("reconstructed metrics differ: tx=%d rx=%d streams=%d start=%d (wire=%+v)",
+			reconstructed.BytesTx.Load(), reconstructed.BytesRx.Load(),
+			reconstructed.Streams.Load(), reconstructed.StartTime.Load(), mw)
+	}
+}
+
 func TestPortFilePath(t *testing.T) {
 	t.Parallel()
 	path := portFilePath("testnode")
