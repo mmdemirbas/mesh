@@ -152,14 +152,37 @@ Rule 1 (boundary gaps) and Rule 2 (reproducer gaps), not the number.
 | internal/tlsutil  | 79.6% | `generateCustom` edge branches untested; `writePEM` 55.6% | ~~AP-1~~ fixed in `1afb5c9`; minor: string-match on `err.Error()` in `TestClientTLS_NoPeerCert_Rejected` (needs new sentinel; deferred) | None (new code) | MED |
 | internal/config   | 83.3% | `Validate` branches at 62.2%; `Load` at 55.6% (boundary gap at `LoadNodeNames`/`ResolveAllowedPeerHosts` closed in `ba06243`) | None found in scan | None found (spot check: `0d57b1b` has TDD reproducer in prior `7661936`) | MED |
 | internal/filesync | 58.6% | HTTP handler rejection paths partly closed in `b5fde66` (method/protobuf/gzip on index,file,delta); `handleBundle` / `handleStatus` rejection paths still uncovered; `Start` / `syncLoop` / `syncFolder` 0% | None found in scan | None found on spot check (fix+test-commit pattern: `c6522c1` paired with `b4ac2cf`; `5aef218`/`9f2bf7d` ship tests inline) | MED |
-| internal/clipsync | _TBD_ | | | | |
-| internal/tunnel   | _TBD_ | | | | |
-| internal/proxy    | _TBD_ | | | | |
-| internal/gateway  | _TBD_ | | | | |
-| internal/netutil  | _TBD_ | | | | |
-| internal/state    | _TBD_ | | | | |
-| cmd/mesh          | _TBD_ | | | | |
-| e2e/scenarios     | _TBD_ | | | | |
+| internal/clipsync | 55.9% | _TBD — 67 tests, needs gap analysis_ | _TBD_ | _TBD_ | LOW |
+| internal/tunnel   | 36.4% | Core SSH paths at 0%: `Run`, `NewSSHClient`, `runMultiplex`, `buildSSHConfig`, `runForwardSet`, `runRemoteForward`, `runLocalForward`, `handleTCPIPForward`, `handleDirectTCPIP`, `connectSSH`, `runSession` | _TBD_ | _TBD_ | HIGH |
+| internal/proxy    | 46.3% | Only `RunStandaloneProxies` and `RunStandaloneRelays` (orchestration wrappers) uncovered; core serving paths tested | None found in scan | _TBD_ | LOW |
+| internal/gateway  | 84.1% | _Strong — 242 tests covering a2o/o2a translation + passthrough + streaming_ | _TBD_ | _TBD_ | LOW |
+| internal/netutil  | 81.5% | _TBD — small package, 10 tests_ | _TBD_ | _TBD_ | LOW |
+| internal/state    | 54.6% | _TBD — 27 tests; Global/Snapshot surface needs review_ | _TBD_ | _TBD_ | MED |
+| cmd/mesh          | _TBD_ | | | | _TBD_ |
+| e2e/scenarios     | _N/A_ (tests themselves) | | | | |
+
+### Phase 4 orientation (other packages)
+
+Cursory coverage numbers only — no full rubric pass yet. Left for
+future audit cycles.
+
+- **tunnel (36.4%)**: largest known gap. Every core SSH runtime path
+  is at 0% — `Run`, `NewSSHClient`, `runMultiplex`, `buildSSHConfig`,
+  `runForwardSet`, `runRemoteForward`, `runLocalForward`,
+  `handleTCPIPForward`, `handleDirectTCPIP`, `connectSSH`,
+  `runSession`. Unit coverage requires an in-process SSH server over
+  `net.Pipe()` or real TCP, plus auth-material setup. This is a
+  multi-day effort — formerly PLAN.md D3.
+- **gateway (84.1%)**: 242 tests, strongest unit suite in the repo.
+  Likely in good shape; a focused audit can confirm.
+- **netutil (81.5%)**: small helper package, likely well-tested.
+- **proxy (46.3%)**: misleading number — only `RunStandaloneProxies`
+  and `RunStandaloneRelays` orchestration wrappers are at 0%. SOCKS5
+  and HTTP CONNECT serving paths are well-tested.
+- **clipsync (55.9%)**, **state (54.6%)**: medium gaps, worth an
+  audit pass before promoting beyond LOW/MED.
+- **cmd/mesh**: not measured — mostly wiring and CLI shells; integration
+  tests in `e2e/scenarios/` are the natural coverage.
 
 ### Phase 2 notes
 
