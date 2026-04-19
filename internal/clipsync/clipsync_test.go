@@ -1914,3 +1914,58 @@ func TestDiscoverEndpoint_AcceptsValidPort(t *testing.T) {
 		t.Errorf("peer count = %d, want 1 (valid port should be accepted)", len(n.peers))
 	}
 }
+
+// TestDiscoverEndpoint_RejectsMalformedProtobuf covers Rule 1 (trust-boundary
+// contract): the real serveDiscover handler must reject a body that isn't a
+// valid DiscoverRequest with HTTP 400, not panic or register a peer.
+func TestDiscoverEndpoint_RejectsMalformedProtobuf(t *testing.T) {
+	t.Parallel()
+	n := &Node{
+		id:     "self",
+		config: config.ClipsyncCfg{LANDiscoveryGroup: []string{"all"}},
+		peers:  make(map[string]time.Time),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/discover", bytes.NewReader([]byte{0xff, 0xff, 0xff, 0xff}))
+	req.RemoteAddr = "127.0.0.1:54321"
+	w := httptest.NewRecorder()
+	n.serveDiscover(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	n.peersMu.RLock()
+	defer n.peersMu.RUnlock()
+	if len(n.peers) != 0 {
+		t.Errorf("peer count = %d, want 0 (malformed body must not register a peer)", len(n.peers))
+	}
+}
+
+// TestDiscoverEndpoint_RejectsNonPeerACL covers Rule 1: a request from an
+// address that isn't loopback, a static peer, or a known dynamic peer must
+// be rejected with 403 before the body is parsed.
+func TestDiscoverEndpoint_RejectsNonPeerACL(t *testing.T) {
+	t.Parallel()
+	n := &Node{
+		id:     "self",
+		config: config.ClipsyncCfg{LANDiscoveryGroup: []string{"all"}},
+		peers:  make(map[string]time.Time),
+	}
+
+	body, _ := proto.Marshal(&pb.DiscoverRequest{
+		Id: "remote-node", Port: 7755, Hash: "hash-abc", Group: "all",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/discover", bytes.NewReader(body))
+	req.RemoteAddr = "203.0.113.5:54321" // TEST-NET-3, never a peer
+	w := httptest.NewRecorder()
+	n.serveDiscover(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	n.peersMu.RLock()
+	defer n.peersMu.RUnlock()
+	if len(n.peers) != 0 {
+		t.Errorf("peer count = %d, want 0 (non-peer ACL must block registration)", len(n.peers))
+	}
+}
