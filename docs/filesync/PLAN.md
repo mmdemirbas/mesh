@@ -94,7 +94,7 @@ there depend on items tracked here.
 |-------|------------------------------------------------------|-------|---------------|--------|--------|------|-------|
 | [C1](#c1) | mtime vs last-sync in `diff()` (Idea A)              | 🔴 P0 | conflict      | ✅     | 🟩 XS  | 🟡   | 📄    |
 | [C2](#c2) | Per-peer last-exchanged hash (Idea B / ancestor)     | 🔴 P0 | conflict      | ✅     | 🟧 M   | 🟡   | 📦    |
-| [C3](#c3) | Per-block verify during write                        | 🔴 P0 | correctness   | ⏳     | 🟧 M   | 🟡   | 📦    |
+| [C3](#c3) | Per-block verify during write                        | 🔴 P0 | correctness   | ✅     | 🟧 M   | 🟡   | 📦    |
 | [C4](#c4) | Immediate multi-peer fallback on hash mismatch       | 🔴 P0 | correctness   | 🔧     | 🟨 S   | 🟢   | 📦    |
 | [P17a](#p17a) | Dirty flag — skip persist when unchanged             | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
 | [P17b](#p17b) | Gob persistence + YAML fallback                      | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟡   | 🔌    |
@@ -120,7 +120,7 @@ there depend on items tracked here.
 | [C5](#c5) | 3-way text merge (Idea C)                            | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 📦    |
 | [C6](#c6) | Full vector clocks per file (Idea D)                 | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 🔌    |
 
-Counts: **4** P0 (2 ✅ / 1 🔧 / 1 ⏳) · **12** P1 (8 ✅ / 1 🔧 / 3 ⏸) · **3** P2 (1 ✅ / 1 🔧 / 1 ⏳) · **6** P3 ⏳ · **2** deferred.
+Counts: **4** P0 (3 ✅ / 1 🔧) · **12** P1 (8 ✅ / 1 🔧 / 3 ⏸) · **3** P2 (1 ✅ / 1 🔧 / 1 ⏳) · **6** P3 ⏳ · **2** deferred.
 
 ---
 
@@ -137,6 +137,7 @@ All `done` entries re-verified against the tree on 2026-04-19.
 | [P18d](#p18d) | Delta path uses `len(tail)` via `seqIndex` binary search (`filesync.go` ~L2031). Full path only on bootstrap. |
 | [C1](#c1) | `diff()` takes `lastSyncNS` and compares `lEntry.MtimeNS` against it for both the B8 tombstone guard and the conflict classifier (`index.go`, `FileIndex.diff`). Caller in `syncFolder` passes `ps.LastSync.UnixNano()`. Covered by `TestDiffC1MtimeVsLastSync` and `TestDiffC1TombstoneMtimeVsLastSync`. |
 | [C2](#c2) | `PeerState.BaseHashes` holds the last agreed hash per path; `diff()` uses it as the primary signal (ancestor match ⇒ download-or-skip, both diverged ⇒ conflict) and falls back to C1 mtime when absent. `updateBaseHashes` folds each completed exchange into the ancestor map (hash match records, tombstone drops, mismatch preserves prior). Caller in `syncFolder` snapshots `ps.BaseHashes` before diff and re-merges on both the no-action and sync-end paths. Covered by `TestDiffC2AncestorClassifier`, `TestDiffC2TombstoneAncestor`, and `TestUpdateBaseHashes`. |
+| [C3](#c3) | `downloadToVerifiedTemp` tries `/blocksigs` first; on success it streams the body via `downloadWithBlockVerify`, hashing each 128 KB block as it arrives and comparing against the sender's authoritative per-block hash. On mismatch the temp is truncated to the last verified offset and `/file?offset=` is re-issued, bounded by `maxBlockRetries = 3`. Peers that don't expose `/blocksigs` fall through to the whole-file `downloadWhole` path. A final whole-file SHA-256 check always runs as a safety net against sender-side races. Server surface `server.handleBlockSigs` reuses the existing `BlockSignatures` proto and the `handleDelta` direction/path/clamp guards. Covered by `TestC3HappyPathPerBlockVerify`, `TestC3BlockCorruptionRecoverable`, `TestC3RepeatedCorruptionQuarantines`, `TestC3FallsBackWhenBlockSigsMissing`, `TestC3SingleBlockFile`, `TestC3WholeFileHashMismatchRejected`, `TestC3BlockSigsEndpoint`, `TestC3BlockSigsRejectsReceiveOnly`. |
 | R1 (partial) | Receiver-side content-hash rename landed: `planRenames` (in `index.go`) pairs each ActionDelete whose local file has hash H with one ActionDownload whose RemoteHash is H, and `syncFolder` performs an atomic local rename (with Chtimes/Chmod, tombstone + new-path index entry) for each plan. Both sides of the rename are skipped in the bundle loop and the main dispatch loop. Metrics `FilesRenamed` and `BytesSavedByRename` exported via `/api/metrics` (`mesh_filesync_files_renamed_total`, `mesh_filesync_bytes_saved_by_rename_total`). Covered by `TestPlanRenames*` (happy path, hash mismatch, one-to-one pairing, target exists, tombstoned source, missing source, nil inputs) and `TestR1RenameFilesystemIntegration`. Phase 2 (sender-side inode tracking + wire capability handshake + delta-on-rename) is approved and pending. See R1 Status note. |
 | [P18c](#p18c) | `runScan` recycles the clone backing map across scans via `FileIndex.cloneInto(dst)`. Measured (darwin/arm64, n=100 000): 7.5 ms / 19.9 MB / 257 allocs → 7.0 ms / 0 B / 0 allocs. `TestRunScanRecyclesCloneMap` pins the ping-pong invariant. Phase 2 (full scan-into-pending refactor) is superseded by D4. |
 | [R3](#r3) | `peerRetryTracker` counts consecutive `sendIndex` failures per peer per folder; backoff activates after `peerRetryThreshold` strikes and reuses the `backoffDelay` exponential curve (capped at `retryMaxDelay`). `syncFolder` gates at entry and records a `Retrying` state with the remaining delay when a peer is backed off; a successful exchange clears the count. Scope is per-folder — a peer unreachable for folder A does not affect folder B. Dashboard surface: `FolderPeer.BackoffRemaining`. Covered by `TestPeerRetryTracker`. |
@@ -261,13 +262,20 @@ Each entry follows the same structure:
   definitively correct for two devices and unlocks 3-way merge (C5) later.
 
 <a id="c3"></a>
-### C3 · Per-block verify during write
+### C3 · Per-block verify during write · ✅
 
 [↑ back to summary](#summary-table)
 
-- **Problem.** `transfer.go:downloadToVerifiedTemp` writes the entire file
-  to a temp path and then hashes. A single corrupted byte anywhere in a
-  10 GB file forces the whole file to be re-requested.
+- **Status.** Shipped. `downloadToVerifiedTemp` now uses a sender-served
+  `/blocksigs` endpoint to verify each 128 KB block as it arrives;
+  mismatches truncate to the last good boundary and reissue `/file?offset=`
+  up to `maxBlockRetries = 3`. Peers without `/blocksigs` fall through to
+  `downloadWhole`, which is the legacy whole-body path. The final
+  whole-file hash check is retained as a safety net. See the verification
+  table row for the full test matrix.
+- **Problem.** `transfer.go:downloadToVerifiedTemp` wrote the entire file
+  to a temp path and then hashed. A single corrupted byte anywhere in a
+  10 GB file forced the whole file to be re-requested.
 - **Why it matters.** No data-integrity gap — corruption is always caught
   before rename, never propagated. But recovery cost is unbounded in file
   size, and on a flaky link a single large file may never complete.
