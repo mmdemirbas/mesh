@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
 )
 
 // TestInodePopulatedDuringScan verifies that the scan records the
@@ -331,5 +333,145 @@ func TestScanRenameIgnoresUnchangedPaths(t *testing.T) {
 	}
 	if got := idx.Files["keep.txt"].PrevPath; got != "" {
 		t.Errorf("PrevPath=%q for in-place edit, want empty", got)
+	}
+}
+
+// TestPrevPathRoundTripsThroughProto pins the Step 3 wire contract:
+// when the sender has tagged a FileEntry with PrevPath, that hint
+// survives marshal via buildIndexExchange and demarshal via
+// protoToFileIndex. This is the bridge between local detection and
+// peer-visible behaviour.
+func TestPrevPathRoundTripsThroughProto(t *testing.T) {
+	t.Parallel()
+	idx := &FileIndex{
+		Sequence: 2,
+		Files: map[string]FileEntry{
+			"old.txt": {Deleted: true, Sequence: 1, MtimeNS: 100},
+			"new.txt": {
+				Size: 5, MtimeNS: 200, SHA256: testHash("zzz"), Sequence: 2,
+				Inode: 42, PrevPath: "old.txt",
+			},
+		},
+	}
+	idx.rebuildSeqIndex()
+	n := &Node{
+		deviceID: "dev",
+		folders: map[string]*folderState{
+			"f": {index: idx},
+		},
+	}
+
+	// Both the delta path (seqIndex) and the full path must emit
+	// prev_path. The delta path goes through buildIndexExchange when
+	// sinceSequence>0 and seqIndex is non-empty; the full path is
+	// sinceSequence==0.
+	for _, since := range []int64{0, 1} {
+		exch := n.buildIndexExchange("f", since)
+		var newInfo *pb.FileInfo
+		for _, f := range exch.GetFiles() {
+			if f.GetPath() == "new.txt" {
+				newInfo = f
+			}
+		}
+		if newInfo == nil {
+			t.Fatalf("since=%d: new.txt missing from exchange", since)
+		}
+		if newInfo.GetPrevPath() != "old.txt" {
+			t.Errorf("since=%d: proto PrevPath=%q, want %q", since, newInfo.GetPrevPath(), "old.txt")
+		}
+
+		decoded := protoToFileIndex(exch)
+		got := decoded.Files["new.txt"]
+		if got.PrevPath != "old.txt" {
+			t.Errorf("since=%d: decoded PrevPath=%q, want %q", since, got.PrevPath, "old.txt")
+		}
+	}
+}
+
+// TestDiffPropagatesPrevPath pins that the receiver's diff() carries
+// the sender's hint onto the resulting ActionDownload so the sync
+// loop can consume it. Covers the three code paths that emit
+// ActionDownload: missing locally, ancestor-driven remote-only
+// change, and mtime fallback.
+func TestDiffPropagatesPrevPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		local   *FileIndex
+		remote  *FileIndex
+		baseHsh map[string]Hash256
+		lastSyn int64
+		wantHin string
+	}{
+		{
+			name:  "missing-locally",
+			local: &FileIndex{Files: map[string]FileEntry{}},
+			remote: &FileIndex{Files: map[string]FileEntry{
+				"new.txt": {Size: 1, SHA256: testHash("n"), Sequence: 5, PrevPath: "old.txt"},
+			}},
+			wantHin: "old.txt",
+		},
+		{
+			name: "ancestor-remote-only-change",
+			local: &FileIndex{Files: map[string]FileEntry{
+				"f.txt": {Size: 1, SHA256: testHash("base"), MtimeNS: 100, Sequence: 1},
+			}},
+			remote: &FileIndex{Files: map[string]FileEntry{
+				"f.txt": {Size: 1, SHA256: testHash("r"), MtimeNS: 200, Sequence: 6, PrevPath: "was.txt"},
+			}},
+			baseHsh: map[string]Hash256{"f.txt": testHash("base")},
+			wantHin: "was.txt",
+		},
+		{
+			name: "mtime-fallback-remote-newer",
+			local: &FileIndex{Files: map[string]FileEntry{
+				"f.txt": {Size: 1, SHA256: testHash("l"), MtimeNS: 100, Sequence: 1},
+			}},
+			remote: &FileIndex{Files: map[string]FileEntry{
+				"f.txt": {Size: 1, SHA256: testHash("r"), MtimeNS: 200, Sequence: 6, PrevPath: "earlier.txt"},
+			}},
+			lastSyn: 150, // local mtime 100 <= 150 → download path
+			wantHin: "earlier.txt",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.local.diff(tc.remote, 0, tc.lastSyn, tc.baseHsh, "send-receive")
+			if len(got) != 1 {
+				t.Fatalf("got %d actions, want 1", len(got))
+			}
+			if got[0].Action != ActionDownload {
+				t.Fatalf("Action=%v, want ActionDownload", got[0].Action)
+			}
+			if got[0].RemotePrevPath != tc.wantHin {
+				t.Errorf("RemotePrevPath=%q, want %q", got[0].RemotePrevPath, tc.wantHin)
+			}
+		})
+	}
+}
+
+// TestDiffOmitsPrevPathFromNonDownloads ensures the hint never leaks
+// onto non-download actions — only ActionDownload uses it, and
+// attaching it to a Delete or Conflict would confuse downstream
+// consumers that assume the field is action-specific.
+func TestDiffOmitsPrevPathFromNonDownloads(t *testing.T) {
+	t.Parallel()
+	local := &FileIndex{Files: map[string]FileEntry{
+		"a.txt": {Size: 1, SHA256: testHash("l"), MtimeNS: 100, Sequence: 1},
+	}}
+	remote := &FileIndex{Files: map[string]FileEntry{
+		"a.txt": {Deleted: true, Sequence: 7, PrevPath: "stale.txt"},
+	}}
+	// lastSeenSeq>0 and local not modified since lastSync → delete propagates.
+	got := local.diff(remote, 3, 200, nil, "send-receive")
+	if len(got) != 1 {
+		t.Fatalf("got %d actions, want 1", len(got))
+	}
+	if got[0].Action != ActionDelete {
+		t.Fatalf("Action=%v, want ActionDelete", got[0].Action)
+	}
+	if got[0].RemotePrevPath != "" {
+		t.Errorf("RemotePrevPath=%q on ActionDelete, want empty", got[0].RemotePrevPath)
 	}
 }

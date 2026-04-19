@@ -133,14 +133,22 @@ func (x *IndexExchange) GetEpoch() string {
 
 // FileInfo describes a single file (or a deletion tombstone) in the index.
 type FileInfo struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"` // Relative to folder root, forward-slash separated
-	Size          int64                  `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
-	MtimeNs       int64                  `protobuf:"varint,3,opt,name=mtime_ns,json=mtimeNs,proto3" json:"mtime_ns,omitempty"` // Unix nanoseconds
-	Sha256        []byte                 `protobuf:"bytes,4,opt,name=sha256,proto3" json:"sha256,omitempty"`                   // 32 bytes
-	Deleted       bool                   `protobuf:"varint,5,opt,name=deleted,proto3" json:"deleted,omitempty"`                // Tombstone flag
-	Sequence      int64                  `protobuf:"varint,6,opt,name=sequence,proto3" json:"sequence,omitempty"`              // Per-file monotonic counter
-	Mode          uint32                 `protobuf:"varint,7,opt,name=mode,proto3" json:"mode,omitempty"`                      // Unix permission bits (e.g., 0644)
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Path     string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"` // Relative to folder root, forward-slash separated
+	Size     int64                  `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
+	MtimeNs  int64                  `protobuf:"varint,3,opt,name=mtime_ns,json=mtimeNs,proto3" json:"mtime_ns,omitempty"` // Unix nanoseconds
+	Sha256   []byte                 `protobuf:"bytes,4,opt,name=sha256,proto3" json:"sha256,omitempty"`                   // 32 bytes
+	Deleted  bool                   `protobuf:"varint,5,opt,name=deleted,proto3" json:"deleted,omitempty"`                // Tombstone flag
+	Sequence int64                  `protobuf:"varint,6,opt,name=sequence,proto3" json:"sequence,omitempty"`              // Per-file monotonic counter
+	Mode     uint32                 `protobuf:"varint,7,opt,name=mode,proto3" json:"mode,omitempty"`                      // Unix permission bits (e.g., 0644)
+	// prev_path is a single-use rename hint (R1 Phase 2). Set by the sender
+	// when it detects that a new path has the same filesystem inode as a
+	// tombstoned entry; the receiver uses it to apply a local rename (plus
+	// optional /delta against the old content) instead of a full re-download.
+	// Empty when no rename was detected. Peers that do not understand this
+	// field ignore it and download normally (safe fallback via proto3
+	// unknown-field tolerance).
+	PrevPath      string `protobuf:"bytes,8,opt,name=prev_path,json=prevPath,proto3" json:"prev_path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -222,6 +230,13 @@ func (x *FileInfo) GetMode() uint32 {
 		return x.Mode
 	}
 	return 0
+}
+
+func (x *FileInfo) GetPrevPath() string {
+	if x != nil {
+		return x.PrevPath
+	}
+	return ""
 }
 
 // BundleRequest lists file paths to download in a single round-trip (P19).
@@ -486,7 +501,7 @@ const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
 	"\vtotal_pages\x18\a \x01(\x05R\n" +
 	"totalPages\x12\x14\n" +
 	"\x05fetch\x18\b \x01(\bR\x05fetch\x12\x14\n" +
-	"\x05epoch\x18\t \x01(\tR\x05epoch\"\xaf\x01\n" +
+	"\x05epoch\x18\t \x01(\tR\x05epoch\"\xcc\x01\n" +
 	"\bFileInfo\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x03R\x04size\x12\x19\n" +
@@ -494,7 +509,8 @@ const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
 	"\x06sha256\x18\x04 \x01(\fR\x06sha256\x12\x18\n" +
 	"\adeleted\x18\x05 \x01(\bR\adeleted\x12\x1a\n" +
 	"\bsequence\x18\x06 \x01(\x03R\bsequence\x12\x12\n" +
-	"\x04mode\x18\a \x01(\rR\x04mode\"B\n" +
+	"\x04mode\x18\a \x01(\rR\x04mode\x12\x1b\n" +
+	"\tprev_path\x18\b \x01(\tR\bprevPath\"B\n" +
 	"\rBundleRequest\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12\x14\n" +
 	"\x05paths\x18\x02 \x03(\tR\x05paths\"\xa1\x01\n" +

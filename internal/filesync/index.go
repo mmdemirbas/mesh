@@ -1266,6 +1266,12 @@ type DiffEntry struct {
 	RemoteMtime    int64
 	RemoteMode     uint32 // L1: file permission bits from remote
 	RemoteSequence int64  // B9: track for safe LastSeenSequence advancement
+	// RemotePrevPath is the sender's rename hint when Action==ActionDownload:
+	// the peer observed the same inode at this prior path. Empty when no
+	// hint is present. R1 Phase 2 receiver pairs this with a matching
+	// ActionDelete to perform a local rename plus /delta instead of a full
+	// re-download. Never set on non-download actions.
+	RemotePrevPath string
 }
 
 // diff compares the local index with a remote index and produces a list of
@@ -1344,6 +1350,7 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 				RemoteMtime:    rEntry.MtimeNS,
 				RemoteMode:     rEntry.Mode,
 				RemoteSequence: rEntry.Sequence,
+				RemotePrevPath: rEntry.PrevPath,
 			})
 			continue
 		}
@@ -1380,6 +1387,7 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 					RemoteMtime:    rEntry.MtimeNS,
 					RemoteMode:     rEntry.Mode,
 					RemoteSequence: rEntry.Sequence,
+					RemotePrevPath: rEntry.PrevPath,
 				})
 				// case localMod only: local will propagate on our next
 				// outbound sync — nothing to do from the receive side.
@@ -1397,6 +1405,7 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 				RemoteMtime:    rEntry.MtimeNS,
 				RemoteMode:     rEntry.Mode,
 				RemoteSequence: rEntry.Sequence,
+				RemotePrevPath: rEntry.PrevPath,
 			})
 		} else {
 			actions = append(actions, DiffEntry{

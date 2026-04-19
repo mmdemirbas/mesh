@@ -2345,6 +2345,7 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 				Deleted:  entry.Deleted,
 				Sequence: entry.Sequence,
 				Mode:     entry.Mode,
+				PrevPath: entry.PrevPath,
 			})
 		}
 		return &pb.IndexExchange{
@@ -2370,6 +2371,7 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 			Deleted:  entry.Deleted,
 			Sequence: entry.Sequence,
 			Mode:     entry.Mode,
+			PrevPath: entry.PrevPath,
 		})
 	}
 
@@ -2505,6 +2507,7 @@ func protoToFileIndex(idx *pb.IndexExchange) *FileIndex {
 			Deleted:  f.GetDeleted(),
 			Sequence: f.GetSequence(),
 			Mode:     f.GetMode(),
+			PrevPath: norm.NFC.String(f.GetPrevPath()),
 		}
 	}
 	fi.recomputeCache() // P18b

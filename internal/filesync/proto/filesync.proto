@@ -25,6 +25,14 @@ message FileInfo {
   bool   deleted   = 5;           // Tombstone flag
   int64  sequence  = 6;           // Per-file monotonic counter
   uint32 mode      = 7;           // Unix permission bits (e.g., 0644)
+  // prev_path is a single-use rename hint (R1 Phase 2). Set by the sender
+  // when it detects that a new path has the same filesystem inode as a
+  // tombstoned entry; the receiver uses it to apply a local rename (plus
+  // optional /delta against the old content) instead of a full re-download.
+  // Empty when no rename was detected. Peers that do not understand this
+  // field ignore it and download normally (safe fallback via proto3
+  // unknown-field tolerance).
+  string prev_path = 8;
 }
 
 // BundleRequest lists file paths to download in a single round-trip (P19).
