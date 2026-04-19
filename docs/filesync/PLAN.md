@@ -850,10 +850,19 @@ Each entry follows the same structure:
     `TestPrevPathRoundTripsThroughProto`,
     `TestDiffPropagatesPrevPath`,
     `TestDiffOmitsPrevPathFromNonDownloads`.
-  - **Step 4 ⏳** — receiver: pair matching delete+download
-    (same hint), perform local rename, then apply `/delta`
-    against old-path content. Content-hash sanity check guards
-    against inode-reuse false positives.
+  - **Step 4 ✅** — receiver pairs a matching `ActionDelete` with an
+    `ActionDownload` whose `RemotePrevPath` points at the old path,
+    renames the local file in place, tombstones the old entry, and
+    lets the download run so `/delta` carries only the changed
+    blocks (reaches H2 via existing C3 block-verify fast path).
+    `folderState.applyHintRenames` extracted for test isolation.
+    Guards: matching `ActionDelete` required, pre-existing `NewPath`
+    left alone, rename failure falls back cleanly. See
+    `TestApplyHintRenamesHappyPath`,
+    `TestApplyHintRenamesSkipsWithoutMatchingDelete`,
+    `TestApplyHintRenamesDoesNotClobberExistingNewPath`,
+    `TestApplyHintRenamesFallsBackWhenOldPathMissing`,
+    `TestApplyHintRenamesSkipsPathsClaimedByPlanRenames`.
   - **Step 5 ⏳** — Windows inode population via hash-phase handle
     (`CreateFile` + `GetFileInformationByHandle`). Keeps the
     syscall-per-file cost consistent with the existing hash read.

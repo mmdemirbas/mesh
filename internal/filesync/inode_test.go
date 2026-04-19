@@ -475,3 +475,224 @@ func TestDiffOmitsPrevPathFromNonDownloads(t *testing.T) {
 		t.Errorf("RemotePrevPath=%q on ActionDelete, want empty", got[0].RemotePrevPath)
 	}
 }
+
+// newHintRenameFolderState builds a folderState backed by a real os.Root
+// and a seeded FileIndex so applyHintRenames can be exercised end-to-end
+// against an actual filesystem. Returned state is safe to mutate; the
+// root is closed via t.Cleanup.
+func newHintRenameFolderState(t *testing.T, dir string, seed map[string]FileEntry) *folderState {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	idx := newFileIndex()
+	for path, entry := range seed {
+		idx.Files[path] = entry
+		if entry.Sequence > idx.Sequence {
+			idx.Sequence = entry.Sequence
+		}
+	}
+	idx.Path = dir
+	return &folderState{
+		index:    idx,
+		inFlight: map[string]bool{},
+		retries:  retryTracker{},
+		root:     root,
+	}
+}
+
+// TestApplyHintRenamesHappyPath pins the R1 Phase 2 Step 4 receiver
+// flow: when the sender tags an ActionDownload with RemotePrevPath and
+// a matching ActionDelete is present, the local file is renamed in
+// place, the OldPath is tombstoned, and renamedPaths[OldPath] is set so
+// the delete action is skipped while the download still runs and can
+// take the /delta fast path.
+func TestApplyHintRenamesHappyPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "old.txt", "original-content")
+
+	fs := newHintRenameFolderState(t, dir, map[string]FileEntry{
+		"old.txt": {Size: 16, SHA256: testHash("original-content"), MtimeNS: 100, Sequence: 5, Inode: 42},
+	})
+
+	actions := []DiffEntry{
+		{Path: "old.txt", Action: ActionDelete},
+		{Path: "new.txt", Action: ActionDownload, RemotePrevPath: "old.txt"},
+	}
+	renamedPaths := map[string]bool{}
+
+	fs.applyHintRenames(context.Background(), "f1", "peer:1", actions, renamedPaths)
+
+	if _, err := os.Stat(filepath.Join(dir, "old.txt")); !os.IsNotExist(err) {
+		t.Errorf("old.txt still present on disk: err=%v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "new.txt"))
+	if err != nil {
+		t.Fatalf("read new.txt: %v", err)
+	}
+	if string(got) != "original-content" {
+		t.Errorf("new.txt content=%q, want %q", got, "original-content")
+	}
+	if !renamedPaths["old.txt"] {
+		t.Errorf("renamedPaths[old.txt]=false, want true (delete must be skipped)")
+	}
+	if renamedPaths["new.txt"] {
+		t.Errorf("renamedPaths[new.txt]=true, want false (download must still run for /delta)")
+	}
+	oldEntry, ok := fs.index.Files["old.txt"]
+	if !ok {
+		t.Fatalf("old.txt entry removed from index, want tombstone")
+	}
+	if !oldEntry.Deleted {
+		t.Errorf("old.txt entry: Deleted=false, want tombstone")
+	}
+	if oldEntry.Sequence <= 5 {
+		t.Errorf("old.txt Sequence=%d, want >5 (bumped on tombstone)", oldEntry.Sequence)
+	}
+	if got := fs.metrics.FilesRenamed.Load(); got != 1 {
+		t.Errorf("FilesRenamed=%d, want 1", got)
+	}
+}
+
+// TestApplyHintRenamesSkipsWithoutMatchingDelete guards against stale
+// hints: an ActionDownload carrying RemotePrevPath with no matching
+// ActionDelete (e.g. the peer already retracted the delete, or this is
+// a fresh-device first sync) must leave the local filesystem untouched.
+func TestApplyHintRenamesSkipsWithoutMatchingDelete(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "old.txt", "untouched")
+
+	fs := newHintRenameFolderState(t, dir, map[string]FileEntry{
+		"old.txt": {Size: 9, SHA256: testHash("untouched"), MtimeNS: 100, Sequence: 3, Inode: 42},
+	})
+
+	// No ActionDelete for "old.txt" — orphan hint.
+	actions := []DiffEntry{
+		{Path: "new.txt", Action: ActionDownload, RemotePrevPath: "old.txt"},
+	}
+	renamedPaths := map[string]bool{}
+
+	fs.applyHintRenames(context.Background(), "f1", "peer:1", actions, renamedPaths)
+
+	if _, err := os.Stat(filepath.Join(dir, "old.txt")); err != nil {
+		t.Errorf("old.txt vanished without matching delete: err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "new.txt")); !os.IsNotExist(err) {
+		t.Errorf("new.txt was created by hint pass: err=%v", err)
+	}
+	if len(renamedPaths) != 0 {
+		t.Errorf("renamedPaths=%v, want empty", renamedPaths)
+	}
+	if got := fs.metrics.FilesRenamed.Load(); got != 0 {
+		t.Errorf("FilesRenamed=%d, want 0", got)
+	}
+}
+
+// TestApplyHintRenamesDoesNotClobberExistingNewPath pins drift safety:
+// if the target NewPath already exists on disk (e.g. local create raced
+// the sync), the hint pass must leave both files alone so the normal
+// download flow can surface the conflict.
+func TestApplyHintRenamesDoesNotClobberExistingNewPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "old.txt", "source")
+	writeFile(t, dir, "new.txt", "pre-existing")
+
+	fs := newHintRenameFolderState(t, dir, map[string]FileEntry{
+		"old.txt": {Size: 6, SHA256: testHash("source"), MtimeNS: 100, Sequence: 5, Inode: 42},
+	})
+
+	actions := []DiffEntry{
+		{Path: "old.txt", Action: ActionDelete},
+		{Path: "new.txt", Action: ActionDownload, RemotePrevPath: "old.txt"},
+	}
+	renamedPaths := map[string]bool{}
+
+	fs.applyHintRenames(context.Background(), "f1", "peer:1", actions, renamedPaths)
+
+	if b, err := os.ReadFile(filepath.Join(dir, "old.txt")); err != nil || string(b) != "source" {
+		t.Errorf("old.txt disturbed: content=%q err=%v", b, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "new.txt")); err != nil || string(b) != "pre-existing" {
+		t.Errorf("new.txt clobbered: content=%q err=%v", b, err)
+	}
+	if len(renamedPaths) != 0 {
+		t.Errorf("renamedPaths=%v, want empty", renamedPaths)
+	}
+	if got := fs.metrics.FilesRenamed.Load(); got != 0 {
+		t.Errorf("FilesRenamed=%d, want 0", got)
+	}
+}
+
+// TestApplyHintRenamesFallsBackWhenOldPathMissing covers the case where
+// the index claims OldPath exists but it is actually absent from disk
+// (e.g. manual user deletion between scan and sync). Rename must fail
+// safely: no tombstone, no renamedPaths entry, no metric bump, so the
+// normal download still runs and the index reconciles on the next scan.
+func TestApplyHintRenamesFallsBackWhenOldPathMissing(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Index says old.txt exists but we never write it to disk.
+
+	fs := newHintRenameFolderState(t, dir, map[string]FileEntry{
+		"old.txt": {Size: 3, SHA256: testHash("abc"), MtimeNS: 100, Sequence: 5, Inode: 42},
+	})
+
+	actions := []DiffEntry{
+		{Path: "old.txt", Action: ActionDelete},
+		{Path: "new.txt", Action: ActionDownload, RemotePrevPath: "old.txt"},
+	}
+	renamedPaths := map[string]bool{}
+
+	fs.applyHintRenames(context.Background(), "f1", "peer:1", actions, renamedPaths)
+
+	if _, err := os.Stat(filepath.Join(dir, "new.txt")); !os.IsNotExist(err) {
+		t.Errorf("new.txt materialised from a failed rename: err=%v", err)
+	}
+	if len(renamedPaths) != 0 {
+		t.Errorf("renamedPaths=%v, want empty on rename failure", renamedPaths)
+	}
+	if entry := fs.index.Files["old.txt"]; entry.Deleted {
+		t.Errorf("old.txt tombstoned despite rename failure")
+	}
+	if got := fs.metrics.FilesRenamed.Load(); got != 0 {
+		t.Errorf("FilesRenamed=%d, want 0 on failure", got)
+	}
+}
+
+// TestApplyHintRenamesSkipsPathsClaimedByPlanRenames guards composability
+// with the earlier planRenames pass: if a path is already in
+// renamedPaths, the hint pass must leave it alone so the planRenames
+// branch's tombstone and metric remain authoritative.
+func TestApplyHintRenamesSkipsPathsClaimedByPlanRenames(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "old.txt", "stay-put")
+
+	fs := newHintRenameFolderState(t, dir, map[string]FileEntry{
+		"old.txt": {Size: 8, SHA256: testHash("stay-put"), MtimeNS: 100, Sequence: 5, Inode: 42},
+	})
+
+	actions := []DiffEntry{
+		{Path: "old.txt", Action: ActionDelete},
+		{Path: "new.txt", Action: ActionDownload, RemotePrevPath: "old.txt"},
+	}
+	// planRenames already claimed the pair — hint pass must no-op.
+	renamedPaths := map[string]bool{"old.txt": true, "new.txt": true}
+
+	fs.applyHintRenames(context.Background(), "f1", "peer:1", actions, renamedPaths)
+
+	if b, err := os.ReadFile(filepath.Join(dir, "old.txt")); err != nil || string(b) != "stay-put" {
+		t.Errorf("old.txt disturbed by hint after planRenames claim: content=%q err=%v", b, err)
+	}
+	if entry := fs.index.Files["old.txt"]; entry.Deleted {
+		t.Errorf("hint pass tombstoned a planRenames-owned path")
+	}
+	if got := fs.metrics.FilesRenamed.Load(); got != 0 {
+		t.Errorf("FilesRenamed=%d, want 0 (planRenames accounts for its own)", got)
+	}
+}

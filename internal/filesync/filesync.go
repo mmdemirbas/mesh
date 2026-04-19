@@ -467,6 +467,93 @@ func (fs *folderState) releasePath(path string) {
 	fs.inFlightMu.Unlock()
 }
 
+// applyHintRenames walks the action set for sender-supplied rename hints
+// (R1 Phase 2). When an ActionDownload carries RemotePrevPath and a
+// matching ActionDelete is also present, the pair is a rename-with-edit
+// the sender detected via inode. Rename the local file at OldPath to
+// NewPath so the subsequent download finds an existing file and takes
+// the /delta fast path, moving only the changed blocks over the wire.
+//
+// planRenames handles the content-unchanged case (local hash matches
+// remote). This pass picks up the remaining content-changed cases.
+//
+// OldPath is added to renamedPaths so its tombstone action is skipped
+// (we apply it ourselves). NewPath is intentionally not added — the
+// download still runs and reaches H2 via /delta.
+func (fs *folderState) applyHintRenames(ctx context.Context, folderID, peerAddr string, actions []DiffEntry, renamedPaths map[string]bool) {
+	fs.indexMu.RLock()
+	deletesInSet := make(map[string]bool, len(actions))
+	for _, a := range actions {
+		if a.Action == ActionDelete {
+			deletesInSet[a.Path] = true
+		}
+	}
+	var hintCandidates []DiffEntry
+	for _, a := range actions {
+		if a.Action != ActionDownload || a.RemotePrevPath == "" {
+			continue
+		}
+		if renamedPaths[a.Path] || renamedPaths[a.RemotePrevPath] {
+			continue // already handled by planRenames
+		}
+		if !deletesInSet[a.RemotePrevPath] {
+			continue // stale hint — no matching delete
+		}
+		oldEntry, exists := fs.index.Files[a.RemotePrevPath]
+		if !exists || oldEntry.Deleted {
+			continue // local already has no file at OldPath
+		}
+		hintCandidates = append(hintCandidates, a)
+	}
+	fs.indexMu.RUnlock()
+
+	for _, a := range hintCandidates {
+		if ctx.Err() != nil {
+			return
+		}
+		oldPath := a.RemotePrevPath
+		if !fs.claimPath(oldPath) {
+			continue
+		}
+		if !fs.claimPath(a.Path) {
+			fs.releasePath(oldPath)
+			continue
+		}
+		// Drift safety: do not clobber a pre-existing NewPath on disk
+		// even if the index has no entry for it.
+		if _, err := fs.root.Stat(a.Path); err == nil {
+			fs.releasePath(oldPath)
+			fs.releasePath(a.Path)
+			continue
+		}
+		if err := fs.root.Rename(oldPath, a.Path); err != nil {
+			slog.Debug("hint rename fallback to download", "folder", folderID,
+				"old", oldPath, "new", a.Path, "error", err)
+			fs.releasePath(oldPath)
+			fs.releasePath(a.Path)
+			continue
+		}
+		fs.indexMu.Lock()
+		oldEntry := fs.index.Files[oldPath]
+		if !oldEntry.Deleted {
+			fs.index.Sequence++
+			oldEntry.Deleted = true
+			oldEntry.MtimeNS = time.Now().UnixNano()
+			oldEntry.Sequence = fs.index.Sequence
+			fs.index.setEntry(oldPath, oldEntry)
+		}
+		fs.retries.clearAll(oldPath)
+		fs.indexMu.Unlock()
+		fs.releasePath(oldPath)
+		fs.releasePath(a.Path)
+
+		renamedPaths[oldPath] = true
+		fs.metrics.FilesRenamed.Add(1)
+		slog.Info("renamed in place (hint)", "folder", folderID, "peer", peerAddr,
+			"old", oldPath, "new", a.Path)
+	}
+}
+
 const (
 	// G5: exponential backoff parameters for failed file transfers.
 	retryBaseDelay = 30 * time.Second // first retry after 30s
@@ -1765,6 +1852,8 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			}
 		}
 	}
+
+	fs.applyHintRenames(ctx, folderID, peerAddr, actions, renamedPaths)
 
 	// P19: bundle transfer for small download actions. Partition into
 	// small (≤4 MB) and the rest. Small files are batched into tar+gzip
