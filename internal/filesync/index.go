@@ -84,6 +84,12 @@ type FileEntry struct {
 	// R1 Phase 2.
 	PrevPath string `yaml:"prev_path,omitempty"`
 
+	// C6: per-file vector clock. Keys are device IDs, values are
+	// monotonic local write counters. A nil clock is a valid empty
+	// clock (dominated by every non-empty clock). See vclock.go and
+	// docs/filesync/DESIGN-v1.md §1.
+	Version VectorClock `yaml:"version,omitempty"`
+
 	// PH: incremental hashing state for append-only optimization.
 	// HashState is the serialized sha256 internal state after hashing
 	// HashedBytes bytes. PrefixCheck holds the last prefixCheckSize bytes

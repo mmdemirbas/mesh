@@ -1,9 +1,11 @@
 package filesync
 
 import (
+	"strings"
 	"testing"
 
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
+	"gopkg.in/yaml.v3"
 )
 
 func TestCompareClocks(t *testing.T) {
@@ -114,6 +116,73 @@ func TestVectorClockFromProto_DedupsAndIgnoresGarbage(t *testing.T) {
 	}
 	if _, ok := got[""]; ok {
 		t.Fatal("empty device_id was not dropped")
+	}
+}
+
+func TestFileEntry_VersionYAMLRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	entry := FileEntry{
+		Size:    100,
+		MtimeNS: 42,
+		SHA256:  testHash("hello"),
+		Version: VectorClock{"ABCDE-12345": 2, "FGHJK-67890": 1},
+	}
+
+	data, err := yaml.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var got FileEntry
+	if err := yaml.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Version["ABCDE-12345"] != 2 || got.Version["FGHJK-67890"] != 1 {
+		t.Fatalf("round-trip lost entries: got %v", got.Version)
+	}
+
+	// Empty clock must not land in YAML as a "version:" key.
+	bare := FileEntry{Size: 1, SHA256: testHash("x")}
+	data2, err := yaml.Marshal(bare)
+	if err != nil {
+		t.Fatalf("marshal bare: %v", err)
+	}
+	if strings.Contains(string(data2), "version:") {
+		t.Fatalf("bare FileEntry emitted version key: %s", data2)
+	}
+}
+
+func TestFileInfo_VersionWireRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	entry := FileEntry{
+		Size:    100,
+		MtimeNS: 42,
+		SHA256:  testHash("abc"),
+		Version: VectorClock{"ABCDE-12345": 3, "ZZZZZ-99999": 1},
+	}
+
+	// Simulate the wire path: FileEntry → FileInfo → back via protoToFileIndex.
+	idx := &pb.IndexExchange{
+		ProtocolVersion: protocolVersion,
+		FolderId:        "f",
+		Files: []*pb.FileInfo{{
+			Path:    "p.txt",
+			Size:    entry.Size,
+			MtimeNs: entry.MtimeNS,
+			Sha256:  entry.SHA256[:],
+			Version: entry.Version.toProto(),
+		}},
+	}
+
+	got := protoToFileIndex(idx)
+	back, ok := got.Files["p.txt"]
+	if !ok {
+		t.Fatal("entry missing after round-trip")
+	}
+	if compareClocks(back.Version, entry.Version) != ClockEqual {
+		t.Fatalf("wire round-trip lost clock: got %v, want %v", back.Version, entry.Version)
 	}
 }
 
