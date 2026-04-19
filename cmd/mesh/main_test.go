@@ -2291,6 +2291,57 @@ func TestRenderDashboardHeaderOnly_NoBodyRegion(t *testing.T) {
 	}
 }
 
+// TestDirectionSymbol pins the glyph set for filesync directions.
+// dry-run and disabled reuse their underlying flow arrows rather than
+// introducing new glyphs — the special mode lives in the status bracket.
+func TestDirectionSymbol(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"send-receive": "↕",
+		"send-only":    "↑",
+		"receive-only": "↓",
+		"dry-run":      "↕",
+		"disabled":     "·",
+		"bogus":        "?",
+	}
+	for dir, want := range cases {
+		if got := directionSymbol(dir); got != want {
+			t.Errorf("directionSymbol(%q) = %q, want %q", dir, got, want)
+		}
+	}
+}
+
+// TestRenderStatus_DryRunFolderShowsDryRunBracket pins that dry-run
+// folders surface the mode in the status bracket rather than through a
+// dedicated glyph. Live runtime states (scanning/idle) are deliberately
+// subsumed under [dry-run] since the scan side-effects are the same.
+func TestRenderStatus_DryRunFolderShowsDryRunBracket(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		Filesync: []config.FilesyncCfg{
+			{
+				Bind:  "0.0.0.0:7756",
+				Peers: map[string]config.PeerDef{"peer": {Addresses: []string{"10.0.0.2:7756"}}},
+				ResolvedFolders: []config.FolderCfg{
+					{ID: "notes", Path: "/home/user/notes", Peers: []string{"10.0.0.2:7756"}, PeerNames: []string{"peer"}, Direction: "dry-run"},
+				},
+			},
+		},
+	}
+	activeState := map[string]state.Component{
+		"filesync:0.0.0.0:7756":  {Type: "filesync", ID: "0.0.0.0:7756", Status: state.Listening},
+		"filesync-folder:notes":  {Type: "filesync-folder", ID: "notes", Status: state.Scanning},
+	}
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
+	plain := stripANSI(output)
+	if !strings.Contains(plain, "[dry-run]") {
+		t.Errorf("dry-run folder must render [dry-run] bracket; got:\n%s", plain)
+	}
+	if strings.Contains(plain, "◎") || strings.Contains(plain, "⏸") {
+		t.Errorf("legacy ◎/⏸ glyphs must not appear; got:\n%s", plain)
+	}
+}
+
 func TestRenderStatus_FilesyncSingleLinePerFolder(t *testing.T) {
 	t.Parallel()
 

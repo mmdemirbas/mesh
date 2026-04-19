@@ -480,18 +480,19 @@ func formatTLSStatus(s string) string {
 }
 
 // directionSymbol returns a compact symbol for a filesync direction mode.
+// dry-run and disabled reuse their underlying flow arrows — the special
+// mode is surfaced in the status bracket ([dry-run], [disabled]) so the
+// glyph column stays a clean up/down/both signal.
 func directionSymbol(dir string) string {
 	switch dir {
-	case "send-receive":
+	case "send-receive", "dry-run":
 		return "↕"
 	case "send-only":
 		return "↑"
 	case "receive-only":
 		return "↓"
-	case "dry-run":
-		return "◎"
 	case "disabled":
-		return "⏸"
+		return "·"
 	default:
 		return "?"
 	}

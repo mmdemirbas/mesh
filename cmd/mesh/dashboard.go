@@ -670,8 +670,11 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 					switch {
 					case folder.Direction == "disabled":
 						fSt = cGray + "[disabled]" + cReset
+					case folder.Direction == "dry-run":
+						fSt = cYellow + "[dry-run]" + cReset
 					case activeState == nil:
-						fSt = cGray + "[starting]" + cReset
+						// Config preview — no runtime state. See getComponentInfo.
+						fSt = ""
 					case comp.Status == state.Connected:
 						fSt = cGreen + "[idle]" + cReset
 					case comp.Status == state.Scanning:
