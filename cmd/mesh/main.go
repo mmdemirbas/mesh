@@ -834,58 +834,50 @@ func statusCmd(nodeNames []string, configPath string, watch bool) {
 		os.Exit(0)
 	}
 
-	// Watch mode — alternate screen buffer, overwrite in-place
+	// Watch mode — share the alt-screen / raw-mode / scroll / footer
+	// pipeline with runDashboard via runLiveView.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
-	winch, stopWinch := winchSignal()
-	defer stopWinch()
+	go func() {
+		select {
+		case <-sigCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	fmt.Print("\033[?1049h\033[?25l") // alternate screen, hide cursor
-	defer fmt.Print("\033[?25h\033[?1049l")
-
-	render := func() {
-		var lines []string
-		for _, n := range running {
-			if !checkPid(n.pid) {
-				fmt.Print("\033[?25h\033[?1049l") // restore screen
-				fmt.Printf("%s⨯ mesh node %q has stopped.%s\n", cRed, n.name, cReset)
-				os.Exit(0)
+	runLiveView(ctx, cancel, liveViewOpts{
+		renderHeader: func(buf *strings.Builder) int {
+			const eol = "\033[K\r\n"
+			now := time.Now().Format("15:04:05")
+			for _, n := range running {
+				fmt.Fprintf(buf, "%s✔ pid %d%s · %s · %s%s%s",
+					cGreen, n.pid, cReset, now, cCyan, n.name, cReset)
+				buf.WriteString(eol)
 			}
-			header := fmt.Sprintf("%s✔ pid %d%s · %s",
-				cGreen, n.pid, cReset, time.Now().Format("15:04:05"))
-			lines = append(lines, header, "")
-			if cfg, ok := allCfgs[n.name]; ok {
+			return len(running)
+		},
+		fetchBody: func() ([]string, bool, string) {
+			var lines []string
+			for _, n := range running {
+				if !checkPid(n.pid) {
+					return nil, true, fmt.Sprintf("%s⨯ mesh node %q has stopped.%s", cRed, n.name, cReset)
+				}
+				cfg, ok := allCfgs[n.name]
+				if !ok {
+					continue
+				}
 				comps, metrics := fetchStateFull(n.name)
 				statusOutput, _ := renderStatus(cfg, comps, metrics, n.name)
 				lines = append(lines, strings.Split(strings.TrimRight(statusOutput, "\n"), "\n")...)
 			}
-		}
-
-		var buf strings.Builder
-		buf.WriteString("\033[H") // cursor home
-		for _, line := range lines {
-			buf.WriteString(line)
-			buf.WriteString("\033[K\n")
-		}
-		buf.WriteString("\033[J") // clear to end of screen
-		fmt.Print(buf.String())
-	}
-
-	render()
-	for {
-		select {
-		case <-sigCh:
-			return
-		case <-ticker.C:
-			render()
-		case <-winch:
-			render()
-		}
-	}
+			return lines, false, ""
+		},
+	})
 }
 
 // certFingerprint loads an existing cert from certPath/keyPath and returns its

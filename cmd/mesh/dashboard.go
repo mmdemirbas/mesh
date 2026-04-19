@@ -190,6 +190,22 @@ func buildDashboardBody(cfgs map[string]*config.Config, nodeNames []string, full
 	return bodyLines, maxWidth
 }
 
+// liveViewOpts configures a live, scrollable terminal view. Both
+// runDashboard and `mesh status -w` run through runLiveView so raw-mode
+// setup, viewport scroll, keyboard handling, and footer rendering stay
+// identical across the two entry points.
+type liveViewOpts struct {
+	// renderHeader writes the header region into buf. Each logical
+	// header line must end with "\033[K\r\n". Returns the line count,
+	// which drives viewport sizing and page up/down math.
+	renderHeader func(buf *strings.Builder) int
+	// fetchBody returns the body lines to display on each tick.
+	// Returning exit=true terminates the view; exitMsg (if non-empty)
+	// is printed after the screen is restored so the user sees the
+	// reason after quit. Used by status -w when the watched node dies.
+	fetchBody func() (lines []string, exit bool, exitMsg string)
+}
+
 // runDashboard renders a live status screen using the terminal's alternate
 // screen buffer. Keyboard input (q/ctrl-c to quit, arrow keys and page
 // up/down to scroll) is handled via raw terminal mode. The dashboard
@@ -197,6 +213,34 @@ func buildDashboardBody(cfgs map[string]*config.Config, nodeNames []string, full
 // scrollback pollution. When the dashboard exits (via ctx cancellation or
 // user quit), cancel is called to unblock the main goroutine.
 func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[string]*config.Config, nodeNames []string, configPath string, logFilePath string, adminURL string) {
+	startTime := time.Now()
+	runLiveView(ctx, cancel, liveViewOpts{
+		renderHeader: func(buf *strings.Builder) int {
+			writeDashboardHeader(buf, nodeNames, configPath, logFilePath, adminURL, startTime)
+			h := 1 // header line
+			if configPath != "" {
+				h++
+			}
+			if logFilePath != "" {
+				h++
+			}
+			if adminURL != "" {
+				h++
+			}
+			return h
+		},
+		fetchBody: func() ([]string, bool, string) {
+			lines, _ := buildDashboardBody(cfgs, nodeNames, state.Global.SnapshotFull())
+			return lines, false, ""
+		},
+	})
+}
+
+// runLiveView drives the alternate-screen, raw-mode render loop shared by
+// runDashboard and statusCmd -w. When the view exits (ctx cancellation,
+// user quit, or fetchBody signaling exit), cancel is called so the caller
+// can unblock its main goroutine.
+func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOpts) {
 	fd := int(os.Stdin.Fd())
 	oldState, err := term.MakeRaw(fd)
 	if err != nil {
@@ -212,6 +256,7 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 	// ENABLE_VIRTUAL_TERMINAL_INPUT causes the console to send mouse events
 	// as VT sequences; if we restore cooked mode first, buffered mouse
 	// events get echoed as garbage text.
+	var exitMsg string
 	defer func() {
 		_, _ = os.Stdout.WriteString("\033[?1003l") // disable any-event mouse tracking
 		_, _ = os.Stdout.WriteString("\033[?1006l") // disable SGR mouse mode
@@ -219,24 +264,18 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 		_, _ = os.Stdout.WriteString("\033[?25h")   // show cursor
 		_, _ = os.Stdout.WriteString("\033[?1049l") // leave alt screen
 		_ = term.Restore(fd, oldState)              // restore cooked mode last
+		if exitMsg != "" {
+			fmt.Println(exitMsg)
+		}
 	}()
 
-	headerHeight := 2 // header line + blank line
-	if configPath != "" {
-		headerHeight++
-	}
-	if logFilePath != "" {
-		headerHeight++
-	}
-	if adminURL != "" {
-		headerHeight++
-	}
 	const footerHeight = 1 // reserved for keybindings/scroll indicator
+	const eol = "\033[K\r\n"
 
-	startTime := time.Now()
 	scrollOffset := 0
 	autoScroll := true // follow tail when at bottom
 	lastBody := ""
+	lastHeaderHeight := 0
 
 	termSize := func() (int, int) {
 		w, h, err := term.GetSize(int(os.Stdout.Fd()))
@@ -246,11 +285,28 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 		return w, h
 	}
 
-	render := func(force bool) {
-		_, height := termSize()
-		vpHeight := max(height-headerHeight-footerHeight, 1)
+	renderHeaderOnly := func() int {
+		var buf strings.Builder
+		buf.WriteString("\033[H")
+		h := opts.renderHeader(&buf)
+		_, _ = os.Stdout.WriteString(buf.String())
+		return h
+	}
 
-		lines, _ := buildDashboardBody(cfgs, nodeNames, state.Global.SnapshotFull())
+	render := func(force bool) bool {
+		_, height := termSize()
+
+		var headerBuf strings.Builder
+		headerHeight := opts.renderHeader(&headerBuf)
+		lastHeaderHeight = headerHeight
+		vpHeight := max(height-headerHeight-1-footerHeight, 1) // -1 for blank line after header
+
+		lines, exit, msg := opts.fetchBody()
+		if exit {
+			exitMsg = msg
+			cancel()
+			return false
+		}
 
 		totalLines := len(lines)
 		maxScroll := max(totalLines-vpHeight, 0)
@@ -286,14 +342,26 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 		if !force && body == lastBody {
 			// Body is unchanged — redraw only the header region so the clock
 			// and uptime advance without rewriting the rest of the screen.
-			// This is what keeps the dashboard flicker-free between ticks.
-			_, _ = os.Stdout.WriteString(renderDashboardHeaderOnly(nodeNames, configPath, logFilePath, adminURL, startTime))
-			return
+			// This is what keeps the view flicker-free between ticks.
+			renderHeaderOnly()
+			return true
 		}
 		lastBody = body
 
-		frame := renderDashboardFrame(lines, start, end, vpHeight, nodeNames, configPath, logFilePath, adminURL, startTime, totalLines, autoScroll)
-		_, _ = os.Stdout.WriteString(frame)
+		var buf strings.Builder
+		buf.WriteString("\033[H")
+		buf.Write([]byte(headerBuf.String()))
+		buf.WriteString(eol) // blank line after header
+		for i := start; i < end; i++ {
+			buf.WriteString(lines[i])
+			buf.WriteString(eol)
+		}
+		for i := end - start; i < vpHeight; i++ {
+			buf.WriteString(eol)
+		}
+		writeDashboardFooter(&buf, start, vpHeight, totalLines, autoScroll)
+		_, _ = os.Stdout.WriteString(buf.String())
+		return true
 	}
 
 	// Input reader goroutine. Cannot be cancelled (blocking Read on stdin),
@@ -325,16 +393,22 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
-	render(true)
+	if !render(true) {
+		return
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-winchCh:
-			render(true)
+			if !render(true) {
+				return
+			}
 		case <-ticker.C:
-			render(false)
+			if !render(false) {
+				return
+			}
 		case input, ok := <-inputCh:
 			if !ok {
 				cancel()
@@ -358,7 +432,7 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 						changed = true
 					case '5': // page up (\033[5~)
 						_, h := termSize()
-						scrollOffset -= h - headerHeight - footerHeight
+						scrollOffset -= h - lastHeaderHeight - 1 - footerHeight
 						autoScroll = false
 						changed = true
 						if i+3 < len(input) && input[i+3] == '~' {
@@ -366,7 +440,7 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 						}
 					case '6': // page down (\033[6~)
 						_, h := termSize()
-						scrollOffset += h - headerHeight - footerHeight
+						scrollOffset += h - lastHeaderHeight - 1 - footerHeight
 						changed = true
 						if i+3 < len(input) && input[i+3] == '~' {
 							i++
@@ -393,7 +467,9 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 				}
 			}
 			if changed {
-				render(true)
+				if !render(true) {
+					return
+				}
 			}
 		}
 	}
