@@ -74,6 +74,32 @@ func waitForPeerCount(n *Node, want int, deadline time.Duration) int {
 	return got
 }
 
+// sendAndWaitForPeerCount keeps sending `buf` at ~50ms intervals while
+// polling n.peers until want is reached or deadline expires. Needed
+// because the runUDPServer goroutine may not have bound its listener
+// by the time the first packet is sent — UDP drops them silently.
+func sendAndWaitForPeerCount(t *testing.T, n *Node, serverPort int, buf []byte, want int, deadline time.Duration) int {
+	t.Helper()
+	sender, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: serverPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+	end := time.Now().Add(deadline)
+	var got int
+	for time.Now().Before(end) {
+		_, _ = sender.Write(buf)
+		time.Sleep(20 * time.Millisecond)
+		n.peersMu.RLock()
+		got = len(n.peers)
+		n.peersMu.RUnlock()
+		if got >= want {
+			return got
+		}
+	}
+	return got
+}
+
 // pickFreeUDPPort binds briefly to grab a free port number. The caller
 // races to ListenUDP on this port; fine for test isolation.
 func pickFreeUDPPort(t *testing.T) int {
@@ -168,10 +194,8 @@ func TestRunUDPServer_AcceptsValidBeacon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sendBeaconRepeatedly(t, serverPort, buf, 10)
-
-	if got := waitForPeerCount(n, 1, 2*time.Second); got < 1 {
-		t.Fatal("beacon did not register a peer")
+	if got := sendAndWaitForPeerCount(t, n, serverPort, buf, 1, 3*time.Second); got < 1 {
+		t.Fatal("beacon did not register a peer within 3s")
 	}
 
 	var gotPeer string
