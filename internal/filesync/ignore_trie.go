@@ -16,52 +16,99 @@ import (
 //
 // Shape of the three groups:
 //
-//   - Base (pattern has neither "/" nor "**"): classified by kind.
-//   - kindLiteral → map[basename][]trieRec         O(1) lookup
-//   - kindStarSuffix / kindPrefixStar / kindGeneric → bucketed slices
-//   - Anchored (has "/", no "**"): classified by whether any segment
-//     contains a wildcard.
-//   - pure-literal path → map[fullpath][]trieRec   O(1) lookup
-//   - anything-else → segment trie with literal children + glob edges
-//   - Double-star (has "**"): bucketed slice with pre-split prefix/suffix.
+//   - Builtins: compiled into an inlined HasPrefix/Contains check on the
+//     basename. No loop, no switch, no per-entry record.
+//   - Base (pattern has neither "/" nor "**"): literals keyed by
+//     basename, *.ext patterns keyed by extension, remaining
+//     prefix-star / generic / non-extension-suffix patterns in slices
+//     iterated in reverse (last registration wins, break on match).
+//   - Anchored (has "/", no "**"): literal full-path → map lookup;
+//     glob-anchored → per-segment trie.
+//   - Double-star (has "**"): pre-classified into dsShape fast paths;
+//     generic falls back to doubleStarMatch.
 //
-// Each match collects the highest-ordinal hit within its group and then
-// picks the group with the highest priority (base < anchored < doublestar,
-// matching the linear iteration order). That record's negation bit drives
-// the final ignored decision.
+// Cross-group priority (base < anchored < doubleStar) is applied by the
+// sequential `bestNeg = ...` writes in shouldIgnore. Within each group,
+// map-based lookups are pre-collapsed to last-wins at construction and
+// slice-based groups are iterated backward so the first match is the
+// highest-ordinal one.
 type trieIgnoreMatcher struct {
-	builtinBase []trieRec
+	// Base group.
+	litBase     map[string]baseFlags // keyed by basename
+	extSuffix   map[string]baseFlags // keyed by extension (after last ".")
+	prefixStar  []baseTest           // fixed = prefix literal
+	genericBase []baseTest           // fixed = full pattern (path.Match fallback)
+	otherSuffix []baseTest           // non-extension kindStarSuffix (e.g. "*~")
 
-	litBase map[string][]trieRec
-	// extSuffix buckets kindStarSuffix patterns whose fixed part starts
-	// with "." — i.e. extensions. Keyed by the extension without the
-	// leading dot (e.g. "class" for "*.class"). Match-time extracts the
-	// path's extension once and does a single map lookup instead of
-	// iterating every star-suffix pattern. This is the dominant
-	// optimization against the linear matcher.
-	extSuffix     map[string][]trieRec
-	otherSuffix   []trieRec // non-extension kindStarSuffix (rare: *~ etc.)
-	prefixStar    []trieRec
-	genericBase   []trieRec
-	hasSuffixBuck bool // any extSuffix / otherSuffix entry exists
+	// Anchored group.
+	litAnchored  map[string]baseFlags // keyed by full relPath
+	anchoredRoot *segNode             // nil if no glob-anchored patterns
 
-	litAnchored  map[string][]trieRec
-	anchoredRoot *segNode // nil if no glob-anchored patterns
-
+	// Double-star group. Kept as trieRec because the match-time dispatch
+	// needs several pre-classified fields.
 	doubleStar []trieRec
 
-	// Skip flags so shouldIgnore avoids touching empty groups. Saves
-	// a map lookup, a slice range, and their associated branch costs on
-	// every call, which adds up across 310k files per scan.
+	// Skip flags: shouldIgnore reads these before touching the group so
+	// empty groups cost only a predictable branch. Adds up across 310k
+	// files per scan.
 	hasLitBase      bool
+	hasSuffixBuck   bool
+	hasPrefixStar   bool
+	hasGeneric      bool
+	hasOtherSuffix  bool
 	hasLitAnchored  bool
-	hasDoubleStar   bool
 	hasAnchoredGlob bool
+	hasDoubleStar   bool
+
+	// First-char bitmaps for the two base-group maps. At construction
+	// each set bit `1 << (firstByte & 63)` indicates that at least one
+	// registered key has that first-byte class. A ~2ns bitmap test
+	// rejects the majority of misses so we don't pay ~8ns per map lookup
+	// on every file. Collisions on `&63` are tolerated — a false positive
+	// falls back to the map lookup, which is the same cost we'd pay
+	// without the filter.
+	litBaseFirstByte   uint64
+	extSuffixFirstByte uint64
+	// prefixStarFirstByte covers the prefix-star slice: each pattern
+	// requires base to start with its `fixed` string, so base[0] must
+	// match at least one registered `fixed[0]`.
+	prefixStarFirstByte uint64
+	// otherSuffixLastByte covers kindStarSuffix patterns that don't live
+	// in the extSuffix map ("*~", "*bak"). base must END with the fixed
+	// suffix, so base's last byte must match at least one registered
+	// fixed-suffix last byte.
+	otherSuffixLastByte uint64
+	// litAnchoredFirstByte covers the same purpose for the litAnchored
+	// map keyed by full relPath.
+	litAnchoredFirstByte uint64
 }
 
-// trieRec holds the per-pattern data the matcher needs at decision time.
-// ordinal is the pattern's registration index within its group; higher
-// wins when multiple patterns in the same group match a path.
+// baseFlags is the slim payload stored in the litBase / extSuffix /
+// litAnchored maps. The key carries the fixed portion; this struct
+// carries only the bits the match step consults. 8 bytes with padding.
+type baseFlags struct {
+	ordinal  uint32
+	negation bool
+	dirOnly  bool
+	// present is written by the constructor's last-wins merge so the
+	// zero value is distinguishable from an explicit entry. Without it,
+	// map-not-present and map-present-with-defaults would be ambiguous
+	// in future refactors; the field costs nothing in practice.
+	present bool
+}
+
+// baseTest carries the fixed portion inline — used by slice-based groups
+// (prefixStar / otherSuffix / genericBase). 32 bytes with padding.
+type baseTest struct {
+	fixed    string // prefix / suffix / full pattern
+	ordinal  uint32
+	negation bool
+	dirOnly  bool
+}
+
+// trieRec is retained for the double-star group and for the anchored
+// segment trie. Base and anchored-literal groups use the slim baseFlags
+// and baseTest structs instead.
 type trieRec struct {
 	pattern  string
 	negation bool
@@ -70,9 +117,9 @@ type trieRec struct {
 	fixed    string
 	dsPrefix string
 	dsSuffix string
-	ordinal  int
+	ordinal  uint32
 	// segGlobs holds per-segment globs for an anchored pattern that lives
-	// in anchoredRoot. Empty for litAnchored / base / doublestar records.
+	// in anchoredRoot. Empty for doublestar records.
 	segGlobs []segGlob
 	// dsShape classifies the double-star pattern into a fast-path shape.
 	// Populated only for doubleStar records.
@@ -117,26 +164,29 @@ type segEdge struct {
 	child *segNode
 }
 
+// builtinIgnores is a compile-time constant: the two patterns are baked
+// directly into shouldIgnore as an inlined HasPrefix / Contains check.
+// The strings below mirror the package-level builtinIgnores list in
+// ignore.go; keep them in sync. A guard test in ignore_behavior_test.go
+// verifies the hardcoded forms still cover those patterns.
+const (
+	builtinTmpPrefix     = ".mesh-tmp-"        // from ".mesh-tmp-*"
+	builtinDeltaContains = ".mesh-delta-tmp-" // from "*.mesh-delta-tmp-*"
+)
+
 // newTrieIgnoreMatcher builds the parallel matcher. Patterns are parsed
 // identically to newIgnoreMatcher so group membership is identical; only
 // the per-group storage differs.
 func newTrieIgnoreMatcher(configPatterns []string) *trieIgnoreMatcher {
 	m := &trieIgnoreMatcher{
-		litBase:     map[string][]trieRec{},
-		extSuffix:   map[string][]trieRec{},
-		litAnchored: map[string][]trieRec{},
-	}
-
-	for _, raw := range builtinIgnores {
-		kind, fixed := classifyGlob(raw)
-		m.builtinBase = append(m.builtinBase, trieRec{
-			pattern: raw, kind: kind, fixed: fixed,
-		})
+		litBase:     map[string]baseFlags{},
+		extSuffix:   map[string]baseFlags{},
+		litAnchored: map[string]baseFlags{},
 	}
 
 	// Per-group ordinals: incremented within each group so we can pick
 	// the highest-ordinal match per group at decision time.
-	var baseOrd, anchoredOrd, doubleOrd int
+	var baseOrd, anchoredOrd, doubleOrd uint32
 
 	for _, raw := range configPatterns {
 		p, ok := parseLine(raw)
@@ -159,17 +209,27 @@ func newTrieIgnoreMatcher(configPatterns []string) *trieIgnoreMatcher {
 			m.doubleStar = append(m.doubleStar, r)
 			doubleOrd++
 		case strings.Contains(p.pattern, "/"):
-			r := trieRec{
-				pattern:  p.pattern,
+			kind, _ := classifyGlob(p.pattern)
+			flags := baseFlags{
+				ordinal:  anchoredOrd,
 				negation: p.negation,
 				dirOnly:  p.dirOnly,
-				ordinal:  anchoredOrd,
+				present:  true,
 			}
-			r.kind, r.fixed = classifyGlob(p.pattern)
-			if r.kind == kindLiteral {
-				m.litAnchored[p.pattern] = append(m.litAnchored[p.pattern], r)
+			if kind == kindLiteral {
+				mergeBaseFlags(m.litAnchored, p.pattern, flags)
 				m.hasLitAnchored = true
+				if len(p.pattern) > 0 {
+					m.litAnchoredFirstByte |= 1 << (p.pattern[0] & 63)
+				}
 			} else {
+				r := trieRec{
+					pattern:  p.pattern,
+					negation: p.negation,
+					dirOnly:  p.dirOnly,
+					ordinal:  anchoredOrd,
+					kind:     kind,
+				}
 				r.segGlobs = classifySegments(p.pattern)
 				if m.anchoredRoot == nil {
 					m.anchoredRoot = &segNode{literal: map[string]*segNode{}}
@@ -179,44 +239,81 @@ func newTrieIgnoreMatcher(configPatterns []string) *trieIgnoreMatcher {
 			}
 			anchoredOrd++
 		default:
-			r := trieRec{
-				pattern:  p.pattern,
+			kind, fixed := classifyGlob(p.pattern)
+			flags := baseFlags{
+				ordinal:  baseOrd,
 				negation: p.negation,
 				dirOnly:  p.dirOnly,
-				ordinal:  baseOrd,
+				present:  true,
 			}
-			r.kind, r.fixed = classifyGlob(p.pattern)
-			switch r.kind {
+			switch kind {
 			case kindLiteral:
-				m.litBase[p.pattern] = append(m.litBase[p.pattern], r)
+				mergeBaseFlags(m.litBase, p.pattern, flags)
 				m.hasLitBase = true
+				if len(p.pattern) > 0 {
+					m.litBaseFirstByte |= 1 << (p.pattern[0] & 63)
+				}
 			case kindStarSuffix:
 				// "*.ext" patterns (fixed=".ext") are bucketed by the
 				// extension so a basename ending in ".ext" can find
 				// its candidates via one map lookup. Non-extension
-				// suffixes (e.g. "*~" → fixed="~") stay in otherSuffix
-				// and still iterate linearly, but they are rare.
-				if len(r.fixed) >= 2 && r.fixed[0] == '.' && !strings.ContainsAny(r.fixed[1:], ".") {
-					ext := r.fixed[1:]
-					m.extSuffix[ext] = append(m.extSuffix[ext], r)
+				// suffixes (e.g. "*~" → fixed="~") stay in otherSuffix.
+				if len(fixed) >= 2 && fixed[0] == '.' && !strings.ContainsAny(fixed[1:], ".") {
+					ext := fixed[1:]
+					mergeBaseFlags(m.extSuffix, ext, flags)
+					m.hasSuffixBuck = true
+					if len(ext) > 0 {
+						m.extSuffixFirstByte |= 1 << (ext[0] & 63)
+					}
 				} else {
-					m.otherSuffix = append(m.otherSuffix, r)
+					m.otherSuffix = append(m.otherSuffix, baseTest{
+						fixed:    fixed,
+						ordinal:  baseOrd,
+						negation: p.negation,
+						dirOnly:  p.dirOnly,
+					})
+					m.hasOtherSuffix = true
+					if n := len(fixed); n > 0 {
+						m.otherSuffixLastByte |= 1 << (fixed[n-1] & 63)
+					}
 				}
-				m.hasSuffixBuck = true
 			case kindPrefixStar:
-				m.prefixStar = append(m.prefixStar, r)
+				m.prefixStar = append(m.prefixStar, baseTest{
+					fixed:    fixed,
+					ordinal:  baseOrd,
+					negation: p.negation,
+					dirOnly:  p.dirOnly,
+				})
+				m.hasPrefixStar = true
+				if len(fixed) > 0 {
+					m.prefixStarFirstByte |= 1 << (fixed[0] & 63)
+				}
 			default:
-				m.genericBase = append(m.genericBase, r)
+				m.genericBase = append(m.genericBase, baseTest{
+					fixed:    p.pattern,
+					ordinal:  baseOrd,
+					negation: p.negation,
+					dirOnly:  p.dirOnly,
+				})
+				m.hasGeneric = true
 			}
 			baseOrd++
 		}
 	}
 
-	if len(m.doubleStar) > 0 {
-		m.hasDoubleStar = true
-	}
-
+	m.hasDoubleStar = len(m.doubleStar) > 0
 	return m
+}
+
+// mergeBaseFlags applies last-wins for map buckets: if a pattern with
+// key `k` already exists, the higher ordinal (always the new one, since
+// we insert in order) replaces it. This collapses `map[string][]rec`
+// into `map[string]rec`, saving a slice header + heap allocation per
+// bucket and a per-match range loop.
+func mergeBaseFlags(dst map[string]baseFlags, k string, v baseFlags) {
+	// Insertion is strictly in ordinal order so we can unconditionally
+	// overwrite: any existing entry has a lower ordinal.
+	dst[k] = v
 }
 
 // classifyDoubleStar detects common double-star shapes so the matcher
@@ -310,161 +407,186 @@ func insertSegTrie(root *segNode, r trieRec) {
 	}
 }
 
-// shouldIgnore mirrors ignoreMatcher.shouldIgnore. Builtins fire first with
-// a true short-circuit. Otherwise we compute the best match per group and
-// let the group-priority order (doubleStar > anchored > base) pick the
-// decision's negation bit.
+// shouldIgnore mirrors ignoreMatcher.shouldIgnore. Builtins fire first
+// with a true short-circuit via inlined HasPrefix/Contains checks; no
+// record loop is executed. The three configurable groups are evaluated
+// in base → anchored → doubleStar order with last-match-wins semantics
+// within each group.
 func (m *trieIgnoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
-	base := pathBaseFast(relPath)
-
-	for i := range m.builtinBase {
-		if fastMatchBaseRec(&m.builtinBase[i], base) {
-			return true
-		}
+	// One slash scan: base extraction, anchored-group guard, and
+	// secondToLastSegment all reuse lastSlash. Profiling showed the
+	// split scans were the biggest remaining waste on realistic paths.
+	lastSlash := strings.LastIndexByte(relPath, '/')
+	var base string
+	if lastSlash >= 0 {
+		base = relPath[lastSlash+1:]
+	} else {
+		base = relPath
 	}
 
+	// Built-ins are non-negatable and compile-time known, so we skip the
+	// generic pattern machinery entirely. Kept in sync with
+	// builtinIgnores in ignore.go; see the guard test.
+	if strings.HasPrefix(base, builtinTmpPrefix) ||
+		strings.Contains(base, builtinDeltaContains) {
+		return true
+	}
+
+	bestOrd := int32(-1)
 	bestNeg := false
-	hit := false
 
 	// --- Base group --------------------------------------------------------
-	baseBestOrd := -1
-	baseBestNeg := false
-	if m.hasLitBase {
-		if recs, ok := m.litBase[base]; ok {
-			for i := range recs {
-				r := &recs[i]
-				if r.dirOnly && !isDir {
-					continue
-				}
-				if r.ordinal > baseBestOrd {
-					baseBestOrd = r.ordinal
-					baseBestNeg = r.negation
-				}
+	// Map lookups are flattened to single baseFlags values (last-wins at
+	// construction), so the hot path is a single map read plus two
+	// branches. Slice-based sub-groups iterate backward and break on
+	// first match, so the highest-ordinal hit is found with minimum
+	// work.
+	baseBest := int32(-1)
+	baseNeg := false
+	// First-byte bitmap pre-filter: if no registered key shares base[0]'s
+	// 64-way class, the map lookup cannot hit. ~2ns test, ~8ns saved per
+	// skip. base is non-empty because lastSlash guarantees a remaining
+	// tail and relPath was non-empty.
+	fb := uint64(1) << (base[0] & 63)
+	if m.hasLitBase && m.litBaseFirstByte&fb != 0 {
+		if f, ok := m.litBase[base]; ok && (!f.dirOnly || isDir) {
+			if int32(f.ordinal) > baseBest {
+				baseBest = int32(f.ordinal)
+				baseNeg = f.negation
 			}
 		}
 	}
 	if m.hasSuffixBuck {
-		// Extension-bucketed lookup: extract the portion after the last
-		// dot once, then visit only the matching bucket. For basenames
-		// without a dot, the bucketed lookup is skipped entirely.
-		if dot := lastDot(base); dot >= 0 {
+		if dot := strings.LastIndexByte(base, '.'); dot >= 0 && dot < len(base)-1 {
 			ext := base[dot+1:]
-			if recs, ok := m.extSuffix[ext]; ok {
-				for i := range recs {
-					r := &recs[i]
-					if r.dirOnly && !isDir {
-						continue
-					}
-					if r.ordinal > baseBestOrd {
-						baseBestOrd = r.ordinal
-						baseBestNeg = r.negation
+			if m.extSuffixFirstByte&(uint64(1)<<(ext[0]&63)) != 0 {
+				if f, ok := m.extSuffix[ext]; ok && (!f.dirOnly || isDir) {
+					if int32(f.ordinal) > baseBest {
+						baseBest = int32(f.ordinal)
+						baseNeg = f.negation
 					}
 				}
 			}
 		}
-		// otherSuffix (rare: "*~" and similar) is still linear but
-		// typically empty, so the range loop is a no-op branch.
-		for i := range m.otherSuffix {
-			r := &m.otherSuffix[i]
-			if r.dirOnly && !isDir {
+	}
+	if m.hasOtherSuffix {
+		// base's last byte must match at least one registered suffix's
+		// last byte, otherwise no HasSuffix can succeed. Cheap reject.
+		if m.otherSuffixLastByte&(uint64(1)<<(base[len(base)-1]&63)) != 0 {
+			for i := len(m.otherSuffix) - 1; i >= 0; i-- {
+				t := &m.otherSuffix[i]
+				if t.dirOnly && !isDir {
+					continue
+				}
+				if int32(t.ordinal) <= baseBest {
+					// Remaining entries have lower ordinals; stop.
+					break
+				}
+				if strings.HasSuffix(base, t.fixed) {
+					baseBest = int32(t.ordinal)
+					baseNeg = t.negation
+					break
+				}
+			}
+		}
+	}
+	if m.hasPrefixStar && m.prefixStarFirstByte&fb != 0 {
+		for i := len(m.prefixStar) - 1; i >= 0; i-- {
+			t := &m.prefixStar[i]
+			if t.dirOnly && !isDir {
 				continue
 			}
-			if strings.HasSuffix(base, r.fixed) {
-				if r.ordinal > baseBestOrd {
-					baseBestOrd = r.ordinal
-					baseBestNeg = r.negation
-				}
+			if int32(t.ordinal) <= baseBest {
+				break
+			}
+			if strings.HasPrefix(base, t.fixed) {
+				baseBest = int32(t.ordinal)
+				baseNeg = t.negation
+				break
 			}
 		}
 	}
-	for i := range m.prefixStar {
-		r := &m.prefixStar[i]
-		if r.dirOnly && !isDir {
-			continue
-		}
-		if strings.HasPrefix(base, r.fixed) {
-			if r.ordinal > baseBestOrd {
-				baseBestOrd = r.ordinal
-				baseBestNeg = r.negation
+	if m.hasGeneric {
+		for i := len(m.genericBase) - 1; i >= 0; i-- {
+			t := &m.genericBase[i]
+			if t.dirOnly && !isDir {
+				continue
+			}
+			if int32(t.ordinal) <= baseBest {
+				break
+			}
+			if matched, _ := path.Match(t.fixed, base); matched {
+				baseBest = int32(t.ordinal)
+				baseNeg = t.negation
+				break
 			}
 		}
 	}
-	for i := range m.genericBase {
-		r := &m.genericBase[i]
-		if r.dirOnly && !isDir {
-			continue
-		}
-		matched, _ := path.Match(r.pattern, base)
-		if matched {
-			if r.ordinal > baseBestOrd {
-				baseBestOrd = r.ordinal
-				baseBestNeg = r.negation
-			}
-		}
-	}
-	if baseBestOrd >= 0 {
-		hit = true
-		bestNeg = baseBestNeg
+	if baseBest >= 0 {
+		bestOrd = baseBest
+		bestNeg = baseNeg
 	}
 
 	// --- Anchored group ----------------------------------------------------
-	anchBestOrd := -1
-	anchBestNeg := false
-	if m.hasLitAnchored {
-		if recs, ok := m.litAnchored[relPath]; ok {
-			for i := range recs {
-				r := &recs[i]
-				if r.dirOnly && !isDir {
-					continue
-				}
-				if r.ordinal > anchBestOrd {
-					anchBestOrd = r.ordinal
-					anchBestNeg = r.negation
+	// Anchored patterns always contain "/"; on paths without one, skip
+	// both sub-groups outright. Reuses lastSlash from the top of the
+	// function to avoid a second scan.
+	if (m.hasLitAnchored || m.hasAnchoredGlob) && lastSlash >= 0 {
+		anchBest := int32(-1)
+		anchNeg := false
+		if m.hasLitAnchored && m.litAnchoredFirstByte&(uint64(1)<<(relPath[0]&63)) != 0 {
+			if f, ok := m.litAnchored[relPath]; ok && (!f.dirOnly || isDir) {
+				if int32(f.ordinal) > anchBest {
+					anchBest = int32(f.ordinal)
+					anchNeg = f.negation
 				}
 			}
 		}
-	}
-	if m.hasAnchoredGlob {
-		segs := splitSegments(relPath)
-		walkAnchoredTrie(m.anchoredRoot, segs, 0, isDir, &anchBestOrd, &anchBestNeg)
-	}
-	if anchBestOrd >= 0 {
-		hit = true
-		bestNeg = anchBestNeg
+		if m.hasAnchoredGlob {
+			segs := splitSegments(relPath)
+			walkAnchoredTrie(m.anchoredRoot, segs, 0, isDir, &anchBest, &anchNeg)
+		}
+		if anchBest >= 0 {
+			bestOrd = anchBest
+			bestNeg = anchNeg
+		}
 	}
 
 	// --- Double-star group -------------------------------------------------
 	if m.hasDoubleStar {
-		dsBestOrd := -1
-		dsBestNeg := false
-		// secondToLast is computed at most once per call, only if any
-		// dsShapeMidLiteral record needs it.
+		dsBest := int32(-1)
+		dsNeg := false
 		secondToLastSeg := ""
 		secondToLastKnown := false
-		for i := range m.doubleStar {
+		for i := len(m.doubleStar) - 1; i >= 0; i-- {
 			r := &m.doubleStar[i]
 			if r.dirOnly && !isDir {
 				continue
 			}
+			if int32(r.ordinal) <= dsBest {
+				break
+			}
 			var matched bool
 			switch r.dsShape {
 			case dsShapePrefixOnly:
-				// "prefix/**" matches filePath starting with "prefix/" or
-				// equalling "prefix". Empty prefix matches anything.
-				if r.dsPrefix == "" {
-					matched = true
-				} else {
-					matched = relPath == r.dsPrefix ||
-						(len(relPath) > len(r.dsPrefix) &&
-							relPath[len(r.dsPrefix)] == '/' &&
-							relPath[:len(r.dsPrefix)] == r.dsPrefix)
-				}
+				matched = r.dsPrefix == "" ||
+					relPath == r.dsPrefix ||
+					(len(relPath) > len(r.dsPrefix) &&
+						relPath[len(r.dsPrefix)] == '/' &&
+						relPath[:len(r.dsPrefix)] == r.dsPrefix)
 			case dsShapeMidLiteral:
 				if !secondToLastKnown {
-					secondToLastSeg = secondToLastSegment(relPath)
+					// Inline lastSlash reuse: no trailing segment → empty;
+					// otherwise scan only the prefix [:lastSlash] once.
+					if lastSlash <= 0 {
+						secondToLastSeg = ""
+					} else {
+						prev := strings.LastIndexByte(relPath[:lastSlash], '/')
+						secondToLastSeg = relPath[prev+1 : lastSlash]
+					}
 					secondToLastKnown = true
 				}
-				matched = secondToLastSeg != "" && secondToLastSeg == r.dsBasenameF
+				matched = secondToLastSeg == r.dsBasenameF && secondToLastSeg != ""
 			case dsShapeBasename:
 				if r.dsPrefix != "" {
 					ok := relPath == r.dsPrefix ||
@@ -472,7 +594,7 @@ func (m *trieIgnoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
 							relPath[len(r.dsPrefix)] == '/' &&
 							relPath[:len(r.dsPrefix)] == r.dsPrefix)
 					if !ok {
-						break
+						continue
 					}
 				}
 				matched = matchBasenameKind(r.dsBasenameK, r.dsBasenameF, r.dsSuffix, base)
@@ -480,34 +602,21 @@ func (m *trieIgnoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
 				matched = doubleStarMatch(r.dsPrefix, r.dsSuffix, relPath)
 			}
 			if matched {
-				if r.ordinal > dsBestOrd {
-					dsBestOrd = r.ordinal
-					dsBestNeg = r.negation
-				}
+				dsBest = int32(r.ordinal)
+				dsNeg = r.negation
+				break
 			}
 		}
-		if dsBestOrd >= 0 {
-			hit = true
-			bestNeg = dsBestNeg
+		if dsBest >= 0 {
+			bestOrd = dsBest
+			bestNeg = dsNeg
 		}
 	}
 
-	if !hit {
+	if bestOrd < 0 {
 		return false
 	}
 	return !bestNeg
-}
-
-// secondToLastSegment returns the segment just before the last "/" in p,
-// or "" when p has fewer than two segments. Zero-allocation; scans p
-// at most twice from the end.
-func secondToLastSegment(p string) string {
-	last := strings.LastIndexByte(p, '/')
-	if last <= 0 {
-		return ""
-	}
-	prev := strings.LastIndexByte(p[:last], '/')
-	return p[prev+1 : last]
 }
 
 // matchBasenameKind dispatches a pre-classified basename pattern against
@@ -530,23 +639,6 @@ func matchBasenameKind(kind patternKind, fixed, raw, base string) bool {
 	}
 }
 
-// pathBaseFast is a lighter alternative to path.Base for the subset of
-// inputs this matcher sees: non-empty relative paths with forward
-// slashes, no cleanup needed. path.Base does extra work for trailing
-// slashes and empty inputs that cannot occur here.
-func pathBaseFast(p string) string {
-	if i := strings.LastIndexByte(p, '/'); i >= 0 {
-		return p[i+1:]
-	}
-	return p
-}
-
-// lastDot returns the index of the last "." in base, or -1 if none.
-// Inlined so the hot path avoids a function call on every match.
-func lastDot(base string) int {
-	return strings.LastIndexByte(base, '.')
-}
-
 // splitSegments returns the path's /-separated segments. Empty relPath
 // yields an empty slice so the trie walk terminates immediately.
 func splitSegments(relPath string) []string {
@@ -559,15 +651,15 @@ func splitSegments(relPath string) []string {
 // walkAnchoredTrie descends the trie one segment at a time, recording
 // the best terminal match. Literal children are taken first; glob edges
 // are checked via per-segment path.Match.
-func walkAnchoredTrie(node *segNode, segs []string, depth int, isDir bool, bestOrd *int, bestNeg *bool) {
+func walkAnchoredTrie(node *segNode, segs []string, depth int, isDir bool, bestOrd *int32, bestNeg *bool) {
 	if depth == len(segs) {
 		for i := range node.terminals {
 			r := &node.terminals[i]
 			if r.dirOnly && !isDir {
 				continue
 			}
-			if r.ordinal > *bestOrd {
-				*bestOrd = r.ordinal
+			if int32(r.ordinal) > *bestOrd {
+				*bestOrd = int32(r.ordinal)
 				*bestNeg = r.negation
 			}
 		}
@@ -599,24 +691,6 @@ func matchSegment(sg *segGlob, s string) bool {
 		return strings.Contains(s, sg.fixed)
 	default:
 		matched, _ := path.Match(sg.raw, s)
-		return matched
-	}
-}
-
-// fastMatchBaseRec is the trieRec flavor of fastMatchBase; identical
-// fast-paths, different record type.
-func fastMatchBaseRec(r *trieRec, base string) bool {
-	switch r.kind {
-	case kindLiteral:
-		return base == r.fixed
-	case kindStarSuffix:
-		return strings.HasSuffix(base, r.fixed)
-	case kindPrefixStar:
-		return strings.HasPrefix(base, r.fixed)
-	case kindContains:
-		return strings.Contains(base, r.fixed)
-	default:
-		matched, _ := path.Match(r.pattern, base)
 		return matched
 	}
 }
