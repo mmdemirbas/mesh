@@ -822,6 +822,38 @@ Each entry follows the same structure:
   move over the wire. Gated behind a capability flag in the index
   exchange so peers without rename support fall back to the current
   full-transfer behaviour.
+- **Phase 2 progress (2026-04-19).**
+  - **Step 1 ✅** — `FileEntry` carries `Inode uint64`; scan
+    populates from `stat.Ino` on Unix; Windows stays at 0 for now
+    (FindFirstFile-backed `FileInfo` lacks the NT file index; a
+    later step piggy-backs on the hash-phase `CreateFile`). Fast
+    path backfills the inode for indexes migrated from pre-Inode
+    versions. See `inode_unix.go`, `inode_windows.go`, and
+    `TestInodePopulatedDuringScan` / `TestInodeStableAcrossRescan`
+    / `TestInodeBackfillOnFastPath`.
+  - **Step 2 ✅** — scan pairs tombstone candidates with newly-
+    hashed entries that share the same inode and tags the new
+    entry with `PrevPath` (transient single-use hint, cleared on
+    the next re-seen scan). `ScanStats.RenamesDetected` added.
+    No wire change yet; still emits the delete+download pair for
+    capability-less peers. See the rename-pairing block in
+    `scanWithStats`, `TestScanDetectsRenameSameContent`,
+    `TestScanDetectsRenameWithEdit`,
+    `TestScanRenameHintClearedOnRescan`,
+    `TestScanRenameIgnoresUnchangedPaths`.
+  - **Step 3 ⏳** — add `prev_path` to `FileInfo` proto and thread
+    through `buildIndexExchange` + diff. Proto3 unknown-field
+    tolerance means a capability flag is not strictly required for
+    forward/backward safety; tests will confirm before removing
+    the flag from the original plan.
+  - **Step 4 ⏳** — receiver: pair matching delete+download
+    (same hint), perform local rename, then apply `/delta`
+    against old-path content. Content-hash sanity check guards
+    against inode-reuse false positives.
+  - **Step 5 ⏳** — Windows inode population via hash-phase handle
+    (`CreateFile` + `GetFileInformationByHandle`). Keeps the
+    syscall-per-file cost consistent with the existing hash read.
+  - **Step 6 ⏳** — e2e scenario: cross-peer rename with edit.
 
 <a id="r2"></a>
 ### R2 · Formal folder-level state machine
