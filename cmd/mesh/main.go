@@ -767,7 +767,6 @@ func statusCmd(nodeNames []string, configPath string, watch bool) {
 				fmt.Printf("%s⚠ Node %q not found in config%s\n", cYellow, n.name, cReset)
 				continue
 			}
-			fmt.Printf("%s✔ mesh node %q is running (pid %d).%s\n\n", cGreen, n.name, n.pid, cReset)
 			s, _ := renderStatus(cfg, fetchState(n.name), nil, n.name)
 			fmt.Print(s)
 		}
@@ -795,8 +794,8 @@ func statusCmd(nodeNames []string, configPath string, watch bool) {
 				fmt.Printf("%s⨯ mesh node %q has stopped.%s\n", cRed, n.name, cReset)
 				os.Exit(0)
 			}
-			header := fmt.Sprintf("%s✔ mesh node %q is running (pid %d)%s | %s",
-				cGreen, n.name, n.pid, cReset, time.Now().Format("15:04:05"))
+			header := fmt.Sprintf("%s✔ pid %d%s · %s",
+				cGreen, n.pid, cReset, time.Now().Format("15:04:05"))
 			lines = append(lines, header, "")
 			if cfg, ok := allCfgs[n.name]; ok {
 				statusOutput, _ := renderStatus(cfg, fetchState(n.name), nil, n.name)
