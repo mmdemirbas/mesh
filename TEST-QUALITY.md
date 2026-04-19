@@ -166,16 +166,16 @@ Rule 1 (boundary gaps) and Rule 2 (reproducer gaps), not the number.
 Cursory coverage numbers only — no full rubric pass yet. Left for
 future audit cycles.
 
-- **tunnel (37.7%)**: largest known gap. Quick-win helpers closed:
-  auth-failure snapshot and eviction (`b4b6934`, 100%) and the unix
-  `dialerControlIPQoS` wrapper (`517489b`, 88.9%). Every core SSH
-  runtime path is still at 0% — `Run`, `NewSSHClient`, `runMultiplex`,
-  `buildSSHConfig`, `runForwardSet`, `runRemoteForward`,
-  `runLocalForward`, `handleTCPIPForward`, `handleDirectTCPIP`,
-  `connectSSH`, `runSession`. Unit coverage of these paths requires an
-  in-process SSH server over `net.Pipe()` or real TCP, plus
-  auth-material setup. This is a multi-day effort — formerly PLAN.md
-  D3.
+- **tunnel (71.6%)**: in-process SSH runtime harness (`runtime_test.go`,
+  `df21edf`) using mesh's own `NewSSHServer` as the peer now pins
+  `Run`/`NewSSHClient`/`runMultiplex`/`runMultiplexTarget`/`buildSSHConfig`/
+  `runLocalForward` at 100% and `connectSSH`/`runSession`/
+  `handleTCPIPForward`/`runRemoteForward` in the 73–86% range. Proxy
+  dispatch covered in `02be144` (runLocalProxy 87.1%, runRemoteProxy 75%).
+  `probeTarget` cache-fallback and `runForwardSetForTarget`
+  ExitOnForwardFailure closed in `4e38e37`. The harness surfaced and fixed
+  a forwarded-tcpip protocol bug: `handleTCPIPForward` echoed the client's
+  requested BindPort (could be 0) instead of the actual bound port.
 - **gateway (84.1%)**: 242 tests, strongest unit suite in the repo.
   Likely in good shape; a focused audit can confirm.
 - **netutil (98.1%)**: audit closed in `a41ddaf`. `ListenReusable`
