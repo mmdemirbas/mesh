@@ -6,7 +6,8 @@ ignore2:
       scan_interval: "2s"
       max_concurrent: 2
       peers:
-        ignore1: ["IGNORE1_IP:7756"]
+        ignore1:
+          addresses: ["IGNORE1_IP:7756"]
       defaults:
         peers: ["ignore1"]
         direction: send-receive

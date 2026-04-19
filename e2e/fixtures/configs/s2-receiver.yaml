@@ -6,7 +6,8 @@ receiver:
       scan_interval: "2s"
       max_concurrent: 2
       peers:
-        sender: ["SENDER_IP:7756"]
+        sender:
+          addresses: ["SENDER_IP:7756"]
       defaults:
         peers: ["sender"]
         direction: receive-only
