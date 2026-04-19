@@ -1331,6 +1331,91 @@ func updateBaseHashes(prior map[string]Hash256, local *FileIndex, remote *FileIn
 	return out
 }
 
+// RenamePlan describes a download/delete pair that can be satisfied by a
+// local filesystem rename (R1). The sender deleted the file at OldPath
+// and created an identical one at NewPath; the receiver already holds
+// the content and only needs to move it.
+type RenamePlan struct {
+	OldPath     string
+	NewPath     string
+	RemoteHash  Hash256
+	RemoteSize  int64
+	RemoteMtime int64
+	RemoteMode  uint32
+	NewSequence int64 // peer's sequence for the new-path entry
+	DelSequence int64 // peer's sequence for the tombstone
+}
+
+// planRenames finds download/delete action pairs that can be resolved
+// by a local filesystem rename instead of a re-download (R1). A pair
+// matches when:
+//
+//   - There is an ActionDownload at path NewPath with RemoteHash H.
+//   - There is an ActionDelete at path OldPath, and our local index
+//     has OldPath with hash H and not already tombstoned.
+//   - NewPath does not already exist locally (or is tombstoned).
+//
+// Each delete matches at most one download; matching is stable across
+// hash collisions (first-indexed delete wins). The returned set lists
+// paths (both sides of every planned rename) that the caller must skip
+// in its normal action loop.
+func planRenames(actions []DiffEntry, local *FileIndex) ([]RenamePlan, map[string]bool) {
+	if len(actions) == 0 || local == nil {
+		return nil, nil
+	}
+
+	type delCandidate struct {
+		path string
+		seq  int64
+	}
+	delsByHash := make(map[Hash256][]delCandidate)
+	for _, a := range actions {
+		if a.Action != ActionDelete {
+			continue
+		}
+		lEntry, ok := local.Files[a.Path]
+		if !ok || lEntry.Deleted || lEntry.SHA256.IsZero() {
+			continue
+		}
+		delsByHash[lEntry.SHA256] = append(delsByHash[lEntry.SHA256], delCandidate{
+			path: a.Path, seq: a.RemoteSequence,
+		})
+	}
+	if len(delsByHash) == 0 {
+		return nil, nil
+	}
+
+	var plans []RenamePlan
+	skip := make(map[string]bool)
+	for _, a := range actions {
+		if a.Action != ActionDownload || a.RemoteHash.IsZero() {
+			continue
+		}
+		if lEntry, ok := local.Files[a.Path]; ok && !lEntry.Deleted {
+			continue // target exists locally — do not clobber
+		}
+		queue := delsByHash[a.RemoteHash]
+		if len(queue) == 0 {
+			continue
+		}
+		pick := queue[0]
+		delsByHash[a.RemoteHash] = queue[1:]
+		plans = append(plans, RenamePlan{
+			OldPath:     pick.path,
+			NewPath:     a.Path,
+			RemoteHash:  a.RemoteHash,
+			RemoteSize:  a.RemoteSize,
+			RemoteMtime: a.RemoteMtime,
+			RemoteMode:  a.RemoteMode,
+			NewSequence: a.RemoteSequence,
+			DelSequence: pick.seq,
+		})
+		skip[a.Path] = true
+		skip[pick.path] = true
+	}
+	return plans, skip
+}
+
 // gcRemovedPeers deletes removed peer entries that are older than maxAge.
 // Called after purgeTombstones so stale removed peers don't block purge
 // indefinitely.

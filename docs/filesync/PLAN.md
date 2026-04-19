@@ -107,7 +107,7 @@ there depend on items tracked here.
 | PL    | Incremental deletion detection                       | 🟠 P1 | perf          | ⏳     | 🟨 S   | 🟢   | 📄    |
 | PM    | Directory-keyed child index                          | 🟠 P1 | perf          | ⏳     | 🟨 S   | 🟢   | 📄    |
 | PN    | Incremental `recomputeCache`                         | 🟠 P1 | perf          | ⏳     | 🟨 S   | 🟢   | 📄    |
-| R1    | Inode-based rename / move detection                  | 🟡 P2 | robustness    | ⏳     | 🟧 M   | 🟡   | 🔌    |
+| R1    | Inode-based rename / move detection                  | 🟡 P2 | robustness    | 🔧     | 🟧 M   | 🟡   | 🔌    |
 | R2    | Formal folder-level state machine                    | 🟡 P2 | robustness    | ⏳     | 🟧 M   | 🟢   | 📦    |
 | R3    | Peer-level failure blacklist                         | 🟡 P2 | robustness    | ⏳     | 🟨 S   | 🟢   | 📦    |
 | D1    | FastCDC content-defined chunking                     | 🟢 P3 | differentiate | ⏳     | 🟥 L   | 🔴   | 🔌    |
@@ -136,6 +136,7 @@ All `done` entries re-verified against the tree on 2026-04-19.
 | P18d  | Delta path uses `len(tail)` via `seqIndex` binary search (`filesync.go` ~L2031). Full path only on bootstrap. |
 | C1    | `diff()` takes `lastSyncNS` and compares `lEntry.MtimeNS` against it for both the B8 tombstone guard and the conflict classifier (`index.go`, `FileIndex.diff`). Caller in `syncFolder` passes `ps.LastSync.UnixNano()`. Covered by `TestDiffC1MtimeVsLastSync` and `TestDiffC1TombstoneMtimeVsLastSync`. |
 | C2    | `PeerState.BaseHashes` holds the last agreed hash per path; `diff()` uses it as the primary signal (ancestor match ⇒ download-or-skip, both diverged ⇒ conflict) and falls back to C1 mtime when absent. `updateBaseHashes` folds each completed exchange into the ancestor map (hash match records, tombstone drops, mismatch preserves prior). Caller in `syncFolder` snapshots `ps.BaseHashes` before diff and re-merges on both the no-action and sync-end paths. Covered by `TestDiffC2AncestorClassifier`, `TestDiffC2TombstoneAncestor`, and `TestUpdateBaseHashes`. |
+| R1 (partial) | Receiver-side content-hash rename landed: `planRenames` (in `index.go`) pairs each ActionDelete whose local file has hash H with one ActionDownload whose RemoteHash is H, and `syncFolder` performs an atomic local rename (with Chtimes/Chmod, tombstone + new-path index entry) for each plan. Both sides of the rename are skipped in the bundle loop and the main dispatch loop. Metrics `FilesRenamed` and `BytesSavedByRename` exported via `/api/metrics` (`mesh_filesync_files_renamed_total`, `mesh_filesync_bytes_saved_by_rename_total`). Covered by `TestPlanRenames*` (happy path, hash mismatch, one-to-one pairing, target exists, tombstoned source, missing source, nil inputs) and `TestR1RenameFilesystemIntegration`. Remaining: inode-based sender-side rename detection with wire protocol capability handshake for the case where the renamed file was also edited. See R1 Status note. |
 
 `P18c` is still pending: `fs.index.clone()` remains at `filesync.go:1030` (runScan) and `filesync.go:2151` (persistFolder).
 
@@ -602,6 +603,18 @@ Each entry follows the same structure:
   exactly this. See `RESEARCH.md` §4.6 and the stat-pre-filter section.
 - **Recommendation.** Ship (1). Gate the on-wire message behind a
   capability handshake; on unknown peer, fall back to current behavior.
+- **Status.** Partial — receiver-side content-hash rename landed without
+  any wire-format or proto change (see `planRenames` in `index.go` and
+  the R1 branch in `syncFolder`). It captures the primary bandwidth
+  win whenever the renamed file's content is unchanged: the receiver
+  notices a download/delete pair where its local file at the delete
+  path already hashes to the download's target, and performs an atomic
+  local rename instead of redownloading. **Open question:** is this
+  sufficient, or should we also ship the inode-tracking + wire
+  capability handshake variant for the case where the sender sees
+  inode-same / hash-different (content edited during rename)? Today
+  that falls back to full re-transfer, which mirrors the recommended
+  behavior before rename-support peers handshake. Decision deferred.
 
 ### R2 · Formal folder-level state machine
 

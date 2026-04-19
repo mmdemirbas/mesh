@@ -360,6 +360,11 @@ func buildAdminMux(ring *logRing, logFilePath, perfLogPath string) *http.ServeMu
 			for _, m := range fsMetrics {
 				fmt.Fprintf(&b, "mesh_filesync_files_conflicted_total{folder=%q} %d\n", m.FolderID, m.FilesConflicted)
 			}
+			b.WriteString("# HELP mesh_filesync_files_renamed_total Files satisfied by local rename per folder (R1).\n")
+			b.WriteString("# TYPE mesh_filesync_files_renamed_total counter\n")
+			for _, m := range fsMetrics {
+				fmt.Fprintf(&b, "mesh_filesync_files_renamed_total{folder=%q} %d\n", m.FolderID, m.FilesRenamed)
+			}
 			b.WriteString("# HELP mesh_filesync_sync_errors_total Per-file sync failures per folder.\n")
 			b.WriteString("# TYPE mesh_filesync_sync_errors_total counter\n")
 			for _, m := range fsMetrics {
@@ -374,6 +379,11 @@ func buildAdminMux(ring *logRing, logFilePath, perfLogPath string) *http.ServeMu
 			b.WriteString("# TYPE mesh_filesync_bytes_uploaded_total counter\n")
 			for _, m := range fsMetrics {
 				fmt.Fprintf(&b, "mesh_filesync_bytes_uploaded_total{folder=%q} %d\n", m.FolderID, m.BytesUploaded)
+			}
+			b.WriteString("# HELP mesh_filesync_bytes_saved_by_rename_total Bytes avoided by R1 local rename per folder.\n")
+			b.WriteString("# TYPE mesh_filesync_bytes_saved_by_rename_total counter\n")
+			for _, m := range fsMetrics {
+				fmt.Fprintf(&b, "mesh_filesync_bytes_saved_by_rename_total{folder=%q} %d\n", m.FolderID, m.BytesSavedByRename)
 			}
 			b.WriteString("# HELP mesh_filesync_index_exchanges_total Index exchange round trips per folder.\n")
 			b.WriteString("# TYPE mesh_filesync_index_exchanges_total counter\n")

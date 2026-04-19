@@ -349,18 +349,20 @@ func (n *Node) recordActivity(a SyncActivity) {
 
 // FolderMetricsSnapshot is a point-in-time read of a folder's sync counters.
 type FolderMetricsSnapshot struct {
-	FolderID        string
-	PeerSyncs       int64
-	FilesDownloaded int64
-	FilesDeleted    int64
-	FilesConflicted int64
-	SyncErrors      int64
-	BytesDownloaded int64
-	BytesUploaded   int64
-	IndexExchanges  int64
-	ScanCount       int64
-	ScanDurationNS  int64
-	PeerSyncNS      int64
+	FolderID           string
+	PeerSyncs          int64
+	FilesDownloaded    int64
+	FilesDeleted       int64
+	FilesConflicted    int64
+	FilesRenamed       int64
+	SyncErrors         int64
+	BytesDownloaded    int64
+	BytesUploaded      int64
+	BytesSavedByRename int64
+	IndexExchanges     int64
+	ScanCount          int64
+	ScanDurationNS     int64
+	PeerSyncNS         int64
 }
 
 // GetFolderMetrics returns a snapshot of sync metrics for all active folders.
@@ -369,18 +371,20 @@ func GetFolderMetrics() []FolderMetricsSnapshot {
 	activeNodes.ForEach(func(n *Node) {
 		for id, fs := range n.folders {
 			result = append(result, FolderMetricsSnapshot{
-				FolderID:        id,
-				PeerSyncs:       fs.metrics.PeerSyncs.Load(),
-				FilesDownloaded: fs.metrics.FilesDownloaded.Load(),
-				FilesDeleted:    fs.metrics.FilesDeleted.Load(),
-				FilesConflicted: fs.metrics.FilesConflicted.Load(),
-				SyncErrors:      fs.metrics.SyncErrors.Load(),
-				BytesDownloaded: fs.metrics.BytesDownloaded.Load(),
-				BytesUploaded:   fs.metrics.BytesUploaded.Load(),
-				IndexExchanges:  fs.metrics.IndexExchanges.Load(),
-				ScanCount:       fs.metrics.ScanCount.Load(),
-				ScanDurationNS:  fs.metrics.ScanDurationNS.Load(),
-				PeerSyncNS:      fs.metrics.PeerSyncNS.Load(),
+				FolderID:           id,
+				PeerSyncs:          fs.metrics.PeerSyncs.Load(),
+				FilesDownloaded:    fs.metrics.FilesDownloaded.Load(),
+				FilesDeleted:       fs.metrics.FilesDeleted.Load(),
+				FilesConflicted:    fs.metrics.FilesConflicted.Load(),
+				FilesRenamed:       fs.metrics.FilesRenamed.Load(),
+				SyncErrors:         fs.metrics.SyncErrors.Load(),
+				BytesDownloaded:    fs.metrics.BytesDownloaded.Load(),
+				BytesUploaded:      fs.metrics.BytesUploaded.Load(),
+				BytesSavedByRename: fs.metrics.BytesSavedByRename.Load(),
+				IndexExchanges:     fs.metrics.IndexExchanges.Load(),
+				ScanCount:          fs.metrics.ScanCount.Load(),
+				ScanDurationNS:     fs.metrics.ScanDurationNS.Load(),
+				PeerSyncNS:         fs.metrics.PeerSyncNS.Load(),
 			})
 		}
 	})
@@ -391,17 +395,19 @@ func GetFolderMetrics() []FolderMetricsSnapshot {
 // FolderSyncMetrics holds per-folder sync counters for Prometheus export.
 // All fields are atomic — safe for concurrent reads from the metrics handler.
 type FolderSyncMetrics struct {
-	PeerSyncs       atomic.Int64 // completed peer sync completions (one per folder×peer pair)
-	FilesDownloaded atomic.Int64 // files successfully downloaded
-	FilesDeleted    atomic.Int64 // files deleted by remote tombstones
-	FilesConflicted atomic.Int64 // conflict resolutions performed
-	SyncErrors      atomic.Int64 // per-file sync failures (download, delete, conflict)
-	BytesDownloaded atomic.Int64 // bytes downloaded from peers
-	BytesUploaded   atomic.Int64 // bytes served to peers (file + delta endpoints)
-	IndexExchanges  atomic.Int64 // index exchange round trips
-	ScanCount       atomic.Int64 // scan cycles completed
-	ScanDurationNS  atomic.Int64 // last scan duration in nanoseconds
-	PeerSyncNS      atomic.Int64 // last peer sync duration in nanoseconds (last-writer-wins)
+	PeerSyncs          atomic.Int64 // completed peer sync completions (one per folder×peer pair)
+	FilesDownloaded    atomic.Int64 // files successfully downloaded
+	FilesDeleted       atomic.Int64 // files deleted by remote tombstones
+	FilesConflicted    atomic.Int64 // conflict resolutions performed
+	FilesRenamed       atomic.Int64 // files resolved by local rename (R1)
+	SyncErrors         atomic.Int64 // per-file sync failures (download, delete, conflict)
+	BytesDownloaded    atomic.Int64 // bytes downloaded from peers
+	BytesUploaded      atomic.Int64 // bytes served to peers (file + delta endpoints)
+	BytesSavedByRename atomic.Int64 // bytes avoided by R1 local rename
+	IndexExchanges     atomic.Int64 // index exchange round trips
+	ScanCount          atomic.Int64 // scan cycles completed
+	ScanDurationNS     atomic.Int64 // last scan duration in nanoseconds
+	PeerSyncNS         atomic.Int64 // last peer sync duration in nanoseconds (last-writer-wins)
 }
 
 // folderState holds runtime state for a single synced folder.
@@ -1494,6 +1500,99 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		}
 	}
 
+	// R1: plan receiver-side renames. Any (delete old, download new) pair
+	// where the local file at old already has the new hash is satisfied
+	// by a local rename — no bytes cross the wire. Successful renames
+	// mark both paths in renamedPaths so the bundle and per-action loops
+	// skip them. Failures remove entries from renamedPaths so the normal
+	// download/delete path still runs.
+	renamedPaths := make(map[string]bool)
+	{
+		fs.indexMu.RLock()
+		plans, skip := planRenames(actions, fs.index)
+		fs.indexMu.RUnlock()
+		if len(plans) > 0 {
+			for p := range skip {
+				renamedPaths[p] = true
+			}
+			for _, rp := range plans {
+				if ctx.Err() != nil {
+					break
+				}
+				if !fs.claimPath(rp.OldPath) {
+					delete(renamedPaths, rp.OldPath)
+					delete(renamedPaths, rp.NewPath)
+					continue
+				}
+				if !fs.claimPath(rp.NewPath) {
+					fs.releasePath(rp.OldPath)
+					delete(renamedPaths, rp.OldPath)
+					delete(renamedPaths, rp.NewPath)
+					continue
+				}
+				// Refuse to clobber a non-empty target on the filesystem
+				// even if the in-memory index had no entry (drift safety).
+				if _, err := fs.root.Stat(rp.NewPath); err == nil {
+					fs.releasePath(rp.OldPath)
+					fs.releasePath(rp.NewPath)
+					delete(renamedPaths, rp.OldPath)
+					delete(renamedPaths, rp.NewPath)
+					continue
+				}
+				if err := fs.root.Rename(rp.OldPath, rp.NewPath); err != nil {
+					slog.Debug("rename fallback to download", "folder", folderID,
+						"old", rp.OldPath, "new", rp.NewPath, "error", err)
+					fs.releasePath(rp.OldPath)
+					fs.releasePath(rp.NewPath)
+					delete(renamedPaths, rp.OldPath)
+					delete(renamedPaths, rp.NewPath)
+					continue
+				}
+
+				if rp.RemoteMtime > 0 {
+					mt := time.Unix(0, rp.RemoteMtime)
+					_ = fs.root.Chtimes(rp.NewPath, mt, mt)
+				}
+				fileMode := os.FileMode(rp.RemoteMode)
+				if fileMode == 0 {
+					fileMode = 0644
+				}
+				_ = fs.root.Chmod(rp.NewPath, fileMode)
+
+				fs.indexMu.Lock()
+				// Tombstone the old path.
+				oldEntry := fs.index.Files[rp.OldPath]
+				if !oldEntry.Deleted {
+					fs.index.Sequence++
+					oldEntry.Deleted = true
+					oldEntry.MtimeNS = time.Now().UnixNano()
+					oldEntry.Sequence = fs.index.Sequence
+					fs.index.setEntry(rp.OldPath, oldEntry)
+				}
+				// Write the new-path entry with remote metadata.
+				fs.index.Sequence++
+				fs.index.setEntry(rp.NewPath, FileEntry{
+					Size:     rp.RemoteSize,
+					MtimeNS:  rp.RemoteMtime,
+					SHA256:   rp.RemoteHash,
+					Sequence: fs.index.Sequence,
+					Mode:     rp.RemoteMode,
+				})
+				fs.retries.clear(rp.OldPath)
+				fs.retries.clear(rp.NewPath)
+				fs.indexMu.Unlock()
+
+				fs.releasePath(rp.OldPath)
+				fs.releasePath(rp.NewPath)
+
+				fs.metrics.FilesRenamed.Add(1)
+				fs.metrics.BytesSavedByRename.Add(rp.RemoteSize)
+				slog.Info("renamed in place", "folder", folderID, "peer", peerAddr,
+					"old", rp.OldPath, "new", rp.NewPath, "bytes", rp.RemoteSize)
+			}
+		}
+	}
+
 	// P19: bundle transfer for small download actions. Partition into
 	// small (≤4 MB) and the rest. Small files are batched into tar+gzip
 	// bundles to eliminate per-file HTTP round-trips.
@@ -1502,6 +1601,10 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		var smallEntries []bundleEntry
 		for _, a := range actions {
 			if a.Action == ActionDownload && a.RemoteSize > 0 && a.RemoteSize <= maxBundleFileSize {
+				// R1: skip paths already handled by local rename.
+				if renamedPaths[a.Path] {
+					continue
+				}
 				// Pre-check: skip quarantined and in-flight.
 				fs.indexMu.RLock()
 				q := fs.retries.quarantined(a.Path, a.RemoteHash)
@@ -1610,6 +1713,11 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	for _, action := range actions {
 		if ctx.Err() != nil {
 			break
+		}
+
+		// R1: skip actions already satisfied by local rename.
+		if renamedPaths[action.Path] {
+			continue
 		}
 
 		// P19: skip actions already handled by bundle download.

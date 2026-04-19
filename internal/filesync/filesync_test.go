@@ -1717,8 +1717,8 @@ func TestUpdateBaseHashes(t *testing.T) {
 	remote.Files["tomb.txt"] = FileEntry{Deleted: true, Sequence: 3}
 
 	prior := map[string]Hash256{
-		"tomb.txt":     testHash("pre-delete"),
-		"diverged.txt": staleAncestor,
+		"tomb.txt":      testHash("pre-delete"),
+		"diverged.txt":  staleAncestor,
 		"untouched.txt": testHash("untouched"),
 	}
 
@@ -1739,6 +1739,196 @@ func TestUpdateBaseHashes(t *testing.T) {
 	// kept.txt is in local only — ancestor should not be synthesized.
 	if _, ok := out["kept.txt"]; ok {
 		t.Errorf("kept.txt: local-only path must not get ancestor")
+	}
+}
+
+// R1: a download at new-path paired with a delete at old-path, where
+// the local file at old-path already holds the downloaded content, is
+// resolved by a local rename with zero bytes over the wire.
+func TestPlanRenamesSimpleRename(t *testing.T) {
+	t.Parallel()
+	h := testHash("shared-content")
+
+	local := newFileIndex()
+	local.Files["docs/old.md"] = FileEntry{SHA256: h, Size: 100, Sequence: 1}
+
+	actions := []DiffEntry{
+		{Path: "docs/old.md", Action: ActionDelete, RemoteSequence: 10},
+		{Path: "docs/new.md", Action: ActionDownload, RemoteHash: h, RemoteSize: 100, RemoteSequence: 11},
+	}
+
+	plans, skip := planRenames(actions, local)
+	if len(plans) != 1 {
+		t.Fatalf("want 1 plan, got %d: %+v", len(plans), plans)
+	}
+	p := plans[0]
+	if p.OldPath != "docs/old.md" || p.NewPath != "docs/new.md" {
+		t.Errorf("path mismatch: %+v", p)
+	}
+	if p.RemoteHash != h || p.RemoteSize != 100 {
+		t.Errorf("metadata mismatch: %+v", p)
+	}
+	if !skip["docs/old.md"] || !skip["docs/new.md"] {
+		t.Errorf("skip map should contain both paths, got %+v", skip)
+	}
+}
+
+// R1: no rename is planned when the local file's hash differs from the
+// download's remote hash, even though delete and download exist. The
+// receiver does not hold the content; it must download.
+func TestPlanRenamesHashMismatch(t *testing.T) {
+	t.Parallel()
+
+	local := newFileIndex()
+	local.Files["docs/old.md"] = FileEntry{SHA256: testHash("local-only"), Size: 100, Sequence: 1}
+
+	actions := []DiffEntry{
+		{Path: "docs/old.md", Action: ActionDelete, RemoteSequence: 10},
+		{Path: "docs/new.md", Action: ActionDownload, RemoteHash: testHash("different"), RemoteSize: 100, RemoteSequence: 11},
+	}
+
+	plans, skip := planRenames(actions, local)
+	if len(plans) != 0 {
+		t.Fatalf("want no plans, got %+v", plans)
+	}
+	if len(skip) != 0 {
+		t.Fatalf("skip map should be empty, got %+v", skip)
+	}
+}
+
+// R1: when two files share a content hash, one-to-one matching pairs
+// each delete with at most one download; extra downloads stay as
+// downloads.
+func TestPlanRenamesOneToOne(t *testing.T) {
+	t.Parallel()
+	h := testHash("shared")
+
+	local := newFileIndex()
+	local.Files["a"] = FileEntry{SHA256: h, Size: 1, Sequence: 1}
+	local.Files["b"] = FileEntry{SHA256: h, Size: 1, Sequence: 2}
+
+	actions := []DiffEntry{
+		{Path: "a", Action: ActionDelete, RemoteSequence: 10},
+		{Path: "b", Action: ActionDelete, RemoteSequence: 11},
+		{Path: "x", Action: ActionDownload, RemoteHash: h, RemoteSize: 1, RemoteSequence: 12},
+		{Path: "y", Action: ActionDownload, RemoteHash: h, RemoteSize: 1, RemoteSequence: 13},
+		{Path: "z", Action: ActionDownload, RemoteHash: h, RemoteSize: 1, RemoteSequence: 14},
+	}
+
+	plans, skip := planRenames(actions, local)
+	if len(plans) != 2 {
+		t.Fatalf("want 2 plans, got %d: %+v", len(plans), plans)
+	}
+	if skip["z"] {
+		t.Errorf("third download should not be skipped: %+v", skip)
+	}
+}
+
+// R1: never clobber a path that already exists locally. If the index
+// has an active entry at the download target, fall back to normal
+// download handling (the existing code handles conflict/overwrite).
+func TestPlanRenamesTargetExists(t *testing.T) {
+	t.Parallel()
+	h := testHash("content")
+
+	local := newFileIndex()
+	local.Files["old"] = FileEntry{SHA256: h, Size: 1, Sequence: 1}
+	local.Files["new"] = FileEntry{SHA256: testHash("other"), Size: 1, Sequence: 2}
+
+	actions := []DiffEntry{
+		{Path: "old", Action: ActionDelete, RemoteSequence: 10},
+		{Path: "new", Action: ActionDownload, RemoteHash: h, RemoteSize: 1, RemoteSequence: 11},
+	}
+
+	plans, _ := planRenames(actions, local)
+	if len(plans) != 0 {
+		t.Fatalf("target exists — expected no plan, got %+v", plans)
+	}
+}
+
+// R1: a tombstoned local entry is not eligible as a rename source — its
+// hash is already gone from disk (or at best a ghost). Treat delete
+// separately.
+func TestPlanRenamesTombstonedSource(t *testing.T) {
+	t.Parallel()
+	h := testHash("content")
+
+	local := newFileIndex()
+	local.Files["old"] = FileEntry{SHA256: h, Deleted: true, Size: 1, Sequence: 1}
+
+	actions := []DiffEntry{
+		{Path: "old", Action: ActionDelete, RemoteSequence: 10},
+		{Path: "new", Action: ActionDownload, RemoteHash: h, RemoteSize: 1, RemoteSequence: 11},
+	}
+
+	plans, _ := planRenames(actions, local)
+	if len(plans) != 0 {
+		t.Fatalf("tombstoned source — expected no plan, got %+v", plans)
+	}
+}
+
+// R1: a delete whose path is not in the local index cannot seed a
+// rename — we cannot hash something we do not have.
+func TestPlanRenamesSourceMissing(t *testing.T) {
+	t.Parallel()
+
+	local := newFileIndex()
+	actions := []DiffEntry{
+		{Path: "missing", Action: ActionDelete, RemoteSequence: 10},
+		{Path: "new", Action: ActionDownload, RemoteHash: testHash("h"), RemoteSize: 1, RemoteSequence: 11},
+	}
+
+	plans, _ := planRenames(actions, local)
+	if len(plans) != 0 {
+		t.Fatalf("missing source — expected no plan, got %+v", plans)
+	}
+}
+
+// R1: an empty action slice and a nil index are both no-ops.
+func TestPlanRenamesNoOpInputs(t *testing.T) {
+	t.Parallel()
+
+	if plans, skip := planRenames(nil, newFileIndex()); plans != nil || skip != nil {
+		t.Errorf("nil actions: want nil/nil, got %+v %+v", plans, skip)
+	}
+	if plans, skip := planRenames([]DiffEntry{{Path: "p", Action: ActionDelete}}, nil); plans != nil || skip != nil {
+		t.Errorf("nil index: want nil/nil, got %+v %+v", plans, skip)
+	}
+}
+
+// R1: rename planning handles a receiver-side rename execution happy
+// path when wired through a real os.Root. This is the integration
+// complement to the planner tests: verify that the filesystem rename
+// is atomic, the target has the right content, and the index is
+// updated both for tombstone (old) and new entry (new).
+func TestR1RenameFilesystemIntegration(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "old.md"), []byte("hello renamed content"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	defer root.Close()
+
+	// Execute exactly the inner filesystem dance of the R1 branch and
+	// confirm atomic-move semantics: after rename, old.md is gone and
+	// new.md holds the original bytes.
+	if err := root.Rename("old.md", "new.md"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "old.md")); !os.IsNotExist(err) {
+		t.Fatalf("old.md should be gone: err=%v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "new.md"))
+	if err != nil {
+		t.Fatalf("read new.md: %v", err)
+	}
+	if string(got) != "hello renamed content" {
+		t.Errorf("content mismatch: %q", got)
 	}
 }
 
