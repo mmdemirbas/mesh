@@ -511,6 +511,7 @@ type hashResult struct {
 	err         error
 	hashState   []byte // PH: serialized hasher state after hashing
 	prefixCheck []byte // PH: boundary bytes captured after hashing
+	inode       uint64 // R1 Phase 2 Step 5: inode observed from the open handle (Windows); 0 on Unix
 }
 
 // pendingHash records metadata captured during the walk for a file that
@@ -750,8 +751,8 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		go func() {
 			defer hashWg.Done()
 			for job := range hashCh {
-				h, st, pc, hErr := hashFileIncremental(job.absPath, job.savedState, job.hashedBytes, job.newSize, job.prefixCheck)
-				hashResults[job.idx] = hashResult{hash: h, err: hErr, hashState: st, prefixCheck: pc}
+				h, st, pc, ino, hErr := hashFileIncremental(job.absPath, job.savedState, job.hashedBytes, job.newSize, job.prefixCheck)
+				hashResults[job.idx] = hashResult{hash: h, err: hErr, hashState: st, prefixCheck: pc, inode: ino}
 			}
 		}()
 	}
@@ -867,10 +868,18 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			mode := uint32(wf.info.Mode().Perm())
 			inode := inodeOf(wf.info)
 
+			// R1 Phase 2 Step 5: force hash phase when the entry has no
+			// recorded inode and the walk phase did not produce one
+			// (Windows migration from pre-Step-5 indexes). The hash phase
+			// opens the file and can extract the NT file index via
+			// GetFileInformationByHandle — fast path alone cannot
+			// backfill on Windows.
+			needInodeBackfill := exists && !existing.Deleted && existing.Inode == 0 && inode == 0
+
 			// Fast path: skip hashing if size and mtime are unchanged.
 			// Direct idx.Files assignment OK here — scanWithStats bulk-rebuilds
 			// seqIndex and cachedCount/cachedSize at the end.
-			if exists && !existing.Deleted && existing.Size == size && existing.MtimeNS == mtimeNS {
+			if !needInodeBackfill && exists && !existing.Deleted && existing.Size == size && existing.MtimeNS == mtimeNS {
 				dirty := false
 				if existing.Mode != mode {
 					existing.Mode = mode
@@ -961,6 +970,15 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			continue
 		}
 
+		// R1 Phase 2 Step 5: prefer the walk-phase inode (Unix stat), but
+		// fall back to the hash-phase inode (Windows GetFileInformationByHandle)
+		// when the walk could not extract one. Zero stays zero when neither
+		// path produced a value.
+		effectiveInode := p.inode
+		if effectiveInode == 0 {
+			effectiveInode = r.inode
+		}
+
 		if p.exists && !p.old.Deleted && p.old.SHA256 == r.hash {
 			// Content identical despite stat change (e.g., touch, chmod). Update stat only.
 			entry := p.old
@@ -970,8 +988,8 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			entry.HashState = r.hashState
 			entry.HashedBytes = p.size
 			entry.PrefixCheck = r.prefixCheck
-			if p.inode != 0 {
-				entry.Inode = p.inode
+			if effectiveInode != 0 {
+				entry.Inode = effectiveInode
 			}
 			// R1 Phase 2: single-use rename hint cleared on re-seen entry.
 			entry.PrevPath = ""
@@ -986,7 +1004,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			SHA256:      r.hash,
 			Sequence:    idx.Sequence,
 			Mode:        p.mode,
-			Inode:       p.inode,
+			Inode:       effectiveInode,
 			HashState:   r.hashState,
 			HashedBytes: p.size,
 			PrefixCheck: r.prefixCheck,
@@ -1032,9 +1050,6 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	inodeToNewPath := make(map[uint64]string)
 	for i := range pending {
 		p := pending[i]
-		if p.inode == 0 {
-			continue
-		}
 		// Skip entries that already existed before this scan — only
 		// genuinely new paths are rename targets. (Existing-path hash
 		// changes are edits, not renames.)
@@ -1047,10 +1062,19 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		}
 		// Record only if the hashed path is actually in idx.Files now
 		// (drain succeeded and TOCTOU didn't reject it).
-		if _, ok := idx.Files[p.rel]; !ok {
+		entry, ok := idx.Files[p.rel]
+		if !ok {
 			continue
 		}
-		inodeToNewPath[p.inode] = p.rel
+		// R1 Phase 2 Step 5: the drainer above already reconciled the
+		// walk-phase inode (Unix) with the hash-phase inode (Windows)
+		// into entry.Inode. Read from there rather than p.inode so
+		// Windows rename detection picks up files hashed via the
+		// open-handle path.
+		if entry.Inode == 0 {
+			continue
+		}
+		inodeToNewPath[entry.Inode] = p.rel
 	}
 
 	delStart := time.Now()
@@ -1167,12 +1191,17 @@ const prefixCheckSize = 4096
 // (4) the boundary region (last prefixCheckSize bytes of the previously-hashed
 // content) matches the saved prefixCheck. Condition (4) catches truncate+regrow
 // where the file was rewritten with different content.
-func hashFileIncremental(path string, savedState []byte, hashedBytes, newSize int64, prefixCheck []byte) (digest Hash256, state []byte, newPrefixCheck []byte, err error) {
+func hashFileIncremental(path string, savedState []byte, hashedBytes, newSize int64, prefixCheck []byte) (digest Hash256, state []byte, newPrefixCheck []byte, inode uint64, err error) {
 	f, err := os.Open(path) //nolint:gosec // G304: path comes from scan walk within a user-configured folder
 	if err != nil {
-		return Hash256{}, nil, nil, err
+		return Hash256{}, nil, nil, 0, err
 	}
 	defer func() { _ = f.Close() }()
+
+	// R1 Phase 2 Step 5: Windows cannot get the NT file index during the
+	// walk phase, so extract it now from the open handle. inodeFromFile
+	// is a no-op on Unix (the walk already captured it via stat).
+	inode = inodeFromFile(f)
 
 	h := sha256Pool.Get().(hash.Hash)
 	h.Reset()
@@ -1198,27 +1227,27 @@ func hashFileIncremental(path string, savedState []byte, hashedBytes, newSize in
 			if restoreErr := um.UnmarshalBinary(savedState); restoreErr == nil {
 				if _, seekErr := f.Seek(hashedBytes, io.SeekStart); seekErr == nil {
 					if _, cpErr := io.Copy(h, f); cpErr != nil {
-						return Hash256{}, nil, nil, cpErr
+						return Hash256{}, nil, nil, 0, cpErr
 					}
 					digest = hash256FromBytes(h.Sum(nil))
 					if m, mok := h.(encoding.BinaryMarshaler); mok {
 						state, _ = m.MarshalBinary()
 					}
 					newPrefixCheck = capturePrefixCheck(f, newSize)
-					return digest, state, newPrefixCheck, nil
+					return digest, state, newPrefixCheck, inode, nil
 				}
 			}
 		}
 		// Fall through to full hash on any restore/seek failure.
 		h.Reset()
 		if _, seekErr := f.Seek(0, io.SeekStart); seekErr != nil {
-			return Hash256{}, nil, nil, seekErr
+			return Hash256{}, nil, nil, 0, seekErr
 		}
 	}
 
 	// Full hash.
 	if _, err := io.Copy(h, f); err != nil {
-		return Hash256{}, nil, nil, err
+		return Hash256{}, nil, nil, 0, err
 	}
 	digest = hash256FromBytes(h.Sum(nil))
 
@@ -1229,7 +1258,7 @@ func hashFileIncremental(path string, savedState []byte, hashedBytes, newSize in
 		}
 		newPrefixCheck = capturePrefixCheck(f, newSize)
 	}
-	return digest, state, newPrefixCheck, nil
+	return digest, state, newPrefixCheck, inode, nil
 }
 
 // capturePrefixCheck reads the last prefixCheckSize bytes of the file (or

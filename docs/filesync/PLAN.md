@@ -863,9 +863,17 @@ Each entry follows the same structure:
     `TestApplyHintRenamesDoesNotClobberExistingNewPath`,
     `TestApplyHintRenamesFallsBackWhenOldPathMissing`,
     `TestApplyHintRenamesSkipsPathsClaimedByPlanRenames`.
-  - **Step 5 ⏳** — Windows inode population via hash-phase handle
-    (`CreateFile` + `GetFileInformationByHandle`). Keeps the
-    syscall-per-file cost consistent with the existing hash read.
+  - **Step 5 ✅** — `inodeFromFile` extracts the NT file index from
+    the file handle already open during hashing, so Windows pays
+    no extra syscall per scanned file. `hashFileIncremental`
+    returns the id alongside the digest; the drainer folds the
+    walk-phase (Unix) and hash-phase (Windows) sources via an
+    `effectiveInode` fallback. Migration: a pre-Step-5 index with
+    `Inode == 0` now forces the hash phase on the next scan so
+    GetFileInformationByHandle can backfill. Cross-platform tests
+    use `observeInode` which stats on Unix and opens a handle on
+    Windows; dedicated Windows coverage lives in
+    `inode_windows_test.go`.
   - **Step 6 ⏳** — e2e scenario: cross-peer rename with edit.
 
 <a id="r2"></a>

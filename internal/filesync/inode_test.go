@@ -4,18 +4,45 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
 )
 
-// TestInodePopulatedDuringScan verifies that the scan records the
-// filesystem inode on every indexed file (Unix) or zero (Windows,
-// where Step 1 defers inode extraction to a follow-up). The inode is
-// the signal R1 Phase 2 uses to detect local renames without a
-// re-transfer, so populating it correctly during scan is the
-// foundation for everything that follows.
+// observeInode returns the platform-native file identifier for cross-
+// checking scan bookkeeping against the filesystem. Uses Unix stat when
+// that yields a non-zero value; otherwise opens a handle and reads the
+// Windows NT file index via inodeFromFile. Fails the test if neither
+// mechanism produces a value so the caller does not silently compare
+// against zero.
+func observeInode(t *testing.T, path string) uint64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ino := inodeOf(info); ino != 0 {
+		return ino
+	}
+	f, err := os.Open(path) //nolint:gosec // G304: test-only path under t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	ino := inodeFromFile(f)
+	if ino == 0 {
+		t.Fatalf("observeInode(%s): platform yielded no identifier", path)
+	}
+	return ino
+}
+
+// TestInodePopulatedDuringScan verifies that the scan records a stable
+// file identifier on every indexed file across platforms: Unix reads it
+// from stat during the walk, Windows extracts it from the open handle
+// during the hash phase (R1 Phase 2 Step 5). The inode is the signal
+// R1 Phase 2 uses to detect local renames without a re-transfer, so
+// populating it correctly during scan is the foundation for everything
+// that follows.
 func TestInodePopulatedDuringScan(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -33,26 +60,17 @@ func TestInodePopulatedDuringScan(t *testing.T) {
 		if !ok {
 			t.Fatalf("entry missing: %s", rel)
 		}
-		if runtime.GOOS == "windows" {
-			if entry.Inode != 0 {
-				t.Errorf("%s: Inode=%d on Windows, want 0 (Step 1 defers Windows population)", rel, entry.Inode)
-			}
+		if entry.Inode == 0 {
+			t.Errorf("%s: Inode=0, want populated identifier", rel)
 			continue
 		}
-		if entry.Inode == 0 {
-			t.Errorf("%s: Inode=0, want populated inode", rel)
-		}
-
-		// Cross-check: the recorded inode must match an os.Stat of the
-		// same file. This pins scan behaviour to the real filesystem
-		// rather than trusting scan bookkeeping in isolation.
-		info, err := os.Stat(filepath.Join(dir, rel))
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := inodeOf(info)
+		// Cross-check: the recorded inode must match what the platform
+		// reports for the same file on disk. This pins scan behaviour
+		// to the real filesystem rather than trusting scan bookkeeping
+		// in isolation.
+		got := observeInode(t, filepath.Join(dir, rel))
 		if got != entry.Inode {
-			t.Errorf("%s: scan recorded Inode=%d, os.Stat sees %d", rel, entry.Inode, got)
+			t.Errorf("%s: scan recorded Inode=%d, platform sees %d", rel, entry.Inode, got)
 		}
 	}
 }
@@ -63,9 +81,6 @@ func TestInodePopulatedDuringScan(t *testing.T) {
 // scans — a spurious change would produce false-positive rename
 // candidates.
 func TestInodeStableAcrossRescan(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Step 1 defers Windows inode population to a follow-up step")
-	}
 	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "stable.txt", "content")
@@ -78,28 +93,22 @@ func TestInodeStableAcrossRescan(t *testing.T) {
 		}
 	}
 
-	// Capture the inode we expect from the filesystem.
-	info, err := os.Stat(filepath.Join(dir, "stable.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := inodeOf(info)
-
+	want := observeInode(t, filepath.Join(dir, "stable.txt"))
 	entry := idx.Files["stable.txt"]
 	if entry.Inode != want {
 		t.Errorf("after rescan Inode=%d, want %d (fast-path must preserve inode)", entry.Inode, want)
 	}
 }
 
-// TestInodeBackfillOnFastPath verifies the migration path: an index
-// loaded from a pre-Inode version (where Inode==0) gets its Inode
-// populated on the next scan even when the fast-path size+mtime check
-// would otherwise skip the entry. Without this, older persisted
-// indexes would never gain inode information until the file changed.
-func TestInodeBackfillOnFastPath(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Step 1 defers Windows inode population to a follow-up step")
-	}
+// TestInodeBackfillAfterMigration verifies the migration path from a
+// pre-Inode version (where every Inode==0): on rescan the entry gains a
+// populated Inode without any content change. Unix backfills during the
+// fast path using the stat inode; Windows cannot see the NT file index
+// until a file handle is opened, so the scan falls through to the hash
+// phase for that entry and inodeFromFile populates it. Either route is
+// acceptable — what matters is that a subsequent scan has a non-zero
+// Inode available for rename detection.
+func TestInodeBackfillAfterMigration(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "legacy.txt", "payload")
@@ -119,18 +128,20 @@ func TestInodeBackfillOnFastPath(t *testing.T) {
 	entry.Inode = 0
 	idx.Files["legacy.txt"] = entry
 
-	// Rescan — fast path must still backfill the inode.
-	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles)
+	// Rescan — either fast-path backfill (Unix) or forced hash-phase
+	// inode extraction (Windows) must produce a non-zero Inode.
+	_, _, _, _, _, err = idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if stats.FastPathHits == 0 {
-		t.Errorf("FastPathHits=%d, want >0 (unchanged file must take fast path)", stats.FastPathHits)
 	}
 
 	got := idx.Files["legacy.txt"]
 	if got.Inode == 0 {
-		t.Error("fast path did not backfill Inode — migration from pre-Inode indexes will not happen until content changes")
+		t.Error("scan did not backfill Inode — migration from pre-Inode indexes will not happen until content changes")
+	}
+	want := observeInode(t, filepath.Join(dir, "legacy.txt"))
+	if got.Inode != want {
+		t.Errorf("backfilled Inode=%d, want %d (platform-observed)", got.Inode, want)
 	}
 }
 
@@ -149,9 +160,6 @@ func TestInodeOfNilInfo(t *testing.T) {
 // new entry with PrevPath; peers use that hint to apply a local
 // rename instead of re-downloading the bytes.
 func TestScanDetectsRenameSameContent(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows inode extraction lands in a later step")
-	}
 	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "old/name.txt", "content stays the same")
@@ -212,9 +220,6 @@ func TestScanDetectsRenameSameContent(t *testing.T) {
 // locally and run /delta against the old content to move only the
 // changed blocks.
 func TestScanDetectsRenameWithEdit(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows inode extraction lands in a later step")
-	}
 	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "source.bin", "original bytes")
@@ -268,9 +273,6 @@ func TestScanDetectsRenameWithEdit(t *testing.T) {
 // rename, re-emitting the hint on every subsequent scan would bloat
 // the index exchange with stale data.
 func TestScanRenameHintClearedOnRescan(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows inode extraction lands in a later step")
-	}
 	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "a.txt", "payload")
@@ -307,9 +309,6 @@ func TestScanRenameHintClearedOnRescan(t *testing.T) {
 // paths. A file that keeps the same path (unchanged or edited) must
 // never get its own path tagged as PrevPath.
 func TestScanRenameIgnoresUnchangedPaths(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows inode extraction lands in a later step")
-	}
 	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "keep.txt", "keep")

@@ -3473,7 +3473,7 @@ func TestHashFileIncremental(t *testing.T) {
 	}
 
 	// Full hash — get the state.
-	hash1, state1, pc1, err := hashFileIncremental(path, nil, 0, int64(len(initial)), nil)
+	hash1, state1, pc1, _, err := hashFileIncremental(path, nil, 0, int64(len(initial)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3497,7 +3497,7 @@ func TestHashFileIncremental(t *testing.T) {
 	}
 
 	// Incremental hash — should produce correct result.
-	hash2, state2, pc2, err := hashFileIncremental(path, state1, int64(len(initial)), int64(len(appended)), pc1)
+	hash2, state2, pc2, _, err := hashFileIncremental(path, state1, int64(len(initial)), int64(len(appended)), pc1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3519,7 +3519,7 @@ func TestHashFileIncremental(t *testing.T) {
 	if err := os.WriteFile(smallPath, []byte("tiny"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_, smallState, smallPC, err := hashFileIncremental(smallPath, nil, 0, 4, nil)
+	_, smallState, smallPC, _, err := hashFileIncremental(smallPath, nil, 0, 4, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3543,7 +3543,7 @@ func TestHashFileIncremental_TruncateRegrow(t *testing.T) {
 	}
 
 	// Full hash to get state + prefix check.
-	hash1, state1, pc1, err := hashFileIncremental(path, nil, 0, int64(len(initial)), nil)
+	hash1, state1, pc1, _, err := hashFileIncremental(path, nil, 0, int64(len(initial)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3557,7 +3557,7 @@ func TestHashFileIncremental_TruncateRegrow(t *testing.T) {
 
 	// Incremental hash with stale state — prefix check should detect mismatch
 	// and fall back to full rehash, producing correct results.
-	hash2, _, _, err := hashFileIncremental(path, state1, int64(len(initial)), int64(len(replaced)), pc1)
+	hash2, _, _, _, err := hashFileIncremental(path, state1, int64(len(initial)), int64(len(replaced)), pc1)
 	if err != nil {
 		t.Fatal(err)
 	}
