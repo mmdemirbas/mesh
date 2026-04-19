@@ -141,3 +141,195 @@ func TestInodeOfNilInfo(t *testing.T) {
 		t.Errorf("inodeOf(nil)=%d, want 0", got)
 	}
 }
+
+// TestScanDetectsRenameSameContent pins the R1 Phase 2 scan-level
+// rename detection for a content-unchanged move. The sender tags the
+// new entry with PrevPath; peers use that hint to apply a local
+// rename instead of re-downloading the bytes.
+func TestScanDetectsRenameSameContent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows inode extraction lands in a later step")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "old/name.txt", "content stays the same")
+
+	idx := newFileIndex()
+	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
+		t.Fatal(err)
+	}
+	idx.recomputeCache()
+	oldEntry := idx.Files["old/name.txt"]
+	if oldEntry.Inode == 0 {
+		t.Fatal("precondition failed: first scan must populate inode")
+	}
+
+	// Rename the file in place. The kernel preserves the inode.
+	if err := os.MkdirAll(filepath.Join(dir, "new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(dir, "old/name.txt"), filepath.Join(dir, "new/name.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if stats.RenamesDetected != 1 {
+		t.Errorf("RenamesDetected=%d, want 1", stats.RenamesDetected)
+	}
+	if stats.Deletions != 1 {
+		t.Errorf("Deletions=%d, want 1 (tombstone still emitted for capability-less peers)", stats.Deletions)
+	}
+
+	newEntry, ok := idx.Files["new/name.txt"]
+	if !ok {
+		t.Fatal("new path missing from index")
+	}
+	if newEntry.PrevPath != "old/name.txt" {
+		t.Errorf("PrevPath=%q, want %q", newEntry.PrevPath, "old/name.txt")
+	}
+	if newEntry.Inode != oldEntry.Inode {
+		t.Errorf("Inode=%d on new path, want %d (kernel preserves inode on rename)", newEntry.Inode, oldEntry.Inode)
+	}
+	if newEntry.SHA256 != oldEntry.SHA256 {
+		t.Error("content hash changed across rename, unexpected")
+	}
+
+	tomb, ok := idx.Files["old/name.txt"]
+	if !ok || !tomb.Deleted {
+		t.Error("old path tombstone not emitted")
+	}
+}
+
+// TestScanDetectsRenameWithEdit pins the R1 Phase 2 big-bandwidth-win
+// case: a rename plus content edit. Without the hint the receiver
+// would re-download the full file; with the hint it can rename
+// locally and run /delta against the old content to move only the
+// changed blocks.
+func TestScanDetectsRenameWithEdit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows inode extraction lands in a later step")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "source.bin", "original bytes")
+
+	idx := newFileIndex()
+	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
+		t.Fatal(err)
+	}
+	idx.recomputeCache()
+	oldHash := idx.Files["source.bin"].SHA256
+	oldInode := idx.Files["source.bin"].Inode
+
+	// Rename and edit in-place. The edit must be observable via mtime
+	// or size so the scan does not take the fast path.
+	if err := os.Rename(filepath.Join(dir, "source.bin"), filepath.Join(dir, "target.bin")); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "target.bin"), os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(" plus addition"); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	f.Close()
+
+	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if stats.RenamesDetected != 1 {
+		t.Errorf("RenamesDetected=%d, want 1", stats.RenamesDetected)
+	}
+
+	newEntry := idx.Files["target.bin"]
+	if newEntry.PrevPath != "source.bin" {
+		t.Errorf("PrevPath=%q, want %q", newEntry.PrevPath, "source.bin")
+	}
+	if newEntry.Inode != oldInode {
+		t.Errorf("inode=%d, want %d (rename preserves inode)", newEntry.Inode, oldInode)
+	}
+	if newEntry.SHA256 == oldHash {
+		t.Error("hash unchanged despite content edit — scan did not re-hash")
+	}
+}
+
+// TestScanRenameHintClearedOnRescan pins that PrevPath is a
+// single-use hint. Once the receiver has had a chance to apply the
+// rename, re-emitting the hint on every subsequent scan would bloat
+// the index exchange with stale data.
+func TestScanRenameHintClearedOnRescan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows inode extraction lands in a later step")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "a.txt", "payload")
+
+	idx := newFileIndex()
+	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
+		t.Fatal(err)
+	}
+	idx.recomputeCache()
+	if err := os.Rename(filepath.Join(dir, "a.txt"), filepath.Join(dir, "b.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
+		t.Fatal(err)
+	}
+	if idx.Files["b.txt"].PrevPath != "a.txt" {
+		t.Fatal("precondition failed: second scan must set PrevPath")
+	}
+	idx.recomputeCache()
+
+	// Third scan: nothing changed on disk. PrevPath must be cleared
+	// because the hint has already been emitted.
+	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
+		t.Fatal(err)
+	}
+	got := idx.Files["b.txt"].PrevPath
+	if got != "" {
+		t.Errorf("PrevPath=%q after stable rescan, want empty (hint is single-use)", got)
+	}
+}
+
+// TestScanRenameIgnoresUnchangedPaths guards against a false
+// positive: the tombstone loop must only pair deletions with *new*
+// paths. A file that keeps the same path (unchanged or edited) must
+// never get its own path tagged as PrevPath.
+func TestScanRenameIgnoresUnchangedPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows inode extraction lands in a later step")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "keep.txt", "keep")
+
+	idx := newFileIndex()
+	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
+		t.Fatal(err)
+	}
+	idx.recomputeCache()
+
+	// Edit the file in place — same path, same inode, new content.
+	if err := os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("keep edited payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RenamesDetected != 0 {
+		t.Errorf("RenamesDetected=%d on in-place edit, want 0", stats.RenamesDetected)
+	}
+	if got := idx.Files["keep.txt"].PrevPath; got != "" {
+		t.Errorf("PrevPath=%q for in-place edit, want empty", got)
+	}
+}

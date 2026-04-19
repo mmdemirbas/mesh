@@ -76,6 +76,13 @@ type FileEntry struct {
 	Sequence int64   `yaml:"sequence"`
 	Mode     uint32  `yaml:"mode,omitempty"`  // L1: Unix permission bits (e.g., 0644)
 	Inode    uint64  `yaml:"inode,omitempty"` // R1 Phase 2: filesystem inode for rename detection; 0 on Windows or when unavailable
+	// PrevPath is a single-use hint set by the scan when it detects that a
+	// new entry at this path is the same inode as a tombstoned entry at the
+	// previous path. Sync consumes this hint to let peers apply a local
+	// rename (plus optional /delta against the old content) instead of a
+	// full re-download. Cleared on the next scan that re-sees the entry.
+	// R1 Phase 2.
+	PrevPath string `yaml:"prev_path,omitempty"`
 
 	// PH: incremental hashing state for append-only optimization.
 	// HashState is the serialized sha256 internal state after hashing
@@ -485,6 +492,7 @@ type ScanStats struct {
 	HashErrors      int
 	TocTouSkips     int // files skipped because stat changed during hashing
 	Deletions       int // tombstones created in this pass
+	RenamesDetected int // R1 Phase 2: tombstone/new-entry pairs paired by inode
 }
 
 // hashJob is a file path to hash, sent from the walk to the worker pool.
@@ -877,6 +885,14 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 					existing.Inode = inode
 					dirty = true
 				}
+				// R1 Phase 2: the rename hint is single-use. If this entry
+				// is being re-seen at the same path in a later scan, the
+				// rename has already been sent; clearing now prevents a
+				// stale hint from leaking to peers joining later.
+				if existing.PrevPath != "" {
+					existing.PrevPath = ""
+					dirty = true
+				}
 				if dirty {
 					idx.Files[wf.rel] = existing
 				}
@@ -957,6 +973,8 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			if p.inode != 0 {
 				entry.Inode = p.inode
 			}
+			// R1 Phase 2: single-use rename hint cleared on re-seen entry.
+			entry.PrevPath = ""
 			idx.Files[p.rel] = entry
 			continue
 		}
@@ -992,6 +1010,47 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		}
 		// Root still exists and is accessible — the folder is legitimately
 		// empty. Proceed with tombstoning.
+	}
+
+	// R1 Phase 2: pair tombstone candidates with newly-hashed entries
+	// sharing the same inode, so the tombstone pass can set PrevPath on
+	// the new entry and peers can apply a local rename instead of a
+	// re-download.
+	//
+	// A rename candidate is a file in idx.Files that is NOT in `seen`
+	// (so the tombstone pass would normally mark it deleted) with a
+	// matching inode in the freshly-hashed `pending` set.
+	//
+	// Only entries hashed this scan can be rename targets — a path that
+	// already existed with the same inode is not a rename, it is the
+	// untouched file. This is cheap because hashed entries are in
+	// `pending`; we don't need to scan idx.Files.
+	//
+	// Inode reuse after deletion can cause a false positive; the receiver
+	// verifies the prev-path content before applying the rename locally
+	// and falls back to a full download on mismatch.
+	inodeToNewPath := make(map[uint64]string)
+	for i := range pending {
+		p := pending[i]
+		if p.inode == 0 {
+			continue
+		}
+		// Skip entries that already existed before this scan — only
+		// genuinely new paths are rename targets. (Existing-path hash
+		// changes are edits, not renames.)
+		if p.exists && !p.old.Deleted {
+			continue
+		}
+		// Skip entries that failed to hash.
+		if _, already := errorPaths[p.rel]; already {
+			continue
+		}
+		// Record only if the hashed path is actually in idx.Files now
+		// (drain succeeded and TOCTOU didn't reject it).
+		if _, ok := idx.Files[p.rel]; !ok {
+			continue
+		}
+		inodeToNewPath[p.inode] = p.rel
 	}
 
 	delStart := time.Now()
@@ -1036,6 +1095,21 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 					continue
 				}
 				if _, ok := seen[rel]; !ok {
+					// R1 Phase 2: before tombstoning, check whether this
+					// file was renamed — its inode is present on a new
+					// path hashed in this scan. Tag the new entry with
+					// PrevPath so the sync cycle can propagate the hint
+					// to peers. Still emit the tombstone so capability-
+					// less peers drop the old path correctly.
+					if entry.Inode != 0 {
+						if newRel, found := inodeToNewPath[entry.Inode]; found && newRel != rel {
+							if newEntry, ok := idx.Files[newRel]; ok {
+								newEntry.PrevPath = rel
+								idx.Files[newRel] = newEntry
+								stats.RenamesDetected++
+							}
+						}
+					}
 					idx.Sequence++
 					entry.Deleted = true
 					entry.MtimeNS = time.Now().UnixNano() // deletion time, not last-modification time
