@@ -63,6 +63,7 @@ here.
 | 🔧   | In progress.                                   |
 | ⏳   | Pending.                                       |
 | ⏸    | Deferred (see per-item notes).                 |
+| ❌   | Cancelled (see per-item notes).                |
 
 **Effort**
 
@@ -113,7 +114,7 @@ here.
 | [PM](#pm) | Directory-keyed child index                          | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
 | [PN](#pn) | Incremental `recomputeCache`                         | 🟠 P1 | perf          | ⏸      | 🟨 S   | 🟢   | 📄    |
 | [R1](#r1) | Inode-based rename / move detection                  | 🟡 P2 | robustness    | ✅     | 🟧 M   | 🟡   | 🔌    |
-| [R2](#r2) | Formal folder-level state machine                    | 🟡 P2 | robustness    | ⏳     | 🟧 M   | 🟢   | 📦    |
+| [R2](#r2) | Formal folder-level state machine                    | 🟡 P2 | robustness    | ❌     | 🟧 M   | 🟢   | 📦    |
 | [R3](#r3) | Peer-level failure blacklist                         | 🟡 P2 | robustness    | ✅     | 🟨 S   | 🟢   | 📦    |
 | [D1](#d1) | FastCDC content-defined chunking                     | 🟢 P3 | differentiate | ⏳     | 🟥 L   | 🔴   | 🔌    |
 | [D2](#d2) | BLAKE3 instead of SHA-256                            | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🔴   | 🔌    |
@@ -124,7 +125,7 @@ here.
 | [C5](#c5) | 3-way text merge (Idea C)                            | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 📦    |
 | [C6](#c6) | Full vector clocks per file (Idea D)                 | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 🔌    |
 
-Counts: **4** P0 ✅ · **12** P1 (9 ✅ / 0 🔧 / 3 ⏸) · **3** P2 (2 ✅ / 0 🔧 / 1 ⏳) · **6** P3 ⏳ · **2** deferred.
+Counts: **4** P0 ✅ · **12** P1 (9 ✅ / 0 🔧 / 3 ⏸) · **3** P2 (2 ✅ / 1 ❌) · **6** P3 ⏳ · **2** deferred.
 
 ---
 
@@ -899,34 +900,38 @@ Each entry follows the same structure:
     the hint was applied locally instead of a blind re-download).
 
 <a id="r2"></a>
-### R2 · Formal folder-level state machine
+### R2 · Formal folder-level state machine · ❌ Cancelled
 
 [↑ back to summary](#summary-table)
 
-- **Problem.** `firstScanDone` gates the first sync but steady-state has
-  no explicit `scanning` / `syncing` state. A slow scan plus a sync cycle
-  starting mid-scan operates on a stale index snapshot. Today the mutex
-  usage keeps this safe, but the invariant is implicit — easy to break
-  in a future refactor.
-- **Fix options.**
-  1. Explicit states per folder (`idle`, `scanning`, `syncing`,
-     `degraded`). Reject overlapping transitions; queue otherwise.
-  2. Keep implicit; add assertions (race-only) that fire on invariant
-     break.
-- **Risks.** Low — state machine is additive; worst case is a missed
-  scan tick.
-- **Impact.**
-  - *Perf:* marginal — a slow scan doesn't overlap with sync, which can
-    either speed things up (no lock fight) or slow them down (sync
-    waits) depending on the workload.
-  - *Maintainability:* the big win. Invariants are enforceable.
-- **Blast radius.** 📦 adds a field to `folderState` and gates scan/sync
-  loop entry.
-- **Syncthing handling.** Syncthing has explicit folder states
-  (`idle`, `scanning`, `syncing`, `error`, etc.) surfaced in its UI.
-- **Recommendation.** Ship (1) after R1 — it gives the state machine
-  something real to coordinate (rename handling needs explicit
-  quiescence).
+- **Status.** Cancelled on 2026-04-19. The mutex-based invariant is
+  correct today and no current bug or user-visible problem motivates a
+  second coordination mechanism. An explicit state machine would have to
+  stay consistent with `indexMu` and `firstScanDone` forever — two
+  sources of truth that can drift. Keep one.
+- **Invariant, documented in code.** `folderState` carries a short doc
+  comment pinning the contract:
+  - `indexMu.Lock` is held across the scan's index swap.
+  - `indexMu.RLock` is held for the sync diff.
+  - `firstScanDone` (a `chan struct{}` on `Node`) gates all peer sync
+    until the first full scan completes.
+  - `initialScanDone atomic.Bool` on `folderState` mirrors that gate
+    per folder.
+  Breaking any of these invariants requires re-reading this comment,
+  not discovering a silent race.
+- **Degraded state already exists in finer form.** Per-peer backoff
+  lives in `peerRetryTracker` (R3); per-path quarantine lives in the
+  conflict / retry paths (C4); the admin dashboard surfaces
+  `backoff_remaining` and `last_error`. A folder-level `degraded` badge
+  would duplicate these without adding new information.
+- **Reopen trigger.** Reopen only if one of these becomes true:
+  1. A concrete correctness bug traces back to scan/sync overlap that
+     the mutex discipline cannot express.
+  2. A user-visible need for a coarse folder-level state (beyond the
+     existing peer and path signals) appears in the UI or API contract.
+  3. The upcoming D1/D2/D4/D6/C6 bundle introduces a coordinated
+     migration step whose safety is easier to reason about as an
+     explicit state.
 
 <a id="r3"></a>
 ### R3 · Peer-level failure blacklist · ✅
@@ -1224,8 +1229,8 @@ group is safe to ship independently.
    allocation still dominates after P18c.
 10. **C3** + **C4** — per-block verify and multi-peer fallback; pair
     with R3 for consistent retry semantics.
-11. **R2** — folder state machine; after R1 gives it something real to
-    coordinate.
+11. **R2** — cancelled. Mutex invariant is correct today; see the R2
+    section for the reopen triggers.
 12. **R3** — peer blacklist; fits alongside C4.
 13. **D3** — fanotify backend; opt-in, universal fallback stays.
 14. **D6** — zstd index swap first, then per-transfer (flag-gated).

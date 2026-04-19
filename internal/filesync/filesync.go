@@ -418,6 +418,12 @@ type FolderSyncMetrics struct {
 }
 
 // folderState holds runtime state for a single synced folder.
+//
+// Scan/sync coordination contract (see R2 in docs/filesync/PLAN.md):
+// scan holds indexMu.Lock across the index swap; sync holds
+// indexMu.RLock for the diff; Node.firstScanDone (and per-folder
+// initialScanDone) gate all peer sync until the first full scan
+// completes. Do not add a parallel coordination mechanism.
 type folderState struct {
 	cfg             config.FolderCfg
 	root            *os.Root // L5: TOCTOU-safe folder root handle
