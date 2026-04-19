@@ -79,7 +79,6 @@ var (
 	cMagenta = "\033[35m"
 	cCyan    = "\033[36m"
 	cGray    = "\033[90m"
-	cBlink   = "\033[5m"
 )
 
 func init() {
@@ -93,7 +92,6 @@ func init() {
 		cMagenta = ""
 		cCyan = ""
 		cGray = ""
-		cBlink = ""
 	}
 }
 

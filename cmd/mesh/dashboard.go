@@ -719,7 +719,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 							case pComp.Status == state.Retrying:
 								peers[name] = cYellow + "●" + cReset
 							case pComp.Status == state.Connecting:
-								peers[name] = cBlink + cYellow + "●" + cReset
+								peers[name] = cYellow + "●" + cReset
 							default:
 								peers[name] = "○"
 							}
@@ -877,7 +877,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 							annotation = cGray + "(" + info.peerAddr + ")" + cReset
 						}
 					case state.Connecting, state.Retrying:
-						ind = cBlink + cYellow + "●" + cReset
+						ind = cYellow + "●" + cReset
 					}
 				}
 				addRow(" ", ind, colorAddr(t), "", "", "", annotation, metricsSnapshot{})
@@ -903,10 +903,10 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 							targetAnnotation = cGray + "(" + comp.PeerAddr + ")" + cReset
 						}
 					case state.Connecting:
-						ind = cBlink + cYellow + "●" + cReset
+						ind = cYellow + "●" + cReset
 						targetStr = cGray + "[connecting]" + cReset
 					case state.Retrying:
-						ind = cBlink + cYellow + "●" + cReset
+						ind = cYellow + "●" + cReset
 						if comp.Message != "" {
 							targetStr = cYellow + comp.Message + cReset
 						} else {
