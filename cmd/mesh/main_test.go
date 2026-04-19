@@ -426,13 +426,73 @@ func TestRenderStatus_NilActiveStateOmitsStartingBracket(t *testing.T) {
 	if strings.Contains(output, "[starting]") {
 		t.Errorf("nil activeState must not render [starting] brackets; got:\n%s", output)
 	}
-	// Indicator should also be omitted (⚪️ is only for missing components in live state).
-	if strings.Contains(output, "⚪") {
-		t.Errorf("nil activeState must not render status indicator ⚪; got:\n%s", output)
+	// Indicator should also be omitted (◇ is only for missing components in live state).
+	if strings.Contains(output, "◇") {
+		t.Errorf("nil activeState must not render status indicator ◇; got:\n%s", output)
 	}
 	// Sanity: config listing itself still renders.
 	if !strings.Contains(output, "1080") {
 		t.Errorf("config preview should still list listener bind; got:\n%s", output)
+	}
+}
+
+// TestRenderStatus_ComponentStatusGlyphs pins the component-status glyph
+// vocabulary: ◇ pending/starting, ◆ live (green) and transient (yellow),
+// ✕ failed. These are deliberately NOT circles so readers don't confuse
+// them with the peer-status radio buttons (●/○/●✓). Emojis are banned
+// because they render as 2-cell wide and broke alignment.
+func TestRenderStatus_ComponentStatusGlyphs(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "socks", Bind: "127.0.0.1:1080"},
+			{Type: "socks", Bind: "127.0.0.1:1081"},
+			{Type: "socks", Bind: "127.0.0.1:1082"},
+			{Type: "socks", Bind: "127.0.0.1:1083"},
+		},
+	}
+	activeState := map[string]state.Component{
+		"proxy:127.0.0.1:1080": {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
+		"proxy:127.0.0.1:1081": {Type: "proxy", ID: "127.0.0.1:1081", Status: state.Retrying, Message: "timeout"},
+		"proxy:127.0.0.1:1082": {Type: "proxy", ID: "127.0.0.1:1082", Status: state.Failed, Message: "bind error"},
+		// 1083 intentionally missing — should fall into the "starting" bucket.
+	}
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
+	plain := stripANSI(output)
+
+	// Listener lines appear in config order; find each by bind.
+	lineFor := func(bind string) string {
+		for _, line := range strings.Split(plain, "\n") {
+			if strings.Contains(line, bind) {
+				return line
+			}
+		}
+		return ""
+	}
+	cases := []struct {
+		bind      string
+		wantGlyph string
+	}{
+		{"1080", "◆"}, // listening
+		{"1081", "◆"}, // retrying (same shape, yellow)
+		{"1082", "✕"}, // failed
+		{"1083", "◇"}, // starting
+	}
+	for _, c := range cases {
+		line := lineFor(c.bind)
+		if line == "" {
+			t.Errorf("bind %s: line not found", c.bind)
+			continue
+		}
+		if !strings.Contains(line, c.wantGlyph) {
+			t.Errorf("bind %s: want glyph %q, got line: %s", c.bind, c.wantGlyph, line)
+		}
+	}
+
+	// No emoji residue.
+	for _, legacy := range []string{"⚪", "🟢", "🟡", "🔴"} {
+		if strings.Contains(plain, legacy) {
+			t.Errorf("legacy emoji %q must not appear in component status column; got:\n%s", legacy, plain)
+		}
 	}
 }
 
@@ -1725,11 +1785,11 @@ func TestAlignment_ListenerStatusColumn(t *testing.T) {
 	lines := extractLines(output)
 
 	// Expect all 3 listener lines to have identical format with aligned [listening]
-	//   🟢 127.0.0.1:1080 socks [listening]
-	//   🟢 127.0.0.1:3128 http  [listening]
-	//   🟢 0.0.0.0:2222   sshd  [listening]
-	// The [listening] column must be identical (27 in this layout)
-	wantCol := 24
+	//   ◆ 127.0.0.1:1080 socks [listening]
+	//   ◆ 127.0.0.1:3128 http  [listening]
+	//   ◆ 0.0.0.0:2222   sshd  [listening]
+	// The [listening] column must be identical.
+	wantCol := 23
 	for _, line := range lines {
 		col := findColumn(line, "[listening]")
 		if col >= 0 && col != wantCol {
@@ -1762,8 +1822,10 @@ func TestAlignment_MetricsColumnSameAcrossRows(t *testing.T) {
 	output, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
 	lines := extractLines(output)
 
-	wantStatusCol := 24
-	wantMetricsCol := 43
+	// Columns reflect the single-cell ◆ indicator (1 column narrower than
+	// the legacy 2-cell 🟢 emoji).
+	wantStatusCol := 23
+	wantMetricsCol := 42
 	for _, line := range lines {
 		if !strings.Contains(line, "[listening]") {
 			continue
@@ -2353,8 +2415,8 @@ func TestRenderStatus_DryRunFolderShowsDryRunBracket(t *testing.T) {
 		},
 	}
 	activeState := map[string]state.Component{
-		"filesync:0.0.0.0:7756":  {Type: "filesync", ID: "0.0.0.0:7756", Status: state.Listening},
-		"filesync-folder:notes":  {Type: "filesync-folder", ID: "notes", Status: state.Scanning},
+		"filesync:0.0.0.0:7756": {Type: "filesync", ID: "0.0.0.0:7756", Status: state.Listening},
+		"filesync-folder:notes": {Type: "filesync-folder", ID: "notes", Status: state.Scanning},
 	}
 	output, _ := renderStatus(cfg, activeState, nil, "testnode")
 	plain := stripANSI(output)

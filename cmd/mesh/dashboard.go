@@ -415,20 +415,22 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		}
 		comp, ok := activeState[compType+":"+id]
 		if !ok {
-			return "⚪️", cGray + "[starting]" + cReset, state.Component{}
+			return cGray + "◇" + cReset, cGray + "[starting]" + cReset, state.Component{}
 		}
+		// Diamond glyphs (◇/◆) keep the component-status column visually
+		// distinct from the peer-status column (●/○/●✓ radio buttons).
 		color := cGray
-		indicator := "⚪️"
+		indicator := cGray + "◇" + cReset
 		switch comp.Status {
 		case state.Listening, state.Connected:
 			color = cGreen
-			indicator = "🟢"
+			indicator = cGreen + "◆" + cReset
 		case state.Connecting, state.Retrying, state.Scanning:
 			color = cYellow
-			indicator = "🟡"
+			indicator = cYellow + "◆" + cReset
 		case state.Failed:
 			color = cRed
-			indicator = "🔴"
+			indicator = cRed + "✕" + cReset
 		}
 		msg := string(comp.Status)
 		if comp.Message != "" {
