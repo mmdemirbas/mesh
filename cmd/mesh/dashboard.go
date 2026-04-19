@@ -578,7 +578,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			addRow("", indicator, colorAddr(cs.Bind), "", "", st, "", readMetrics(metricsMap["clipsync:"+cs.Bind]))
 			// Show last clipboard activity if available.
 			if comp.Message != "" {
-				addRow("   ", "⌁", cGray+comp.Message+cReset, "", "", "", "", metricsSnapshot{})
+				addRow("   ", "↳", cGray+comp.Message+cReset, "", "", "", "", metricsSnapshot{})
 			}
 
 			type peerEntry struct{ addr, label, tlsStatus string }

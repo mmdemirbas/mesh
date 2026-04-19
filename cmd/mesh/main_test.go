@@ -436,6 +436,30 @@ func TestRenderStatus_NilActiveStateOmitsStartingBracket(t *testing.T) {
 	}
 }
 
+// TestRenderStatus_ClipsyncActivityUsesSubrowArrow pins the glyph used
+// for the "last clipboard activity" sub-row under a clipsync listener.
+// The previous ⌁ (high-voltage) glyph was visually arbitrary. Use ↳,
+// the same sub-row marker used for unmapped dynamic ports, so the
+// reader learns one shape instead of two.
+func TestRenderStatus_ClipsyncActivityUsesSubrowArrow(t *testing.T) {
+	cfg := &config.Config{
+		Clipsync: []config.ClipsyncCfg{{Bind: "127.0.0.1:9000"}},
+	}
+	activeState := map[string]state.Component{
+		"clipsync:127.0.0.1:9000": {
+			Type: "clipsync", ID: "127.0.0.1:9000",
+			Status: state.Listening, Message: "text · 42 B · 14:03:27",
+		},
+	}
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
+	if strings.Contains(output, "⌁") {
+		t.Errorf("legacy ⌁ glyph must not appear; got:\n%s", output)
+	}
+	if !strings.Contains(output, "↳") {
+		t.Errorf("clipsync activity row must use ↳; got:\n%s", output)
+	}
+}
+
 // TestRenderStatus_EmptyActiveStateShowsStarting pins the distinction:
 // a running node whose state map has not been populated yet must still
 // report each configured component as [starting]. This is the status-
