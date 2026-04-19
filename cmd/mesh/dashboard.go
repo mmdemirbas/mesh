@@ -250,6 +250,7 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 
 	_, _ = os.Stdout.WriteString("\033[?1049h") // enter alt screen
 	_, _ = os.Stdout.WriteString("\033[?25l")   // hide cursor
+	_, _ = os.Stdout.WriteString("\033[?7l")    // disable auto-wrap: long lines truncate at the right edge instead of wrapping into extra rows, which would push the header off-screen on narrow terminals
 
 	// Cleanup order matters: disable mouse tracking first (while still in
 	// raw/VT mode), leave alt screen, then restore cooked mode. On Windows,
@@ -261,6 +262,7 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 		_, _ = os.Stdout.WriteString("\033[?1003l") // disable any-event mouse tracking
 		_, _ = os.Stdout.WriteString("\033[?1006l") // disable SGR mouse mode
 		_, _ = os.Stdout.WriteString("\033[?1000l") // disable normal mouse tracking
+		_, _ = os.Stdout.WriteString("\033[?7h")    // restore auto-wrap
 		_, _ = os.Stdout.WriteString("\033[?25h")   // show cursor
 		_, _ = os.Stdout.WriteString("\033[?1049l") // leave alt screen
 		_ = term.Restore(fd, oldState)              // restore cooked mode last
