@@ -5658,6 +5658,28 @@ func BenchmarkIndexClone(b *testing.B) {
 	}
 }
 
+// BenchmarkRecomputeCache measures the per-scan cache refresh cost.
+// runScan calls fs.index.recomputeCache() after every scan+merge swap;
+// for a 168 k-entry folder the cost determines whether PN (incremental
+// recompute) is worth shipping.
+func BenchmarkRecomputeCache(b *testing.B) {
+	for _, n := range []int{1_000, 10_000, 100_000} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			idx := newFileIndex()
+			for i := range n {
+				idx.Files[fmt.Sprintf("dir%03d/file%05d.dat", i/100, i)] = FileEntry{
+					Size: int64(i), MtimeNS: int64(i) * 1000, Sequence: int64(i),
+				}
+			}
+			b.ResetTimer()
+			b.ReportAllocs()
+			for b.Loop() {
+				idx.recomputeCache()
+			}
+		})
+	}
+}
+
 // BenchmarkIndexCloneReused measures the P18c pool-reuse path. The runScan
 // loop stashes the old Files map after swap and recycles it on the next
 // clone, so steady-state scans allocate zero map memory.
