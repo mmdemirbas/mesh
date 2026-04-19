@@ -149,9 +149,9 @@ Rule 1 (boundary gaps) and Rule 2 (reproducer gaps), not the number.
 
 | Package | Line cov | Boundary gaps | Anti-patterns | Reproducer gaps | Priority |
 |---------|----------|---------------|---------------|-----------------|----------|
-| internal/tlsutil  | 79.6% | `generateCustom` edge branches untested; `writePEM` 55.6% | **AP-1** confirmed (see catalog); string-match on `err.Error()` in `TestClientTLS_NoPeerCert_Rejected` | None (new code) | HIGH |
-| internal/config   | 72.5% | `LoadNodeNames` 0%; `ResolveAllowedPeerHosts` 0%; `Validate` branches at 62.2%; `Load` at 55.6% | None found in scan | None found (spot check: `0d57b1b` has TDD reproducer in prior `7661936`) | HIGH |
-| internal/filesync | 58.2% | HTTP handlers `handleIndex` / `handleFile` / `handleDelta` / `handleBundle` not exercised at unit level; `Start` / `syncLoop` / `syncFolder` 0% | None found in scan | None found on spot check (fix+test-commit pattern: `c6522c1` paired with `b4ac2cf`; `5aef218`/`9f2bf7d` ship tests inline) | HIGH |
+| internal/tlsutil  | 79.6% | `generateCustom` edge branches untested; `writePEM` 55.6% | ~~AP-1~~ fixed in `1afb5c9`; minor: string-match on `err.Error()` in `TestClientTLS_NoPeerCert_Rejected` (needs new sentinel; deferred) | None (new code) | MED |
+| internal/config   | 83.3% | `Validate` branches at 62.2%; `Load` at 55.6% (boundary gap at `LoadNodeNames`/`ResolveAllowedPeerHosts` closed in `ba06243`) | None found in scan | None found (spot check: `0d57b1b` has TDD reproducer in prior `7661936`) | MED |
+| internal/filesync | 58.6% | HTTP handler rejection paths partly closed in `b5fde66` (method/protobuf/gzip on index,file,delta); `handleBundle` / `handleStatus` rejection paths still uncovered; `Start` / `syncLoop` / `syncFolder` 0% | None found in scan | None found on spot check (fix+test-commit pattern: `c6522c1` paired with `b4ac2cf`; `5aef218`/`9f2bf7d` ship tests inline) | MED |
 | internal/clipsync | _TBD_ | | | | |
 | internal/tunnel   | _TBD_ | | | | |
 | internal/proxy    | _TBD_ | | | | |
@@ -202,12 +202,13 @@ value pinned into peer configs.
 notion of "the right fingerprint" is "whatever `AutoCert` produced"
 (oracle). A bug in `Fingerprint` would pass the e2e unchanged.
 
-**Fix:** Add `internal/tlsutil/tlsutil_test.go` with a hardcoded PEM cert
-and a hardcoded expected fingerprint computed out-of-band (e.g. via
-`openssl x509 -noout -fingerprint -sha256`). Keep the e2e as-is — it's
-testing pinning behavior, which is the right concern there.
+**Fix:** `TestFingerprint_PinnedPEM` in `internal/tlsutil/tlsutil_test.go`
+anchors the algorithm against a static PEM fixture and a hardcoded hex
+computed out-of-band with `openssl x509 -noout -fingerprint -sha256`.
+The e2e continues to use `AutoCert` for pinning-behavior tests, which
+is the correct concern there.
 
-**Status:** Open.
+**Status:** Fixed in `1afb5c9` (2026-04-19).
 
 ### AP-2: Piecemeal coverage goals without rubric
 
@@ -228,15 +229,17 @@ _New entries: add only from real findings. Do not pre-fill speculatively._
 
 ## Rollout
 
-1. **Phase 1 — land this doc and the rubric.** Done when committed.
+1. **Phase 1 — land this doc and the rubric.** Done.
 2. **Phase 2 — audit three packages first:** `internal/config`,
-   `internal/tlsutil`, `internal/filesync`. Each produces a punch list
-   of boundary gaps and anti-patterns in the table above.
-3. **Phase 3 — fix the top-priority gaps** per package, one commit per
-   logical fix. Regression tests mandatory (Rule 2 applies to these
-   too — if Phase 2 found a gap that corresponds to a past bug, the
-   fix includes a reproducer).
-4. **Phase 4 — remaining packages,** same pattern.
+   `internal/tlsutil`, `internal/filesync`. Done.
+3. **Phase 3 — fix the top-priority gaps.** In progress. Closed so far:
+   AP-1 (tlsutil oracle anchor); config boundary gaps on `LoadNodeNames`
+   and `ResolveAllowedPeerHosts`; filesync protocol-handler rejection
+   paths on `/index`, `/file`, `/delta`. Remaining: `handleBundle` and
+   `handleStatus` rejection paths; deeper coverage of `Validate` and
+   `Load` branches; live-loop paths (`Start`, `syncLoop`).
+4. **Phase 4 — remaining packages,** same pattern: `clipsync`, `tunnel`,
+   `proxy`, `gateway`, `netutil`, `state`, `cmd/mesh`, `e2e/scenarios`.
 
 No deadline. Quality work blocks no feature; feature work does not
 create new Rule-1 or Rule-2 gaps (enforced at review, not CI).
