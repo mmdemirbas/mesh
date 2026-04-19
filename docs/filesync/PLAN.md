@@ -87,37 +87,38 @@ there depend on items tracked here.
 
 ---
 
+<a id="summary-table"></a>
 ## Summary Table
 
 | ID    | Item                                                 | Pri   | Area          | Status | Effort | Risk | Blast |
 |-------|------------------------------------------------------|-------|---------------|--------|--------|------|-------|
-| C1    | mtime vs last-sync in `diff()` (Idea A)              | 🔴 P0 | conflict      | ✅     | 🟩 XS  | 🟡   | 📄    |
-| C2    | Per-peer last-exchanged hash (Idea B / ancestor)     | 🔴 P0 | conflict      | ✅     | 🟧 M   | 🟡   | 📦    |
-| C3    | Per-block verify during write                        | 🔴 P0 | correctness   | ⏳     | 🟧 M   | 🟡   | 📦    |
-| C4    | Immediate multi-peer fallback on hash mismatch       | 🔴 P0 | correctness   | 🔧     | 🟨 S   | 🟢   | 📦    |
-| P17a  | Dirty flag — skip persist when unchanged             | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
-| P17b  | Gob persistence + YAML fallback                      | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟡   | 🔌    |
-| P18a  | Pre-size `seen` map                                  | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
-| P18b  | Incremental `activeCount` / `activeSize`             | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
-| P18c  | Eliminate index clone (scan into `pending`)          | 🟠 P1 | perf          | 🔧     | 🟧 M   | 🟡   | 📦    |
-| P18d  | Cap `buildIndexExchange` pre-allocation              | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
-| P3sc  | Adaptive watch / scan                                | 🟠 P1 | perf          | ⏸     | 🟧 M   | 🟡   | 📦    |
-| PF    | Trie-based ignore with cursor propagation            | 🟠 P1 | perf          | 🔧     | 🟥 L   | 🟡   | 📦    |
-| PK    | Clone elimination (COW / change-set on persist)      | 🟠 P1 | perf          | ⏳     | 🟧 M   | 🔴   | 📦    |
-| PL    | Incremental deletion detection                       | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
-| PM    | Directory-keyed child index                          | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
-| PN    | Incremental `recomputeCache`                         | 🟠 P1 | perf          | ⏸      | 🟨 S   | 🟢   | 📄    |
-| R1    | Inode-based rename / move detection                  | 🟡 P2 | robustness    | 🔧     | 🟧 M   | 🟡   | 🔌    |
-| R2    | Formal folder-level state machine                    | 🟡 P2 | robustness    | ⏳     | 🟧 M   | 🟢   | 📦    |
-| R3    | Peer-level failure blacklist                         | 🟡 P2 | robustness    | 🔧     | 🟨 S   | 🟢   | 📦    |
-| D1    | FastCDC content-defined chunking                     | 🟢 P3 | differentiate | ⏳     | 🟥 L   | 🔴   | 🔌    |
-| D2    | BLAKE3 instead of SHA-256                            | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🔴   | 🔌    |
-| D3    | Linux `fanotify` backend                             | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🟡   | 📦    |
-| D4    | SQLite-backed index                                  | 🟢 P3 | differentiate | ⏳     | 🟥 L   | 🔴   | 🔌    |
-| D5    | Sparse file detection                                | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🟡   | 📦    |
-| D6    | Per-transfer zstd compression                        | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🟡   | 🔌    |
-| C5    | 3-way text merge (Idea C)                            | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 📦    |
-| C6    | Full vector clocks per file (Idea D)                 | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 🔌    |
+| [C1](#c1) | mtime vs last-sync in `diff()` (Idea A)              | 🔴 P0 | conflict      | ✅     | 🟩 XS  | 🟡   | 📄    |
+| [C2](#c2) | Per-peer last-exchanged hash (Idea B / ancestor)     | 🔴 P0 | conflict      | ✅     | 🟧 M   | 🟡   | 📦    |
+| [C3](#c3) | Per-block verify during write                        | 🔴 P0 | correctness   | ⏳     | 🟧 M   | 🟡   | 📦    |
+| [C4](#c4) | Immediate multi-peer fallback on hash mismatch       | 🔴 P0 | correctness   | 🔧     | 🟨 S   | 🟢   | 📦    |
+| [P17a](#p17a) | Dirty flag — skip persist when unchanged             | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
+| [P17b](#p17b) | Gob persistence + YAML fallback                      | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟡   | 🔌    |
+| [P18a](#p18a) | Pre-size `seen` map                                  | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
+| [P18b](#p18b) | Incremental `activeCount` / `activeSize`             | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
+| [P18c](#p18c) | Eliminate index clone (scan into `pending`)          | 🟠 P1 | perf          | 🔧     | 🟧 M   | 🟡   | 📦    |
+| [P18d](#p18d) | Cap `buildIndexExchange` pre-allocation              | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
+| [P3sc](#p3sc) | Adaptive watch / scan                                | 🟠 P1 | perf          | ⏸     | 🟧 M   | 🟡   | 📦    |
+| [PF](#pf) | Trie-based ignore with cursor propagation            | 🟠 P1 | perf          | 🔧     | 🟥 L   | 🟡   | 📦    |
+| [PK](#pk) | Clone elimination (COW / change-set on persist)      | 🟠 P1 | perf          | ⏳     | 🟧 M   | 🔴   | 📦    |
+| [PL](#pl) | Incremental deletion detection                       | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
+| [PM](#pm) | Directory-keyed child index                          | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
+| [PN](#pn) | Incremental `recomputeCache`                         | 🟠 P1 | perf          | ⏸      | 🟨 S   | 🟢   | 📄    |
+| [R1](#r1) | Inode-based rename / move detection                  | 🟡 P2 | robustness    | 🔧     | 🟧 M   | 🟡   | 🔌    |
+| [R2](#r2) | Formal folder-level state machine                    | 🟡 P2 | robustness    | ⏳     | 🟧 M   | 🟢   | 📦    |
+| [R3](#r3) | Peer-level failure blacklist                         | 🟡 P2 | robustness    | 🔧     | 🟨 S   | 🟢   | 📦    |
+| [D1](#d1) | FastCDC content-defined chunking                     | 🟢 P3 | differentiate | ⏳     | 🟥 L   | 🔴   | 🔌    |
+| [D2](#d2) | BLAKE3 instead of SHA-256                            | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🔴   | 🔌    |
+| [D3](#d3) | Linux `fanotify` backend                             | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🟡   | 📦    |
+| [D4](#d4) | SQLite-backed index                                  | 🟢 P3 | differentiate | ⏳     | 🟥 L   | 🔴   | 🔌    |
+| [D5](#d5) | Sparse file detection                                | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🟡   | 📦    |
+| [D6](#d6) | Per-transfer zstd compression                        | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🟡   | 🔌    |
+| [C5](#c5) | 3-way text merge (Idea C)                            | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 📦    |
+| [C6](#c6) | Full vector clocks per file (Idea D)                 | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 🔌    |
 
 Counts: **4** P0 (1 ✅ / 3 ⏳) · **12** P1 (5 ✅ / 7 ⏳) · **3** P2 · **6** P3 · **2** deferred.
 
@@ -129,13 +130,13 @@ All `done` entries re-verified against the tree on 2026-04-19.
 
 | ID    | Verification                                                                                                |
 |-------|-------------------------------------------------------------------------------------------------------------|
-| P17a  | `indexDirty` / `peersDirty` fields on `folderState` (`filesync.go` ~L427); `persistFolder` gates (~L2127).  |
-| P17b  | `encoding/gob` Encode / Decode in `index.go` (~L265 / L274). YAML fallback path present for migration.      |
-| P18a  | `seen := make(map[string]struct{}, len(idx.Files))` in `index.go` (~L673).                                  |
-| P18b  | `cachedCount` / `cachedSize` on `FileIndex`; `activeCountAndSize()` is O(1) field read (~L389).             |
-| P18d  | Delta path uses `len(tail)` via `seqIndex` binary search (`filesync.go` ~L2031). Full path only on bootstrap. |
-| C1    | `diff()` takes `lastSyncNS` and compares `lEntry.MtimeNS` against it for both the B8 tombstone guard and the conflict classifier (`index.go`, `FileIndex.diff`). Caller in `syncFolder` passes `ps.LastSync.UnixNano()`. Covered by `TestDiffC1MtimeVsLastSync` and `TestDiffC1TombstoneMtimeVsLastSync`. |
-| C2    | `PeerState.BaseHashes` holds the last agreed hash per path; `diff()` uses it as the primary signal (ancestor match ⇒ download-or-skip, both diverged ⇒ conflict) and falls back to C1 mtime when absent. `updateBaseHashes` folds each completed exchange into the ancestor map (hash match records, tombstone drops, mismatch preserves prior). Caller in `syncFolder` snapshots `ps.BaseHashes` before diff and re-merges on both the no-action and sync-end paths. Covered by `TestDiffC2AncestorClassifier`, `TestDiffC2TombstoneAncestor`, and `TestUpdateBaseHashes`. |
+| [P17a](#p17a) | `indexDirty` / `peersDirty` fields on `folderState` (`filesync.go` ~L427); `persistFolder` gates (~L2127).  |
+| [P17b](#p17b) | `encoding/gob` Encode / Decode in `index.go` (~L265 / L274). YAML fallback path present for migration.      |
+| [P18a](#p18a) | `seen := make(map[string]struct{}, len(idx.Files))` in `index.go` (~L673).                                  |
+| [P18b](#p18b) | `cachedCount` / `cachedSize` on `FileIndex`; `activeCountAndSize()` is O(1) field read (~L389).             |
+| [P18d](#p18d) | Delta path uses `len(tail)` via `seqIndex` binary search (`filesync.go` ~L2031). Full path only on bootstrap. |
+| [C1](#c1) | `diff()` takes `lastSyncNS` and compares `lEntry.MtimeNS` against it for both the B8 tombstone guard and the conflict classifier (`index.go`, `FileIndex.diff`). Caller in `syncFolder` passes `ps.LastSync.UnixNano()`. Covered by `TestDiffC1MtimeVsLastSync` and `TestDiffC1TombstoneMtimeVsLastSync`. |
+| [C2](#c2) | `PeerState.BaseHashes` holds the last agreed hash per path; `diff()` uses it as the primary signal (ancestor match ⇒ download-or-skip, both diverged ⇒ conflict) and falls back to C1 mtime when absent. `updateBaseHashes` folds each completed exchange into the ancestor map (hash match records, tombstone drops, mismatch preserves prior). Caller in `syncFolder` snapshots `ps.BaseHashes` before diff and re-merges on both the no-action and sync-end paths. Covered by `TestDiffC2AncestorClassifier`, `TestDiffC2TombstoneAncestor`, and `TestUpdateBaseHashes`. |
 | R1 (partial) | Receiver-side content-hash rename landed: `planRenames` (in `index.go`) pairs each ActionDelete whose local file has hash H with one ActionDownload whose RemoteHash is H, and `syncFolder` performs an atomic local rename (with Chtimes/Chmod, tombstone + new-path index entry) for each plan. Both sides of the rename are skipped in the bundle loop and the main dispatch loop. Metrics `FilesRenamed` and `BytesSavedByRename` exported via `/api/metrics` (`mesh_filesync_files_renamed_total`, `mesh_filesync_bytes_saved_by_rename_total`). Covered by `TestPlanRenames*` (happy path, hash mismatch, one-to-one pairing, target exists, tombstoned source, missing source, nil inputs) and `TestR1RenameFilesystemIntegration`. Remaining: inode-based sender-side rename detection with wire protocol capability handshake for the case where the renamed file was also edited. See R1 Status note. |
 
 `P18c` is still pending: `fs.index.clone()` remains at `filesync.go:1030` (runScan) and `filesync.go:2151` (persistFolder).
@@ -174,7 +175,10 @@ Each entry follows the same structure:
 
 ## 🔴 P0 — Correctness
 
+<a id="c1"></a>
 ### C1 · mtime vs last-sync timestamp in `diff()` (Idea A)
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** `index.go:diff()` decides "was our copy locally modified since
   we last talked to this peer?" by comparing `lEntry.Sequence` (our folder
@@ -213,7 +217,10 @@ Each entry follows the same structure:
   improvement with no protocol change. C2 subsumes it and can land later
   without reverting this.
 
+<a id="c2"></a>
 ### C2 · Per-peer last-exchanged hash (Idea B / ancestor)
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** `diff()` has no memory of the version both sides last agreed
   on. It only sees "their hash" and "our hash". If the two differ, it must
@@ -253,7 +260,10 @@ Each entry follows the same structure:
 - **Recommendation.** Ship option (1). It is the minimum solution that is
   definitively correct for two devices and unlocks 3-way merge (C5) later.
 
+<a id="c3"></a>
 ### C3 · Per-block verify during write
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** `transfer.go:downloadToVerifiedTemp` writes the entire file
   to a temp path and then hashes. A single corrupted byte anywhere in a
@@ -288,7 +298,10 @@ Each entry follows the same structure:
 - **Recommendation.** Ship option (1) after C1 and C2. Land together with
   C4 so the retry policy is consistent.
 
+<a id="c4"></a>
 ### C4 · Immediate multi-peer fallback on hash mismatch · 🔧
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** On hash mismatch, `retryTracker.record` bumps a
   `(path, remoteHash)` failure count and waits for the next sync cycle
@@ -342,7 +355,10 @@ Each entry follows the same structure:
 
 ## 🟠 P1 — Performance
 
+<a id="p17a"></a>
 ### P17a · Dirty flag — skip persist when unchanged · ✅
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** `persistFolder` used to run after every `syncFolder` (~30 s
   per peer) whether or not anything changed. ~30 MB of YAML × 2 writes +
@@ -352,7 +368,10 @@ Each entry follows the same structure:
 - **Verification.** See Verification table above.
 - **Notes.** Eliminated ~90 % of persists in idle state.
 
+<a id="p17b"></a>
 ### P17b · Gob persistence + YAML fallback · ✅
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** YAML marshal for 168 k entries produced ~30 MB and took
   several seconds, hurting scan-cycle latency.
@@ -367,14 +386,20 @@ Each entry follows the same structure:
   superseded. The migration path (gob → SQLite) must read the existing
   on-disk gob once.
 
+<a id="p18a"></a>
 ### P18a · Pre-size `seen` map · ✅
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** `make(map[string]struct{})` with no capacity hint causes
   8+ rehashes as it grows to 168 k entries during scan.
 - **Fix shipped.** Pre-size to `len(idx.Files)`. One-line change.
 - **Verification.** See Verification table.
 
+<a id="p18b"></a>
 ### P18b · Incremental `activeCount` / `activeSize` · ✅
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** `activeCountAndSize()` iterated the whole index to report
   file count and total size, called after every sync and on every
@@ -386,7 +411,10 @@ Each entry follows the same structure:
 - **Open follow-up.** PN — make `recomputeCache` itself incremental on
   scan swap.
 
+<a id="p18c"></a>
 ### P18c · Eliminate index clone (scan into `pending`) · 🔧
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** `runScan` calls `fs.index.clone()` before walking the tree,
   so the walker can mutate a private copy while readers see the old
@@ -449,7 +477,10 @@ Each entry follows the same structure:
   captured here with ~10 lines of change and a small, measurable
   blast radius.
 
+<a id="p18d"></a>
 ### P18d · Cap `buildIndexExchange` pre-allocation · ✅
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** `make([]*pb.FileInfo, 0, len(fs.index.Files))` pre-allocated
   168 k pointer slots even when delta-since was 0–10 entries.
@@ -458,7 +489,10 @@ Each entry follows the same structure:
   first contact (sinceSequence == 0).
 - **Verification.** See Verification table.
 
+<a id="p3sc"></a>
 ### P3sc · Adaptive watch / scan · ⏳
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** `defaultMaxWatches = 4096` is a hard cap on fsnotify
   watches. Folders with more directories (spark-kit 16 k dirs, m2-repo
@@ -499,7 +533,10 @@ Each entry follows the same structure:
   only if production tells us realtime coverage for unwatched
   directories is actually needed.
 
+<a id="pf"></a>
 ### PF · Trie-based ignore with cursor propagation · 🔧
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** `ignore.shouldIgnore` evaluates patterns linearly —
   O(P) per path segment where P = pattern count. On the 310 k-file
@@ -554,7 +591,10 @@ Each entry follows the same structure:
   partial win already removed ignore matching from the scan-time
   hotspot list, so Phase 2 is no longer urgent.
 
+<a id="pk"></a>
 ### PK · Clone elimination (COW / change-set on persist) · ⏳
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** Even after P18c removes the scan-time clone,
   `persistFolder` still clones to get a stable snapshot for the writer.
@@ -582,7 +622,10 @@ Each entry follows the same structure:
   shows persist-time allocation still dominates. Heavy test matrix is a
   prerequisite.
 
+<a id="pl"></a>
 ### PL · Incremental deletion detection · ✅
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** After scan, `index.go:834-848` iterates the whole index to
   find entries the scan did not visit. O(N) per scan.
@@ -616,7 +659,10 @@ Each entry follows the same structure:
   continue to pass. Eager fsnotify-remove path deferred; the scan-side
   short-circuit alone captures the common-case win.
 
+<a id="pm"></a>
 ### PM · Directory-keyed child index · ✅
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** Error-path protection (`index.go:665-670`) scans the full
   index to find children of a failed directory. O(N × M) where M = number
@@ -652,7 +698,10 @@ Each entry follows the same structure:
   `TestScanPerFileErrorAllowsOtherTombstones`,
   `TestScanBulkErrorsSuppressAllTombstones`) continue to pass.
 
+<a id="pn"></a>
 ### PN · Incremental `recomputeCache` · ⏸
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** `recomputeCache` rebuilds the active-files cache
   (advisory, used by `claimPath` dedup) from scratch after every scan
@@ -678,7 +727,10 @@ Each entry follows the same structure:
 
 ## 🟡 P2 — Robustness
 
+<a id="r1"></a>
 ### R1 · Inode-based rename / move detection
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** `FileEntry` has no inode field. Renames within the synced
   tree look like delete + create, forcing a full file re-upload.
@@ -723,7 +775,10 @@ Each entry follows the same structure:
   that falls back to full re-transfer, which mirrors the recommended
   behavior before rename-support peers handshake. Decision deferred.
 
+<a id="r2"></a>
 ### R2 · Formal folder-level state machine
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** `firstScanDone` gates the first sync but steady-state has
   no explicit `scanning` / `syncing` state. A slow scan plus a sync cycle
@@ -750,7 +805,10 @@ Each entry follows the same structure:
   something real to coordinate (rename handling needs explicit
   quiescence).
 
+<a id="r3"></a>
 ### R3 · Peer-level failure blacklist · 🔧
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** Today a peer that serves consistently wrong data is
   indistinguishable from a network error. Each bad file requires its own
@@ -790,7 +848,10 @@ Each entry follows the same structure:
   (below-threshold no backoff, threshold activation, doubling, clear
   resets, cap at `retryMaxDelay`, `backedOffPeers` filtering).
 
+<a id="d1"></a>
 ### D1 · FastCDC content-defined chunking
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** Fixed 128 KB blocks mean a 1-byte insertion at offset 0
   shifts every downstream block boundary; full retransfer.
@@ -818,7 +879,10 @@ Each entry follows the same structure:
 - **Recommendation.** Phase-gated: after C3, C4, R1 are stable. Protocol
   version bump required.
 
+<a id="d2"></a>
 ### D2 · BLAKE3 instead of SHA-256
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** Full-scan CPU is dominated by SHA-256 hashing.
 - **Fix options.**
@@ -842,7 +906,10 @@ Each entry follows the same structure:
 - **Recommendation.** Design-gated behind C6 (vector clocks) wire bump
   — land both together if the protocol version is going to move anyway.
 
+<a id="d3"></a>
 ### D3 · Linux `fanotify` backend
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** inotify needs one FD per directory; `defaultMaxWatches`
   caps at 4096.
@@ -867,7 +934,10 @@ Each entry follows the same structure:
 - **Recommendation.** Ship (1) as opt-in. Pairs well with P3sc which
   remains the universal fallback.
 
+<a id="d4"></a>
 ### D4 · SQLite-backed index
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** The gob store is correct and crash-safe but requires
   loading the entire index into memory to answer any query. The in-process
@@ -896,7 +966,10 @@ Each entry follows the same structure:
 - **Recommendation.** Right long-term answer, but large enough to need
   a design doc and dependency approval first.
 
+<a id="d5"></a>
 ### D5 · Sparse file detection
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** A 10 GB sparse file with 1 MB of data is hashed and
   transferred as 10 GB.
@@ -919,7 +992,10 @@ Each entry follows the same structure:
 - **Syncthing handling.** Syncthing does not preserve sparseness.
 - **Recommendation.** Defer until a concrete user workload needs it.
 
+<a id="d6"></a>
 ### D6 · Per-transfer zstd compression
+
+[↑ back to summary](#summary-table)
 
 - **Problem.** Index exchanges are gzip-compressed; file payloads are
   raw.
@@ -945,7 +1021,10 @@ Each entry follows the same structure:
 
 ## ⚪ Deferred
 
+<a id="c5"></a>
 ### C5 · 3-way text merge (Idea C)
+
+[↑ back to summary](#summary-table)
 
 - **Why deferred.**
   - Needs an ancestor content cache on disk (LRU, size-bounded, text-only
@@ -960,7 +1039,10 @@ Each entry follows the same structure:
 - **Syncthing handling.** No 3-way merge. Unison does it; rsync doesn't.
   Git's own merge drivers are the gold standard here.
 
+<a id="c6"></a>
 ### C6 · Full vector clocks per file (Idea D)
+
+[↑ back to summary](#summary-table)
 
 - **Why deferred.**
   - 🔌 wire-format change (`repeated Counter version = N` on
