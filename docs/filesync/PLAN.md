@@ -8,6 +8,9 @@ Companion documents:
 
 - `RESEARCH.md` — Syncthing internals reference, used as the comparison
   baseline in the per-item analysis below.
+- `DESIGN-v1.md` — Phase 0 design for the coordinated D1 / D2 / D4 /
+  D6 / C6 landing as filesync protocol v1. Read before starting any
+  of those items.
 - `FILESYNC-ROLLOUT.local.md` — folder-by-folder rollout gate for the local
   MBP / HW / Lenovo deployment. Not checked in.
 
