@@ -89,7 +89,12 @@ func (r *logRing) PlainLines() []string {
 // renderDashboardFrame builds one complete frame of the dashboard output.
 // All line breaks use \r\n because the terminal is in raw mode where \n
 // alone only moves the cursor down without returning to column 1.
-func renderDashboardFrame(lines []string, start, end, vpHeight int, nodeNames []string, configPath, logFilePath, adminURL string, startTime time.Time) string {
+//
+// The frame has three regions: header (node label, clock, paths), body
+// (scrollable status lines, vpHeight tall), and footer (keybindings +
+// scroll indicator). totalLines and autoScroll drive the footer's
+// position/state display.
+func renderDashboardFrame(lines []string, start, end, vpHeight int, nodeNames []string, configPath, logFilePath, adminURL string, startTime time.Time, totalLines int, autoScroll bool) string {
 	const eol = "\033[K\r\n"
 
 	var buf strings.Builder
@@ -104,7 +109,32 @@ func renderDashboardFrame(lines []string, start, end, vpHeight int, nodeNames []
 	for i := end - start; i < vpHeight; i++ {
 		buf.WriteString(eol)
 	}
+	writeDashboardFooter(&buf, start, vpHeight, totalLines, autoScroll)
 	return buf.String()
+}
+
+// writeDashboardFooter emits a single-line footer with keybindings and
+// a scroll state indicator. No trailing newline — the footer sits on
+// the terminal's last row so the cursor stays put without triggering
+// a scroll. \033[K clears any stale content from the previous frame.
+func writeDashboardFooter(buf *strings.Builder, start, vpHeight, total int, autoScroll bool) {
+	hints := "q quit · ↑↓/jk scroll · g/G top/end · PgUp/PgDn page"
+	fmt.Fprintf(buf, "\033[K%s%s%s", cGray, hints, cReset)
+
+	if total <= vpHeight {
+		return
+	}
+	end := start + vpHeight
+	if end > total {
+		end = total
+	}
+	label := "paused"
+	color := cYellow
+	if autoScroll {
+		label = "LIVE"
+		color = cGreen
+	}
+	fmt.Fprintf(buf, "  %s[%s %d-%d/%d]%s", color, label, start+1, end, total, cReset)
 }
 
 // writeDashboardHeader emits the header lines (node label, clock, uptime,
@@ -201,6 +231,7 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 	if adminURL != "" {
 		headerHeight++
 	}
+	const footerHeight = 1 // reserved for keybindings/scroll indicator
 
 	startTime := time.Now()
 	scrollOffset := 0
@@ -217,7 +248,7 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 
 	render := func(force bool) {
 		_, height := termSize()
-		vpHeight := max(height-headerHeight, 1)
+		vpHeight := max(height-headerHeight-footerHeight, 1)
 
 		lines, _ := buildDashboardBody(cfgs, nodeNames, state.Global.SnapshotFull())
 
@@ -241,10 +272,11 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 		end := min(start+vpHeight, totalLines)
 
 		// Capture the exact byte sequence that will fill the body region.
-		// Including vpHeight and start in the key means terminal resizes and
-		// scroll shifts naturally invalidate the cache.
+		// Including vpHeight, start, total, and autoScroll in the key means
+		// terminal resizes, scroll shifts, and follow-mode toggles naturally
+		// invalidate the cache (footer state depends on the last two).
 		var sig strings.Builder
-		fmt.Fprintf(&sig, "%d|%d|", vpHeight, start)
+		fmt.Fprintf(&sig, "%d|%d|%d|%t|", vpHeight, start, totalLines, autoScroll)
 		for i := start; i < end; i++ {
 			sig.WriteString(lines[i])
 			sig.WriteByte('\n')
@@ -260,7 +292,7 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 		}
 		lastBody = body
 
-		frame := renderDashboardFrame(lines, start, end, vpHeight, nodeNames, configPath, logFilePath, adminURL, startTime)
+		frame := renderDashboardFrame(lines, start, end, vpHeight, nodeNames, configPath, logFilePath, adminURL, startTime, totalLines, autoScroll)
 		_, _ = os.Stdout.WriteString(frame)
 	}
 
@@ -326,7 +358,7 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 						changed = true
 					case '5': // page up (\033[5~)
 						_, h := termSize()
-						scrollOffset -= h - headerHeight
+						scrollOffset -= h - headerHeight - footerHeight
 						autoScroll = false
 						changed = true
 						if i+3 < len(input) && input[i+3] == '~' {
@@ -334,7 +366,7 @@ func runDashboard(ctx context.Context, cancel context.CancelFunc, cfgs map[strin
 						}
 					case '6': // page down (\033[6~)
 						_, h := termSize()
-						scrollOffset += h - headerHeight
+						scrollOffset += h - headerHeight - footerHeight
 						changed = true
 						if i+3 < len(input) && input[i+3] == '~' {
 							i++

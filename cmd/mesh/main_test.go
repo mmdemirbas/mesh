@@ -1937,7 +1937,7 @@ func BenchmarkCompareAddrSort(b *testing.B) {
 func TestRenderDashboardFrame_UsesRawNewlines(t *testing.T) {
 	t.Parallel()
 	lines := []string{"line1", "line2", "line3"}
-	frame := renderDashboardFrame(lines, 0, 3, 5, []string{"test-node"}, "/tmp/cfg.yaml", "/tmp/mesh.log", "http://127.0.0.1:7777", time.Now())
+	frame := renderDashboardFrame(lines, 0, 3, 5, []string{"test-node"}, "/tmp/cfg.yaml", "/tmp/mesh.log", "http://127.0.0.1:7777", time.Now(), 3, true)
 
 	// In raw terminal mode, every newline must be \r\n, not bare \n.
 	// Strip all \r\n first, then check no bare \n remains.
@@ -1954,7 +1954,7 @@ func TestRenderDashboardFrame_UsesRawNewlines(t *testing.T) {
 
 func TestRenderDashboardFrame_ContainsHeaderFields(t *testing.T) {
 	t.Parallel()
-	frame := renderDashboardFrame(nil, 0, 0, 5, []string{"my-node"}, "/etc/mesh.yaml", "/var/log/mesh.log", "http://localhost:7777", time.Now())
+	frame := renderDashboardFrame(nil, 0, 0, 5, []string{"my-node"}, "/etc/mesh.yaml", "/var/log/mesh.log", "http://localhost:7777", time.Now(), 0, true)
 
 	for _, want := range []string{"my-node", "/etc/mesh.yaml", "/var/log/mesh.log", "localhost:7777"} {
 		if !strings.Contains(frame, want) {
@@ -1967,7 +1967,7 @@ func TestRenderDashboardFrame_ViewportLines(t *testing.T) {
 	t.Parallel()
 	lines := []string{"alpha", "bravo", "charlie", "delta"}
 	// Scroll: show lines[1:3] in a viewport of height 4
-	frame := renderDashboardFrame(lines, 1, 3, 4, []string{"n"}, "", "", "", time.Now())
+	frame := renderDashboardFrame(lines, 1, 3, 4, []string{"n"}, "", "", "", time.Now(), 4, false)
 
 	if !strings.Contains(frame, "bravo") {
 		t.Error("frame should contain 'bravo' (lines[1])")
@@ -1980,6 +1980,40 @@ func TestRenderDashboardFrame_ViewportLines(t *testing.T) {
 	}
 	if strings.Contains(frame, "delta") {
 		t.Error("frame should NOT contain 'delta' (not in viewport)")
+	}
+}
+
+func TestRenderDashboardFrame_FooterLiveAndPaused(t *testing.T) {
+	t.Parallel()
+	lines := []string{"a", "b", "c", "d", "e", "f", "g", "h"}
+	// Eight lines, viewport of 3 → content overflows, footer shows position.
+	live := stripANSI(renderDashboardFrame(lines, 5, 8, 3, []string{"n"}, "", "", "", time.Now(), 8, true))
+	paused := stripANSI(renderDashboardFrame(lines, 1, 4, 3, []string{"n"}, "", "", "", time.Now(), 8, false))
+
+	if !strings.Contains(live, "q quit") {
+		t.Error("footer must show the q-quit keybinding hint")
+	}
+	if !strings.Contains(live, "↑↓/jk scroll") {
+		t.Error("footer must show the scroll hint")
+	}
+	if !strings.Contains(live, "[LIVE 6-8/8]") {
+		t.Errorf("LIVE footer should show current range, got: %q", live)
+	}
+	if !strings.Contains(paused, "[paused 2-4/8]") {
+		t.Errorf("paused footer should show current range, got: %q", paused)
+	}
+}
+
+func TestRenderDashboardFrame_FooterOmittedWhenContentFits(t *testing.T) {
+	t.Parallel()
+	// Three lines in a viewport of 5 — everything visible, no scroll indicator needed.
+	frame := stripANSI(renderDashboardFrame([]string{"a", "b", "c"}, 0, 3, 5, []string{"n"}, "", "", "", time.Now(), 3, true))
+
+	if !strings.Contains(frame, "q quit") {
+		t.Error("footer keybinding hints must always be present")
+	}
+	if strings.Contains(frame, "LIVE") || strings.Contains(frame, "paused") {
+		t.Errorf("scroll indicator should be omitted when content fits, got: %q", frame)
 	}
 }
 
@@ -2084,7 +2118,7 @@ func TestRenderDashboardHeaderOnly_NoBodyRegion(t *testing.T) {
 	// Full frame has the header + blank separator + body + trailing fill.
 	// Header-only must be strictly shorter for the same inputs, proving
 	// no body is emitted.
-	full := renderDashboardFrame([]string{"row1", "row2", "row3"}, 0, 3, 10, []string{"n"}, "cfg", "log", "ui", start)
+	full := renderDashboardFrame([]string{"row1", "row2", "row3"}, 0, 3, 10, []string{"n"}, "cfg", "log", "ui", start, 3, true)
 	if len(out) >= len(full) {
 		t.Errorf("header-only output (%d bytes) should be strictly shorter than full frame (%d bytes)", len(out), len(full))
 	}
