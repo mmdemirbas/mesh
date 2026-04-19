@@ -212,6 +212,57 @@ func TestClientTLS_NoPeerCert_Rejected(t *testing.T) {
 	}
 }
 
+// TestWritePEM_MkdirFails pins the error path when the parent directory
+// cannot be created (a path component exists as a regular file).
+func TestWritePEM_MkdirFails(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a dir"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// writePEM tries to MkdirAll(dir/blocker/sub), which fails because
+	// "blocker" already exists as a regular file.
+	target := filepath.Join(blocker, "sub", "cert.pem")
+	err := writePEM(target, "CERTIFICATE", []byte("ignored"), 0600)
+	if err == nil {
+		t.Fatal("expected error when parent path component is a regular file")
+	}
+}
+
+// TestWritePEM_OpenFails pins the error path when MkdirAll succeeds but
+// OpenFile cannot open the target (target path is a directory).
+func TestWritePEM_OpenFails(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Target is a directory, not a file — OpenFile with O_WRONLY fails.
+	err := writePEM(dir, "CERTIFICATE", []byte("ignored"), 0600)
+	if err == nil {
+		t.Fatal("expected error when target path is a directory")
+	}
+}
+
+// TestGenerateCustom_WritePathUnwritable pins the generateCustom "write
+// cert" failure branch by routing the cert path through a regular-file
+// path component so MkdirAll fails inside writePEM.
+func TestGenerateCustom_WritePathUnwritable(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a dir"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	certPath := filepath.Join(blocker, "sub", "cert.pem")
+	keyPath := filepath.Join(dir, "key.pem")
+	_, _, err := generateCustom(certPath, keyPath, "mesh-test", time.Hour)
+	if err == nil {
+		t.Fatal("expected generateCustom to fail when cert path is unwritable")
+	}
+	if !strings.Contains(err.Error(), "write cert") {
+		t.Errorf("error %q should mention write cert", err.Error())
+	}
+}
+
 // --- helpers ---
 
 func mustServer(t *testing.T) (tls.Certificate, string, net.Listener) {
