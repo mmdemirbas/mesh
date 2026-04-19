@@ -94,7 +94,7 @@ there depend on items tracked here.
 | C1    | mtime vs last-sync in `diff()` (Idea A)              | 🔴 P0 | conflict      | ✅     | 🟩 XS  | 🟡   | 📄    |
 | C2    | Per-peer last-exchanged hash (Idea B / ancestor)     | 🔴 P0 | conflict      | ✅     | 🟧 M   | 🟡   | 📦    |
 | C3    | Per-block verify during write                        | 🔴 P0 | correctness   | ⏳     | 🟧 M   | 🟡   | 📦    |
-| C4    | Immediate multi-peer fallback on hash mismatch       | 🔴 P0 | correctness   | ⏳     | 🟨 S   | 🟢   | 📦    |
+| C4    | Immediate multi-peer fallback on hash mismatch       | 🔴 P0 | correctness   | 🔧     | 🟨 S   | 🟢   | 📦    |
 | P17a  | Dirty flag — skip persist when unchanged             | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
 | P17b  | Gob persistence + YAML fallback                      | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟡   | 🔌    |
 | P18a  | Pre-size `seen` map                                  | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
@@ -288,7 +288,7 @@ Each entry follows the same structure:
 - **Recommendation.** Ship option (1) after C1 and C2. Land together with
   C4 so the retry policy is consistent.
 
-### C4 · Immediate multi-peer fallback on hash mismatch
+### C4 · Immediate multi-peer fallback on hash mismatch · 🔧
 
 - **Problem.** On hash mismatch, `retryTracker.record` bumps a
   `(path, remoteHash)` failure count and waits for the next sync cycle
@@ -321,6 +321,22 @@ Each entry follows the same structure:
   requests whole files and so must iterate at the file level.
 - **Recommendation.** Ship (3). Not urgent but satisfying to pair with C3
   so the retry story is complete.
+- **Verification.** Option (2) — the data-model change — is shipped.
+  `retryTracker.counts` is now keyed on `retryKey{path, peer}`; `record`,
+  `quarantined`, and `clear` all take a peer argument. A new `clearAll`
+  sweeps every peer for a path and is called on any successful
+  completion (rename, download, bundle download, conflict adopt) so a
+  now-synced file does not leave stale quarantine entries for other
+  peers. `verifyPostWrite` gained a peer parameter so corruption on a
+  network filesystem is attributed to the serving peer. `quarantinedPaths`
+  returns a deduplicated path set — a path quarantined on any peer is
+  shown once in the dashboard. `TestRetryTrackerPeerScoped` pins the
+  new semantics: peer B never inherits A's backoff, `clear(A)` leaves
+  B intact, and `clearAll(path)` sweeps both. Option (1) — within-cycle
+  peer fallback — is deferred: the current loop already fans out one
+  `syncFolder` goroutine per peer in parallel, so peers try the same
+  cycle naturally; a serial in-file fallback across peers would be a
+  larger restructuring than the current symptom warrants.
 
 ---
 
