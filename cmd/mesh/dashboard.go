@@ -250,7 +250,6 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 
 	_, _ = os.Stdout.WriteString("\033[?1049h") // enter alt screen
 	_, _ = os.Stdout.WriteString("\033[?25l")   // hide cursor
-	_, _ = os.Stdout.WriteString("\033[?7l")    // disable auto-wrap: long lines truncate at the right edge instead of wrapping into extra rows, which would push the header off-screen on narrow terminals
 
 	// Cleanup order matters: disable mouse tracking first (while still in
 	// raw/VT mode), leave alt screen, then restore cooked mode. On Windows,
@@ -262,7 +261,6 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 		_, _ = os.Stdout.WriteString("\033[?1003l") // disable any-event mouse tracking
 		_, _ = os.Stdout.WriteString("\033[?1006l") // disable SGR mouse mode
 		_, _ = os.Stdout.WriteString("\033[?1000l") // disable normal mouse tracking
-		_, _ = os.Stdout.WriteString("\033[?7h")    // restore auto-wrap
 		_, _ = os.Stdout.WriteString("\033[?25h")   // show cursor
 		_, _ = os.Stdout.WriteString("\033[?1049l") // leave alt screen
 		_ = term.Restore(fd, oldState)              // restore cooked mode last
@@ -287,19 +285,38 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 		return w, h
 	}
 
-	renderHeaderOnly := func() int {
+	// writeTruncated emits s truncated to width columns so each logical
+	// line occupies exactly one terminal row. Without this, lines wider
+	// than the terminal wrap and push later content (including the
+	// header) off the top of the alt screen.
+	writeTruncated := func(buf *strings.Builder, s string, width int) {
+		buf.WriteString(truncateToVisibleWidth(s, width))
+	}
+
+	// headerToLines calls opts.renderHeader, then splits its output into
+	// logical lines (trimming the trailing \r\n each one carries).
+	headerToLines := func() []string {
+		var hb strings.Builder
+		opts.renderHeader(&hb)
+		raw := strings.TrimSuffix(hb.String(), eol)
+		return strings.Split(raw, eol)
+	}
+
+	renderHeaderOnly := func(width int) {
 		var buf strings.Builder
 		buf.WriteString("\033[H")
-		h := opts.renderHeader(&buf)
+		for _, ln := range headerToLines() {
+			writeTruncated(&buf, ln, width)
+			buf.WriteString(eol)
+		}
 		_, _ = os.Stdout.WriteString(buf.String())
-		return h
 	}
 
 	render := func(force bool) bool {
-		_, height := termSize()
+		width, height := termSize()
 
-		var headerBuf strings.Builder
-		headerHeight := opts.renderHeader(&headerBuf)
+		headerLines := headerToLines()
+		headerHeight := len(headerLines)
 		lastHeaderHeight = headerHeight
 		vpHeight := max(height-headerHeight-1-footerHeight, 1) // -1 for blank line after header
 
@@ -330,11 +347,11 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 		end := min(start+vpHeight, totalLines)
 
 		// Capture the exact byte sequence that will fill the body region.
-		// Including vpHeight, start, total, and autoScroll in the key means
-		// terminal resizes, scroll shifts, and follow-mode toggles naturally
-		// invalidate the cache (footer state depends on the last two).
+		// Including vpHeight, start, total, autoScroll, and width in the
+		// key means terminal resizes (which change truncation), scroll
+		// shifts, and follow-mode toggles naturally invalidate the cache.
 		var sig strings.Builder
-		fmt.Fprintf(&sig, "%d|%d|%d|%t|", vpHeight, start, totalLines, autoScroll)
+		fmt.Fprintf(&sig, "%d|%d|%d|%d|%t|", width, vpHeight, start, totalLines, autoScroll)
 		for i := start; i < end; i++ {
 			sig.WriteString(lines[i])
 			sig.WriteByte('\n')
@@ -345,23 +362,28 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 			// Body is unchanged — redraw only the header region so the clock
 			// and uptime advance without rewriting the rest of the screen.
 			// This is what keeps the view flicker-free between ticks.
-			renderHeaderOnly()
+			renderHeaderOnly(width)
 			return true
 		}
 		lastBody = body
 
 		var buf strings.Builder
 		buf.WriteString("\033[H")
-		buf.Write([]byte(headerBuf.String()))
+		for _, ln := range headerLines {
+			writeTruncated(&buf, ln, width)
+			buf.WriteString(eol)
+		}
 		buf.WriteString(eol) // blank line after header
 		for i := start; i < end; i++ {
-			buf.WriteString(lines[i])
+			writeTruncated(&buf, lines[i], width)
 			buf.WriteString(eol)
 		}
 		for i := end - start; i < vpHeight; i++ {
 			buf.WriteString(eol)
 		}
-		writeDashboardFooter(&buf, start, vpHeight, totalLines, autoScroll)
+		var footerBuf strings.Builder
+		writeDashboardFooter(&footerBuf, start, vpHeight, totalLines, autoScroll)
+		writeTruncated(&buf, footerBuf.String(), width)
 		_, _ = os.Stdout.WriteString(buf.String())
 		return true
 	}

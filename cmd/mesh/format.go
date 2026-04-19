@@ -41,6 +41,54 @@ func visibleLen(s string) int {
 	return n
 }
 
+// truncateToVisibleWidth returns s truncated so its visible width does
+// not exceed maxWidth. ANSI CSI escape sequences are copied through
+// without counting toward width. A trailing reset (\033[0m) is appended
+// when the input contained any SGR sequence so truncation never leaves
+// color or bold bleeding into the rest of the line.
+func truncateToVisibleWidth(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	sawSGR := false
+	w := 0
+	prevWidth := 0
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && (s[j] < '@' || s[j] > '~') {
+				j++
+			}
+			if j < len(s) {
+				b.WriteString(s[i : j+1])
+				if s[j] == 'm' {
+					sawSGR = true
+				}
+				i = j + 1
+				continue
+			}
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		cw := runeWidth(r)
+		if r == 0xFE0F && prevWidth == 1 {
+			cw = 1
+		}
+		if w+cw > maxWidth {
+			break
+		}
+		b.WriteString(s[i : i+size])
+		w += cw
+		prevWidth = cw
+		i += size
+	}
+	if sawSGR && w > 0 {
+		b.WriteString("\033[0m")
+	}
+	return b.String()
+}
+
 // stripANSI removes ANSI CSI escape sequences from s.
 // Incomplete sequences (no final byte before end of string) are preserved.
 func stripANSI(s string) string {

@@ -395,6 +395,42 @@ func TestVisibleLen(t *testing.T) {
 	}
 }
 
+// TestTruncateToVisibleWidth pins the contract used by the live-view
+// render loop to keep each logical line on exactly one terminal row.
+// Regression guard for the narrow-terminal bug where wider-than-window
+// body lines pushed the header off the top of the alt screen.
+func TestTruncateToVisibleWidth(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		width int
+		want  string
+	}{
+		{"no truncation needed", "hello", 10, "hello"},
+		{"exact fit", "hello", 5, "hello"},
+		{"plain truncation", "hello world", 5, "hello"},
+		{"zero width", "hello", 0, ""},
+		{"negative width", "hello", -1, ""},
+		{"color preserved, reset appended", "\033[31mhello world\033[0m", 5, "\033[31mhello\033[0m"},
+		{"only color then cut keeps reset", "\033[31mabcdef", 3, "\033[31mabc\033[0m"},
+		{"escape-only input stays empty and un-reset", "\033[31m\033[0m", 3, "\033[31m\033[0m"},
+		{"CJK 2-cell truncation", "中文abc", 4, "中文"},
+		{"CJK partial 2-cell does not split", "中文abc", 3, "中"},
+		{"plain ASCII no reset appended", "hello", 3, "hel"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateToVisibleWidth(tt.input, tt.width)
+			if got != tt.want {
+				t.Errorf("truncateToVisibleWidth(%q, %d) = %q, want %q", tt.input, tt.width, got, tt.want)
+			}
+			if vw := visibleLen(got); vw > tt.width && tt.width > 0 {
+				t.Errorf("visible width %d exceeds max %d for %q", vw, tt.width, got)
+			}
+		})
+	}
+}
+
 func TestRenderStatus_Empty(t *testing.T) {
 	cfg := &config.Config{}
 	output, _ := renderStatus(cfg, nil, nil, "testnode")
