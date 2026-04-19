@@ -291,6 +291,21 @@ func GetConflicts() []ConflictInfo {
 	return result
 }
 
+// RegisterFolderForTest inserts a minimal Node whose folder map contains a
+// single (folderID → path) entry and returns a cleanup function that removes
+// it. Intended for tests in packages outside filesync (e.g. cmd/mesh admin
+// handler tests) that need GetFolderPath to resolve a folder without
+// starting a full sync node.
+//
+// Test-only: do not call from production code paths.
+func RegisterFolderForTest(folderID, path string) func() {
+	n := &Node{folders: map[string]*folderState{
+		folderID: {cfg: config.FolderCfg{Path: path}},
+	}}
+	activeNodes.Register(n)
+	return func() { activeNodes.Unregister(n) }
+}
+
 // GetFolderPath returns the disk path for the given folder ID, or ("", false)
 // if the folder is not active.
 func GetFolderPath(folderID string) (string, bool) {
