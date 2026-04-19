@@ -1915,6 +1915,176 @@ func TestDiscoverEndpoint_AcceptsValidPort(t *testing.T) {
 	}
 }
 
+// --- Real-handler rejection contract tests ---
+// These bypass the shadow mux in newTestNode and invoke the exported
+// serveSync / serveClip / serveFiles / serveDiscover handlers directly
+// via httptest.NewRecorder, so r.RemoteAddr and ACL state are fully
+// controllable.
+
+// TestSyncEndpoint_RejectsNonPeerACL pins that the real serveSync handler
+// rejects a request from a non-peer address with 403 before parsing the body.
+func TestSyncEndpoint_RejectsNonPeerACL(t *testing.T) {
+	t.Parallel()
+	n := &Node{
+		maxReqBodySize: 1024,
+		peers:          make(map[string]time.Time),
+	}
+	payload, _ := proto.Marshal(&pb.SyncPayload{})
+	req := httptest.NewRequest(http.MethodPost, "/sync", bytes.NewReader(payload))
+	req.RemoteAddr = "203.0.113.5:54321"
+	w := httptest.NewRecorder()
+	n.serveSync(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+}
+
+// TestSyncEndpoint_RejectsMalformedProtobuf: loopback ACL passes, but an
+// unparseable body must return 400 without updating node state.
+func TestSyncEndpoint_RejectsMalformedProtobuf(t *testing.T) {
+	t.Parallel()
+	n := &Node{
+		maxReqBodySize: 1024,
+		peers:          make(map[string]time.Time),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/sync", bytes.NewReader([]byte{0xff, 0xff, 0xff, 0xff}))
+	req.RemoteAddr = "127.0.0.1:54321"
+	w := httptest.NewRecorder()
+	n.serveSync(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.lastWrittenHash != "" {
+		t.Errorf("lastWrittenHash = %q, want empty (payload must not be ingested)", n.lastWrittenHash)
+	}
+}
+
+// TestSyncEndpoint_RejectsBadGzip: a Content-Encoding: gzip header with a
+// body that isn't valid gzip must return 400.
+func TestSyncEndpoint_RejectsBadGzip(t *testing.T) {
+	t.Parallel()
+	n := &Node{
+		maxReqBodySize: 1024,
+		peers:          make(map[string]time.Time),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/sync", bytes.NewReader([]byte("not gzip")))
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Content-Encoding", "gzip")
+	w := httptest.NewRecorder()
+	n.serveSync(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+// TestSyncEndpoint_RejectsOversizedBody_RealHandler pins the 413 path on
+// the real handler (the shadow mux in newTestNode returns 400 here — it
+// lacks the special-case branch).
+func TestSyncEndpoint_RejectsOversizedBody_RealHandler(t *testing.T) {
+	t.Parallel()
+	n := &Node{
+		maxReqBodySize: 8,
+		peers:          make(map[string]time.Time),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/sync", bytes.NewReader(make([]byte, 256)))
+	req.RemoteAddr = "127.0.0.1:54321"
+	w := httptest.NewRecorder()
+	n.serveSync(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+// TestClipEndpoint_RejectsNonPeerACL: a non-peer must not receive the
+// cached payload via the pull-back route.
+func TestClipEndpoint_RejectsNonPeerACL(t *testing.T) {
+	t.Parallel()
+	n := &Node{peers: make(map[string]time.Time)}
+	n.lastPayload = []byte("secret")
+
+	req := httptest.NewRequest(http.MethodGet, "/clip", nil)
+	req.RemoteAddr = "203.0.113.5:54321"
+	w := httptest.NewRecorder()
+	n.serveClip(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if got := w.Body.String(); strings.Contains(got, "secret") {
+		t.Errorf("body leaked payload: %q", got)
+	}
+}
+
+// TestClipEndpoint_404WhenEmpty_RealHandler: loopback allowed, but with
+// no cached payload the real handler must return 404.
+func TestClipEndpoint_404WhenEmpty_RealHandler(t *testing.T) {
+	t.Parallel()
+	n := &Node{peers: make(map[string]time.Time)}
+
+	req := httptest.NewRequest(http.MethodGet, "/clip", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	w := httptest.NewRecorder()
+	n.serveClip(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+// TestClipEndpoint_ReturnsPayload_RealHandler: happy path on the real
+// handler — cached payload is returned with the gzip content-encoding.
+func TestClipEndpoint_ReturnsPayload_RealHandler(t *testing.T) {
+	t.Parallel()
+	n := &Node{peers: make(map[string]time.Time)}
+	n.lastPayload = []byte("gzipped-bytes")
+
+	req := httptest.NewRequest(http.MethodGet, "/clip", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	w := httptest.NewRecorder()
+	n.serveClip(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if ce := w.Header().Get("Content-Encoding"); ce != "gzip" {
+		t.Errorf("Content-Encoding = %q, want gzip", ce)
+	}
+	if got := w.Body.String(); got != "gzipped-bytes" {
+		t.Errorf("body = %q, want %q", got, "gzipped-bytes")
+	}
+}
+
+// TestFilesEndpoint_RejectsNonPeerACL: the file server must never serve
+// bytes to a non-peer caller.
+func TestFilesEndpoint_RejectsNonPeerACL(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Seed a file so the file server would happily return it if the ACL
+	// were missing.
+	if err := os.WriteFile(filepath.Join(dir, "leak.txt"), []byte("confidential"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{filesDir: dir, peers: make(map[string]time.Time)}
+
+	req := httptest.NewRequest(http.MethodGet, "/files/leak.txt", nil)
+	req.RemoteAddr = "203.0.113.5:54321"
+	w := httptest.NewRecorder()
+	n.serveFiles(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if strings.Contains(w.Body.String(), "confidential") {
+		t.Error("body leaked file contents")
+	}
+}
+
 // TestDiscoverEndpoint_RejectsMalformedProtobuf covers Rule 1 (trust-boundary
 // contract): the real serveDiscover handler must reject a body that isn't a
 // valid DiscoverRequest with HTTP 400, not panic or register a peer.
