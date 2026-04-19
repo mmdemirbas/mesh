@@ -1,13 +1,17 @@
-# Filesync v1 — Coordinated Design for D1 / D2 / D4 / D6 / C6
+# Filesync v1 — Coordinated Design for D1 / D4 / D6 / C6
 
 > Phase 0 design for the coordinated landing of **D1** (FastCDC),
-> **D2** (BLAKE3), **D4** (SQLite index), **D6** (zstd transfer),
-> and **C6** (per-file vector clocks).
+> **D4** (SQLite index), **D6** (zstd transfer), and **C6**
+> (per-file vector clocks).
 >
 > This ships as **protocol v1**. There is no prior protocol version
 > deployed anywhere; we start from scratch. Any leftover index or
 > state files from development builds are deleted by hand before
 > the first v1 run.
+>
+> **D2 (BLAKE3) was in scope in an earlier draft and has been
+> deferred.** v1 stays on SHA-256. See `HASH-ALGORITHM.md` for the
+> benchmark data and the reopen criteria.
 >
 > Status: **draft** · 2026-04-19. No code change until reviewed.
 
@@ -19,10 +23,12 @@
    a knob. Well-chosen defaults beat flexibility the user never
    asked for.
 2. **Implementation quality matters as much as algorithm choice.**
-   A slow BLAKE3 binding beats a fast SHA-256 one only if the
-   binding is good. Pick well-maintained libraries, benchmark the
-   real code, and own a tiny in-tree fallback when the library is
-   thin.
+   A "faster" algorithm loses to a well-optimized slower one when
+   the ecosystem lacks a good implementation on our target arch.
+   Pick well-maintained libraries, benchmark the real code on real
+   hardware, and do not assume the paper beats the silicon.
+   (See `HASH-ALGORITHM.md` for the concrete case that led to D2
+   being deferred.)
 3. **One protocol version. One schema.** No fallback matrix, no
    legacy path, no migration. The binary swap is cold: stop,
    upgrade, restart.
@@ -53,13 +59,14 @@ behind its own commit with tests.
 |-------|--------|-------------|---------------------------------------------------|
 | 0     | Device ID + protocol version field | core | every later item uses them     |
 | 1     | **C6** | correctness | `FileInfo` gains `version`; SQLite schema depends on it |
-| 2     | **D2** | hash swap   | renames `sha256`→`hash`; block layout depends on it |
-| 3     | **D1** | block shape | variable-sized blocks; wire shape depends on it   |
-| 4     | **D6** | transport   | compression is orthogonal but cheap to wire last  |
-| 5     | **D4** | storage     | schema reflects C6 + D2 + D1 final shapes         |
+| 2     | **D1** | block shape | variable-sized blocks; wire shape depends on it   |
+| 3     | **D6** | transport   | compression is orthogonal but cheap to wire last  |
+| 4     | **D4** | storage     | schema reflects C6 + D1 final shapes              |
 
-D4 last is deliberate: its schema is a function of the other four.
-Landing D4 earlier would force a rewrite as each later item lands.
+D4 last is deliberate: its schema is a function of the other
+three. Landing D4 earlier would force a rewrite as each later
+item lands. Hash stays SHA-256 throughout — if D2 is ever picked
+up it becomes its own protocol bump, not a v1 dialect.
 
 ---
 
@@ -126,7 +133,7 @@ message FileInfo {
   string path      = 1;
   int64  size      = 2;
   int64  mtime_ns  = 3;
-  bytes  hash      = 4;                // BLAKE3-32, see D2
+  bytes  sha256    = 4;                // 32 bytes
   bool   deleted   = 5;
   int64  sequence  = 6;                // intra-device ordering only
   uint32 mode      = 7;
@@ -169,36 +176,7 @@ shipped) still applies on a fresh peer.
 
 ---
 
-## 2. D2 — BLAKE3
-
-### Choice
-
-`github.com/zeebo/blake3`. Pure Go, no CGo, actively maintained,
-benchmarks well in AVX-capable environments. Benchmark gate
-before committing: ≥2.5× faster than the current SHA-256 pool on
-the representative corpus. If the binding fails the gate, the
-fallback is `lukechampine.com/blake3` (also pure Go, slightly
-slower). We do not ship SHA-256 alongside.
-
-### Call-site swap
-
-All hashing goes through a single `Hasher` type with two entry
-points: `Hash(io.Reader) ([]byte, error)` and `Sum(data []byte)
-[]byte`. The `sha256` pool is removed entirely — no dual-algo
-code paths to maintain.
-
-### Wire
-
-`FileInfo.sha256` → `FileInfo.hash`. Proto tag 4 retained; type
-stays `bytes`; semantic is BLAKE3-32 (32 bytes, truncated from
-the 32-byte BLAKE3 output which is already 32 bytes — no
-truncation in practice). Block hashes (see D1) are BLAKE3-32 too.
-
-No `algo` discriminator. Algorithm is pinned by protocol version.
-
----
-
-## 3. D1 — FastCDC
+## 2. D1 — FastCDC
 
 ### Parameters
 
@@ -231,7 +209,7 @@ message BlockSignatures {
 message Block {
   int64 offset = 1;
   int32 length = 2;
-  bytes hash   = 3;            // BLAKE3-32
+  bytes hash   = 3;            // SHA-256, 32 bytes
 }
 
 message DeltaResponse {
@@ -258,7 +236,7 @@ is unchanged.
 
 ---
 
-## 4. D6 — zstd everywhere, no config
+## 3. D6 — zstd everywhere, no config
 
 Compression is a default, not a folder option. No YAML knob.
 
@@ -281,7 +259,7 @@ precisely and per-file.
 
 ---
 
-## 5. D4 — SQLite index
+## 4. D4 — SQLite index
 
 No migration. No gob coexistence. Development builds may have
 left `~/.mesh/filesync/<folder-id>/index.gob` (or similar)
@@ -310,7 +288,7 @@ CREATE TABLE files (
   path      TEXT    NOT NULL,
   size      INTEGER NOT NULL,
   mtime_ns  INTEGER NOT NULL,
-  hash      BLOB    NOT NULL,   -- BLAKE3-32
+  hash      BLOB    NOT NULL,   -- SHA-256, 32 bytes
   deleted   INTEGER NOT NULL,   -- 0 or 1
   sequence  INTEGER NOT NULL,
   mode      INTEGER NOT NULL,
@@ -374,7 +352,8 @@ Per step:
 1. A failing test pinning the new behavior before the commit.
 2. Behavior-pinning tests for adjacent paths that the change
    touches — not only the new feature.
-3. A micro-benchmark with a pinned baseline (D2 and D1 only).
+3. A micro-benchmark with a pinned baseline (D1 only — D6 is
+   covered by end-to-end throughput, others are correctness).
 
 Bundle-level:
 
@@ -406,9 +385,9 @@ Before Phase 1 starts, the reviewer signs off on:
       chars, `XXXXX-XXXXX` display).
 - [ ] `protocol_version=1` on every message, no handshake, no
       capability list.
-- [ ] BLAKE3 over SHA-256 (library choice, bench gate).
+- [ ] Hash stays SHA-256; D2 deferred per `HASH-ALGORITHM.md`.
 - [ ] FastCDC parameters and library choice.
 - [ ] zstd level 3, magic-byte probe list, no config knob.
 - [ ] SQLite schema and WAL + NORMAL durability choice.
 - [ ] `modernc.org/sqlite` dependency approval.
-- [ ] Commit order (ID/version → C6 → D2 → D1 → D6 → D4).
+- [ ] Commit order (ID/version → C6 → D1 → D6 → D4).

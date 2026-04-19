@@ -8,9 +8,11 @@ Companion documents:
 
 - `RESEARCH.md` — Syncthing internals reference, used as the comparison
   baseline in the per-item analysis below.
-- `DESIGN-v1.md` — Phase 0 design for the coordinated D1 / D2 / D4 /
-  D6 / C6 landing as filesync protocol v1. Read before starting any
-  of those items.
+- `DESIGN-v1.md` — Phase 0 design for the coordinated D1 / D4 / D6 /
+  C6 landing as filesync protocol v1. Read before starting any of
+  those items.
+- `HASH-ALGORITHM.md` — why v1 keeps SHA-256 (D2 deferred), with
+  benchmark data and the path to reopen.
 - `FILESYNC-ROLLOUT.local.md` — folder-by-folder rollout gate for the local
   MBP / HW / Lenovo deployment. Not checked in.
 
@@ -120,7 +122,7 @@ here.
 | [R2](#r2) | Formal folder-level state machine                    | 🟡 P2 | robustness    | ❌     | 🟧 M   | 🟢   | 📦    |
 | [R3](#r3) | Peer-level failure blacklist                         | 🟡 P2 | robustness    | ✅     | 🟨 S   | 🟢   | 📦    |
 | [D1](#d1) | FastCDC content-defined chunking                     | 🟢 P3 | differentiate | ⏳     | 🟥 L   | 🔴   | 🔌    |
-| [D2](#d2) | BLAKE3 instead of SHA-256                            | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🔴   | 🔌    |
+| [D2](#d2) | BLAKE3 instead of SHA-256                            | 🟢 P3 | differentiate | ⏸      | 🟧 M   | 🔴   | 🔌    |
 | [D3](#d3) | Linux `fanotify` backend                             | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🟡   | 📦    |
 | [D4](#d4) | SQLite-backed index                                  | 🟢 P3 | differentiate | ⏳     | 🟥 L   | 🔴   | 🔌    |
 | [D5](#d5) | Sparse file detection                                | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🟡   | 📦    |
@@ -128,7 +130,7 @@ here.
 | [C5](#c5) | 3-way text merge (Idea C)                            | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 📦    |
 | [C6](#c6) | Full vector clocks per file (Idea D)                 | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 🔌    |
 
-Counts: **4** P0 ✅ · **12** P1 (9 ✅ / 0 🔧 / 3 ⏸) · **3** P2 (2 ✅ / 1 ❌) · **6** P3 ⏳ · **2** deferred.
+Counts: **4** P0 ✅ · **12** P1 (9 ✅ / 0 🔧 / 3 ⏸) · **3** P2 (2 ✅ / 1 ❌) · **6** P3 (5 ⏳ / 1 ⏸) · **2** deferred.
 
 ---
 
@@ -932,7 +934,7 @@ Each entry follows the same structure:
      the mutex discipline cannot express.
   2. A user-visible need for a coarse folder-level state (beyond the
      existing peer and path signals) appears in the UI or API contract.
-  3. The upcoming D1/D2/D4/D6/C6 bundle introduces a coordinated
+  3. The upcoming v1 bundle (C6 / D1 / D6 / D4) introduces a coordinated
      migration step whose safety is easier to reason about as an
      explicit state.
 
@@ -1018,31 +1020,30 @@ Each entry follows the same structure:
   version bump required.
 
 <a id="d2"></a>
-### D2 · BLAKE3 instead of SHA-256
+### D2 · BLAKE3 instead of SHA-256 · ⏸ Deferred
 
 [↑ back to summary](#summary-table)
 
-- **Problem.** Full-scan CPU is dominated by SHA-256 hashing.
-- **Fix options.**
-  1. Replace `sha256.New()` pool and `sha256.Sum256` calls with
-     `github.com/zeebo/blake3`. Wire format change: rename
-     `FileInfo.Sha256` or add an `algo` discriminator.
-  2. Parallelize SHA-256 across cores. Helps but does not close the
-     gap to BLAKE3.
-  3. Use BLAKE2b. Faster than SHA-256 but slower than BLAKE3 and not a
-     meaningful win vs the migration cost.
-- **Risks.**
-  - 🔌 wire / on-disk change. Mixed-algo folders need negotiation.
-  - Hash output stored in every `FileEntry`; adding `algo` per entry
-    is correct but bloats the index. Probably move `algo` to folder
-    level with per-file override for migration.
-- **Impact.**
-  - *Perf:* ~75 % CPU reduction on full-scan hashing.
-- **Blast radius.** 🔌 every hashing call site, wire, on-disk.
-- **Syncthing handling.** Syncthing uses SHA-256. `RESEARCH.md §16.2`
-  notes this as an upgrade opportunity.
-- **Recommendation.** Design-gated behind C6 (vector clocks) wire bump
-  — land both together if the protocol version is going to move anyway.
+See `HASH-ALGORITHM.md` for the full analysis, benchmark data, and
+reopen criteria. Short version:
+
+- **Algorithmically BLAKE3 is faster than SHA-256.** That part of
+  the original motivation stands.
+- **The Go ecosystem does not have an ARM64 NEON BLAKE3
+  implementation** as of 2026-04-19. `zeebo/blake3` has AVX2 /
+  AVX-512 Plan 9 asm but falls back to scalar Go on `arm64`.
+- **On Apple Silicon, stdlib `crypto/sha256` uses ARMv8
+  hardware crypto extensions** and outpaces every available Go
+  BLAKE3 library by 2×–4×. Shipping BLAKE3 today would regress
+  the MBP peer to help the x86 peers.
+- **Reopen** when one of these is true: (a) a pure-Go BLAKE3
+  library lands a NEON asm path and benchmarks over 2 GB/s on
+  M1; (b) we invest 1–3 weeks in an in-tree `blake3min`
+  implementation (scalar + NEON + AVX2 paths); (c) measurement
+  shows SHA-256 hashing as the dominant wall-time cost of a
+  user-visible operation.
+- Until then, SHA-256 is the right answer for v1 — fast on
+  every target, zero new dependencies, audited stdlib.
 
 <a id="d3"></a>
 ### D3 · Linux `fanotify` backend
@@ -1199,12 +1200,16 @@ Each entry follows the same structure:
     deployment plan keeps most shared folders in star form (one hub
     receives, the others are `send-only`). Under a star topology the
     C2 pairwise ancestor is sufficient, so C6 can stay deferred.
-  - If D2 (BLAKE3) or D1 (FastCDC) land, their protocol bump is a good
-    moment to fold in vector clocks and avoid two separate breaking
-    changes.
-- **Revisit trigger.** A full-mesh three-device folder (every peer in
-  `send-receive`) goes live on the deployment, or D1 / D2 lands and the
-  protocol version is moving anyway.
+  - If D1 (FastCDC) lands, its protocol bump is a good moment to fold
+    in vector clocks and avoid two separate breaking changes. That is
+    exactly what the v1 bundle does — see `DESIGN-v1.md`.
+- **Status update (2026-04-19).** Folded into the v1 bundle alongside
+  D1 / D6 / D4. No longer deferred in the strict sense — tracked via
+  `DESIGN-v1.md`. This section stays for the history of why it was
+  deferred before the bundle.
+- **Revisit trigger (historical).** A full-mesh three-device folder
+  (every peer in `send-receive`) goes live on the deployment, or D1
+  lands and the protocol version is moving anyway.
 - **Syncthing handling.** Vector clocks are core. `RESEARCH.md §3.1` is
   the implementation reference.
 
@@ -1236,12 +1241,11 @@ group is safe to ship independently.
     section for the reopen triggers.
 12. **R3** — peer blacklist; fits alongside C4.
 13. **D3** — fanotify backend; opt-in, universal fallback stays.
-14. **D6** — zstd index swap first, then per-transfer (flag-gated).
-15. **D1 + D2 + C6** — if the protocol version has to move, fold them
-    together. Otherwise defer individually.
-16. **D4** — SQLite index; needs design doc + dependency approval
-    first.
-17. **D5** — sparse files; defer until a user workload needs it.
+14. **v1 bundle** — C6 + D1 + D6 + D4, one protocol bump, per
+    `DESIGN-v1.md`. D6 no longer independent — zstd lands here.
+15. **D2** — deferred. See `HASH-ALGORITHM.md` for the reopen
+    criteria.
+16. **D5** — sparse files; defer until a user workload needs it.
 
 ---
 
