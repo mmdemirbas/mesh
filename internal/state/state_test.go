@@ -555,3 +555,156 @@ func BenchmarkUpdateDelete(b *testing.B) {
 		s.Delete("bench", "id")
 	}
 }
+
+func TestMetrics_Reset(t *testing.T) {
+	t.Parallel()
+	m := &Metrics{}
+	m.BytesTx.Store(100)
+	m.BytesRx.Store(200)
+	m.Streams.Store(5)
+	m.TokensIn.Store(1000)
+	m.TokensOut.Store(2000)
+	m.TokensCacheRd.Store(300)
+	m.TokensCacheWr.Store(400)
+	m.TokensReason.Store(500)
+	m.StartTime.Store(12345)
+
+	before := time.Now().UnixNano()
+	m.Reset()
+	after := time.Now().UnixNano()
+
+	if got := m.BytesTx.Load(); got != 0 {
+		t.Errorf("BytesTx = %d, want 0", got)
+	}
+	if got := m.BytesRx.Load(); got != 0 {
+		t.Errorf("BytesRx = %d, want 0", got)
+	}
+	if got := m.Streams.Load(); got != 0 {
+		t.Errorf("Streams = %d, want 0", got)
+	}
+	if got := m.TokensIn.Load(); got != 0 {
+		t.Errorf("TokensIn = %d, want 0", got)
+	}
+	if got := m.TokensOut.Load(); got != 0 {
+		t.Errorf("TokensOut = %d, want 0", got)
+	}
+	if got := m.TokensCacheRd.Load(); got != 0 {
+		t.Errorf("TokensCacheRd = %d, want 0", got)
+	}
+	if got := m.TokensCacheWr.Load(); got != 0 {
+		t.Errorf("TokensCacheWr = %d, want 0", got)
+	}
+	if got := m.TokensReason.Load(); got != 0 {
+		t.Errorf("TokensReason = %d, want 0", got)
+	}
+	if st := m.StartTime.Load(); st < before || st > after {
+		t.Errorf("StartTime = %d, want in [%d, %d]", st, before, after)
+	}
+}
+
+func TestUpdateFileCount(t *testing.T) {
+	t.Parallel()
+	s := newState()
+	s.Update("filesync", "folder1", Scanning, "")
+	s.UpdateFileCount("filesync", "folder1", 42, 1_234_567)
+
+	snap := s.Snapshot()
+	comp := snap["filesync:folder1"]
+	if comp.FileCount != 42 {
+		t.Errorf("FileCount = %d, want 42", comp.FileCount)
+	}
+	if comp.TotalSize != 1_234_567 {
+		t.Errorf("TotalSize = %d, want 1234567", comp.TotalSize)
+	}
+	if comp.Status != Scanning {
+		t.Errorf("Status = %q (should be preserved), want %q", comp.Status, Scanning)
+	}
+}
+
+func TestUpdateLastSync(t *testing.T) {
+	t.Parallel()
+	s := newState()
+	s.Update("filesync", "f1", Connected, "")
+	ts := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+	s.UpdateLastSync("filesync", "f1", ts)
+
+	snap := s.Snapshot()
+	if got := snap["filesync:f1"].LastSync; !got.Equal(ts) {
+		t.Errorf("LastSync = %v, want %v", got, ts)
+	}
+}
+
+func TestUpdateTLSFingerprint(t *testing.T) {
+	t.Parallel()
+	s := newState()
+	s.Update("filesync-peer", "bind|peer", Connected, "")
+	const fp = "sha256:abc123def456"
+	s.UpdateTLSFingerprint("filesync-peer", "bind|peer", fp)
+
+	snap := s.Snapshot()
+	if got := snap["filesync-peer:bind|peer"].TLSFingerprint; got != fp {
+		t.Errorf("TLSFingerprint = %q, want %q", got, fp)
+	}
+}
+
+func TestUpdateTLSStatus(t *testing.T) {
+	t.Parallel()
+	s := newState()
+	s.Update("filesync-peer", "bind|peer", Connected, "")
+	s.UpdateTLSStatus("filesync-peer", "bind|peer", "encrypted · verified")
+
+	snap := s.Snapshot()
+	if got := snap["filesync-peer:bind|peer"].TLSStatus; got != "encrypted · verified" {
+		t.Errorf("TLSStatus = %q, want %q", got, "encrypted · verified")
+	}
+}
+
+func TestSnapshotFull(t *testing.T) {
+	t.Parallel()
+	s := newState()
+	s.Update("proxy", "p1", Listening, "")
+	s.UpdateBind("proxy", "p1", "127.0.0.1:1080")
+	m := s.GetMetrics("proxy", "p1")
+	m.BytesTx.Store(500)
+
+	snap := s.SnapshotFull()
+
+	if len(snap.Components) != 1 {
+		t.Errorf("Components len = %d, want 1", len(snap.Components))
+	}
+	if got := snap.Components["proxy:p1"].BoundAddr; got != "127.0.0.1:1080" {
+		t.Errorf("BoundAddr = %q, want 127.0.0.1:1080", got)
+	}
+	if len(snap.Metrics) != 1 {
+		t.Errorf("Metrics len = %d, want 1", len(snap.Metrics))
+	}
+	if got := snap.Metrics["proxy:p1"].BytesTx.Load(); got != 500 {
+		t.Errorf("BytesTx = %d, want 500", got)
+	}
+}
+
+func TestSnapshotFull_Empty(t *testing.T) {
+	t.Parallel()
+	s := newState()
+	snap := s.SnapshotFull()
+	if len(snap.Components) != 0 {
+		t.Errorf("Components non-empty in fresh state: %d", len(snap.Components))
+	}
+	if len(snap.Metrics) != 0 {
+		t.Errorf("Metrics non-empty in fresh state: %d", len(snap.Metrics))
+	}
+}
+
+func TestSnapshotFull_IsACopy(t *testing.T) {
+	t.Parallel()
+	s := newState()
+	s.Update("proxy", "p1", Listening, "")
+
+	snap := s.SnapshotFull()
+	snap.Components["proxy:p1"] = Component{Message: "mutated"}
+
+	snap2 := s.SnapshotFull()
+	if snap2.Components["proxy:p1"].Message == "mutated" {
+		t.Error("SnapshotFull returned a reference to internal map, not a copy")
+	}
+}
