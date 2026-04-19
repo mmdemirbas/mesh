@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1286,6 +1287,150 @@ func TestParseBandwidth(t *testing.T) {
 			}
 			if !tt.wantErr && got != tt.want {
 				t.Errorf("ParseBandwidth(%q) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadNodeNames(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		yaml string
+		want []string
+	}{
+		{
+			name: "happy path: two nodes",
+			yaml: "client:\n  log_level: info\nserver:\n  log_level: debug\n",
+			want: []string{"client", "server"},
+		},
+		{
+			name: "skips x-prefix extension keys",
+			yaml: "x-anchors: &a {}\nclient:\n  log_level: info\nx-shared: *a\n",
+			want: []string{"client"},
+		},
+		{
+			name: "preserves declaration order",
+			yaml: "zebra: {log_level: info}\nalpha: {log_level: info}\nmike: {log_level: info}\n",
+			want: []string{"zebra", "alpha", "mike"},
+		},
+		{
+			name: "empty file",
+			yaml: "",
+			want: nil,
+		},
+		{
+			name: "only extension keys",
+			yaml: "x-one: {}\nx-two: {}\n",
+			want: nil,
+		},
+		{
+			name: "env expansion in values",
+			yaml: "client:\n  log_level: $TEST_LEVEL\n",
+			want: []string{"client"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "mesh.yaml")
+			if err := os.WriteFile(path, []byte(tt.yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := LoadNodeNames(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("LoadNodeNames = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadNodeNames_MissingFile(t *testing.T) {
+	t.Parallel()
+	_, err := LoadNodeNames(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	if err == nil {
+		t.Fatal("expected error for missing file")
+	}
+	if !strings.Contains(err.Error(), "read config") {
+		t.Errorf("error should mention 'read config', got: %v", err)
+	}
+}
+
+func TestLoadNodeNames_MalformedYAML(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mesh.yaml")
+	// Unterminated mapping value — yaml.Unmarshal rejects.
+	if err := os.WriteFile(path, []byte("client:\n  log_level: [unterminated\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadNodeNames(path)
+	if err == nil {
+		t.Fatal("expected error for malformed YAML")
+	}
+	if !strings.Contains(err.Error(), "parse config") {
+		t.Errorf("error should mention 'parse config', got: %v", err)
+	}
+}
+
+func TestResolveAllowedPeerHosts(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		peers []string
+		want  []string
+	}{
+		{
+			name:  "ipv4 literal with port",
+			peers: []string{"192.168.1.10:7756"},
+			want:  []string{"192.168.1.10"},
+		},
+		{
+			name:  "ipv4 literal without port",
+			peers: []string{"10.0.0.1"},
+			want:  []string{"10.0.0.1"},
+		},
+		{
+			name:  "ipv6 literal with port",
+			peers: []string{"[fe80::1]:7756"},
+			want:  []string{"fe80::1"},
+		},
+		{
+			name:  "localhost expands to both loopbacks",
+			peers: []string{"localhost:7756"},
+			want:  []string{"127.0.0.1", "::1"},
+		},
+		{
+			name:  "localhost case-insensitive",
+			peers: []string{"LocalHost:7756"},
+			want:  []string{"127.0.0.1", "::1"},
+		},
+		{
+			name:  "duplicate peers deduplicated",
+			peers: []string{"192.168.1.10:7756", "192.168.1.10:9999"},
+			want:  []string{"192.168.1.10"},
+		},
+		{
+			name:  "empty list returns nil",
+			peers: nil,
+			want:  nil,
+		},
+		{
+			name:  "unresolvable host falls back to literal",
+			peers: []string{"nonexistent.invalid:7756"},
+			want:  []string{"nonexistent.invalid"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := ResolveAllowedPeerHosts("test-folder", tt.peers)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("ResolveAllowedPeerHosts(%v) = %v, want %v", tt.peers, got, tt.want)
 			}
 		})
 	}
