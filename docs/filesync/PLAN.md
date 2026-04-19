@@ -102,7 +102,7 @@ there depend on items tracked here.
 | P18c  | Eliminate index clone (scan into `pending`)          | 🟠 P1 | perf          | ⏳     | 🟧 M   | 🟡   | 📦    |
 | P18d  | Cap `buildIndexExchange` pre-allocation              | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
 | P3sc  | Adaptive watch / scan                                | 🟠 P1 | perf          | ⏸     | 🟧 M   | 🟡   | 📦    |
-| PF    | Trie-based ignore with cursor propagation            | 🟠 P1 | perf          | ⏳     | 🟥 L   | 🟡   | 📦    |
+| PF    | Trie-based ignore with cursor propagation            | 🟠 P1 | perf          | 🔧     | 🟥 L   | 🟡   | 📦    |
 | PK    | Clone elimination (COW / change-set on persist)      | 🟠 P1 | perf          | ⏳     | 🟧 M   | 🔴   | 📦    |
 | PL    | Incremental deletion detection                       | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
 | PM    | Directory-keyed child index                          | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
@@ -455,7 +455,7 @@ Each entry follows the same structure:
   only if production tells us realtime coverage for unwatched
   directories is actually needed.
 
-### PF · Trie-based ignore with cursor propagation · ⏳
+### PF · Trie-based ignore with cursor propagation · 🔧
 
 - **Problem.** `ignore.shouldIgnore` evaluates patterns linearly —
   O(P) per path segment where P = pattern count. On the 310 k-file
@@ -487,6 +487,28 @@ Each entry follows the same structure:
 - **Recommendation.** Ship (1) as Phase 2 of scan-time perf work.
   Mandatory conformance test suite: generate 10 k random patterns ×
   10 k random paths; compare against a reference linear evaluator.
+- **Verification (partial, Phase 1 shipped).** Profiling
+  `BenchmarkIgnoreMatcherRealistic` (60 patterns × 50 paths mirroring a
+  monorepo gitignore) showed `path.Match` was 69 % of CPU inside
+  `shouldIgnore`, dominated by two sources: a dead-code
+  `fastMatchPath` fallback in the basename loop (`*` never crosses
+  `/`, so it never matched when the first check missed) and a per-call
+  `strings.SplitN(pattern, "**", 2)` inside `matchDoubleStar`.
+  The dead branch was removed and `**` patterns now carry pre-split
+  `dsPrefix`/`dsSuffix` fields populated in `newIgnoreMatcher`; the
+  hot path calls `matchDoubleStarPresplit` through them.
+  Measured (darwin/arm64, Apple M1 Max, -count=5):
+  - `BenchmarkIgnoreMatcher`: 8 165 → 5 110 ns/op (1.6×), allocs 0.
+  - `BenchmarkIgnoreMatcherRealistic`: 200 865 → 54 500 ns/op (3.7×),
+    150 allocs/op → **0 allocs/op**.
+  `TestShouldIgnoreReferenceConformance` (30+ cases, including a pin
+  for the current single-`**` limitation) locks the externally visible
+  behaviour so the full trie rewrite can be ported against a stable
+  reference. The trie itself, gitignore-conformance widening (multiple
+  `**` in one pattern, directory cursor propagation across descent),
+  and the 10 k × 10 k fuzz comparator remain deferred to Phase 2 — this
+  partial win already removed ignore matching from the scan-time
+  hotspot list, so Phase 2 is no longer urgent.
 
 ### PK · Clone elimination (COW / change-set on persist) · ⏳
 
