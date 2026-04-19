@@ -156,9 +156,9 @@ Rule 1 (boundary gaps) and Rule 2 (reproducer gaps), not the number.
 | internal/tunnel   | 36.4% | Core SSH paths at 0%: `Run`, `NewSSHClient`, `runMultiplex`, `buildSSHConfig`, `runForwardSet`, `runRemoteForward`, `runLocalForward`, `handleTCPIPForward`, `handleDirectTCPIP`, `connectSSH`, `runSession` | _TBD_ | _TBD_ | HIGH |
 | internal/proxy    | 68.5% | Orchestration wrappers closed in `2a65b4f` (`RunStandaloneProxies` 85.7%, `RunStandaloneRelays` 79.6%). Core serving paths already tested | None found in scan | _TBD_ | LOW |
 | internal/gateway  | 84.1% | _Strong — 242 tests covering a2o/o2a translation + passthrough + streaming_ | _TBD_ | _TBD_ | LOW |
-| internal/netutil  | 81.5% | _TBD — small package, 10 tests_ | _TBD_ | _TBD_ | LOW |
+| internal/netutil  | 98.1% | `ListenReusable` closed in `a41ddaf` (accept round-trip + empty-address wildcard bind) | None found in scan | None found | LOW |
 | internal/state    | 94.1% | Previously-0% exported Metrics/State setters and `SnapshotFull` closed in `7d6d926`; `StartEviction` still 0% but is a thin ticker wrapper around the already-tested `evictStale` | None found in scan | _TBD_ | LOW |
-| cmd/mesh          | _TBD_ | | | | _TBD_ |
+| cmd/mesh          | 57.5% | Pidfile lifecycle and `resolveNodesForDown` closed in `ebef6b3`. Residual 0% is interactive command entry points (`runDashboard`, `upCmd`, `downCmd`, `statusCmd`, `configCmd`, `initCmd`, `completionCmd`, `main`) — covered end-to-end by `e2e/scenarios` | None found in scan | _TBD_ | LOW |
 | e2e/scenarios     | _N/A_ (tests themselves) | | | | |
 
 ### Phase 4 orientation (other packages)
@@ -175,7 +175,9 @@ future audit cycles.
   multi-day effort — formerly PLAN.md D3.
 - **gateway (84.1%)**: 242 tests, strongest unit suite in the repo.
   Likely in good shape; a focused audit can confirm.
-- **netutil (81.5%)**: small helper package, likely well-tested.
+- **netutil (98.1%)**: audit closed in `a41ddaf`. `ListenReusable`
+  was the only 0% function; now exercised via a real accept and the
+  empty-address defaulting branch.
 - **proxy (68.5%)**: both orchestration wrappers now covered end-to-end
   (`2a65b4f`). Residual ~30% is defensive error branches in serving
   paths.
@@ -188,8 +190,10 @@ future audit cycles.
 - **state (94.1%)**: tests for all previously-0% exported functions
   landed in `7d6d926`. Remaining 0% is `StartEviction`, a 3-line
   ticker wrapper around the tested `evictStale`.
-- **cmd/mesh**: not measured — mostly wiring and CLI shells; integration
-  tests in `e2e/scenarios/` are the natural coverage.
+- **cmd/mesh (57.5%)**: pidfile helpers and `resolveNodesForDown`
+  closed in `ebef6b3`. The remaining 0% is interactive command entry
+  points (dashboard, up/down/status/config, signal handlers) — covered
+  end-to-end by `e2e/scenarios/`.
 
 ### Phase 2 notes
 
