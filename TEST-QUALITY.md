@@ -152,12 +152,12 @@ Rule 1 (boundary gaps) and Rule 2 (reproducer gaps), not the number.
 | internal/tlsutil  | 79.6% | `generateCustom` edge branches untested; `writePEM` 55.6% | ~~AP-1~~ fixed in `1afb5c9`; minor: string-match on `err.Error()` in `TestClientTLS_NoPeerCert_Rejected` (needs new sentinel; deferred) | None (new code) | MED |
 | internal/config   | 83.3% | `Validate` branches at 62.2%; `Load` at 55.6% (boundary gap at `LoadNodeNames`/`ResolveAllowedPeerHosts` closed in `ba06243`) | None found in scan | None found (spot check: `0d57b1b` has TDD reproducer in prior `7661936`) | MED |
 | internal/filesync | 58.6% | HTTP handler rejection paths partly closed in `b5fde66` (method/protobuf/gzip on index,file,delta); `handleBundle` / `handleStatus` rejection paths still uncovered; `Start` / `syncLoop` / `syncFolder` 0% | None found in scan | None found on spot check (fix+test-commit pattern: `c6522c1` paired with `b4ac2cf`; `5aef218`/`9f2bf7d` ship tests inline) | MED |
-| internal/clipsync | 55.9% | _TBD — 67 tests, needs gap analysis_ | _TBD_ | _TBD_ | LOW |
+| internal/clipsync | 55.9% | `/discover` malformed-body and non-peer ACL rejection paths closed in `41518a7`; `/sync`+`/clip`+`/files` ACL paths still routed through a shadow mux in tests (not the real runHTTPServer) — residual Rule 1 gap | _TBD_ | _TBD_ | LOW |
 | internal/tunnel   | 36.4% | Core SSH paths at 0%: `Run`, `NewSSHClient`, `runMultiplex`, `buildSSHConfig`, `runForwardSet`, `runRemoteForward`, `runLocalForward`, `handleTCPIPForward`, `handleDirectTCPIP`, `connectSSH`, `runSession` | _TBD_ | _TBD_ | HIGH |
-| internal/proxy    | 46.3% | Only `RunStandaloneProxies` and `RunStandaloneRelays` (orchestration wrappers) uncovered; core serving paths tested | None found in scan | _TBD_ | LOW |
+| internal/proxy    | 68.5% | Orchestration wrappers closed in `2a65b4f` (`RunStandaloneProxies` 85.7%, `RunStandaloneRelays` 79.6%). Core serving paths already tested | None found in scan | _TBD_ | LOW |
 | internal/gateway  | 84.1% | _Strong — 242 tests covering a2o/o2a translation + passthrough + streaming_ | _TBD_ | _TBD_ | LOW |
 | internal/netutil  | 81.5% | _TBD — small package, 10 tests_ | _TBD_ | _TBD_ | LOW |
-| internal/state    | 54.6% | _TBD — 27 tests; Global/Snapshot surface needs review_ | _TBD_ | _TBD_ | MED |
+| internal/state    | 94.1% | Previously-0% exported Metrics/State setters and `SnapshotFull` closed in `7d6d926`; `StartEviction` still 0% but is a thin ticker wrapper around the already-tested `evictStale` | None found in scan | _TBD_ | LOW |
 | cmd/mesh          | _TBD_ | | | | _TBD_ |
 | e2e/scenarios     | _N/A_ (tests themselves) | | | | |
 
@@ -176,11 +176,18 @@ future audit cycles.
 - **gateway (84.1%)**: 242 tests, strongest unit suite in the repo.
   Likely in good shape; a focused audit can confirm.
 - **netutil (81.5%)**: small helper package, likely well-tested.
-- **proxy (46.3%)**: misleading number — only `RunStandaloneProxies`
-  and `RunStandaloneRelays` orchestration wrappers are at 0%. SOCKS5
-  and HTTP CONNECT serving paths are well-tested.
-- **clipsync (55.9%)**, **state (54.6%)**: medium gaps, worth an
-  audit pass before promoting beyond LOW/MED.
+- **proxy (68.5%)**: both orchestration wrappers now covered end-to-end
+  (`2a65b4f`). Residual ~30% is defensive error branches in serving
+  paths.
+- **clipsync (55.9%)**: `/discover` real-handler rejection paths closed
+  in `41518a7`. Remaining gap: `/sync`, `/clip`, `/files` handlers in
+  tests run through a shadow mux built inside `newTestNode`, so the
+  real `runHTTPServer` wiring of `canReceiveFrom` / gzip / proto
+  decode on those routes isn't directly asserted. Refactoring
+  `newTestNode` to use the real server is a later cleanup.
+- **state (94.1%)**: tests for all previously-0% exported functions
+  landed in `7d6d926`. Remaining 0% is `StartEviction`, a 3-line
+  ticker wrapper around the tested `evictStale`.
 - **cmd/mesh**: not measured — mostly wiring and CLI shells; integration
   tests in `e2e/scenarios/` are the natural coverage.
 
