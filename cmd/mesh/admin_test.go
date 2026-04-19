@@ -8,12 +8,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/mmdemirbas/mesh/internal/filesync"
 	"github.com/mmdemirbas/mesh/internal/gateway"
 	"github.com/mmdemirbas/mesh/internal/state"
 )
@@ -874,6 +876,55 @@ func keys[K comparable, V any](m map[K]V) []K {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestAdminConflictsDiff_ErrorJSONEncodingPreservesQuotes pins the fix from
+// commit f4ca16a: the 500-path must JSON-encode the error via
+// json.NewEncoder, not string concat. Pre-fix, an error whose message
+// contained a double-quote would produce malformed JSON that every client
+// parser rejects. A path with a quote in it causes ComputeConflictDiff to
+// return `not a conflict file: <path-with-quote>`, exercising the encoder.
+func TestAdminConflictsDiff_ErrorJSONEncodingPreservesQuotes(t *testing.T) {
+	dir := t.TempDir()
+	cleanup := filesync.RegisterFolderForTest("fid", dir)
+	t.Cleanup(cleanup)
+
+	ring := newLogRing(4)
+	srv := httptest.NewServer(buildAdminMux(ring, "", ""))
+	defer srv.Close()
+
+	// The raw path 'bad"file.txt' is not a conflict file (no conflict
+	// marker), so ComputeConflictDiff returns:
+	//   not a conflict file: bad"file.txt
+	// The old code string-concatenated that into the JSON body and
+	// produced:   {"error":"not a conflict file: bad"file.txt"}
+	// which is invalid JSON. The fix uses json.NewEncoder so the quote
+	// is escaped.
+	q := url.Values{}
+	q.Set("folder", "fid")
+	q.Set("path", `bad"file.txt`)
+	resp, err := http.Get(srv.URL + "/api/filesync/conflicts/diff?" + q.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+
+	// Must parse as valid JSON with an "error" field preserving the quote.
+	var got map[string]string
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("response is not valid JSON: %v\nbody: %s", err, body)
+	}
+	if !strings.Contains(got["error"], `"`) {
+		t.Errorf("error field lost the quote, got: %q", got["error"])
+	}
+	if !strings.Contains(got["error"], "not a conflict file") {
+		t.Errorf("error field missing underlying cause, got: %q", got["error"])
+	}
 }
 
 func TestAdminHealthz(t *testing.T) {
