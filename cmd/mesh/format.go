@@ -447,6 +447,24 @@ func compareAddr(a, b string) bool {
 	return makeAddrKey(a).less(makeAddrKey(b))
 }
 
+// truncateMessage clips a status message to budget runes, replacing the
+// tail with an ellipsis when longer. Preserves the head so the reader
+// sees the most-identifying prefix (typically the error class). budget
+// counts runes, not bytes, so multi-byte UTF-8 content is clipped safely.
+func truncateMessage(s string, budget int) string {
+	if budget <= 1 || utf8.RuneCountInString(s) <= budget {
+		return s
+	}
+	n := 0
+	for i := range s {
+		if n == budget-1 {
+			return s[:i] + "…"
+		}
+		n++
+	}
+	return s
+}
+
 // formatTLSStatus returns a colored label for a TLS status value, or "" if empty.
 func formatTLSStatus(s string) string {
 	switch s {

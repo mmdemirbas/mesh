@@ -596,6 +596,50 @@ func TestHumanLogHandler(t *testing.T) {
 	}
 }
 
+func TestTruncateMessage(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		budget int
+		want   string
+	}{
+		{"shorter than budget", "connection refused", 60, "connection refused"},
+		{"exactly budget", "abcdefghij", 10, "abcdefghij"},
+		{"longer than budget", "dial tcp 10.0.0.1:22: i/o timeout after multiple retries", 20, "dial tcp 10.0.0.1:2…"},
+		{"budget of 1 returns input", "anything", 1, "anything"},
+		{"multibyte clipped safely", "hëllo world", 5, "hëll…"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := truncateMessage(tt.input, tt.budget); got != tt.want {
+				t.Errorf("truncateMessage(%q, %d) = %q, want %q", tt.input, tt.budget, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderStatus_LongErrorMessagesTruncated(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "socks", Bind: "127.0.0.1:1080"},
+		},
+	}
+	longErr := strings.Repeat("dial tcp 10.0.0.1:22: i/o timeout ", 10)
+	activeState := map[string]state.Component{
+		"proxy:127.0.0.1:1080": {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Failed, Message: longErr},
+	}
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
+	plain := stripANSI(output)
+
+	if strings.Contains(plain, longErr) {
+		t.Errorf("long error message should have been truncated, but appeared in full:\n%s", plain)
+	}
+	if !strings.Contains(plain, "…") {
+		t.Errorf("truncated message should include ellipsis:\n%s", plain)
+	}
+}
+
 func TestFormatBytes(t *testing.T) {
 	tests := []struct {
 		input int64

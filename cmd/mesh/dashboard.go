@@ -431,7 +431,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 		msg := string(comp.Status)
 		if comp.Message != "" {
 			if comp.Status == state.Failed || comp.Status == state.Retrying {
-				msg += " (" + comp.Message + ")"
+				msg += " (" + truncateMessage(comp.Message, 60) + ")"
 			}
 		}
 		return indicator, color + "[" + msg + "]" + cReset, comp
