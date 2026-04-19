@@ -103,6 +103,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/index", s.handleIndex)
 	mux.HandleFunc("/file", s.handleFile)
 	mux.HandleFunc("/delta", s.handleDelta)
+	mux.HandleFunc("/blocksigs", s.handleBlockSigs)
 	mux.HandleFunc("/bundle", s.handleBundle)
 	mux.HandleFunc("/status", s.handleStatus)
 	return mux
@@ -648,6 +649,104 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 	n, _ := w.Write(data)
 	if n > 0 {
 		folder.metrics.BytesUploaded.Add(int64(n))
+	}
+}
+
+// handleBlockSigs returns SHA-256 hashes of each sequential block in a file.
+// Used by receivers (C3) to verify incoming bytes per block so a single
+// corrupted block can be re-requested without restarting the whole file.
+// The hashes come from the sender's authoritative on-disk view at the time
+// of the call; callers should cross-check the resulting whole-file hash
+// against their expected index hash to catch files that changed between
+// /blocksigs and /file.
+func (s *server) handleBlockSigs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if _, ok := s.validatePeer(w, r); !ok {
+		return
+	}
+
+	folderID := r.URL.Query().Get("folder")
+	relPath := r.URL.Query().Get("path")
+	blockSizeStr := r.URL.Query().Get("block_size")
+
+	folder := s.node.findFolder(folderID)
+	if folder == nil {
+		http.Error(w, "unknown folder", http.StatusNotFound)
+		return
+	}
+	switch folder.cfg.Direction {
+	case "receive-only":
+		http.Error(w, "folder is receive-only", http.StatusForbidden)
+		return
+	case "disabled":
+		http.Error(w, "folder is disabled", http.StatusForbidden)
+		return
+	}
+
+	if err := validateRelPath(relPath); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	blockSize := int64(defaultBlockSize)
+	if blockSizeStr != "" {
+		parsed, err := strconv.ParseInt(blockSizeStr, 10, 64)
+		if err != nil || parsed <= 0 {
+			http.Error(w, "invalid block_size", http.StatusBadRequest)
+			return
+		}
+		blockSize = parsed
+	}
+	// Same clamp as handleDelta (B18): prevent tiny-block CPU/OOM attack.
+	const minBlockSize = 1024
+	const maxBlockSizeCap = 16 << 20
+	if blockSize < minBlockSize {
+		blockSize = minBlockSize
+	}
+	if blockSize > maxBlockSizeCap {
+		blockSize = maxBlockSizeCap
+	}
+
+	fi, err := folder.root.Stat(relPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "stat: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	hashes, err := computeBlockSignaturesRoot(folder.root, relPath, blockSize)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "compute block sigs: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := &pb.BlockSignatures{
+		FolderId:    folderID,
+		Path:        relPath,
+		BlockSize:   blockSize,
+		FileSize:    fi.Size(),
+		BlockHashes: hashes,
+	}
+	data, err := proto.Marshal(resp)
+	if err != nil {
+		http.Error(w, "marshal block sigs: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	if _, err := w.Write(data); err != nil {
+		return
 	}
 }
 
