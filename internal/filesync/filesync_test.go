@@ -6196,3 +6196,120 @@ func TestHandleDelta_RejectsMalformedProtobuf(t *testing.T) {
 		t.Errorf("malformed delta protobuf = %d, want 400", resp.StatusCode)
 	}
 }
+
+func TestHandleBundle_RejectsNonPost(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  map[string]*folderState{"test": {cfg: testFolderCfg(dir, "127.0.0.1")}},
+		deviceID: "test-device",
+	}
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/bundle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("GET /bundle = %d, want 405", resp.StatusCode)
+	}
+}
+
+func TestHandleBundle_RejectsMalformedProtobuf(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  map[string]*folderState{"test": {cfg: testFolderCfg(dir, "127.0.0.1")}},
+		deviceID: "test-device",
+	}
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp := bundlePost(t, ts.URL, []byte("not a valid protobuf"))
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("malformed bundle protobuf = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestHandleBundle_RejectsBadGzip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  map[string]*folderState{"test": {cfg: testFolderCfg(dir, "127.0.0.1")}},
+		deviceID: "test-device",
+	}
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/bundle", bytes.NewReader([]byte("not gzipped")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	req.Header.Set("Content-Encoding", "gzip")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bundle with bad gzip = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestHandleBundle_RejectsUnknownFolder(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  map[string]*folderState{"test": {cfg: testFolderCfg(dir, "127.0.0.1")}},
+		deviceID: "test-device",
+	}
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	reqMsg := &pb.BundleRequest{FolderId: "nonexistent", Paths: []string{"a.txt"}}
+	reqData, _ := proto.Marshal(reqMsg)
+	resp := bundlePost(t, ts.URL, reqData)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("bundle for unknown folder = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestHandleStatus_RejectsNonGet(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/status", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("POST /status = %d, want 405", resp.StatusCode)
+	}
+}
