@@ -252,6 +252,120 @@ func TestFilesyncPermissions(t *testing.T) {
 	}
 }
 
+// TestFilesyncRenameWithEdit exercises the R1 Phase 2 hint path end-to-end:
+// peer1 renames a file and edits a small portion of it in the same step;
+// peer2 must end up with the new path holding the edited content, the old
+// path gone, no leftover temp files, and a non-zero
+// mesh_filesync_files_renamed_total on the receiver (proving the hint was
+// applied locally instead of a blind re-download).
+func TestFilesyncRenameWithEdit(t *testing.T) {
+	requireImage(t, harness.DefaultImage)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	net := harness.NewNetwork(ctx, t)
+
+	keepFile := harness.File{Path: "/root/sync/.keep", Content: []byte{}, Mode: 0o600}
+	peer1, peer2 := startFilesyncPair(ctx, t, net,
+		"peer1", "configs/s2-peer1.yaml", "PEER2_IP",
+		"peer2", "configs/s2-peer2.yaml", "PEER1_IP",
+		[]harness.File{keepFile}, []harness.File{keepFile},
+	)
+
+	// Seed a file large enough to cross the incremental-hash threshold so
+	// the receiver's /delta path is eligible. 2 MB of a repeating pattern
+	// keeps block hashes deterministic while leaving room for a surgical
+	// edit near the tail.
+	const size = 2 * 1024 * 1024
+	payload := make([]byte, size)
+	for i := range payload {
+		payload[i] = byte('A' + (i % 26))
+	}
+	if err := peer1.WriteFile(ctx, "/root/sync/report.bin", payload, 0o600); err != nil {
+		t.Fatalf("seed report.bin: %v", err)
+	}
+
+	harness.Eventually(ctx, t, 60*time.Second, 500*time.Millisecond, "report.bin reaches peer2",
+		func() (bool, string) {
+			out := peer2.MustExec(ctx, "sh", "-c", "stat -c %s /root/sync/report.bin 2>/dev/null || echo 0")
+			if strings.TrimSpace(out) == fmt.Sprintf("%d", size) {
+				return true, ""
+			}
+			return false, fmt.Sprintf("size=%s, want %d", strings.TrimSpace(out), size)
+		})
+
+	// Rename + edit in one step: the peer1 scanner picks up the new path
+	// with the old inode and tags the new entry with PrevPath so the sender
+	// emits prev_path=old on the wire.
+	peer1.MustExec(ctx, "sh", "-c", "mv /root/sync/report.bin /root/sync/report-final.bin")
+	peer1.MustExec(ctx, "sh", "-c", "printf 'APPENDED' >> /root/sync/report-final.bin")
+
+	wantSize := int64(size + len("APPENDED"))
+	harness.Eventually(ctx, t, 90*time.Second, 500*time.Millisecond, "peer2 has renamed+edited file",
+		func() (bool, string) {
+			out := peer2.MustExec(ctx, "sh", "-c", "stat -c %s /root/sync/report-final.bin 2>/dev/null || echo 0")
+			if strings.TrimSpace(out) == fmt.Sprintf("%d", wantSize) {
+				return true, ""
+			}
+			return false, fmt.Sprintf("size=%s, want %d", strings.TrimSpace(out), wantSize)
+		})
+
+	// Old path must be gone on peer2 — the hint path tombstones it locally
+	// as part of the rename, and the separate ActionDelete would finish the
+	// job even if the hint had not fired.
+	harness.Eventually(ctx, t, 30*time.Second, 500*time.Millisecond, "old path removed on peer2",
+		func() (bool, string) {
+			code, _, _ := peer2.Exec(ctx, "test", "-f", "/root/sync/report.bin")
+			if code != 0 {
+				return true, ""
+			}
+			return false, "old path still present"
+		})
+
+	// Content check: the tail must contain the appended marker so we know
+	// the receiver applied the edit rather than resurrecting old content.
+	out := peer2.MustExec(ctx, "sh", "-c", "tail -c 8 /root/sync/report-final.bin")
+	if strings.TrimSpace(out) != "APPENDED" {
+		t.Fatalf("peer2 tail=%q, want APPENDED", out)
+	}
+
+	// No leftover temp files: hint rename is a local move + /delta over the
+	// existing path, so neither .mesh-tmp-* nor *.mesh-delta-tmp-* should
+	// remain after sync settles.
+	for _, p := range []*harness.Node{peer1, peer2} {
+		leftover := p.MustExec(ctx, "sh", "-c",
+			"find /root/sync \\( -name '.mesh-tmp-*' -o -name '*.mesh-delta-tmp-*' \\) -type f | wc -l")
+		if strings.TrimSpace(leftover) != "0" {
+			t.Fatalf("%s: leftover temp files: %s", p.Alias, strings.TrimSpace(leftover))
+		}
+	}
+
+	// The receiver's rename counter must have ticked — either via the pre-
+	// existing planRenames path (if the post-rename hash happened to match
+	// pre-rename, unlikely here) or via the Step 4 hint path.
+	metrics := peer2.MustExec(ctx, "sh", "-c",
+		"curl -sS http://127.0.0.1:7777/api/metrics | grep mesh_filesync_files_renamed_total || true")
+	if !strings.Contains(metrics, "mesh_filesync_files_renamed_total{folder=\"shared\"}") {
+		t.Fatalf("peer2 metrics missing files_renamed: %q", metrics)
+	}
+	// Extract the counter value; any non-zero count means a rename was
+	// applied locally instead of a full re-download.
+	var renamed int
+	for _, line := range strings.Split(metrics, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "mesh_filesync_files_renamed_total{folder=\"shared\"}") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				fmt.Sscanf(fields[len(fields)-1], "%d", &renamed)
+			}
+		}
+	}
+	if renamed < 1 {
+		t.Fatalf("peer2 files_renamed=%d, want >=1 (hint path did not fire)\nmetrics:\n%s", renamed, metrics)
+	}
+}
+
 // TestFilesyncIgnorePatterns verifies that files matching configured ignore
 // patterns (*.log, .git/, build/) are not synced to the peer.
 func TestFilesyncIgnorePatterns(t *testing.T) {

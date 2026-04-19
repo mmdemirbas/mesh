@@ -874,7 +874,13 @@ Each entry follows the same structure:
     use `observeInode` which stats on Unix and opens a handle on
     Windows; dedicated Windows coverage lives in
     `inode_windows_test.go`.
-  - **Step 6 ⏳** — e2e scenario: cross-peer rename with edit.
+  - **Step 6 ✅** — `TestFilesyncRenameWithEdit` in
+    `e2e/scenarios/filesync_extended_test.go` seeds a 2 MB file on
+    peer1, renames + appends a trailing marker in the same step, and
+    verifies peer2 ends up with the new path holding the edited
+    content, the old path gone, no leftover temp files, and a
+    non-zero `mesh_filesync_files_renamed_total` counter (proving
+    the hint was applied locally instead of a blind re-download).
 
 <a id="r2"></a>
 ### R2 · Formal folder-level state machine
