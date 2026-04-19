@@ -100,17 +100,17 @@ there depend on items tracked here.
 | [P17b](#p17b) | Gob persistence + YAML fallback                      | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟡   | 🔌    |
 | [P18a](#p18a) | Pre-size `seen` map                                  | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
 | [P18b](#p18b) | Incremental `activeCount` / `activeSize`             | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
-| [P18c](#p18c) | Eliminate index clone (scan into `pending`)          | 🟠 P1 | perf          | 🔧     | 🟧 M   | 🟡   | 📦    |
+| [P18c](#p18c) | Eliminate index clone (scan into `pending`)          | 🟠 P1 | perf          | ✅     | 🟧 M   | 🟡   | 📦    |
 | [P18d](#p18d) | Cap `buildIndexExchange` pre-allocation              | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
 | [P3sc](#p3sc) | Adaptive watch / scan                                | 🟠 P1 | perf          | ⏸     | 🟧 M   | 🟡   | 📦    |
 | [PF](#pf) | Trie-based ignore with cursor propagation            | 🟠 P1 | perf          | 🔧     | 🟥 L   | 🟡   | 📦    |
-| [PK](#pk) | Clone elimination (COW / change-set on persist)      | 🟠 P1 | perf          | ⏳     | 🟧 M   | 🔴   | 📦    |
+| [PK](#pk) | Clone elimination (COW / change-set on persist)      | 🟠 P1 | perf          | ⏸      | 🟧 M   | 🔴   | 📦    |
 | [PL](#pl) | Incremental deletion detection                       | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
 | [PM](#pm) | Directory-keyed child index                          | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
 | [PN](#pn) | Incremental `recomputeCache`                         | 🟠 P1 | perf          | ⏸      | 🟨 S   | 🟢   | 📄    |
 | [R1](#r1) | Inode-based rename / move detection                  | 🟡 P2 | robustness    | 🔧     | 🟧 M   | 🟡   | 🔌    |
 | [R2](#r2) | Formal folder-level state machine                    | 🟡 P2 | robustness    | ⏳     | 🟧 M   | 🟢   | 📦    |
-| [R3](#r3) | Peer-level failure blacklist                         | 🟡 P2 | robustness    | 🔧     | 🟨 S   | 🟢   | 📦    |
+| [R3](#r3) | Peer-level failure blacklist                         | 🟡 P2 | robustness    | ✅     | 🟨 S   | 🟢   | 📦    |
 | [D1](#d1) | FastCDC content-defined chunking                     | 🟢 P3 | differentiate | ⏳     | 🟥 L   | 🔴   | 🔌    |
 | [D2](#d2) | BLAKE3 instead of SHA-256                            | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🔴   | 🔌    |
 | [D3](#d3) | Linux `fanotify` backend                             | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🟡   | 📦    |
@@ -120,7 +120,7 @@ there depend on items tracked here.
 | [C5](#c5) | 3-way text merge (Idea C)                            | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 📦    |
 | [C6](#c6) | Full vector clocks per file (Idea D)                 | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 🔌    |
 
-Counts: **4** P0 (1 ✅ / 3 ⏳) · **12** P1 (5 ✅ / 7 ⏳) · **3** P2 · **6** P3 · **2** deferred.
+Counts: **4** P0 (2 ✅ / 1 🔧 / 1 ⏳) · **12** P1 (8 ✅ / 1 🔧 / 3 ⏸) · **3** P2 (1 ✅ / 1 🔧 / 1 ⏳) · **6** P3 ⏳ · **2** deferred.
 
 ---
 
@@ -137,9 +137,9 @@ All `done` entries re-verified against the tree on 2026-04-19.
 | [P18d](#p18d) | Delta path uses `len(tail)` via `seqIndex` binary search (`filesync.go` ~L2031). Full path only on bootstrap. |
 | [C1](#c1) | `diff()` takes `lastSyncNS` and compares `lEntry.MtimeNS` against it for both the B8 tombstone guard and the conflict classifier (`index.go`, `FileIndex.diff`). Caller in `syncFolder` passes `ps.LastSync.UnixNano()`. Covered by `TestDiffC1MtimeVsLastSync` and `TestDiffC1TombstoneMtimeVsLastSync`. |
 | [C2](#c2) | `PeerState.BaseHashes` holds the last agreed hash per path; `diff()` uses it as the primary signal (ancestor match ⇒ download-or-skip, both diverged ⇒ conflict) and falls back to C1 mtime when absent. `updateBaseHashes` folds each completed exchange into the ancestor map (hash match records, tombstone drops, mismatch preserves prior). Caller in `syncFolder` snapshots `ps.BaseHashes` before diff and re-merges on both the no-action and sync-end paths. Covered by `TestDiffC2AncestorClassifier`, `TestDiffC2TombstoneAncestor`, and `TestUpdateBaseHashes`. |
-| R1 (partial) | Receiver-side content-hash rename landed: `planRenames` (in `index.go`) pairs each ActionDelete whose local file has hash H with one ActionDownload whose RemoteHash is H, and `syncFolder` performs an atomic local rename (with Chtimes/Chmod, tombstone + new-path index entry) for each plan. Both sides of the rename are skipped in the bundle loop and the main dispatch loop. Metrics `FilesRenamed` and `BytesSavedByRename` exported via `/api/metrics` (`mesh_filesync_files_renamed_total`, `mesh_filesync_bytes_saved_by_rename_total`). Covered by `TestPlanRenames*` (happy path, hash mismatch, one-to-one pairing, target exists, tombstoned source, missing source, nil inputs) and `TestR1RenameFilesystemIntegration`. Remaining: inode-based sender-side rename detection with wire protocol capability handshake for the case where the renamed file was also edited. See R1 Status note. |
-
-`P18c` is still pending: `fs.index.clone()` remains at `filesync.go:1030` (runScan) and `filesync.go:2151` (persistFolder).
+| R1 (partial) | Receiver-side content-hash rename landed: `planRenames` (in `index.go`) pairs each ActionDelete whose local file has hash H with one ActionDownload whose RemoteHash is H, and `syncFolder` performs an atomic local rename (with Chtimes/Chmod, tombstone + new-path index entry) for each plan. Both sides of the rename are skipped in the bundle loop and the main dispatch loop. Metrics `FilesRenamed` and `BytesSavedByRename` exported via `/api/metrics` (`mesh_filesync_files_renamed_total`, `mesh_filesync_bytes_saved_by_rename_total`). Covered by `TestPlanRenames*` (happy path, hash mismatch, one-to-one pairing, target exists, tombstoned source, missing source, nil inputs) and `TestR1RenameFilesystemIntegration`. Phase 2 (sender-side inode tracking + wire capability handshake + delta-on-rename) is approved and pending. See R1 Status note. |
+| [P18c](#p18c) | `runScan` recycles the clone backing map across scans via `FileIndex.cloneInto(dst)`. Measured (darwin/arm64, n=100 000): 7.5 ms / 19.9 MB / 257 allocs → 7.0 ms / 0 B / 0 allocs. `TestRunScanRecyclesCloneMap` pins the ping-pong invariant. Phase 2 (full scan-into-pending refactor) is superseded by D4. |
+| [R3](#r3) | `peerRetryTracker` counts consecutive `sendIndex` failures per peer per folder; backoff activates after `peerRetryThreshold` strikes and reuses the `backoffDelay` exponential curve (capped at `retryMaxDelay`). `syncFolder` gates at entry and records a `Retrying` state with the remaining delay when a peer is backed off; a successful exchange clears the count. Scope is per-folder — a peer unreachable for folder A does not affect folder B. Dashboard surface: `FolderPeer.BackoffRemaining`. Covered by `TestPeerRetryTracker`. |
 
 ---
 
@@ -412,7 +412,7 @@ Each entry follows the same structure:
   scan swap.
 
 <a id="p18c"></a>
-### P18c · Eliminate index clone (scan into `pending`) · 🔧
+### P18c · Eliminate index clone (scan into `pending`) · ✅
 
 [↑ back to summary](#summary-table)
 
@@ -471,11 +471,9 @@ Each entry follows the same structure:
   cadence with 15 folders, the ~1.8 GB/hour of map allocation the
   plan targeted is gone. `TestRunScanRecyclesCloneMap` pins the
   ping-pong invariant so a future refactor cannot silently regress it.
-  The full scan-into-pending refactor (option 1) remains deferred:
-  it is still the correct endpoint for unblocking PK (stable snapshot
-  for persist), but the GC-pressure gain that motivated P18c has been
-  captured here with ~10 lines of change and a small, measurable
-  blast radius.
+  The full scan-into-pending refactor (option 1) is superseded by
+  D4: the SQLite index delivers MVCC snapshots for free, which
+  obviates both the clone-on-scan and the clone-on-persist paths.
 
 <a id="p18d"></a>
 ### P18d · Cap `buildIndexExchange` pre-allocation · ✅
@@ -568,6 +566,36 @@ Each entry follows the same structure:
 - **Recommendation.** Ship (1) as Phase 2 of scan-time perf work.
   Mandatory conformance test suite: generate 10 k random patterns ×
   10 k random paths; compare against a reference linear evaluator.
+- **Phase 2 plan (approved 2026-04-19).** Correctness first, speed
+  second. The shipping gate is "zero divergence from the reference
+  matcher across the full corpus, then at least as fast".
+  1. Build a conformance comparator. Use the current linear matcher
+     as the reference; cross-check a representative subset against
+     `git check-ignore` so the reference itself is grounded.
+  2. Assemble a corpus of 10 k patterns × 10 k paths covering
+     monorepo gitignores, `node_modules`, build trees, and
+     pathological cases: deep `**`, negation chains, directory-only
+     patterns, trailing-slash rules, mixed separators, case
+     sensitivity edges. Pin the corpus under `testdata/` so
+     regressions stay reproducible.
+  3. Run the comparator against the current linear matcher. Lock
+     today's behaviour in as the baseline. Any disagreements with
+     `git check-ignore` at this stage are pre-existing and must be
+     documented (either a bug to fix, or a known gap to pin).
+  4. Implement the trie behind a feature flag. Unit tests first,
+     one per construct (plain segment, `*`, `?`, `**`, negation,
+     directory-only, escape). Every construct has a blazing-fast
+     test that runs on every `go test`.
+  5. Re-run the comparator against the trie. Zero divergence is the
+     merge gate. A divergence is either a trie bug (fix) or a legacy
+     bug surfaced by the rewrite (decide explicitly, with a test,
+     whether to preserve the quirk or correct it).
+  6. Benchmark the trie against the baseline across the corpus. The
+     trie must win across every bucket (shallow, deep, wide fan-out,
+     negation-heavy); otherwise the perf story is incomplete and the
+     decision goes back to the user.
+  7. Only after both gates are green, flip the feature flag default
+     and retire the linear matcher.
 - **Verification (partial, Phase 1 shipped).** Profiling
   `BenchmarkIgnoreMatcherRealistic` (60 patterns × 50 paths mirroring a
   monorepo gitignore) showed `path.Match` was 69 % of CPU inside
@@ -592,7 +620,7 @@ Each entry follows the same structure:
   hotspot list, so Phase 2 is no longer urgent.
 
 <a id="pk"></a>
-### PK · Clone elimination (COW / change-set on persist) · ⏳
+### PK · Clone elimination (COW / change-set on persist) · ⏸
 
 [↑ back to summary](#summary-table)
 
@@ -621,6 +649,11 @@ Each entry follows the same structure:
 - **Recommendation.** Only ship once P18c has landed and measurement
   shows persist-time allocation still dominates. Heavy test matrix is a
   prerequisite.
+- **Status (2026-04-19).** Deferred, superseded by D4. Once the SQLite
+  index lands, both the clone-on-persist and the COW overlay
+  questions disappear — SQLite's MVCC provides the stable snapshot
+  for free. Revisit only if the D4 design doc concludes SQLite is
+  not the right answer.
 
 <a id="pl"></a>
 ### PL · Incremental deletion detection · ✅
@@ -762,18 +795,24 @@ Each entry follows the same structure:
   exactly this. See `RESEARCH.md` §4.6 and the stat-pre-filter section.
 - **Recommendation.** Ship (1). Gate the on-wire message behind a
   capability handshake; on unknown peer, fall back to current behavior.
-- **Status.** Partial — receiver-side content-hash rename landed without
-  any wire-format or proto change (see `planRenames` in `index.go` and
-  the R1 branch in `syncFolder`). It captures the primary bandwidth
-  win whenever the renamed file's content is unchanged: the receiver
-  notices a download/delete pair where its local file at the delete
-  path already hashes to the download's target, and performs an atomic
-  local rename instead of redownloading. **Open question:** is this
-  sufficient, or should we also ship the inode-tracking + wire
-  capability handshake variant for the case where the sender sees
-  inode-same / hash-different (content edited during rename)? Today
-  that falls back to full re-transfer, which mirrors the recommended
-  behavior before rename-support peers handshake. Decision deferred.
+- **Status.** Phase 1 complete — receiver-side content-hash rename
+  landed without any wire-format or proto change. See `planRenames`
+  in `index.go` and the R1 branch in `syncFolder`. It captures the
+  primary bandwidth win whenever the renamed file's content is
+  unchanged: the receiver notices a download/delete pair where its
+  local file at the delete path already hashes to the download's
+  target, and performs an atomic local rename instead of
+  redownloading.
+- **Phase 2 plan (approved 2026-04-19).** Ship sender-side inode
+  tracking + wire capability handshake + delta-on-rename for the
+  renamed-and-edited case, which today costs a full re-transfer.
+  The sender carries a `prev_path` hint on the download message when
+  it detects an inode-same / hash-different rename. The receiver
+  pairs the delete and download, renames locally, then applies
+  `/delta` against the old-path content so only the changed blocks
+  move over the wire. Gated behind a capability flag in the index
+  exchange so peers without rename support fall back to the current
+  full-transfer behaviour.
 
 <a id="r2"></a>
 ### R2 · Formal folder-level state machine
@@ -806,7 +845,7 @@ Each entry follows the same structure:
   quiescence).
 
 <a id="r3"></a>
-### R3 · Peer-level failure blacklist · 🔧
+### R3 · Peer-level failure blacklist · ✅
 
 [↑ back to summary](#summary-table)
 
@@ -847,6 +886,11 @@ Each entry follows the same structure:
   `GetFolderStatuses`. `TestPeerRetryTracker` pins the state machine
   (below-threshold no backoff, threshold activation, doubling, clear
   resets, cap at `retryMaxDelay`, `backedOffPeers` filtering).
+- **Open follow-up.** Verify the web UI at `/ui/filesync` renders
+  `FolderPeer.BackoffRemaining` distinctly from file-level quarantine
+  and transient network error, so an operator can tell the three
+  states apart at a glance. If the current surface collapses them,
+  open a small UI item to split the indicator.
 
 <a id="d1"></a>
 ### D1 · FastCDC content-defined chunking
@@ -965,6 +1009,15 @@ Each entry follows the same structure:
   to SQLite. `RESEARCH.md §16.5`.
 - **Recommendation.** Right long-term answer, but large enough to need
   a design doc and dependency approval first.
+- **Status (2026-04-19).** Promoted to active design work. Supersedes
+  P18c Phase 2 and PK. First deliverable is a design doc covering:
+  schema (folders, files, block hashes, peer state, base hashes,
+  rename inode map), secondary indexes, migration from the current
+  gob store, fsync and crash-safety semantics versus today's
+  double-write + fsync, WAL-mode behaviour on the admin backup
+  flow, and dependency approval for the pure-Go driver
+  (`modernc.org/sqlite`, preserves `CGO_ENABLED=0` release target).
+  No code change until the design doc is reviewed.
 
 <a id="d5"></a>
 ### D5 · Sparse file detection
