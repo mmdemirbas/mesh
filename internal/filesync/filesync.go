@@ -111,6 +111,7 @@ type FolderPeer struct {
 	LastSeenSequence int64           `json:"last_seen_sequence"`
 	LastSentSequence int64           `json:"last_sent_sequence"`
 	LastError        string          `json:"last_error,omitempty"`
+	BackoffRemaining time.Duration   `json:"backoff_remaining,omitempty"` // R3: non-zero while peer is in consecutive-failure backoff
 	Pending          *PendingSummary `json:"pending,omitempty"`
 }
 
@@ -229,6 +230,12 @@ func GetFolderStatuses() []FolderStatus {
 				}
 				if msg, ok := fs.peerLastError[addr]; ok {
 					fp.LastError = msg
+				}
+				// R3: surface active peer-level backoff so operators see
+				// "peer is being skipped" rather than inferring it from
+				// LastError + clock math.
+				if backed, remaining := fs.peerRetries.backedOff(addr); backed {
+					fp.BackoffRemaining = remaining
 				}
 				if p, ok := fs.pending[addr]; ok {
 					fp.Pending = clonePendingSummary(p)
@@ -425,6 +432,7 @@ type folderState struct {
 	initialScanDone atomic.Bool               // true after first full scan completes
 	indexMu         sync.RWMutex
 	retries         retryTracker
+	peerRetries     peerRetryTracker // R3: per-peer backoff after consecutive sendIndex failures
 	// H3: inFlight tracks paths currently being downloaded so concurrent
 	// peer goroutines skip the same path. Protected by inFlightMu.
 	inFlightMu  sync.Mutex
@@ -551,6 +559,103 @@ func (rt *retryTracker) quarantinedPaths() []string {
 	for path, e := range rt.counts {
 		if now.Sub(e.lastFailed) < backoffDelay(e.failures) {
 			out = append(out, path)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// R3: peer-level retry tracking. The file-level retryTracker quarantines a
+// specific (path, remoteHash) tuple after a hash mismatch — fine-grained and
+// keyed on content. It does nothing when the peer itself is unreachable: a
+// peer whose sendIndex times out keeps getting retried every cycle, burning
+// a goroutine and 2-minute timeout each time.
+//
+// peerRetryTracker fills that gap. After peerRetryThreshold consecutive
+// sendIndex failures the peer enters exponential backoff; syncFolder skips
+// it until the window elapses. Any successful sendIndex resets the state.
+// Below the threshold, failures are counted but no backoff is applied — a
+// transient glitch does not stall sync for the next 30 seconds.
+const peerRetryThreshold = 3
+
+type peerRetryState struct {
+	failures   int       // consecutive sendIndex failures, capped at retryMaxCount
+	lastFailed time.Time // wall-clock time of the last failure
+}
+
+// peerRetryTracker is a sibling of retryTracker keyed on peer address.
+// Accessed under folderState.indexMu.
+type peerRetryTracker struct {
+	states map[string]peerRetryState // peerAddr -> state
+	nowFn  func() time.Time          // injectable clock for testing
+}
+
+func (pt *peerRetryTracker) now() time.Time {
+	if pt.nowFn != nil {
+		return pt.nowFn()
+	}
+	return time.Now()
+}
+
+// peerBackoffDelay maps failures -> backoff duration. Failures below the
+// threshold produce zero delay (no backoff yet). At the threshold, the
+// curve matches file-level backoffDelay starting from base.
+func peerBackoffDelay(failures int) time.Duration {
+	if failures < peerRetryThreshold {
+		return 0
+	}
+	return backoffDelay(failures - peerRetryThreshold + 1)
+}
+
+// backedOff reports whether the peer should be skipped this cycle and, if
+// so, how long is left in the current backoff window.
+func (pt *peerRetryTracker) backedOff(peer string) (bool, time.Duration) {
+	if pt.states == nil {
+		return false, 0
+	}
+	s, ok := pt.states[peer]
+	if !ok || s.failures < peerRetryThreshold {
+		return false, 0
+	}
+	elapsed := pt.now().Sub(s.lastFailed)
+	delay := peerBackoffDelay(s.failures)
+	if elapsed >= delay {
+		return false, 0
+	}
+	return true, delay - elapsed
+}
+
+// record marks a sendIndex failure for the peer. After peerRetryThreshold
+// consecutive failures the peer enters backoff.
+func (pt *peerRetryTracker) record(peer string) {
+	if pt.states == nil {
+		pt.states = make(map[string]peerRetryState)
+	}
+	s := pt.states[peer]
+	s.failures++
+	if s.failures > retryMaxCount {
+		s.failures = retryMaxCount
+	}
+	s.lastFailed = pt.now()
+	pt.states[peer] = s
+}
+
+// clear removes tracking for a peer (e.g., after a successful exchange).
+func (pt *peerRetryTracker) clear(peer string) {
+	delete(pt.states, peer)
+}
+
+// backedOffPeers returns peers currently within their backoff window,
+// sorted by address. Admin/dashboard surfaces.
+func (pt *peerRetryTracker) backedOffPeers() []string {
+	now := pt.now()
+	var out []string
+	for peer, s := range pt.states {
+		if s.failures < peerRetryThreshold {
+			continue
+		}
+		if now.Sub(s.lastFailed) < peerBackoffDelay(s.failures) {
+			out = append(out, peer)
 		}
 	}
 	sort.Strings(out)
@@ -1275,6 +1380,21 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	folderID := fs.cfg.ID
 	stateKey := folderID + "|" + peerAddr
 
+	// R3: if the peer has hit consecutive-failure threshold, skip this cycle
+	// until the backoff window expires. Each folder tracks its own view of
+	// the peer, so a healthy folder→peer pair is not penalised by another
+	// folder's troubles with the same peer.
+	fs.indexMu.RLock()
+	backedOff, remaining := fs.peerRetries.backedOff(peerAddr)
+	fs.indexMu.RUnlock()
+	if backedOff {
+		slog.Debug("peer in backoff, skipping sync cycle",
+			"folder", folderID, "peer", peerAddr, "remaining", remaining)
+		state.Global.Update("filesync-peer", stateKey, state.Retrying,
+			fmt.Sprintf("backoff %s", remaining.Round(time.Second)))
+		return
+	}
+
 	// L6: verify folder root still exists before syncing. If the folder was
 	// unmounted or deleted after startup, downloading files would recreate
 	// the directory tree via MkdirAll — producing a zombie folder.
@@ -1322,7 +1442,13 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		}
 		fs.indexMu.Lock()
 		fs.peerLastError[peerAddr] = err.Error()
+		fs.peerRetries.record(peerAddr) // R3
+		failures := fs.peerRetries.states[peerAddr].failures
 		fs.indexMu.Unlock()
+		if failures == peerRetryThreshold {
+			slog.Warn("peer entered backoff after consecutive failures",
+				"folder", folderID, "peer", peerAddr, "failures", failures)
+		}
 		n.recordActivity(SyncActivity{
 			Time:   time.Now(),
 			Folder: folderID,
@@ -1334,6 +1460,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 	fs.indexMu.Lock()
 	delete(fs.peerLastError, peerAddr)
+	fs.peerRetries.clear(peerAddr) // R3: healthy exchange resets backoff
 	fs.indexMu.Unlock()
 	remoteEntries := len(remoteIdx.GetFiles())
 	fs.metrics.IndexExchanges.Add(1)

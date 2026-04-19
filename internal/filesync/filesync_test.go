@@ -1476,6 +1476,75 @@ func TestRetryTracker(t *testing.T) {
 	}
 }
 
+// TestPeerRetryTracker pins R3 peer-level backoff: below the threshold
+// failures accumulate without blocking; at the threshold backoff activates;
+// the curve is exponential and capped; a clear resets state.
+func TestPeerRetryTracker(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
+	pt := peerRetryTracker{nowFn: func() time.Time { return now }}
+
+	// Unknown peer: not backed off.
+	if backed, _ := pt.backedOff("p1"); backed {
+		t.Fatal("unknown peer should not be backed off")
+	}
+
+	// Below threshold: failures counted but no backoff.
+	for i := 1; i < peerRetryThreshold; i++ {
+		pt.record("p1")
+		if backed, _ := pt.backedOff("p1"); backed {
+			t.Fatalf("below threshold (failure %d) should not back off", i)
+		}
+	}
+
+	// Threshold reached: backoff activates for the base window.
+	pt.record("p1") // failure == peerRetryThreshold
+	backed, remaining := pt.backedOff("p1")
+	if !backed {
+		t.Fatal("should be backed off at threshold")
+	}
+	if remaining <= 0 || remaining > retryBaseDelay {
+		t.Errorf("remaining = %v, want (0, %v]", remaining, retryBaseDelay)
+	}
+
+	// Elapse the window: backoff clears.
+	now = now.Add(retryBaseDelay + time.Second)
+	if backed, _ := pt.backedOff("p1"); backed {
+		t.Fatal("backoff should have elapsed")
+	}
+
+	// Another failure: window doubles.
+	pt.record("p1") // failure == threshold+1
+	if d := peerBackoffDelay(peerRetryThreshold + 1); d != 2*retryBaseDelay {
+		t.Errorf("peerBackoffDelay(threshold+1) = %v, want %v", d, 2*retryBaseDelay)
+	}
+
+	// Clear resets.
+	pt.clear("p1")
+	if backed, _ := pt.backedOff("p1"); backed {
+		t.Fatal("clear should reset backoff state")
+	}
+
+	// Cap: many failures should not exceed retryMaxDelay.
+	for range retryMaxCount + 5 {
+		pt.record("p2")
+	}
+	if d := peerBackoffDelay(pt.states["p2"].failures); d != retryMaxDelay {
+		t.Errorf("capped backoff = %v, want %v", d, retryMaxDelay)
+	}
+
+	// backedOffPeers lists peers in active backoff only.
+	pt = peerRetryTracker{nowFn: func() time.Time { return now }}
+	for range peerRetryThreshold {
+		pt.record("bad-peer")
+	}
+	pt.record("healthy-peer") // single failure, below threshold
+	peers := pt.backedOffPeers()
+	if len(peers) != 1 || peers[0] != "bad-peer" {
+		t.Errorf("backedOffPeers = %v, want [bad-peer]", peers)
+	}
+}
+
 func TestBackoffDelay(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
