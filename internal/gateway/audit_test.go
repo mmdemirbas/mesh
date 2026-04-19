@@ -64,6 +64,25 @@ func readRows(t *testing.T, dir string) []map[string]any {
 	return rows
 }
 
+// waitForRows polls fn until it returns at least want rows or timeout
+// expires. Use this instead of time.Sleep when waiting for the audit
+// recorder's background goroutine to flush entries — the recorder does
+// not expose a sync primitive, so polling with a deadline is the
+// idiomatic replacement (testing.md: no sleep as synchronization).
+func waitForRows(t *testing.T, fn func() []map[string]any, want int, timeout time.Duration) []map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var rows []map[string]any
+	for time.Now().Before(deadline) {
+		rows = fn()
+		if len(rows) >= want {
+			return rows
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return rows
+}
+
 func TestRecorder_RunIDPresentAndStableWithinProcess(t *testing.T) {
 	t.Parallel()
 	rec := newTestRecorder(t, LogLevelMetadata)

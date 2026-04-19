@@ -100,8 +100,8 @@ func TestTranslationAudit_A2O_NonStreaming(t *testing.T) {
 		t.Fatalf("parse client response: %v; body=%s", err, got)
 	}
 
-	time.Sleep(50 * time.Millisecond)
-	rows := readRows(t, filepath.Join(logDir, gwName))
+	dir := filepath.Join(logDir, gwName)
+	rows := waitForRows(t, func() []map[string]any { return readRows(t, dir) }, 2, 2*time.Second)
 	if len(rows) != 2 {
 		t.Fatalf("audit rows = %d, want 2; rows=%+v", len(rows), rows)
 	}
@@ -166,8 +166,8 @@ func TestTranslationAudit_A2O_StreamingReassembly(t *testing.T) {
 	_, _ = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
-	time.Sleep(80 * time.Millisecond)
-	rows := readRows(t, filepath.Join(logDir, gwName))
+	dir := filepath.Join(logDir, gwName)
+	rows := waitForRows(t, func() []map[string]any { return readRows(t, dir) }, 2, 2*time.Second)
 	if len(rows) != 2 {
 		t.Fatalf("audit rows = %d, want 2", len(rows))
 	}

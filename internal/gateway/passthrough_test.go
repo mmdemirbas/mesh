@@ -129,10 +129,8 @@ func TestPassthrough_NonStreamingRoundtrip(t *testing.T) {
 		t.Errorf("response id = %v, want msg_abc (upstream body must be forwarded verbatim)", payload["id"])
 	}
 
-	// Flush any file buffers by shutting the gateway (Cleanup handles it) and
-	// then reading the audit file.
-	time.Sleep(50 * time.Millisecond) // give the recorder goroutine time to write
-	rows := auditFiles(t, gwName, logDir)
+	// Wait for the recorder's background goroutine to flush both rows.
+	rows := waitForRows(t, func() []map[string]any { return auditFiles(t, gwName, logDir) }, 2, 2*time.Second)
 	if len(rows) != 2 {
 		t.Fatalf("audit rows = %d, want 2: %+v", len(rows), rows)
 	}
@@ -270,8 +268,7 @@ func TestPassthrough_StreamingForwardsBytes(t *testing.T) {
 		}
 	}
 
-	time.Sleep(100 * time.Millisecond)
-	rows := auditFiles(t, gwName, logDir)
+	rows := waitForRows(t, func() []map[string]any { return auditFiles(t, gwName, logDir) }, 2, 2*time.Second)
 	if len(rows) != 2 {
 		t.Fatalf("audit rows = %d, want 2", len(rows))
 	}
@@ -409,8 +406,7 @@ func TestPassthrough_GzippedResponseDecodedInAuditOnly(t *testing.T) {
 		t.Errorf("client bytes differ from upstream (got %d bytes, want %d); passthrough must not mutate payload", len(got), len(compressed))
 	}
 
-	time.Sleep(50 * time.Millisecond)
-	rows := auditFiles(t, gwName, logDir)
+	rows := waitForRows(t, func() []map[string]any { return auditFiles(t, gwName, logDir) }, 2, 2*time.Second)
 	if len(rows) != 2 {
 		t.Fatalf("audit rows = %d, want 2", len(rows))
 	}
