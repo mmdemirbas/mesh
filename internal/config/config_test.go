@@ -931,6 +931,138 @@ func TestValidate_FilesyncNonOverlappingPaths(t *testing.T) {
 	}
 }
 
+func TestValidate_AdminAddr_OffAllowed(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{AdminAddr: "off"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("admin_addr=off should validate: %v", err)
+	}
+}
+
+func TestValidate_AdminAddr_LoopbackAllowed(t *testing.T) {
+	t.Parallel()
+	for _, addr := range []string{"127.0.0.1:7777", "[::1]:7777"} {
+		cfg := &Config{AdminAddr: addr}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("admin_addr=%q should validate: %v", addr, err)
+		}
+	}
+}
+
+func TestValidate_AdminAddr_NonLoopbackRejected(t *testing.T) {
+	t.Parallel()
+	for _, addr := range []string{"0.0.0.0:7777", "192.168.1.10:7777", "10.0.0.1:7777"} {
+		cfg := &Config{AdminAddr: addr}
+		err := cfg.Validate()
+		if err == nil {
+			t.Errorf("admin_addr=%q should be rejected", addr)
+			continue
+		}
+		if !strings.Contains(err.Error(), "loopback") {
+			t.Errorf("admin_addr=%q: error %q does not mention loopback", addr, err.Error())
+		}
+	}
+}
+
+func TestValidate_AdminAddr_MalformedRejected(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{AdminAddr: "not-a-host-port"}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("malformed admin_addr should be rejected")
+	}
+	if !strings.Contains(err.Error(), "admin_addr") {
+		t.Errorf("error %q does not mention admin_addr", err.Error())
+	}
+}
+
+func TestValidate_FilesyncInvalidScanInterval(t *testing.T) {
+	t.Parallel()
+	fsCfg := FilesyncCfg{
+		Bind:          "0.0.0.0:7756",
+		MaxConcurrent: 4,
+		ScanInterval:  "not-a-duration",
+		Peers:         map[string]PeerDef{"p1": {Addresses: []string{"10.0.0.1:7756"}}},
+		Folders: map[string]FolderCfgRaw{
+			"a": {Path: t.TempDir(), Peers: []string{"p1"}},
+		},
+	}
+	_ = fsCfg.Resolve()
+	cfg := &Config{Filesync: []FilesyncCfg{fsCfg}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("invalid scan_interval should be rejected")
+	}
+	if !strings.Contains(err.Error(), "scan_interval") {
+		t.Errorf("error %q does not mention scan_interval", err.Error())
+	}
+}
+
+func TestValidate_FilesyncInvalidMaxBandwidth(t *testing.T) {
+	t.Parallel()
+	fsCfg := FilesyncCfg{
+		Bind:          "0.0.0.0:7756",
+		MaxConcurrent: 4,
+		MaxBandwidth:  "bogus",
+		Peers:         map[string]PeerDef{"p1": {Addresses: []string{"10.0.0.1:7756"}}},
+		Folders: map[string]FolderCfgRaw{
+			"a": {Path: t.TempDir(), Peers: []string{"p1"}},
+		},
+	}
+	_ = fsCfg.Resolve()
+	cfg := &Config{Filesync: []FilesyncCfg{fsCfg}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("invalid max_bandwidth should be rejected")
+	}
+	if !strings.Contains(err.Error(), "max_bandwidth") {
+		t.Errorf("error %q does not mention max_bandwidth", err.Error())
+	}
+}
+
+func TestValidate_FilesyncMissingPath(t *testing.T) {
+	t.Parallel()
+	fsCfg := FilesyncCfg{
+		Bind:          "0.0.0.0:7756",
+		MaxConcurrent: 4,
+		Peers:         map[string]PeerDef{"p1": {Addresses: []string{"10.0.0.1:7756"}}},
+		Folders:       map[string]FolderCfgRaw{"a": {Path: t.TempDir(), Peers: []string{"p1"}}},
+	}
+	_ = fsCfg.Resolve()
+	// Overwrite the resolved entry with one missing a Path to exercise the
+	// post-Resolve validation branch (Resolve itself rejects empty paths).
+	fsCfg.ResolvedFolders = []FolderCfg{{ID: "a", Direction: "send-receive", Peers: []string{"10.0.0.1:7756"}}}
+	cfg := &Config{Filesync: []FilesyncCfg{fsCfg}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("folder missing path should be rejected")
+	}
+	if !strings.Contains(err.Error(), "path is required") {
+		t.Errorf("error %q does not mention path required", err.Error())
+	}
+}
+
+func TestValidate_FilesyncInvalidDirection(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	fsCfg := FilesyncCfg{
+		Bind:          "0.0.0.0:7756",
+		MaxConcurrent: 4,
+		Peers:         map[string]PeerDef{"p1": {Addresses: []string{"10.0.0.1:7756"}}},
+		Folders:       map[string]FolderCfgRaw{"a": {Path: dir, Peers: []string{"p1"}}},
+	}
+	_ = fsCfg.Resolve()
+	fsCfg.ResolvedFolders = []FolderCfg{{ID: "a", Path: dir, Direction: "sideways", Peers: []string{"10.0.0.1:7756"}}}
+	cfg := &Config{Filesync: []FilesyncCfg{fsCfg}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("invalid direction should be rejected")
+	}
+	if !strings.Contains(err.Error(), "direction") {
+		t.Errorf("error %q does not mention direction", err.Error())
+	}
+}
+
 func TestFilesyncResolve(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
