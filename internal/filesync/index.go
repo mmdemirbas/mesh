@@ -74,7 +74,8 @@ type FileEntry struct {
 	SHA256   Hash256 `yaml:"sha256"`
 	Deleted  bool    `yaml:"deleted,omitempty"`
 	Sequence int64   `yaml:"sequence"`
-	Mode     uint32  `yaml:"mode,omitempty"` // L1: Unix permission bits (e.g., 0644)
+	Mode     uint32  `yaml:"mode,omitempty"`  // L1: Unix permission bits (e.g., 0644)
+	Inode    uint64  `yaml:"inode,omitempty"` // R1 Phase 2: filesystem inode for rename detection; 0 on Windows or when unavailable
 
 	// PH: incremental hashing state for append-only optimization.
 	// HashState is the serialized sha256 internal state after hashing
@@ -513,6 +514,7 @@ type pendingHash struct {
 	size    int64
 	mtimeNS int64
 	mode    uint32
+	inode   uint64    // R1 Phase 2: captured during walk; 0 when unavailable
 	exists  bool      // true if the file was already in the index
 	old     FileEntry // previous index entry (valid only when exists)
 }
@@ -855,13 +857,27 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			mtimeNS := wf.info.ModTime().UnixNano()
 			size := wf.info.Size()
 			mode := uint32(wf.info.Mode().Perm())
+			inode := inodeOf(wf.info)
 
 			// Fast path: skip hashing if size and mtime are unchanged.
 			// Direct idx.Files assignment OK here — scanWithStats bulk-rebuilds
 			// seqIndex and cachedCount/cachedSize at the end.
 			if exists && !existing.Deleted && existing.Size == size && existing.MtimeNS == mtimeNS {
+				dirty := false
 				if existing.Mode != mode {
 					existing.Mode = mode
+					dirty = true
+				}
+				// R1 Phase 2: backfill inode when a previous scan had no
+				// value (migration from pre-inode indexes) or when the
+				// inode changed silently (e.g. restore from backup).
+				// Skip when the current scan could not observe an inode
+				// (inode == 0) so we do not clobber a known-good value.
+				if inode != 0 && existing.Inode != inode {
+					existing.Inode = inode
+					dirty = true
+				}
+				if dirty {
 					idx.Files[wf.rel] = existing
 				}
 				stats.FastPathHits++
@@ -873,7 +889,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			// consumer that drains resultCh, stalling walk workers.
 			pending = append(pending, pendingHash{
 				rel: wf.rel, absPath: wf.absPath,
-				size: size, mtimeNS: mtimeNS, mode: mode,
+				size: size, mtimeNS: mtimeNS, mode: mode, inode: inode,
 				exists: exists, old: existing,
 			})
 		}
@@ -938,6 +954,9 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			entry.HashState = r.hashState
 			entry.HashedBytes = p.size
 			entry.PrefixCheck = r.prefixCheck
+			if p.inode != 0 {
+				entry.Inode = p.inode
+			}
 			idx.Files[p.rel] = entry
 			continue
 		}
@@ -949,6 +968,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			SHA256:      r.hash,
 			Sequence:    idx.Sequence,
 			Mode:        p.mode,
+			Inode:       p.inode,
 			HashState:   r.hashState,
 			HashedBytes: p.size,
 			PrefixCheck: r.prefixCheck,
