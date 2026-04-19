@@ -850,16 +850,26 @@ func statusCmd(nodeNames []string, configPath string, watch bool) {
 		}
 	}()
 
+	// Header is a single shared line: pid list + clock. The per-node
+	// config title already appears at the top of each renderStatus
+	// output so the node name isn't duplicated up here.
+	pidLabel := make([]string, len(running))
+	for i, n := range running {
+		pidLabel[i] = fmt.Sprintf("%s%d%s", cCyan, n.pid, cReset)
+	}
+	pidJoined := strings.Join(pidLabel, ", ")
+
 	runLiveView(ctx, cancel, liveViewOpts{
 		renderHeader: func(buf *strings.Builder) int {
 			const eol = "\033[K\r\n"
 			now := time.Now().Format("15:04:05")
-			for _, n := range running {
-				fmt.Fprintf(buf, "%s✔ pid %d%s · %s · %s%s%s",
-					cGreen, n.pid, cReset, now, cCyan, n.name, cReset)
-				buf.WriteString(eol)
+			label := "pid"
+			if len(running) > 1 {
+				label = "pids"
 			}
-			return len(running)
+			fmt.Fprintf(buf, "%s✔%s %s %s · %s", cGreen, cReset, label, pidJoined, now)
+			buf.WriteString(eol)
+			return 1
 		},
 		fetchBody: func() ([]string, bool, string) {
 			var lines []string
