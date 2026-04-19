@@ -73,6 +73,12 @@ func validateRelPath(relPath string) error {
 // renaming to the final destination. Used by conflict resolution (B13) to
 // ensure the download succeeds before moving the local file aside.
 //
+// C3: when the sender exposes /blocksigs, each 128 KB block is hashed as it
+// arrives. On block mismatch, the temp file is truncated back to the last
+// verified boundary and the remainder is re-requested with &offset=, up to
+// maxBlockRetries attempts. Peers without /blocksigs fall back to the
+// whole-file path. A final whole-file hash check always runs as a safety net.
+//
 // L5: all filesystem operations go through os.Root to prevent symlink TOCTOU.
 // H1: temp file name includes a peer-derived suffix so concurrent downloads
 // of the same file from different peers get separate temp files.
@@ -95,73 +101,24 @@ func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, 
 	tmpName := ".mesh-tmp-" + hashHex[:16] + "-" + peerSuffix(peerAddr)
 	tmpRelPath := filepath.Join(filepath.Dir(relPath), tmpName)
 
-	// Check if we can resume from an existing temp file.
-	var offset int64
-	if info, err := root.Stat(tmpRelPath); err == nil {
-		offset = info.Size()
-	}
-
-	// Build request URL.
-	u := fmt.Sprintf("https://%s/file?folder=%s&path=%s",
-		peerAddr,
-		url.QueryEscape(folderID),
-		url.QueryEscape(relPath),
-	)
-	if offset > 0 {
-		u += fmt.Sprintf("&offset=%d", offset)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("download %s: %w", relPath, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return "", fmt.Errorf("file not found on peer: %s", relPath)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("peer returned %d for %s", resp.StatusCode, relPath)
-	}
-
-	// G2: pre-flight disk space check. ContentLength is the remaining bytes
-	// to download (already excludes the resumed offset). Best-effort: skip
-	// when Content-Length is absent (-1) or platform is unsupported.
-	if err := checkDiskSpace(root.Name(), resp.ContentLength); err != nil {
-		return "", fmt.Errorf("download %s: %w", relPath, err)
-	}
-
-	// Open temp file for writing (append if resuming).
-	flag := os.O_CREATE | os.O_WRONLY
-	if offset > 0 {
-		flag |= os.O_APPEND
+	// C3: try per-block verified download first; fall back on any error.
+	if sigs, ok := tryFetchBlockSignatures(ctx, client, peerAddr, folderID, relPath); ok {
+		if err := checkDiskSpace(root.Name(), sigs.GetFileSize()); err != nil {
+			return "", fmt.Errorf("download %s: %w", relPath, err)
+		}
+		if err := downloadWithBlockVerify(ctx, client, peerAddr, folderID, relPath, sigs, root, limiter, tmpRelPath); err != nil {
+			_ = root.Remove(tmpRelPath)
+			return "", err
+		}
 	} else {
-		flag |= os.O_TRUNC
-	}
-	f, err := root.OpenFile(tmpRelPath, flag, 0600)
-	if err != nil {
-		return "", fmt.Errorf("open temp file: %w", err)
-	}
-
-	reader := newRateLimitedReader(ctx, io.LimitReader(resp.Body, maxSyncFileSize), limiter)
-	if _, err := io.Copy(f, reader); err != nil {
-		_ = f.Close()
-		return "", fmt.Errorf("write file data: %w", err)
-	}
-	// L2: check Close error — on NFS/FUSE the server-side write can fail
-	// here. Without this check, the corrupt temp produces a misleading
-	// "hash mismatch" instead of the real I/O error.
-	if err := f.Close(); err != nil {
-		_ = root.Remove(tmpRelPath)
-		return "", fmt.Errorf("close temp file: %w", err)
+		if err := downloadWhole(ctx, client, peerAddr, folderID, relPath, root, limiter, tmpRelPath); err != nil {
+			_ = root.Remove(tmpRelPath)
+			return "", err
+		}
 	}
 
-	// Verify hash of completed file.
+	// Final whole-file hash check — catches sender-side races (file changed
+	// between /blocksigs and /file) and sanity-checks both paths.
 	actualHash, err := hashFileRoot(root, tmpRelPath)
 	if err != nil {
 		_ = root.Remove(tmpRelPath)
@@ -173,6 +130,251 @@ func downloadToVerifiedTemp(ctx context.Context, client *http.Client, peerAddr, 
 	}
 
 	return tmpRelPath, nil
+}
+
+// maxBlockSigsResponse caps the /blocksigs response body. At 128 KB blocks,
+// 1 MB of hashes covers a 4 GB file (the maxSyncFileSize ceiling); the 16 MB
+// bound tolerates smaller blockSize values without OOM risk.
+const maxBlockSigsResponse = 16 * 1024 * 1024
+
+// maxBlockRetries bounds the number of per-block refetch attempts within a
+// single downloadToVerifiedTemp call. Once exhausted, the caller's
+// retryTracker takes over and may quarantine the (path, peer) pair.
+const maxBlockRetries = 3
+
+// tryFetchBlockSignatures fetches the sender's per-block hashes for relPath.
+// Returns (nil, false) on any error — the caller treats this as "peer doesn't
+// support /blocksigs" and falls back to whole-file verify.
+func tryFetchBlockSignatures(ctx context.Context, client *http.Client, peerAddr, folderID, relPath string) (*pb.BlockSignatures, bool) {
+	u := fmt.Sprintf("https://%s/blocksigs?folder=%s&path=%s",
+		peerAddr,
+		url.QueryEscape(folderID),
+		url.QueryEscape(relPath),
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil, false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBlockSigsResponse))
+	if err != nil {
+		return nil, false
+	}
+	var sigs pb.BlockSignatures
+	if err := proto.Unmarshal(body, &sigs); err != nil {
+		return nil, false
+	}
+	if sigs.GetFileSize() < 0 || sigs.GetFileSize() > maxSyncFileSize {
+		return nil, false
+	}
+	if sigs.GetBlockSize() <= 0 {
+		return nil, false
+	}
+	expectedBlocks := (sigs.GetFileSize() + sigs.GetBlockSize() - 1) / sigs.GetBlockSize()
+	if int64(len(sigs.GetBlockHashes())) != expectedBlocks {
+		return nil, false
+	}
+	return &sigs, true
+}
+
+// downloadWithBlockVerify streams relPath from the peer, verifying each
+// complete block against sigs.BlockHashes as it arrives. On block mismatch,
+// it truncates the temp file back to the last verified boundary and reissues
+// the request with &offset=. Bounded by maxBlockRetries.
+func downloadWithBlockVerify(ctx context.Context, client *http.Client, peerAddr, folderID, relPath string, sigs *pb.BlockSignatures, root *os.Root, limiter *rate.Limiter, tmpRelPath string) error {
+	blockSize := sigs.GetBlockSize()
+	totalSize := sigs.GetFileSize()
+	expectedHashes := sigs.GetBlockHashes()
+
+	// Resume from the last verified block boundary (any partial block is
+	// discarded — we don't know if it was truncated mid-write).
+	var verifiedOffset int64
+	if info, statErr := root.Stat(tmpRelPath); statErr == nil && info.Size() > 0 {
+		verifiedOffset = (info.Size() / blockSize) * blockSize
+		if verifiedOffset > totalSize {
+			verifiedOffset = totalSize
+		}
+	}
+
+	f, err := root.OpenFile(tmpRelPath, os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return fmt.Errorf("open temp file: %w", err)
+	}
+	if err := f.Truncate(verifiedOffset); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("truncate temp: %w", err)
+	}
+	if _, err := f.Seek(verifiedOffset, io.SeekStart); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("seek temp: %w", err)
+	}
+
+	buf := make([]byte, blockSize)
+	attempts := 0
+
+	for verifiedOffset < totalSize {
+		u := fmt.Sprintf("https://%s/file?folder=%s&path=%s&offset=%d",
+			peerAddr,
+			url.QueryEscape(folderID),
+			url.QueryEscape(relPath),
+			verifiedOffset,
+		)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			_ = f.Close()
+			return fmt.Errorf("create request: %w", err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			_ = f.Close()
+			return fmt.Errorf("download %s: %w", relPath, err)
+		}
+		if resp.StatusCode == http.StatusNotFound {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			_ = f.Close()
+			return fmt.Errorf("file not found on peer: %s", relPath)
+		}
+		if resp.StatusCode != http.StatusOK {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			_ = f.Close()
+			return fmt.Errorf("peer returned %d for %s", resp.StatusCode, relPath)
+		}
+
+		reader := newRateLimitedReader(ctx, io.LimitReader(resp.Body, maxSyncFileSize), limiter)
+		restart := false
+
+		for verifiedOffset < totalSize {
+			blockIndex := verifiedOffset / blockSize
+			want := min(blockSize, totalSize-verifiedOffset)
+			n, readErr := io.ReadFull(reader, buf[:want])
+			if int64(n) != want {
+				// Short read — treat as transient, retry from verifiedOffset.
+				slog.Warn("C3: short read during block verify",
+					"folder", folderID, "path", relPath, "peer", peerAddr,
+					"block", blockIndex, "want", want, "got", n, "err", readErr)
+				restart = true
+				break
+			}
+			h := sha256.Sum256(buf[:n])
+			if !bytes.Equal(h[:], expectedHashes[blockIndex]) {
+				slog.Warn("C3: block hash mismatch, will retry",
+					"folder", folderID, "path", relPath, "peer", peerAddr,
+					"block", blockIndex)
+				restart = true
+				break
+			}
+			if _, err := f.Write(buf[:n]); err != nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+				_ = f.Close()
+				return fmt.Errorf("write block: %w", err)
+			}
+			verifiedOffset += int64(n)
+		}
+
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+
+		if !restart {
+			break
+		}
+
+		attempts++
+		if attempts > maxBlockRetries {
+			_ = f.Close()
+			return fmt.Errorf("block verify failed after %d attempts for %s", maxBlockRetries, relPath)
+		}
+		if err := f.Truncate(verifiedOffset); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("truncate on retry: %w", err)
+		}
+		if _, err := f.Seek(verifiedOffset, io.SeekStart); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("seek on retry: %w", err)
+		}
+	}
+
+	// L2: check Close error — on NFS/FUSE the server-side write can fail here.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	return nil
+}
+
+// downloadWhole streams the entire body into tmpRelPath with no per-block
+// verification. Used as the fallback when the peer doesn't expose /blocksigs.
+// The final whole-file hash check in downloadToVerifiedTemp catches any
+// corruption.
+func downloadWhole(ctx context.Context, client *http.Client, peerAddr, folderID, relPath string, root *os.Root, limiter *rate.Limiter, tmpRelPath string) error {
+	var offset int64
+	if info, err := root.Stat(tmpRelPath); err == nil {
+		offset = info.Size()
+	}
+
+	u := fmt.Sprintf("https://%s/file?folder=%s&path=%s",
+		peerAddr,
+		url.QueryEscape(folderID),
+		url.QueryEscape(relPath),
+	)
+	if offset > 0 {
+		u += fmt.Sprintf("&offset=%d", offset)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("download %s: %w", relPath, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("file not found on peer: %s", relPath)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("peer returned %d for %s", resp.StatusCode, relPath)
+	}
+
+	// G2: pre-flight disk-space check. ContentLength already excludes the
+	// resumed offset. Best-effort — skipped when unknown.
+	if err := checkDiskSpace(root.Name(), resp.ContentLength); err != nil {
+		return fmt.Errorf("download %s: %w", relPath, err)
+	}
+
+	flag := os.O_CREATE | os.O_WRONLY
+	if offset > 0 {
+		flag |= os.O_APPEND
+	} else {
+		flag |= os.O_TRUNC
+	}
+	f, err := root.OpenFile(tmpRelPath, flag, 0600)
+	if err != nil {
+		return fmt.Errorf("open temp file: %w", err)
+	}
+
+	reader := newRateLimitedReader(ctx, io.LimitReader(resp.Body, maxSyncFileSize), limiter)
+	if _, err := io.Copy(f, reader); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write file data: %w", err)
+	}
+	// L2: check Close error.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	return nil
 }
 
 // downloadFile fetches a file from a peer and writes it to the folder.
