@@ -74,7 +74,24 @@ type trieRec struct {
 	// segGlobs holds per-segment globs for an anchored pattern that lives
 	// in anchoredRoot. Empty for litAnchored / base / doublestar records.
 	segGlobs []segGlob
+	// dsShape classifies the double-star pattern into a fast-path shape.
+	// Populated only for doubleStar records.
+	dsShape     dsShape
+	dsBasenameK patternKind // sub-kind for dsShapeBasename
+	dsBasenameF string      // fixed portion for dsShapeBasename
 }
+
+// dsShape is a pre-classified double-star pattern shape. Generic falls
+// back to doubleStarMatch; the other shapes dispatch to a specialized
+// branch that avoids path.Match entirely.
+type dsShape uint8
+
+const (
+	dsShapeGeneric    dsShape = iota // fall back to doubleStarMatch
+	dsShapeBasename                  // dsPrefix + "**" + "/" + basename-pattern (suffix has no "/")
+	dsShapeMidLiteral                // "**/LITERAL/**" — second-to-last segment equals LITERAL
+	dsShapePrefixOnly                // "prefix/**" — path starts with prefix or equals it
+)
 
 // segGlob represents one segment of an anchored pattern that contains a
 // wildcard. Populated at construction so match-time avoids parsing.
@@ -138,6 +155,7 @@ func newTrieIgnoreMatcher(configPatterns []string) *trieIgnoreMatcher {
 				r.dsPrefix = strings.TrimSuffix(parts[0], "/")
 				r.dsSuffix = strings.TrimPrefix(parts[1], "/")
 			}
+			classifyDoubleStar(&r)
 			m.doubleStar = append(m.doubleStar, r)
 			doubleOrd++
 		case strings.Contains(p.pattern, "/"):
@@ -199,6 +217,48 @@ func newTrieIgnoreMatcher(configPatterns []string) *trieIgnoreMatcher {
 	}
 
 	return m
+}
+
+// classifyDoubleStar detects common double-star shapes so the matcher
+// can dispatch without calling path.Match on every path. Unrecognized
+// patterns stay as dsShapeGeneric and use the shared doubleStarMatch
+// fallback. Each specialization must match the pinned single-`**`
+// semantics that the behavior corpus locks in.
+func classifyDoubleStar(r *trieRec) {
+	// dsShapePrefixOnly: pattern ended with "**" — suffix is empty.
+	// Example: "build/**". Match == filePath has prefix + "/" or equals.
+	if r.dsSuffix == "" {
+		r.dsShape = dsShapePrefixOnly
+		return
+	}
+	// dsShapeMidLiteral: prefix empty and suffix is "LITERAL/**".
+	// Example: "**/node_modules/**". The single-`**` quirk means
+	// suffix's trailing "**" acts as a single segment matcher, which
+	// reduces the pattern to "segment LITERAL appears with exactly
+	// one segment after it" — i.e. LITERAL is the second-to-last
+	// segment of relPath.
+	if r.dsPrefix == "" && strings.HasSuffix(r.dsSuffix, "/**") {
+		lit := r.dsSuffix[:len(r.dsSuffix)-len("/**")]
+		if lit != "" && !strings.ContainsAny(lit, "/*?[") {
+			r.dsShape = dsShapeMidLiteral
+			r.dsBasenameF = lit
+			return
+		}
+	}
+	// dsShapeBasename: suffix has no "/" and no further "**".
+	// Examples: "**/*.go", "src/**/Makefile", "dist/**/*.pyc".
+	// Semantics reduce to: path starts with prefix (if any) AND basename
+	// matches suffix as a simple glob. Classify suffix once up front.
+	if !strings.Contains(r.dsSuffix, "/") && !strings.Contains(r.dsSuffix, "**") {
+		k, fix := classifyGlob(r.dsSuffix)
+		r.dsShape = dsShapeBasename
+		r.dsBasenameK = k
+		r.dsBasenameF = fix
+		return
+	}
+	// Anything else (e.g. "a/**/b/**/c", "**/X/Y") keeps the generic
+	// doubleStarMatch fallback.
+	r.dsShape = dsShapeGeneric
 }
 
 // classifySegments pre-computes per-segment matchers for a glob-anchored
@@ -377,12 +437,49 @@ func (m *trieIgnoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
 	if m.hasDoubleStar {
 		dsBestOrd := -1
 		dsBestNeg := false
+		// secondToLast is computed at most once per call, only if any
+		// dsShapeMidLiteral record needs it.
+		secondToLastSeg := ""
+		secondToLastKnown := false
 		for i := range m.doubleStar {
 			r := &m.doubleStar[i]
 			if r.dirOnly && !isDir {
 				continue
 			}
-			if doubleStarMatch(r.dsPrefix, r.dsSuffix, relPath) {
+			var matched bool
+			switch r.dsShape {
+			case dsShapePrefixOnly:
+				// "prefix/**" matches filePath starting with "prefix/" or
+				// equalling "prefix". Empty prefix matches anything.
+				if r.dsPrefix == "" {
+					matched = true
+				} else {
+					matched = relPath == r.dsPrefix ||
+						(len(relPath) > len(r.dsPrefix) &&
+							relPath[len(r.dsPrefix)] == '/' &&
+							relPath[:len(r.dsPrefix)] == r.dsPrefix)
+				}
+			case dsShapeMidLiteral:
+				if !secondToLastKnown {
+					secondToLastSeg = secondToLastSegment(relPath)
+					secondToLastKnown = true
+				}
+				matched = secondToLastSeg != "" && secondToLastSeg == r.dsBasenameF
+			case dsShapeBasename:
+				if r.dsPrefix != "" {
+					ok := relPath == r.dsPrefix ||
+						(len(relPath) > len(r.dsPrefix) &&
+							relPath[len(r.dsPrefix)] == '/' &&
+							relPath[:len(r.dsPrefix)] == r.dsPrefix)
+					if !ok {
+						break
+					}
+				}
+				matched = matchBasenameKind(r.dsBasenameK, r.dsBasenameF, r.dsSuffix, base)
+			default:
+				matched = doubleStarMatch(r.dsPrefix, r.dsSuffix, relPath)
+			}
+			if matched {
 				if r.ordinal > dsBestOrd {
 					dsBestOrd = r.ordinal
 					dsBestNeg = r.negation
@@ -399,6 +496,38 @@ func (m *trieIgnoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
 		return false
 	}
 	return !bestNeg
+}
+
+// secondToLastSegment returns the segment just before the last "/" in p,
+// or "" when p has fewer than two segments. Zero-allocation; scans p
+// at most twice from the end.
+func secondToLastSegment(p string) string {
+	last := strings.LastIndexByte(p, '/')
+	if last <= 0 {
+		return ""
+	}
+	prev := strings.LastIndexByte(p[:last], '/')
+	return p[prev+1 : last]
+}
+
+// matchBasenameKind dispatches a pre-classified basename pattern against
+// a basename. Mirrors fastMatchBaseRec but avoids carrying a full
+// trieRec: dsShapeBasename only needs kind, fixed, and the raw pattern
+// for the kindGeneric fallback.
+func matchBasenameKind(kind patternKind, fixed, raw, base string) bool {
+	switch kind {
+	case kindLiteral:
+		return base == fixed
+	case kindStarSuffix:
+		return strings.HasSuffix(base, fixed)
+	case kindPrefixStar:
+		return strings.HasPrefix(base, fixed)
+	case kindContains:
+		return strings.Contains(base, fixed)
+	default:
+		matched, _ := path.Match(raw, base)
+		return matched
+	}
 }
 
 // pathBaseFast is a lighter alternative to path.Base for the subset of
