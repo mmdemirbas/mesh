@@ -406,6 +406,50 @@ func TestRenderStatus_Empty(t *testing.T) {
 	}
 }
 
+// TestRenderStatus_NilActiveStateOmitsStartingBracket pins the behavior
+// of `mesh config` previews: with no runtime state, the renderer must
+// not pretend every component is "[starting]". Bracketed status markers
+// belong only to live dashboards and the status command.
+func TestRenderStatus_NilActiveStateOmitsStartingBracket(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{
+			{Type: "socks", Bind: "127.0.0.1:1080"},
+		},
+		Clipsync: []config.ClipsyncCfg{
+			{Bind: "127.0.0.1:9000"},
+		},
+		Filesync: []config.FilesyncCfg{
+			{Bind: "127.0.0.1:8384"},
+		},
+	}
+	output, _ := renderStatus(cfg, nil, nil, "testnode")
+	if strings.Contains(output, "[starting]") {
+		t.Errorf("nil activeState must not render [starting] brackets; got:\n%s", output)
+	}
+	// Indicator should also be omitted (⚪️ is only for missing components in live state).
+	if strings.Contains(output, "⚪") {
+		t.Errorf("nil activeState must not render status indicator ⚪; got:\n%s", output)
+	}
+	// Sanity: config listing itself still renders.
+	if !strings.Contains(output, "1080") {
+		t.Errorf("config preview should still list listener bind; got:\n%s", output)
+	}
+}
+
+// TestRenderStatus_EmptyActiveStateShowsStarting pins the distinction:
+// a running node whose state map has not been populated yet must still
+// report each configured component as [starting]. This is the status-
+// command-while-node-is-warming-up path.
+func TestRenderStatus_EmptyActiveStateShowsStarting(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{{Type: "socks", Bind: "127.0.0.1:1080"}},
+	}
+	output, _ := renderStatus(cfg, map[string]state.Component{}, nil, "testnode")
+	if !strings.Contains(output, "[starting]") {
+		t.Errorf("empty activeState must render [starting] for unmapped components; got:\n%s", output)
+	}
+}
+
 func TestRenderStatus_WithListeners(t *testing.T) {
 	cfg := &config.Config{
 		Listeners: []config.Listener{

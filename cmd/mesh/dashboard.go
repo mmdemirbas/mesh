@@ -409,7 +409,9 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 
 	getComponentInfo := func(compType, id string) (string, string, state.Component) {
 		if activeState == nil {
-			return "⚪️", cGray + "[starting]" + cReset, state.Component{}
+			// No runtime state available (e.g. `mesh config` preview).
+			// Omit indicator and status bracket rather than misreport "starting".
+			return "", "", state.Component{}
 		}
 		comp, ok := activeState[compType+":"+id]
 		if !ok {

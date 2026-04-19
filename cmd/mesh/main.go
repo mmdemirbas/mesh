@@ -720,6 +720,9 @@ func fetchState(nodeName string) map[string]state.Component {
 	defer func() { _ = resp.Body.Close() }()
 	var s map[string]state.Component
 	_ = json.NewDecoder(resp.Body).Decode(&s)
+	if s == nil {
+		s = map[string]state.Component{}
+	}
 	return s
 }
 
