@@ -144,21 +144,48 @@ the SUT.
 
 ## Per-package audit snapshot
 
-_To be populated. Each row is a package, not a file._
+Line coverage is shown for orientation only. Priority is driven by
+Rule 1 (boundary gaps) and Rule 2 (reproducer gaps), not the number.
 
-| Package | Boundaries | Boundary gaps | Anti-patterns | Reproducer gaps | Priority |
-|---------|------------|---------------|---------------|-----------------|----------|
-| internal/config | _TBD_ | | | | |
-| internal/tlsutil | _TBD_ | | | | |
-| internal/filesync | _TBD_ | | | | |
+| Package | Line cov | Boundary gaps | Anti-patterns | Reproducer gaps | Priority |
+|---------|----------|---------------|---------------|-----------------|----------|
+| internal/tlsutil  | 79.6% | `generateCustom` edge branches untested; `writePEM` 55.6% | **AP-1** confirmed (see catalog); string-match on `err.Error()` in `TestClientTLS_NoPeerCert_Rejected` | None (new code) | HIGH |
+| internal/config   | 72.5% | `LoadNodeNames` 0%; `ResolveAllowedPeerHosts` 0%; `Validate` branches at 62.2%; `Load` at 55.6% | None found in scan | None found (spot check: `0d57b1b` has TDD reproducer in prior `7661936`) | HIGH |
+| internal/filesync | 58.2% | HTTP handlers `handleIndex` / `handleFile` / `handleDelta` / `handleBundle` not exercised at unit level; `Start` / `syncLoop` / `syncFolder` 0% | None found in scan | None found on spot check (fix+test-commit pattern: `c6522c1` paired with `b4ac2cf`; `5aef218`/`9f2bf7d` ship tests inline) | HIGH |
 | internal/clipsync | _TBD_ | | | | |
-| internal/tunnel | _TBD_ | | | | |
-| internal/proxy | _TBD_ | | | | |
-| internal/gateway | _TBD_ | | | | |
-| internal/netutil | _TBD_ | | | | |
-| internal/state | _TBD_ | | | | |
-| cmd/mesh | _TBD_ | | | | |
-| e2e/scenarios | _TBD_ | | | | |
+| internal/tunnel   | _TBD_ | | | | |
+| internal/proxy    | _TBD_ | | | | |
+| internal/gateway  | _TBD_ | | | | |
+| internal/netutil  | _TBD_ | | | | |
+| internal/state    | _TBD_ | | | | |
+| cmd/mesh          | _TBD_ | | | | |
+| e2e/scenarios     | _TBD_ | | | | |
+
+### Phase 2 notes
+
+- **tlsutil**: all twelve existing tests are well-written (no shared
+  state, `t.Parallel`, deterministic). The weakness is the oracle —
+  every fingerprint assertion is relative (`fp1 == fp2`), shape-only
+  (prefix + length), or compared against a value computed from the
+  same cert. Swapping SHA-256 for SHA-1 in `Fingerprint` would pass
+  every existing test. AP-1 fix: embed a static PEM fixture in
+  `testdata/` with a known-out-of-band fingerprint.
+- **config**: `config_test.go` (40 tests) uses good hardcoded-value
+  patterns and table-driven rejection cases. The two 0% exported
+  functions are the clearest gap — both are trust boundaries (node-
+  name loader and peer-host resolver) with zero contract tests.
+- **filesync**: 180 tests, 180 KB of test code — the package is not
+  under-tested by volume. The gap is shape. HTTP handler code is
+  exercised only via e2e, not via unit-level contract tests. A
+  malformed protobuf, oversize payload, or unauthorized peer produces
+  behavior currently verified only by running containers.
+- **Rule 2 practice (positive finding).** Spot checks across five
+  fix commits found the repo consistently pairs fixes with tests:
+  inline in the same commit (`5aef218`, `9f2bf7d`) or in an adjacent
+  commit titled `test(...)` or `add tests for ...` (`0d57b1b` ↔
+  `7661936`; `c6522c1` ↔ `b4ac2cf`). This is the practice to preserve
+  in rollout; the three TEST-QUALITY rules codify what is already
+  happening, not something new.
 
 ## Known anti-patterns in this repo
 
