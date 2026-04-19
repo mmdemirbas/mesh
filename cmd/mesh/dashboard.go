@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -261,6 +262,11 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 
 	_, _ = os.Stdout.WriteString("\033[?1049h") // enter alt screen
 	_, _ = os.Stdout.WriteString("\033[?25l")   // hide cursor
+	// Enable mouse wheel reporting so touchpad/wheel scroll drives
+	// vertical and horizontal panning. SGR extended mode (1006) avoids
+	// the 223-column byte-packing limit of legacy X10/normal mode.
+	_, _ = os.Stdout.WriteString("\033[?1000h") // normal mouse tracking (press/release + wheel)
+	_, _ = os.Stdout.WriteString("\033[?1006h") // SGR extended coords
 
 	// Cleanup order matters: disable mouse tracking first (while still in
 	// raw/VT mode), leave alt screen, then restore cooked mode. On Windows,
@@ -484,6 +490,45 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 					return
 				}
 				if input[i] == 27 && i+2 < len(input) && input[i+1] == '[' {
+					// SGR mouse event: ESC [ < b ; x ; y (M|m)
+					// Button codes 64/65 = wheel up/down, 66/67 = wheel
+					// left/right. The touchpad horizontal gesture maps
+					// to 66/67 on modern terminals. Modifier bits (shift
+					// 4, alt 8, ctrl 16) are masked off since we only
+					// care about the axis.
+					if input[i+2] == '<' {
+						j := i + 3
+						for j < len(input) && input[j] != 'M' && input[j] != 'm' {
+							j++
+						}
+						if j < len(input) {
+							params := string(input[i+3 : j])
+							isPress := input[j] == 'M'
+							i = j
+							if isPress {
+								btn := 0
+								if semi := strings.IndexByte(params, ';'); semi > 0 {
+									btn, _ = strconv.Atoi(params[:semi])
+								}
+								switch btn & 0xE3 { // strip shift/alt/ctrl modifier bits
+								case 64: // wheel up
+									scrollOffset--
+									autoScroll = false
+									changed = true
+								case 65: // wheel down
+									scrollOffset++
+									changed = true
+								case 66: // wheel left
+									hScroll -= hStep
+									changed = true
+								case 67: // wheel right
+									hScroll += hStep
+									changed = true
+								}
+							}
+							continue
+						}
+					}
 					// CSI escape sequence
 					switch input[i+2] {
 					case 'A': // up
