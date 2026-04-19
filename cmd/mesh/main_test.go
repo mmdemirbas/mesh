@@ -773,18 +773,18 @@ func TestFormatBytes(t *testing.T) {
 		input int64
 		want  string
 	}{
-		{0, "0"},
-		{1, "1B"},
-		{512, "512B"},
-		{1023, "1023B"},
-		{1024, "1K"},
-		{1536, "2K"},
-		{10240, "10K"},
-		{1048576, "1.0M"},
-		{1572864, "1.5M"},
-		{10485760, "10.0M"},
-		{1073741824, "1.0G"},
-		{1610612736, "1.5G"},
+		{0, "0 B"},
+		{1, "1 B"},
+		{512, "512 B"},
+		{1023, "1023 B"},
+		{1024, "1 KB"},
+		{1536, "2 KB"},
+		{10240, "10 KB"},
+		{1048576, "1.0 MB"},
+		{1572864, "1.5 MB"},
+		{10485760, "10.0 MB"},
+		{1073741824, "1.0 GB"},
+		{1610612736, "1.5 GB"},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%d", tt.input), func(t *testing.T) {
@@ -801,18 +801,19 @@ func TestFormatDuration(t *testing.T) {
 		input time.Duration
 		want  string
 	}{
-		{0, "0s"},
-		{5 * time.Second, "5s"},
-		{59 * time.Second, "59s"},
-		{60 * time.Second, "1m0s"},
-		{90 * time.Second, "1m30s"},
-		{5*time.Minute + 15*time.Second, "5m15s"},
-		{59*time.Minute + 59*time.Second, "59m59s"},
-		{60 * time.Minute, "1h0m"},
-		{2*time.Hour + 13*time.Minute, "2h13m"},
-		{23*time.Hour + 59*time.Minute, "23h59m"},
-		{24 * time.Hour, "1d0h"},
-		{3*24*time.Hour + 5*time.Hour, "3d5h"},
+		{0, "00:00:00"},
+		{5 * time.Second, "00:00:05"},
+		{59 * time.Second, "00:00:59"},
+		{60 * time.Second, "00:01:00"},
+		{90 * time.Second, "00:01:30"},
+		{5*time.Minute + 15*time.Second, "00:05:15"},
+		{59*time.Minute + 59*time.Second, "00:59:59"},
+		{60 * time.Minute, "01:00:00"},
+		{2*time.Hour + 13*time.Minute, "02:13:00"},
+		{23*time.Hour + 59*time.Minute, "23:59:00"},
+		{24 * time.Hour, "24:00:00"},
+		{3*24*time.Hour + 5*time.Hour, "77:00:00"},
+		{100 * time.Hour, "100:00:00"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
@@ -1035,17 +1036,17 @@ func TestRenderStatus_WithMetrics(t *testing.T) {
 	}
 	rawOutput, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
 	output := stripANSI(rawOutput)
-	if !strings.Contains(output, "↑1.0M") {
-		t.Error("output should contain ↑1.0M")
+	if !strings.Contains(output, "↑1.0 MB") {
+		t.Error("output should contain ↑1.0 MB")
 	}
-	if !strings.Contains(output, "↓2.0M") {
-		t.Error("output should contain ↓2.0M")
+	if !strings.Contains(output, "↓2.0 MB") {
+		t.Error("output should contain ↓2.0 MB")
 	}
 	if !strings.Contains(output, "3↔") {
 		t.Error("output should contain 3↔")
 	}
-	if !strings.Contains(output, "2h") {
-		t.Error("output should contain 2h uptime")
+	if !strings.Contains(output, "02:00:00") {
+		t.Error("output should contain 02:00:00 uptime")
 	}
 }
 
@@ -1136,14 +1137,14 @@ func TestRenderStatus_ListenerMetrics(t *testing.T) {
 	}
 	rawOutput, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
 	output := stripANSI(rawOutput)
-	if !strings.Contains(output, "5.0M") {
-		t.Error("output should contain 5.0M TX bytes for listener")
+	if !strings.Contains(output, "5.0 MB") {
+		t.Error("output should contain 5.0 MB TX bytes for listener")
 	}
-	if !strings.Contains(output, "1K") {
-		t.Error("output should contain 1K RX bytes for listener")
+	if !strings.Contains(output, "1 KB") {
+		t.Error("output should contain 1 KB RX bytes for listener")
 	}
-	if !strings.Contains(output, "30m") {
-		t.Error("output should contain 30m uptime for listener")
+	if !strings.Contains(output, "00:30:00") {
+		t.Error("output should contain 00:30:00 uptime for listener")
 	}
 }
 
@@ -1207,13 +1208,13 @@ func TestRenderStatus_SshdAggregatesDynamicMetrics(t *testing.T) {
 		t.Fatal("sshd listener line not found in output")
 	}
 
-	// Aggregated: tx = 1024 + 10240 = 11264 → "11K", rx = 2048 + 6291456 = 6293504 → "6.0M"
+	// Aggregated: tx = 1024 + 10240 = 11264 → "11 KB", rx = 2048 + 6291456 = 6293504 → "6.0 MB"
 	// Streams: 1 + 1 + 0 = 2
-	if !strings.Contains(sshdLine, "11K") {
-		t.Errorf("sshd line should show aggregated ↑11K, got: %s", sshdLine)
+	if !strings.Contains(sshdLine, "11 KB") {
+		t.Errorf("sshd line should show aggregated ↑11 KB, got: %s", sshdLine)
 	}
-	if !strings.Contains(sshdLine, "6.0M") {
-		t.Errorf("sshd line should show aggregated ↓6.0M, got: %s", sshdLine)
+	if !strings.Contains(sshdLine, "6.0 MB") {
+		t.Errorf("sshd line should show aggregated ↓6.0 MB, got: %s", sshdLine)
 	}
 	if !strings.Contains(sshdLine, "2↔") {
 		t.Errorf("sshd line should show aggregated 2↔ streams, got: %s", sshdLine)
@@ -1337,12 +1338,12 @@ func TestRenderStatus_SshdDynamicOnlyMetrics(t *testing.T) {
 		t.Fatal("sshd listener line not found")
 	}
 
-	// sshd should show the dynamic forward's metrics: ↑49K ↓98K 2↔
-	if !strings.Contains(sshdLine, "49K") {
-		t.Errorf("sshd line should show dynamic ↑49K, got: %s", sshdLine)
+	// sshd should show the dynamic forward's metrics: ↑49 KB ↓98 KB 2↔
+	if !strings.Contains(sshdLine, "49 KB") {
+		t.Errorf("sshd line should show dynamic ↑49 KB, got: %s", sshdLine)
 	}
-	if !strings.Contains(sshdLine, "98K") {
-		t.Errorf("sshd line should show dynamic ↓98K, got: %s", sshdLine)
+	if !strings.Contains(sshdLine, "98 KB") {
+		t.Errorf("sshd line should show dynamic ↓98 KB, got: %s", sshdLine)
 	}
 	if !strings.Contains(sshdLine, "2↔") {
 		t.Errorf("sshd line should show dynamic 2↔ streams, got: %s", sshdLine)
@@ -1387,7 +1388,7 @@ func TestRenderStatus_GrandTotalNoDoubleCounting(t *testing.T) {
 	rawOutput, _ := renderStatus(cfg, activeState, metricsMap, "testnode")
 	output := stripANSI(rawOutput)
 
-	// Grand total: tx = 1024 + 10240 = 11264 → "11K", rx = 2048 + 20480 = 22528 → "22K"
+	// Grand total: tx = 1024 + 10240 = 11264 → "11 KB", rx = 2048 + 20480 = 22528 → "22 KB"
 	// The title line has the grand total
 	lines := extractLines(rawOutput)
 	if len(lines) == 0 {
@@ -1395,18 +1396,18 @@ func TestRenderStatus_GrandTotalNoDoubleCounting(t *testing.T) {
 	}
 	titleLine := lines[0]
 
-	if !strings.Contains(titleLine, "11K") {
-		t.Errorf("grand total should show ↑11K (1K server + 10K dynamic), got title: %s", titleLine)
+	if !strings.Contains(titleLine, "11 KB") {
+		t.Errorf("grand total should show ↑11 KB (1K server + 10K dynamic), got title: %s", titleLine)
 	}
-	if !strings.Contains(titleLine, "22K") {
-		t.Errorf("grand total should show ↓22K (2K server + 20K dynamic), got title: %s", titleLine)
+	if !strings.Contains(titleLine, "22 KB") {
+		t.Errorf("grand total should show ↓22 KB (2K server + 20K dynamic), got title: %s", titleLine)
 	}
 
-	// Verify it does NOT show doubled values (↑21K or ↓42K would indicate double-counting)
-	if strings.Contains(output, "↑21K") || strings.Contains(output, "↑20K") {
+	// Verify it does NOT show doubled values (↑21 KB or ↓42 KB would indicate double-counting)
+	if strings.Contains(output, "↑21 KB") || strings.Contains(output, "↑20 KB") {
 		t.Error("grand total appears to double-count TX bytes")
 	}
-	if strings.Contains(output, "↓42K") || strings.Contains(output, "↓40K") {
+	if strings.Contains(output, "↓42 KB") || strings.Contains(output, "↓40 KB") {
 		t.Error("grand total appears to double-count RX bytes")
 	}
 }
@@ -1505,8 +1506,8 @@ func TestRenderStatus_OnlyProducerRowsShowMetrics(t *testing.T) {
 		}
 	}
 
-	// Producer rows must carry metrics. formatBytes uses %.0fK for KiB, so
-	// 3072 → "3K", 10240 → "10K".
+	// Producer rows must carry metrics. formatBytes renders "N KB" with
+	// a space separator, so 3072 → "3 KB", 10240 → "10 KB".
 	producers := []struct {
 		name, line string
 		wantTx     string
@@ -1514,9 +1515,9 @@ func TestRenderStatus_OnlyProducerRowsShowMetrics(t *testing.T) {
 		wantStream string
 	}{
 		// sshd listener aggregates the dynamic reverse forward under it.
-		{"sshd listener", sshdLine, "↑5K", "↓10K", "1↔"},
-		{"forward 8080", fwd8080Line, "↑3K", "↓7K", "2↔"},
-		{"forward 8081", fwd8081Line, "↑2K", "↓3K", "1↔"},
+		{"sshd listener", sshdLine, "↑5 KB", "↓10 KB", "1↔"},
+		{"forward 8080", fwd8080Line, "↑3 KB", "↓7 KB", "2↔"},
+		{"forward 8081", fwd8081Line, "↑2 KB", "↓3 KB", "1↔"},
 	}
 	for _, p := range producers {
 		if p.line == "" {
@@ -1823,9 +1824,10 @@ func TestAlignment_MetricsColumnSameAcrossRows(t *testing.T) {
 	lines := extractLines(output)
 
 	// Columns reflect the single-cell ◆ indicator (1 column narrower than
-	// the legacy 2-cell 🟢 emoji).
+	// the legacy 2-cell 🟢 emoji) and the HH:MM:SS duration column (2 chars
+	// wider than the legacy compact duration).
 	wantStatusCol := 23
-	wantMetricsCol := 42
+	wantMetricsCol := 44
 	for _, line := range lines {
 		if !strings.Contains(line, "[listening]") {
 			continue
@@ -2480,11 +2482,11 @@ func TestRenderStatus_FilesyncSingleLinePerFolder(t *testing.T) {
 	}
 
 	// Total size present.
-	if !strings.Contains(plain, "1.5G") {
-		t.Errorf("output missing total size 1.5G\n%s", plain)
+	if !strings.Contains(plain, "1.5 GB") {
+		t.Errorf("output missing total size 1.5 GB\n%s", plain)
 	}
-	if !strings.Contains(plain, "2.0M") {
-		t.Errorf("output missing total size 2.0M\n%s", plain)
+	if !strings.Contains(plain, "2.0 MB") {
+		t.Errorf("output missing total size 2.0 MB\n%s", plain)
 	}
 
 	// Sync time (HH:MM:SS format, no "synced ... ago").

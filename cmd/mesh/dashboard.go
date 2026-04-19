@@ -1308,7 +1308,7 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 	// Title: align ↑↓ with the ↑↓ in row metrics (skip the duration column).
 	titleLine := titleBase
 	if hasSnap(grandTotal) {
-		durationWidth := 7 // formatMetricsAligned uses "%-6s " for duration
+		durationWidth := 9 // formatMetricsAligned uses "%-8s " for duration
 		padTo := metricsPadCol + durationWidth
 		titleLen := visibleLen(titleLine)
 		if titleLen < padTo {

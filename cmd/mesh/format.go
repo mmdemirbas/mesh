@@ -291,36 +291,35 @@ func parseAddr(s string) (net.IP, int) {
 	return ip, int(k.port)
 }
 
-// formatBytes returns a human-readable byte count (e.g. "1.2M", "340K", "0").
+// formatBytes returns a human-readable byte count with a space
+// separator and two-letter unit (e.g. "1.2 GB", "340 KB", "0 B").
+// Math is binary (KiB = 1024); the short KB/MB/GB labels match the
+// convention used across the rest of the dashboard.
 func formatBytes(b int64) string {
 	switch {
 	case b >= 1<<30:
-		return fmt.Sprintf("%.1fG", float64(b)/float64(1<<30))
+		return fmt.Sprintf("%.1f GB", float64(b)/float64(1<<30))
 	case b >= 1<<20:
-		return fmt.Sprintf("%.1fM", float64(b)/float64(1<<20))
+		return fmt.Sprintf("%.1f MB", float64(b)/float64(1<<20))
 	case b >= 1<<10:
-		return fmt.Sprintf("%.0fK", float64(b)/float64(1<<10))
-	case b > 0:
-		return fmt.Sprintf("%dB", b)
+		return fmt.Sprintf("%.0f KB", float64(b)/float64(1<<10))
 	default:
-		return "0"
+		return fmt.Sprintf("%d B", b)
 	}
 }
 
-// formatDuration returns a compact duration string (e.g. "2h13m", "45s", "3d5h").
+// formatDuration returns an HH:MM:SS clock-face duration. Hours grow
+// past two digits for uptimes over 99h (e.g. "172:30:00" for a week);
+// zero pad keeps columns aligned in the dashboard metrics region.
 func formatDuration(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
+	if d < 0 {
+		d = 0
 	}
-	if d < time.Hour {
-		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
-	}
-	if d < 24*time.Hour {
-		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
-	}
-	days := int(d.Hours()) / 24
-	hours := int(d.Hours()) % 24
-	return fmt.Sprintf("%dd%dh", days, hours)
+	total := int(d / time.Second)
+	h := total / 3600
+	m := (total % 3600) / 60
+	s := total % 60
+	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
 }
 
 // metricsSnapshot holds a point-in-time copy of metrics values.
@@ -376,13 +375,19 @@ func formatTokens(n int64) string {
 }
 
 // colorBytes formats a byte count with bold number and non-bold unit in the given color.
+// formatBytes always returns "<num> <unit>"; split on the space so the
+// unit (" B", " KB", ...) stays non-bold while the number is bold.
 func colorBytes(b int64, color string) string {
-	raw := formatBytes(b)
-	if raw == "0" {
-		return cGray + "0" + cReset
+	if b == 0 {
+		return cGray + "0 B" + cReset
 	}
-	unit := raw[len(raw)-1:]
-	num := raw[:len(raw)-1]
+	raw := formatBytes(b)
+	idx := strings.IndexByte(raw, ' ')
+	if idx < 0 {
+		return cBold + color + raw + cReset
+	}
+	num := raw[:idx]
+	unit := raw[idx:]
 	return cBold + color + num + cReset + color + unit
 }
 
@@ -393,7 +398,7 @@ func formatMetricsSnap(s metricsSnapshot) string {
 	if s.uptime <= 0 && s.tx == 0 && s.rx == 0 && s.tokensIn == 0 && s.tokensOut == 0 {
 		return ""
 	}
-	r := cGray + fmt.Sprintf("%-6s ", formatDuration(s.uptime))
+	r := cGray + fmt.Sprintf("%-8s ", formatDuration(s.uptime))
 	r += cCyan + "↑" + colorBytes(s.tx, cCyan) + " " + cMagenta + "↓" + colorBytes(s.rx, cMagenta)
 	if s.streams > 0 {
 		r += " " + cBold + cReset + fmt.Sprintf("%d", s.streams) + cGray + "↔"
@@ -411,7 +416,7 @@ func formatMetricsAligned(s metricsSnapshot, txWidth, rxWidth int) string {
 	if s.uptime <= 0 && s.tx == 0 && s.rx == 0 && s.tokensIn == 0 && s.tokensOut == 0 {
 		return ""
 	}
-	r := cGray + fmt.Sprintf("%-6s ", formatDuration(s.uptime))
+	r := cGray + fmt.Sprintf("%-8s ", formatDuration(s.uptime))
 	txRaw := formatBytes(s.tx)
 	r += cCyan + "↑" + colorBytes(s.tx, cCyan)
 	if pad := txWidth - len(txRaw); pad > 0 {
