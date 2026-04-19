@@ -43,7 +43,45 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
+| [P21](#p21-hot-path-discovery-sweep) | all | Hot-path discovery sweep | Profile-driven audit of where `mesh up` spends CPU and allocates memory outside `internal/filesync`. Ships a short-list of concrete optimization items into this PLAN. |
 | P14  | tunnel | Parallel target probing (Happy Eyeballs) | Stagger-start all targets concurrently in `probeTarget` instead of sequential. First to connect wins, respecting target order preference within a short tie-break window. Reduces worst-case probe time from sum(timeouts) to max(stagger, fastest_target). Nice-to-have. |
+
+#### P21: Hot-path discovery sweep
+
+**Goal.** Identify the next set of meaningful optimization targets across the codebase after the scan-time ignore matcher was retired from the hotspot list (PF, 17× on the realistic corpus). The output of this sweep is *not* a fix — it is a prioritized list of new `Pxx` entries added to this table with ns/op and B/op baselines attached.
+
+**Scope (inclusion).**
+- SSH tunnel data path: `internal/tunnel` — `BiCopy`, keepalive loops, per-connection goroutine lifecycle, auth method build on reconnect.
+- SOCKS5 / HTTP CONNECT proxy: `internal/proxy` — per-request goroutine count, address parsing, header handling.
+- Clipsync: `internal/clipsync` — `SyncPayload` gzip+proto round-trip, UDP beacon fan-out, clipboard I/O polling.
+- Gateway: `internal/gateway` — Anthropic↔OpenAI translation (tool-call and SSE hot paths), audit recorder, body buffering.
+- Admin server: `cmd/mesh` — `/api/state` JSON encoding (every dashboard refresh), `/api/metrics` Prometheus render, SPA asset serving.
+- Log ring: `cmd/mesh/humanLogHandler` — per-record classification, fan-out to file + ring.
+- `state.Global` — `Snapshot()` deep copy frequency, mutex contention under many listeners / forwards, `StartEviction` walk cost.
+- Filesync already covered under `docs/filesync/PLAN.md`; this sweep explicitly excludes it.
+
+**Method.**
+1. Build `mesh` with `-cpuprofile` / `-memprofile` hooks wired to the admin API (a `/debug/pprof` tab on the admin server already exists — confirm it covers the goroutines, heap, CPU, mutex, and block profiles and pin the smallest viable set).
+2. Run the binary on a representative node for ≥10 minutes under realistic load (clipsync enabled, gateway idle-with-audit-metadata, one or two SSH tunnels, filesync with the production folder set). Capture one CPU profile, one heap profile, and one mutex profile.
+3. For each top-10 cumulative function in each profile: determine whether (a) it is a genuine hotspot, (b) it is instrumentation overhead, or (c) it is already tracked under an existing plan item. Document the decision one line per function.
+4. For every genuine hotspot not already tracked: file a `Pxx` entry in the performance table with a baseline measurement (`go test -bench` where possible, or a profile excerpt when a bench does not exist). No fix lands as part of P21 — it is discovery only.
+5. Benchmark harnesses that do not exist yet (e.g. admin JSON encoding, gateway translation round-trip) are added as part of the sweep so the new items are grounded in reproducible numbers.
+
+**Expected categories of finding.**
+- **JSON / proto marshal costs on admin and state endpoints.** `/api/state` runs on every SPA poll; large state snapshots may allocate on every hit.
+- **Address parsing and sorting in the dashboard.** `addrKey` / `compareAddr` are already optimized; verify.
+- **Gateway SSE translation.** Per-event translation path is a candidate for allocation pressure on long streams.
+- **Clipsync UDP fan-out.** Group filter and broadcast scheduling on a busy LAN.
+- **Proxy per-request overhead.** Goroutine spin-up cost is rarely measured.
+
+**Out of scope for P21.**
+- Implementing any of the fixes it discovers. Every fix lands under its own `Pxx` entry with its own commit.
+- Filesync work — tracked entirely in `docs/filesync/PLAN.md`.
+- Micro-optimizations with no visible profile signal. Quantify before touching.
+
+**Effort.** S–M for the sweep itself (profile capture, baseline benches, triage). The individual follow-up items are sized when filed.
+
+**Deliverable.** A commit that adds 3–10 new `Pxx` rows to this table with baselines, plus any new benchmark files under `_test.go` used to ground the numbers.
 
 ### UX & CLI
 

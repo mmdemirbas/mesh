@@ -9,7 +9,7 @@ Companion documents:
 - `RESEARCH.md` — Syncthing internals reference, used as the comparison
   baseline in the per-item analysis below.
 - `FILESYNC-ROLLOUT.local.md` — folder-by-folder rollout gate for the local
-  MBP ⇄ Windows deployment. Not checked in.
+  MBP / HW / Lenovo deployment. Not checked in.
 
 Last updated: 2026-04-19.
 
@@ -34,8 +34,12 @@ For a fresh session picking up this plan:
 
 The local rollout gate (`FILESYNC-ROLLOUT.local.md`) is personal and
 gitignored. It tracks which folders are enabled for `send-receive` on the
-MBP ⇄ Windows deployment. It is downstream of this plan — phases 3 / 4 / 5
-there depend on items tracked here.
+MBP / HW / Lenovo deployment. Most three-device folders are planned in a
+star topology (one hub in `receive-only`, the other two in `send-only`)
+so the C2 pairwise ancestor classifier remains sufficient; a full-mesh
+three-device folder would fire the C6 revisit trigger. The local doc is
+downstream of this plan — its phased rollout depends on items tracked
+here.
 
 ---
 
@@ -103,12 +107,12 @@ there depend on items tracked here.
 | [P18c](#p18c) | Eliminate index clone (scan into `pending`)          | 🟠 P1 | perf          | ✅     | 🟧 M   | 🟡   | 📦    |
 | [P18d](#p18d) | Cap `buildIndexExchange` pre-allocation              | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
 | [P3sc](#p3sc) | Adaptive watch / scan                                | 🟠 P1 | perf          | ⏸     | 🟧 M   | 🟡   | 📦    |
-| [PF](#pf) | Trie-based ignore with cursor propagation            | 🟠 P1 | perf          | 🔧     | 🟥 L   | 🟡   | 📦    |
+| [PF](#pf) | Trie-based ignore with cursor propagation            | 🟠 P1 | perf          | ✅     | 🟥 L   | 🟡   | 📦    |
 | [PK](#pk) | Clone elimination (COW / change-set on persist)      | 🟠 P1 | perf          | ⏸      | 🟧 M   | 🔴   | 📦    |
 | [PL](#pl) | Incremental deletion detection                       | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
 | [PM](#pm) | Directory-keyed child index                          | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
 | [PN](#pn) | Incremental `recomputeCache`                         | 🟠 P1 | perf          | ⏸      | 🟨 S   | 🟢   | 📄    |
-| [R1](#r1) | Inode-based rename / move detection                  | 🟡 P2 | robustness    | 🔧     | 🟧 M   | 🟡   | 🔌    |
+| [R1](#r1) | Inode-based rename / move detection                  | 🟡 P2 | robustness    | ✅     | 🟧 M   | 🟡   | 🔌    |
 | [R2](#r2) | Formal folder-level state machine                    | 🟡 P2 | robustness    | ⏳     | 🟧 M   | 🟢   | 📦    |
 | [R3](#r3) | Peer-level failure blacklist                         | 🟡 P2 | robustness    | ✅     | 🟨 S   | 🟢   | 📦    |
 | [D1](#d1) | FastCDC content-defined chunking                     | 🟢 P3 | differentiate | ⏳     | 🟥 L   | 🔴   | 🔌    |
@@ -120,7 +124,7 @@ there depend on items tracked here.
 | [C5](#c5) | 3-way text merge (Idea C)                            | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 📦    |
 | [C6](#c6) | Full vector clocks per file (Idea D)                 | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 🔌    |
 
-Counts: **4** P0 ✅ · **12** P1 (8 ✅ / 1 🔧 / 3 ⏸) · **3** P2 (1 ✅ / 1 🔧 / 1 ⏳) · **6** P3 ⏳ · **2** deferred.
+Counts: **4** P0 ✅ · **12** P1 (9 ✅ / 0 🔧 / 3 ⏸) · **3** P2 (2 ✅ / 0 🔧 / 1 ⏳) · **6** P3 ⏳ · **2** deferred.
 
 ---
 
@@ -139,7 +143,7 @@ All `done` entries re-verified against the tree on 2026-04-19.
 | [C2](#c2) | `PeerState.BaseHashes` holds the last agreed hash per path; `diff()` uses it as the primary signal (ancestor match ⇒ download-or-skip, both diverged ⇒ conflict) and falls back to C1 mtime when absent. `updateBaseHashes` folds each completed exchange into the ancestor map (hash match records, tombstone drops, mismatch preserves prior). Caller in `syncFolder` snapshots `ps.BaseHashes` before diff and re-merges on both the no-action and sync-end paths. Covered by `TestDiffC2AncestorClassifier`, `TestDiffC2TombstoneAncestor`, and `TestUpdateBaseHashes`. |
 | [C4](#c4) | Option (2) — peer-scoped retry budget — shipped: `retryTracker.counts` is keyed on `retryKey{path, peer}`; `record`, `quarantined`, `clear` take a peer argument; `clearAll` sweeps every peer on successful completion. `verifyPostWrite` carries the peer so NFS-class corruption is attributed correctly. `quarantinedPaths` deduplicates for the dashboard. `TestRetryTrackerPeerScoped` pins peer-independence: peer B never inherits A's failure count, `clear(A)` leaves B, `clearAll` sweeps both. Option (1) — in-cycle serial fallback — deferred: `Node.Sync` already spawns one `syncFolder` goroutine per `(folder, peer)` pair so peers try the same cycle in parallel, making serial in-file fallback redundant. |
 | [C3](#c3) | `downloadToVerifiedTemp` tries `/blocksigs` first; on success it streams the body via `downloadWithBlockVerify`, hashing each 128 KB block as it arrives and comparing against the sender's authoritative per-block hash. On mismatch the temp is truncated to the last verified offset and `/file?offset=` is re-issued, bounded by `maxBlockRetries = 3`. Peers that don't expose `/blocksigs` fall through to the whole-file `downloadWhole` path. A final whole-file SHA-256 check always runs as a safety net against sender-side races. Server surface `server.handleBlockSigs` reuses the existing `BlockSignatures` proto and the `handleDelta` direction/path/clamp guards. Covered by `TestC3HappyPathPerBlockVerify`, `TestC3BlockCorruptionRecoverable`, `TestC3RepeatedCorruptionQuarantines`, `TestC3FallsBackWhenBlockSigsMissing`, `TestC3SingleBlockFile`, `TestC3WholeFileHashMismatchRejected`, `TestC3BlockSigsEndpoint`, `TestC3BlockSigsRejectsReceiveOnly`. |
-| R1 (partial) | Receiver-side content-hash rename landed: `planRenames` (in `index.go`) pairs each ActionDelete whose local file has hash H with one ActionDownload whose RemoteHash is H, and `syncFolder` performs an atomic local rename (with Chtimes/Chmod, tombstone + new-path index entry) for each plan. Both sides of the rename are skipped in the bundle loop and the main dispatch loop. Metrics `FilesRenamed` and `BytesSavedByRename` exported via `/api/metrics` (`mesh_filesync_files_renamed_total`, `mesh_filesync_bytes_saved_by_rename_total`). Covered by `TestPlanRenames*` (happy path, hash mismatch, one-to-one pairing, target exists, tombstoned source, missing source, nil inputs) and `TestR1RenameFilesystemIntegration`. Phase 2 (sender-side inode tracking + wire capability handshake + delta-on-rename) is approved and pending. See R1 Status note. |
+| [R1](#r1) | Phase 1 (receiver-side content-hash rename) and Phase 2 (sender-side inode tracking + wire hint + delta-on-rename) both shipped. Phase 1: `planRenames` (in `index.go`) pairs each ActionDelete whose local file has hash H with one ActionDownload whose RemoteHash is H; `syncFolder` performs the atomic local rename. Metrics `mesh_filesync_files_renamed_total`, `mesh_filesync_bytes_saved_by_rename_total`. Phase 2 (six steps, 2026-04-19): `FileEntry.Inode` populated from `stat.Ino` on Unix and from `GetFileInformationByHandle` on Windows during the hash phase; `scanWithStats` pairs inode-matched delete+create as a rename and tags the new entry with a transient `PrevPath`; `FileInfo.prev_path` rides along in the proto exchange (forward-compatible via proto3 unknown-field tolerance — no capability flag needed); `folderState.applyHintRenames` performs the local rename on the receiver and lets the existing `/delta` path carry only the changed blocks for renamed-and-edited files. Tests: `TestInodePopulatedDuringScan`, `TestInodeStableAcrossRescan`, `TestInodeBackfillOnFastPath`, `TestScanDetectsRenameSameContent`, `TestScanDetectsRenameWithEdit`, `TestScanRenameHintClearedOnRescan`, `TestScanRenameIgnoresUnchangedPaths`, `TestPrevPathRoundTripsThroughProto`, `TestDiffPropagatesPrevPath`, `TestDiffOmitsPrevPathFromNonDownloads`, `TestApplyHintRenamesHappyPath`, `TestApplyHintRenamesSkipsWithoutMatchingDelete`, `TestApplyHintRenamesDoesNotClobberExistingNewPath`, `TestApplyHintRenamesFallsBackWhenOldPathMissing`, `TestApplyHintRenamesSkipsPathsClaimedByPlanRenames`, `inode_windows_test.go` suite, and `TestFilesyncRenameWithEdit` e2e scenario. |
 | [P18c](#p18c) | `runScan` recycles the clone backing map across scans via `FileIndex.cloneInto(dst)`. Measured (darwin/arm64, n=100 000): 7.5 ms / 19.9 MB / 257 allocs → 7.0 ms / 0 B / 0 allocs. `TestRunScanRecyclesCloneMap` pins the ping-pong invariant. Phase 2 (full scan-into-pending refactor) is superseded by D4. |
 | [R3](#r3) | `peerRetryTracker` counts consecutive `sendIndex` failures per peer per folder; backoff activates after `peerRetryThreshold` strikes and reuses the `backoffDelay` exponential curve (capped at `retryMaxDelay`). `syncFolder` gates at entry and records a `Retrying` state with the remaining delay when a peer is backed off; a successful exchange clears the count. Scope is per-folder — a peer unreachable for folder A does not affect folder B. Dashboard surface: `FolderPeer.BackoffRemaining`. Covered by `TestPeerRetryTracker`. |
 
@@ -155,7 +159,7 @@ Make filesync viable as a full Syncthing replacement for folders up to
 | Scan cycle time (168 k files, stable)    | ~30 s          | < 10 s     |
 | Memory during scan                       | ~160 MB spikes | < 200 MB   |
 | Persistence write (168 k files)          | several s      | < 1 s      |
-| Silent conflict files on 2-device edits  | occasional     | 0          |
+| Silent conflict files on multi-device edits | occasional     | 0       |
 | Bandwidth on rename                      | full file      | metadata   |
 
 ---
@@ -227,10 +231,13 @@ Each entry follows the same structure:
 - **Problem.** `diff()` has no memory of the version both sides last agreed
   on. It only sees "their hash" and "our hash". If the two differ, it must
   guess which side caused the divergence.
-- **Why it matters.** This is the canonical cause of false conflicts in
-  two-device setups. Without an ancestor, there is no way to distinguish
-  "we modified the stale copy we got from them" from "we both modified the
-  same starting point independently".
+- **Why it matters.** This is the canonical cause of false conflicts.
+  Without an ancestor, there is no way to distinguish "we modified the
+  stale copy we got from them" from "we both modified the same starting
+  point independently". Pairwise ancestor-hash covers the full-mesh
+  two-device case exactly and approximates the N-device case when the
+  topology is star-shaped (one hub, leaves in `send-only` /
+  `receive-only`); full N-device correctness needs C6 (vector clocks).
 - **Fix options.**
   1. Add a parallel map `peerBaseHash[peerAddr]map[path]Hash256`, updated on
      every successful download and successful ack'd upload. Persisted
@@ -252,15 +259,18 @@ Each entry follows the same structure:
   - *Perf:* O(1) extra map lookup per file in `diff()`. Negligible.
   - *Memory:* 32 B per file per peer. 168 k × 2 = ~10 MB. Acceptable.
   - *Security:* none. Hashes only, no content.
-  - *UX:* eliminates ~all false conflicts in two-device mode.
+  - *UX:* eliminates ~all false conflicts for two-device full-mesh
+    and for star topologies at any N.
 - **Blast radius.** 📦 new persistence record, small touch in `syncFolder`
   download and upload success paths, new branch in `diff()`. No wire-format
   change.
 - **Syncthing handling.** Syncthing does not carry a per-peer ancestor
   explicitly — its version vector effectively encodes the same information
-  in causal form. Ancestor-hash is the pragmatic two-device equivalent.
+  in causal form. Ancestor-hash is the pragmatic pairwise equivalent.
 - **Recommendation.** Ship option (1). It is the minimum solution that is
-  definitively correct for two devices and unlocks 3-way merge (C5) later.
+  definitively correct pairwise (every full-mesh two-device pair, every
+  star-topology N-device pair), and unlocks 3-way merge (C5) later. Full
+  N-device concurrent-edit correctness still requires C6 (vector clocks).
 
 <a id="c3"></a>
 ### C3 · Per-block verify during write · ✅
@@ -1164,7 +1174,8 @@ Each entry follows the same structure:
   - Correctness delivered by C2 alone is the large win; C5 is a UX nice
     to have.
 - **Revisit trigger.** Conflict files still a visible pain point after
-  C2 is stable in two-device use for four weeks.
+  C2 is stable in production for four weeks across the MBP / HW / Lenovo
+  deployment.
 - **Syncthing handling.** No 3-way merge. Unison does it; rsync doesn't.
   Git's own merge drivers are the gold standard here.
 
@@ -1176,13 +1187,16 @@ Each entry follows the same structure:
 - **Why deferred.**
   - 🔌 wire-format change (`repeated Counter version = N` on
     `FileInfo`) plus peer-version negotiation and a migration path.
-  - Current deployment is two devices. C1 + C2 cover that case fully.
-    Vector clocks become strictly required only at 3+ devices.
+  - Current topology is three devices (MBP, HW, Lenovo) but the
+    deployment plan keeps most shared folders in star form (one hub
+    receives, the others are `send-only`). Under a star topology the
+    C2 pairwise ancestor is sufficient, so C6 can stay deferred.
   - If D2 (BLAKE3) or D1 (FastCDC) land, their protocol bump is a good
     moment to fold in vector clocks and avoid two separate breaking
     changes.
-- **Revisit trigger.** A third device joins any folder, or D1 / D2
-  lands and the protocol version is moving anyway.
+- **Revisit trigger.** A full-mesh three-device folder (every peer in
+  `send-receive`) goes live on the deployment, or D1 / D2 lands and the
+  protocol version is moving anyway.
 - **Syncthing handling.** Vector clocks are core. `RESEARCH.md §3.1` is
   the implementation reference.
 
