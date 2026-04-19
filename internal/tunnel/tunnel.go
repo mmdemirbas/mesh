@@ -73,8 +73,14 @@ var authFailuresByIP sync.Map
 
 // SnapshotAuthFailures returns a point-in-time copy of auth failure counts keyed by remote IP.
 func SnapshotAuthFailures() map[string]int64 {
+	return snapshotAuthFailuresIn(&authFailuresByIP)
+}
+
+// snapshotAuthFailuresIn is the map-parameterized form used in tests so the
+// package-level authFailuresByIP doesn't leak between test cases.
+func snapshotAuthFailuresIn(m *sync.Map) map[string]int64 {
 	out := make(map[string]int64)
-	authFailuresByIP.Range(func(k, v any) bool {
+	m.Range(func(k, v any) bool {
 		out[k.(string)] = v.(*authFailureEntry).count.Load()
 		return true
 	})
@@ -83,10 +89,15 @@ func SnapshotAuthFailures() map[string]int64 {
 
 // evictOldAuthFailures removes authFailuresByIP entries not seen since cutoff.
 func evictOldAuthFailures(cutoff time.Time) {
+	evictOldAuthFailuresIn(&authFailuresByIP, cutoff)
+}
+
+// evictOldAuthFailuresIn is the map-parameterized form used in tests.
+func evictOldAuthFailuresIn(m *sync.Map, cutoff time.Time) {
 	cutoffNano := cutoff.UnixNano()
-	authFailuresByIP.Range(func(k, v any) bool {
+	m.Range(func(k, v any) bool {
 		if v.(*authFailureEntry).lastSeen.Load() < cutoffNano {
-			authFailuresByIP.Delete(k)
+			m.Delete(k)
 		}
 		return true
 	})

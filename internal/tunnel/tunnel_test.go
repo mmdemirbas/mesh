@@ -653,6 +653,92 @@ func TestRecordAuthFailure_Concurrent(t *testing.T) {
 	}
 }
 
+// --- snapshotAuthFailuresIn / evictOldAuthFailuresIn ---
+
+func TestSnapshotAuthFailures_Empty(t *testing.T) {
+	t.Parallel()
+	var m sync.Map
+	got := snapshotAuthFailuresIn(&m)
+	if len(got) != 0 {
+		t.Errorf("snapshot of empty map = %v, want empty", got)
+	}
+}
+
+func TestSnapshotAuthFailures_CopiesCountsPerIP(t *testing.T) {
+	t.Parallel()
+	var m sync.Map
+	recordAuthFailure(&m, "10.0.0.1")
+	recordAuthFailure(&m, "10.0.0.1")
+	recordAuthFailure(&m, "10.0.0.1")
+	recordAuthFailure(&m, "10.0.0.2")
+
+	got := snapshotAuthFailuresIn(&m)
+	if got["10.0.0.1"] != 3 {
+		t.Errorf("10.0.0.1 = %d, want 3", got["10.0.0.1"])
+	}
+	if got["10.0.0.2"] != 1 {
+		t.Errorf("10.0.0.2 = %d, want 1", got["10.0.0.2"])
+	}
+	if len(got) != 2 {
+		t.Errorf("len = %d, want 2", len(got))
+	}
+}
+
+// TestSnapshotAuthFailures_IsACopy pins that later writes to the map do not
+// mutate a snapshot already handed to the caller. This is a load-bearing
+// contract — the metrics endpoint iterates the snapshot concurrently with
+// the SSH server writing to the map.
+func TestSnapshotAuthFailures_IsACopy(t *testing.T) {
+	t.Parallel()
+	var m sync.Map
+	recordAuthFailure(&m, "10.0.0.1")
+	snap := snapshotAuthFailuresIn(&m)
+
+	recordAuthFailure(&m, "10.0.0.1")
+	recordAuthFailure(&m, "10.0.0.99")
+
+	if snap["10.0.0.1"] != 1 {
+		t.Errorf("snapshot mutated after later writes: 10.0.0.1 = %d, want 1", snap["10.0.0.1"])
+	}
+	if _, ok := snap["10.0.0.99"]; ok {
+		t.Error("snapshot picked up a key added after snapshot was taken")
+	}
+}
+
+func TestEvictOldAuthFailures_RemovesStale(t *testing.T) {
+	t.Parallel()
+	var m sync.Map
+	// Seed two entries with different lastSeen timestamps.
+	recordAuthFailure(&m, "10.0.0.1") // lastSeen = now
+	stale := &authFailureEntry{}
+	stale.count.Store(7)
+	stale.lastSeen.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	m.Store("10.0.0.99", stale)
+
+	// Cutoff 1 hour ago: stale (lastSeen 2h ago) must be evicted; fresh kept.
+	evictOldAuthFailuresIn(&m, time.Now().Add(-time.Hour))
+
+	if _, ok := m.Load("10.0.0.99"); ok {
+		t.Error("stale entry was not evicted")
+	}
+	if _, ok := m.Load("10.0.0.1"); !ok {
+		t.Error("fresh entry was evicted")
+	}
+}
+
+func TestEvictOldAuthFailures_NoopWhenAllFresh(t *testing.T) {
+	t.Parallel()
+	var m sync.Map
+	recordAuthFailure(&m, "10.0.0.1")
+	recordAuthFailure(&m, "10.0.0.2")
+
+	evictOldAuthFailuresIn(&m, time.Now().Add(-time.Hour))
+
+	if snap := snapshotAuthFailuresIn(&m); len(snap) != 2 {
+		t.Errorf("len after noop eviction = %d, want 2", len(snap))
+	}
+}
+
 // --- stubSSHConn: minimal ssh.Conn implementation for keepAlive tests ---
 
 type stubSSHConn struct {
