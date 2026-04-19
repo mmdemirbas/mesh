@@ -1,6 +1,6 @@
 # PLAN.md
 
-Roadmap for mesh. Last updated 2026-04-09.
+Roadmap for mesh. Last updated 2026-04-19.
 Organized by urgency. Tags in the Component column indicate the area.
 
 ## Implementation Guidelines
@@ -39,56 +39,7 @@ Crashes, active CVEs, broken functionality, exploitable security issues.
 
 Security hardening, correctness, data integrity, protocol compliance.
 
-| ID   | Component | Item                                         | Notes |
-|------|-----------|----------------------------------------------|-------|
-| [S1/FS4](#s1fs4-auto-tls-for-filesync-and-clipsync-http) | filesync, clipsync | Auto-TLS for filesync and clipsync HTTP | Shared `internal/tlsutil` package. See design below. |
-
-### S1/FS4: Auto-TLS for filesync and clipsync HTTP
-
-**Status:** Not needed for LAN-over-SSH-tunnel use. Required for production/untrusted-network use.
-
-**Architecture:**
-
-A shared `internal/tlsutil` package provides cert generation, persistence, and `tls.Config` construction. Both filesync and clipsync embed a `TLS` config block. TLS is opt-in (`enabled: false` default) for backward compatibility.
-
-**Config:**
-```yaml
-filesync:
-  bind: "0.0.0.0:7756"
-  tls:
-    enabled: true
-    cert_file: ""    # optional; auto-generated ECDSA P-256 if empty
-    key_file: ""     # optional; paired with cert_file
-    insecure: true   # client skips CA chain (relies on IP allowlist)
-```
-
-**Server path:** `net.Listen("tcp", bind)` → `tls.NewListener(ln, serverCfg)` → `httpSrv.Serve(tlsLn)`. Clipsync requires refactoring from `ListenAndServe` to explicit listener.
-
-**Client path:** `http.Transport.TLSClientConfig` gets a client `tls.Config`. Outbound URLs switch from `http://` to `https://` via a `scheme` field on the Node.
-
-**Auto-cert:** ECDSA P-256, 10-year validity, stored at `~/.mesh/tls/<bind>.pem` and `.key`. Regenerated if within 30 days of expiry. Permissions: `0600` for key.
-
-**Design decisions needing human input:**
-1. **InsecureSkipVerify (default) vs cert pinning:** InsecureSkipVerify + IP allowlist is simpler (no fingerprint distribution). Pinning is stronger but requires manual setup. Proposed default: insecure (encrypt wire, rely on IP allowlist for auth).
-2. **Cert-per-bind vs cert-per-node:** Per-bind is simpler (no node topology knowledge). Per-node shares one cert for filesync+clipsync. Proposed: per-bind.
-3. **Scope:** Both components together, or filesync first? Together shares the implementation; separately is lower risk.
-
-**Files:**
-
-| File | Type | Est. lines |
-|------|------|------------|
-| `internal/tlsutil/tlsutil.go` | New | ~150 |
-| `internal/tlsutil/tlsutil_test.go` | New | ~120 |
-| `internal/config/config.go` | Modify | +30 |
-| `internal/filesync/filesync.go` | Modify | +25 |
-| `internal/filesync/protocol.go` | Modify | ~20 |
-| `internal/filesync/transfer.go` | Modify | ~10 |
-| `internal/clipsync/clipsync.go` | Modify | ~40 |
-| Config examples + JSON schema | Modify | ~20 |
-
-**Total:** ~270 new lines, ~165 modified. 6 build phases, each with its own test gate.
-
-**Effort:** M — 2 new files, 6 modified, shared implementation across two components.
+(All items completed.)
 
 ---
 
@@ -98,34 +49,7 @@ Performance, UX, reliability, code quality, documentation, DevOps.
 
 ### Robustness & Error Handling
 
-| ID   | Component | Item                                         | Notes |
-|------|-----------|----------------------------------------------|-------|
-| [S11](#s11-udp-beacon-port-used-for-ssrf) | clipsync | UDP beacon port used for SSRF | `msg.GetPort()` from unauthenticated beacon. Largely mitigated by S2. |
-
-### S11: UDP beacon port used for SSRF
-
-**Problem:** Clipsync UDP beacons carry a `port` field (`msg.GetPort()`) that tells the receiver which HTTP port the sender listens on. This field is taken from an unauthenticated UDP broadcast — any device on the LAN can send a forged beacon with an arbitrary port.
-
-When a node receives a beacon, it uses `msg.GetPort()` to construct the peer's HTTP address (`{sender_ip}:{untrusted_port}`), then makes HTTP requests to that address (`/discover`, `/clip`). An attacker can set `port` to an internal service port (e.g., 80, 8080, 9090), causing the mesh node to make HTTP requests to arbitrary ports on the sender's IP — a classic SSRF vector.
-
-**Current mitigation (S2):** The `canReceiveFrom` function validates that incoming HTTP requests come from known, trusted peers (loopback, static peers, or previously discovered peers). This means the attacker's forged beacon creates outbound requests from the victim node, but the victim's own HTTP server rejects requests from unknown sources. The SSRF risk is that the victim node acts as an HTTP client toward the attacker-controlled port, not that the attacker accesses the victim's data.
-
-**Residual risk:** A LAN attacker can still cause the mesh node to probe arbitrary ports on the attacker's own IP (or any spoofed source IP in the beacon). This leaks connection success/failure information and could interact with services that trigger actions on incoming HTTP requests.
-
-**Fix:** Validate `msg.GetPort()` against a reasonable range (e.g., 1024-65535) and optionally reject beacons whose `port` differs from the UDP source port by more than a configured threshold. Or: ignore the beacon `port` field entirely and always use the configured clipsync port.
-
-**Effort:** S — a single validation check on `msg.GetPort()` in the beacon handler.
-
-### Correctness Gaps (from gap analysis vs Syncthing — see docs/research/)
-
-| ID | Priority | Item | Notes |
-|----|----------|------|-------|
-| G1 | P0 | Preserve mtime on downloaded files | Downloaded files get wall-clock mtime, defeating fast-path scan. Chtimes before rename. |
-| G2 | P2 | Disk space pre-check before temp file write | Best-effort: clearer error message ("disk full" vs "hash mismatch"). Inherently racy. |
-| G3 | P0 | Folder device-ID guard | Record filesystem device ID at first scan; refuse to sync if device changes (detects unmounted/remounted path). No marker files in synced tree. |
-| G4 | P2 | Conflict file count limit per path | Unbounded .sync-conflict-* accumulation. Cap at 10, prune oldest. |
-| G5 | P2 | Exponential backoff on pull failure | Replace all-or-nothing 3-strike quarantine with progressive backoff + reset on reconnect. |
-| G6 | P1 | IN_Q_OVERFLOW triggers immediate rescan | fsnotify errors don't trigger rescan. Up to 60s blind window. |
+(All items completed.)
 
 ### Performance
 
