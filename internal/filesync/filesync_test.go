@@ -92,15 +92,17 @@ func TestClassifyGlob(t *testing.T) {
 		{"node_modules", kindLiteral, "node_modules"},
 		{".git", kindLiteral, ".git"},
 		{"*.class", kindStarSuffix, ".class"},
-		{"*.mesh-delta-tmp-*", kindGeneric, ""},
+		{"*.mesh-delta-tmp-*", kindContains, ".mesh-delta-tmp-"},
 		{".mesh-tmp-*", kindPrefixStar, ".mesh-tmp-"},
 		{"prefix*", kindPrefixStar, "prefix"},
-		{"f?o", kindGeneric, ""},     // ? is not optimizable
-		{"[abc]", kindGeneric, ""},   // character class
-		{"a*b", kindGeneric, ""},     // star in the middle
-		{"**", kindGeneric, ""},      // double star
-		{"*.tar.*", kindGeneric, ""}, // two stars
-		{"", kindLiteral, ""},        // degenerate but classified
+		{"f?o", kindGeneric, ""},           // ? is not optimizable
+		{"[abc]", kindGeneric, ""},         // character class
+		{"a*b", kindGeneric, ""},           // star in the middle
+		{"**", kindGeneric, ""},            // double star — handled as double-star before classifyGlob
+		{"*.tar.*", kindContains, ".tar."}, // *LITERAL*
+		{"*foo*bar*", kindGeneric, ""},     // three stars → generic
+		{"*?*", kindGeneric, ""},           // wildcard in middle disqualifies
+		{"", kindLiteral, ""},              // degenerate but classified
 		{"exact.txt", kindLiteral, "exact.txt"},
 	}
 	for _, tt := range tests {

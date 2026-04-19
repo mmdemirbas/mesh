@@ -19,6 +19,7 @@ const (
 	kindLiteral                       // exact string match (no wildcards)
 	kindStarSuffix                    // *.ext → strings.HasSuffix
 	kindPrefixStar                    // prefix* → strings.HasPrefix
+	kindContains                      // *literal* → strings.Contains
 )
 
 // ignoreMatcher evaluates whether a file path should be excluded from sync.
@@ -65,6 +66,13 @@ func classifyGlob(pattern string) (patternKind, string) {
 		if strings.HasSuffix(pattern, "*") {
 			return kindPrefixStar, pattern[:len(pattern)-1] // e.g. ".mesh-tmp-*" → ".mesh-tmp-"
 		}
+	}
+	if n == 2 && len(pattern) >= 3 && strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") {
+		// "*literal*" — a contains-check. Middle has no further stars
+		// (n==2 covers both edges) and no "?"/"[" (caught above).
+		// len>=3 excludes "**"; that is handled as a double-star pattern
+		// before any classifyGlob call.
+		return kindContains, pattern[1 : len(pattern)-1]
 	}
 	return kindGeneric, ""
 }
@@ -150,6 +158,8 @@ func fastMatchBase(p *classifiedPattern, base string) bool {
 		return strings.HasSuffix(base, p.fixed)
 	case kindPrefixStar:
 		return strings.HasPrefix(base, p.fixed)
+	case kindContains:
+		return strings.Contains(base, p.fixed)
 	default:
 		matched, _ := path.Match(p.pattern, base)
 		return matched

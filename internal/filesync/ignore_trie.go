@@ -32,15 +32,31 @@ import (
 type trieIgnoreMatcher struct {
 	builtinBase []trieRec
 
-	litBase     map[string][]trieRec
-	starSuffix  []trieRec
-	prefixStar  []trieRec
-	genericBase []trieRec
+	litBase map[string][]trieRec
+	// extSuffix buckets kindStarSuffix patterns whose fixed part starts
+	// with "." — i.e. extensions. Keyed by the extension without the
+	// leading dot (e.g. "class" for "*.class"). Match-time extracts the
+	// path's extension once and does a single map lookup instead of
+	// iterating every star-suffix pattern. This is the dominant
+	// optimization against the linear matcher.
+	extSuffix     map[string][]trieRec
+	otherSuffix   []trieRec // non-extension kindStarSuffix (rare: *~ etc.)
+	prefixStar    []trieRec
+	genericBase   []trieRec
+	hasSuffixBuck bool // any extSuffix / otherSuffix entry exists
 
 	litAnchored  map[string][]trieRec
 	anchoredRoot *segNode // nil if no glob-anchored patterns
 
 	doubleStar []trieRec
+
+	// Skip flags so shouldIgnore avoids touching empty groups. Saves
+	// a map lookup, a slice range, and their associated branch costs on
+	// every call, which adds up across 310k files per scan.
+	hasLitBase      bool
+	hasLitAnchored  bool
+	hasDoubleStar   bool
+	hasAnchoredGlob bool
 }
 
 // trieRec holds the per-pattern data the matcher needs at decision time.
@@ -90,6 +106,7 @@ type segEdge struct {
 func newTrieIgnoreMatcher(configPatterns []string) *trieIgnoreMatcher {
 	m := &trieIgnoreMatcher{
 		litBase:     map[string][]trieRec{},
+		extSuffix:   map[string][]trieRec{},
 		litAnchored: map[string][]trieRec{},
 	}
 
@@ -133,12 +150,14 @@ func newTrieIgnoreMatcher(configPatterns []string) *trieIgnoreMatcher {
 			r.kind, r.fixed = classifyGlob(p.pattern)
 			if r.kind == kindLiteral {
 				m.litAnchored[p.pattern] = append(m.litAnchored[p.pattern], r)
+				m.hasLitAnchored = true
 			} else {
 				r.segGlobs = classifySegments(p.pattern)
 				if m.anchoredRoot == nil {
 					m.anchoredRoot = &segNode{literal: map[string]*segNode{}}
 				}
 				insertSegTrie(m.anchoredRoot, r)
+				m.hasAnchoredGlob = true
 			}
 			anchoredOrd++
 		default:
@@ -152,8 +171,20 @@ func newTrieIgnoreMatcher(configPatterns []string) *trieIgnoreMatcher {
 			switch r.kind {
 			case kindLiteral:
 				m.litBase[p.pattern] = append(m.litBase[p.pattern], r)
+				m.hasLitBase = true
 			case kindStarSuffix:
-				m.starSuffix = append(m.starSuffix, r)
+				// "*.ext" patterns (fixed=".ext") are bucketed by the
+				// extension so a basename ending in ".ext" can find
+				// its candidates via one map lookup. Non-extension
+				// suffixes (e.g. "*~" → fixed="~") stay in otherSuffix
+				// and still iterate linearly, but they are rare.
+				if len(r.fixed) >= 2 && r.fixed[0] == '.' && !strings.ContainsAny(r.fixed[1:], ".") {
+					ext := r.fixed[1:]
+					m.extSuffix[ext] = append(m.extSuffix[ext], r)
+				} else {
+					m.otherSuffix = append(m.otherSuffix, r)
+				}
+				m.hasSuffixBuck = true
 			case kindPrefixStar:
 				m.prefixStar = append(m.prefixStar, r)
 			default:
@@ -161,6 +192,10 @@ func newTrieIgnoreMatcher(configPatterns []string) *trieIgnoreMatcher {
 			}
 			baseOrd++
 		}
+	}
+
+	if len(m.doubleStar) > 0 {
+		m.hasDoubleStar = true
 	}
 
 	return m
@@ -220,7 +255,7 @@ func insertSegTrie(root *segNode, r trieRec) {
 // let the group-priority order (doubleStar > anchored > base) pick the
 // decision's negation bit.
 func (m *trieIgnoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
-	base := path.Base(relPath)
+	base := pathBaseFast(relPath)
 
 	for i := range m.builtinBase {
 		if fastMatchBaseRec(&m.builtinBase[i], base) {
@@ -231,30 +266,54 @@ func (m *trieIgnoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
 	bestNeg := false
 	hit := false
 
-	// Base group.
+	// --- Base group --------------------------------------------------------
 	baseBestOrd := -1
 	baseBestNeg := false
-	if recs, ok := m.litBase[base]; ok {
-		for i := range recs {
-			r := &recs[i]
-			if r.dirOnly && !isDir {
-				continue
-			}
-			if r.ordinal > baseBestOrd {
-				baseBestOrd = r.ordinal
-				baseBestNeg = r.negation
+	if m.hasLitBase {
+		if recs, ok := m.litBase[base]; ok {
+			for i := range recs {
+				r := &recs[i]
+				if r.dirOnly && !isDir {
+					continue
+				}
+				if r.ordinal > baseBestOrd {
+					baseBestOrd = r.ordinal
+					baseBestNeg = r.negation
+				}
 			}
 		}
 	}
-	for i := range m.starSuffix {
-		r := &m.starSuffix[i]
-		if r.dirOnly && !isDir {
-			continue
+	if m.hasSuffixBuck {
+		// Extension-bucketed lookup: extract the portion after the last
+		// dot once, then visit only the matching bucket. For basenames
+		// without a dot, the bucketed lookup is skipped entirely.
+		if dot := lastDot(base); dot >= 0 {
+			ext := base[dot+1:]
+			if recs, ok := m.extSuffix[ext]; ok {
+				for i := range recs {
+					r := &recs[i]
+					if r.dirOnly && !isDir {
+						continue
+					}
+					if r.ordinal > baseBestOrd {
+						baseBestOrd = r.ordinal
+						baseBestNeg = r.negation
+					}
+				}
+			}
 		}
-		if strings.HasSuffix(base, r.fixed) {
-			if r.ordinal > baseBestOrd {
-				baseBestOrd = r.ordinal
-				baseBestNeg = r.negation
+		// otherSuffix (rare: "*~" and similar) is still linear but
+		// typically empty, so the range loop is a no-op branch.
+		for i := range m.otherSuffix {
+			r := &m.otherSuffix[i]
+			if r.dirOnly && !isDir {
+				continue
+			}
+			if strings.HasSuffix(base, r.fixed) {
+				if r.ordinal > baseBestOrd {
+					baseBestOrd = r.ordinal
+					baseBestNeg = r.negation
+				}
 			}
 		}
 	}
@@ -288,22 +347,24 @@ func (m *trieIgnoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
 		bestNeg = baseBestNeg
 	}
 
-	// Anchored group.
+	// --- Anchored group ----------------------------------------------------
 	anchBestOrd := -1
 	anchBestNeg := false
-	if recs, ok := m.litAnchored[relPath]; ok {
-		for i := range recs {
-			r := &recs[i]
-			if r.dirOnly && !isDir {
-				continue
-			}
-			if r.ordinal > anchBestOrd {
-				anchBestOrd = r.ordinal
-				anchBestNeg = r.negation
+	if m.hasLitAnchored {
+		if recs, ok := m.litAnchored[relPath]; ok {
+			for i := range recs {
+				r := &recs[i]
+				if r.dirOnly && !isDir {
+					continue
+				}
+				if r.ordinal > anchBestOrd {
+					anchBestOrd = r.ordinal
+					anchBestNeg = r.negation
+				}
 			}
 		}
 	}
-	if m.anchoredRoot != nil {
+	if m.hasAnchoredGlob {
 		segs := splitSegments(relPath)
 		walkAnchoredTrie(m.anchoredRoot, segs, 0, isDir, &anchBestOrd, &anchBestNeg)
 	}
@@ -312,30 +373,49 @@ func (m *trieIgnoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
 		bestNeg = anchBestNeg
 	}
 
-	// Double-star group.
-	dsBestOrd := -1
-	dsBestNeg := false
-	for i := range m.doubleStar {
-		r := &m.doubleStar[i]
-		if r.dirOnly && !isDir {
-			continue
-		}
-		if doubleStarMatch(r.dsPrefix, r.dsSuffix, relPath) {
-			if r.ordinal > dsBestOrd {
-				dsBestOrd = r.ordinal
-				dsBestNeg = r.negation
+	// --- Double-star group -------------------------------------------------
+	if m.hasDoubleStar {
+		dsBestOrd := -1
+		dsBestNeg := false
+		for i := range m.doubleStar {
+			r := &m.doubleStar[i]
+			if r.dirOnly && !isDir {
+				continue
+			}
+			if doubleStarMatch(r.dsPrefix, r.dsSuffix, relPath) {
+				if r.ordinal > dsBestOrd {
+					dsBestOrd = r.ordinal
+					dsBestNeg = r.negation
+				}
 			}
 		}
-	}
-	if dsBestOrd >= 0 {
-		hit = true
-		bestNeg = dsBestNeg
+		if dsBestOrd >= 0 {
+			hit = true
+			bestNeg = dsBestNeg
+		}
 	}
 
 	if !hit {
 		return false
 	}
 	return !bestNeg
+}
+
+// pathBaseFast is a lighter alternative to path.Base for the subset of
+// inputs this matcher sees: non-empty relative paths with forward
+// slashes, no cleanup needed. path.Base does extra work for trailing
+// slashes and empty inputs that cannot occur here.
+func pathBaseFast(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[i+1:]
+	}
+	return p
+}
+
+// lastDot returns the index of the last "." in base, or -1 if none.
+// Inlined so the hot path avoids a function call on every match.
+func lastDot(base string) int {
+	return strings.LastIndexByte(base, '.')
 }
 
 // splitSegments returns the path's /-separated segments. Empty relPath
@@ -386,6 +466,8 @@ func matchSegment(sg *segGlob, s string) bool {
 		return strings.HasSuffix(s, sg.fixed)
 	case kindPrefixStar:
 		return strings.HasPrefix(s, sg.fixed)
+	case kindContains:
+		return strings.Contains(s, sg.fixed)
 	default:
 		matched, _ := path.Match(sg.raw, s)
 		return matched
@@ -402,6 +484,8 @@ func fastMatchBaseRec(r *trieRec, base string) bool {
 		return strings.HasSuffix(base, r.fixed)
 	case kindPrefixStar:
 		return strings.HasPrefix(base, r.fixed)
+	case kindContains:
+		return strings.Contains(base, r.fixed)
 	default:
 		matched, _ := path.Match(r.pattern, base)
 		return matched
