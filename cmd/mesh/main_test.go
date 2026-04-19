@@ -797,6 +797,76 @@ func TestRenderStatus_ForwardSetPeerSymbol(t *testing.T) {
 	}
 }
 
+// TestRenderStatus_ForwardSetIndentedUnderConnection pins the visual
+// hierarchy: the forward-set header must sit strictly deeper than the
+// connection name (otherwise both appear as siblings and the reader
+// cannot tell which forward-sets belong to which connection), and the
+// individual forward rows must sit strictly deeper than the forward-set
+// header.
+func TestRenderStatus_ForwardSetIndentedUnderConnection(t *testing.T) {
+	cfg := &config.Config{
+		Connections: []config.Connection{
+			{
+				Name:    "tunnel",
+				Targets: []string{"root@10.0.0.1:22"},
+				Forwards: []config.ForwardSet{
+					{
+						Name: "fwd",
+						Local: []config.Forward{
+							{Type: "forward", Bind: "127.0.0.1:8080", Target: "10.0.0.1:80"},
+						},
+					},
+				},
+			},
+		},
+	}
+	activeState := map[string]state.Component{
+		"connection:tunnel [fwd]": {
+			Type: "connection", ID: "tunnel [fwd]",
+			Status: state.Connected, Message: "root@10.0.0.1:22",
+		},
+	}
+	output, _ := renderStatus(cfg, activeState, nil, "testnode")
+	lines := extractLines(output)
+
+	leadingSpaces := func(s string) int {
+		clean := stripANSI(s)
+		n := 0
+		for _, r := range clean {
+			if r != ' ' {
+				break
+			}
+			n++
+		}
+		return n
+	}
+
+	var connIndent, fsetIndent, fwdIndent int = -1, -1, -1
+	for _, line := range lines {
+		clean := stripANSI(line)
+		trimmed := strings.TrimLeft(clean, " ")
+		switch {
+		case connIndent < 0 && strings.HasPrefix(trimmed, "tunnel"):
+			connIndent = leadingSpaces(line)
+		case fsetIndent < 0 && strings.Contains(trimmed, "fwd") && !strings.Contains(trimmed, "127.0.0.1"):
+			fsetIndent = leadingSpaces(line)
+		case fwdIndent < 0 && strings.Contains(trimmed, "127.0.0.1:8080"):
+			fwdIndent = leadingSpaces(line)
+		}
+	}
+
+	if connIndent < 0 || fsetIndent < 0 || fwdIndent < 0 {
+		t.Fatalf("missing expected rows: conn=%d fset=%d fwd=%d; output:\n%s",
+			connIndent, fsetIndent, fwdIndent, output)
+	}
+	if fsetIndent <= connIndent {
+		t.Errorf("forward-set header must be indented deeper than connection name; conn=%d fset=%d", connIndent, fsetIndent)
+	}
+	if fwdIndent <= fsetIndent {
+		t.Errorf("forward row must be indented deeper than forward-set header; fset=%d fwd=%d", fsetIndent, fwdIndent)
+	}
+}
+
 func TestRenderStatus_PeerAddrHidden_WhenSameAsTarget(t *testing.T) {
 	cfg := &config.Config{
 		Connections: []config.Connection{
@@ -1757,7 +1827,10 @@ func TestAlignment_ArrowsAtSameColumn(t *testing.T) {
 	output, _ := renderStatus(cfg, activeState, nil, "testnode")
 	lines := extractLines(output)
 
-	wantCol := 18
+	// Forward rows nest one level deeper than the connection name — see
+	// TestRenderStatus_ForwardSetIndentedUnderConnection. The exact column
+	// is a function of the nested indent plus the widest bind address.
+	wantCol := 19
 	for _, line := range lines {
 		col := findColumn(line, "──▶")
 		if col >= 0 && col != wantCol {

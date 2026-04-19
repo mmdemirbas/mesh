@@ -888,9 +888,9 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			for _, fset := range c.Forwards {
 				id := c.Name + " [" + fset.Name + "]"
 				indicator, st, comp := getComponentInfo("connection", id)
-				// Forward-set name is a grouping header; metrics live on the
-				// individual forward rows below.
-				addRow("", indicator, sectionTitle(fset.Name), "", "", st, "", metricsSnapshot{})
+				// Forward-set name is a grouping header nested under the
+				// connection; metrics live on the individual forward rows below.
+				addRow("  ", indicator, sectionTitle(fset.Name), "", "", st, "", metricsSnapshot{})
 
 				// Always show a target line under each forward set
 				{
@@ -924,10 +924,10 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 					default:
 						targetStr = cGray + "[starting]" + cReset
 					}
-					addRow("   ", ind, targetStr, "", "", "", targetAnnotation, metricsSnapshot{})
+					addRow("    ", ind, targetStr, "", "", "", targetAnnotation, metricsSnapshot{})
 				}
 
-				indent := "   "
+				indent := "    "
 				for _, fwd := range fset.Local {
 					compID := c.Name + " [" + fset.Name + "] " + fwd.Bind
 					_, _, fwdComp := getComponentInfo("forward", compID)
