@@ -166,11 +166,12 @@ PG, PH, PI, PJ done.
 
 ### DevOps
 
+> **Cross-cutting test quality work** lives in [`TEST-QUALITY.md`](TEST-QUALITY.md) — rubric, per-package audit, and anti-pattern catalog. That document supersedes D3, D15, and D16 as isolated line items.
+
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
 | [D1](#d1-log-rotation) | ops | Log rotation | Unbounded growth. SIGHUP + size-based rotation or external logrotate. |
 | [D2](#d2-systemd--launchd-service-units) | ops | systemd / launchd service units | No service management. Ship templates. |
-| [D3](#d3-tunnel-package-test-coverage-at-34) | testing | Tunnel package coverage at 34% | Core forwarding functions at 0%. |
 | [D6](#d6-binary-signing-cosignsigstore) | release | Binary signing | No cosign/Sigstore. |
 | D8   | ops       | `time.Sleep` in `downCmd` and tests         | Replace with channel-based sync. |
 | [D10](#d10-darwinarm64-dist-allows-cgo) | build | darwin/arm64 dist allows CGO | Align Taskfile with GoReleaser. |
@@ -178,8 +179,6 @@ PG, PH, PI, PJ done.
 | [D12](#d12-modernize-unused-parameters) | refactor | Unused parameters in tunnel.go (2 sites)    | `unusedparams` analyzer flagged `id` and `t0`. Removing them changes function signatures; must check call sites. |
 | [D13](#d13-gateway-audit-historical-file-browsing) | gateway | Audit UI shows only newest jsonl file       | `/api/gateway/audit` and the UI tab read only the most-recent file in each gateway dir. After rollover, older rows become invisible to the UI. |
 | [D14](#d14-gateway-audit-spillover-to-disk) | gateway | Audit body buffer is in-memory (64 MB cap)  | Single in-flight passthrough response is bounded; multi-tenant or pathological cases should spill to a temp file. |
-| [D15](#d15-gateway-passthrough-e2e-coverage) | gateway | No e2e scenario for passthrough             | S4 covers a2o/o2a translation only. An a2a passthrough scenario against the stub would catch wire-level regressions unit tests can't. |
-| [D16](#d16-flaky-tcp-test-on-macos) | testing | `TestAcceptAndForward_DialerErrorDropsConnection` flakes on macOS | `SetLinger(0)` on the accepted side can RST during the TCP handshake. Current 3-attempt retry isn't always enough; failed in CI on `504ac77` and `c831f27`. |
 
 #### D1: Log rotation
 
@@ -212,25 +211,6 @@ PG, PH, PI, PJ done.
 **Risks/dependencies:** Hot-reload (F1) is parked; document that `systemctl restart mesh@node` is the config-change workflow until F1 lands. Launchd plist format differs between macOS versions; test on macOS 13+.
 
 **Effort:** S — template files are straightforward. The install tasks add minor Taskfile work.
-
-#### D3: Tunnel package test coverage at 34%
-
-**Goal:** Raise `internal/tunnel` coverage to at least 60%, covering core forwarding, auth, and server paths.
-
-**Approach:**
-- Run `go test -coverprofile=cover.out ./internal/tunnel/...` and `go tool cover -func=cover.out` to identify the zero-coverage functions.
-- Prioritize: `handleDirectTCPIP`, `handleTCPIPForward`, `runForwardSet`, `buildAuthMethods`, `parsePermitOpen` (already has unit-testable shape).
-- For `handleDirectTCPIP` and `handleTCPIPForward`: start an in-process SSH server with `net.Pipe()` and an SSH client; exercise permit-open allow/deny paths.
-- For `runForwardSet`: test reconnect loop using a listener that closes after N accepts.
-- For `buildAuthMethods`: table-driven tests with mock agent socket, key file, and `password_command`.
-- Use `httptest.NewServer` pattern for any HTTP-adjacent paths.
-- Add `t.Parallel()` once each test is self-contained.
-
-**Key decisions:** Whether to use `net.Pipe()` (zero-network) or real TCP listeners (more realistic). `net.Pipe()` is preferred per project conventions (no `time.Sleep`, deterministic).
-
-**Risks/dependencies:** `runForwardSet` has retry loops; tests must use context cancellation to bound execution time. Shell-dependent paths (`password_command`) need build-tag isolation.
-
-**Effort:** L — each integration test requires setting up SSH server config, host keys, and auth. Targeting 60% is achievable in a focused session; 80%+ would require mocking OS-level calls.
 
 #### D6: Binary signing (cosign/Sigstore)
 
@@ -313,32 +293,6 @@ PG, PH, PI, PJ done.
 **Risks/dependencies:** Temp file lifetime — must clean up on context cancellation and on Recorder.Close. Filesystem permissions match the audit dir.
 
 **Effort:** M.
-
-#### D16: flaky TCP test on macOS
-
-**Goal:** Stop intermittent CI failures of `TestAcceptAndForward_DialerErrorDropsConnection` on `macos-latest`.
-
-**Symptom:** `Dial failed after retries: dial tcp 127.0.0.1:NNNNN: connect: connection reset by peer`. The accepted side of the listener calls `SetLinger(0)` so that `Close()` immediately RSTs once the dialer fails. On macOS the RST sometimes races the SYN-ACK of the test's own dial, so the dial itself fails. The current 3-iteration `for range 3` retry loop is not enough on a slow CI runner.
-
-**Approach:**
-- Replace the bounded retry with a deadline-bounded poll: keep dialing until `time.Now().After(deadline)`, with a small backoff between attempts. ~250 ms total budget is plenty.
-- Optionally drop `SetLinger(0)` for this specific test path and verify the assertion still holds — the goal is "client sees an error after dialer failure", which a graceful FIN also satisfies.
-
-**Risks/dependencies:** None — test-only change.
-
-**Effort:** XS.
-
-#### D15: gateway passthrough e2e coverage
-
-**Goal:** A scenario test in `e2e/scenarios/` that drives an a2a passthrough gateway against the stub LLM and asserts on audit log content.
-
-**Approach:**
-- Reuse `e2e/stub` to serve canned Anthropic SSE responses.
-- Add `s5_gateway_passthrough_test.go` with build tag `e2e`. Start a mesh node with `client_api: anthropic`, `upstream_api: anthropic`, and the audit log enabled in a temp dir.
-- Drive a request via `docker exec curl`, then read the audit JSONL via `docker exec cat` and assert on the reassembled `stream_summary.content`.
-- Cover both gzip-encoded and identity upstream responses to exercise `decodeForAudit`.
-
-**Effort:** M — adding a scenario is mechanical now that the stub and harness exist.
 
 ---
 
