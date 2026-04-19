@@ -541,7 +541,7 @@ Each entry follows the same structure:
   directories is actually needed.
 
 <a id="pf"></a>
-### PF · Trie-based ignore with cursor propagation · 🔧
+### PF · Trie-based ignore with cursor propagation · ✅
 
 [↑ back to summary](#summary-table)
 
@@ -605,7 +605,7 @@ Each entry follows the same structure:
      decision goes back to the user.
   7. Only after both gates are green, flip the feature flag default
      and retire the linear matcher.
-- **Verification (partial, Phase 1 shipped).** Profiling
+- **Verification (Phase 1 shipped).** Profiling
   `BenchmarkIgnoreMatcherRealistic` (60 patterns × 50 paths mirroring a
   monorepo gitignore) showed `path.Match` was 69 % of CPU inside
   `shouldIgnore`, dominated by two sources: a dead-code
@@ -613,20 +613,26 @@ Each entry follows the same structure:
   `/`, so it never matched when the first check missed) and a per-call
   `strings.SplitN(pattern, "**", 2)` inside `matchDoubleStar`.
   The dead branch was removed and `**` patterns now carry pre-split
-  `dsPrefix`/`dsSuffix` fields populated in `newIgnoreMatcher`; the
-  hot path calls `matchDoubleStarPresplit` through them.
+  `dsPrefix`/`dsSuffix` fields populated at construction; the hot path
+  calls `matchDoubleStarPresplit` through them.
   Measured (darwin/arm64, Apple M1 Max, -count=5):
   - `BenchmarkIgnoreMatcher`: 8 165 → 5 110 ns/op (1.6×), allocs 0.
   - `BenchmarkIgnoreMatcherRealistic`: 200 865 → 54 500 ns/op (3.7×),
     150 allocs/op → **0 allocs/op**.
-  `TestShouldIgnoreReferenceConformance` (30+ cases, including a pin
-  for the current single-`**` limitation) locks the externally visible
-  behaviour so the full trie rewrite can be ported against a stable
-  reference. The trie itself, gitignore-conformance widening (multiple
-  `**` in one pattern, directory cursor propagation across descent),
-  and the 10 k × 10 k fuzz comparator remain deferred to Phase 2 — this
-  partial win already removed ignore matching from the scan-time
-  hotspot list, so Phase 2 is no longer urgent.
+- **Verification (Phase 2 shipped, 2026-04-19).** Trie-based matcher
+  now the production default. `linearIgnoreMatcher` retained as the
+  conformance reference. Zero-divergence gate green:
+  - `TestTrieConformanceEdgeCases`, `TestTrieConformanceSmallGenerated`:
+    run on every `go test`. Zero divergences.
+  - `TestTrieConformanceLargeScale` (10 k patterns × 10 k paths,
+    `MESH_CONFORMANCE_LARGE=1`): zero divergences.
+  Measured (darwin/arm64, Apple M1 Max):
+  - `BenchmarkIgnoreMatcher`: 2 071 (linear) → 167 ns/op (**12×**).
+  - `BenchmarkIgnoreMatcherRealistic`: 32 928 (linear) → 1 910 ns/op
+    (**17×**).
+  Allocations remain 0 on both hot paths. The linear matcher and the
+  retained `BenchmarkIgnoreMatcher*Linear` baselines stay in tree as
+  regression comparators.
 
 <a id="pk"></a>
 ### PK · Clone elimination (COW / change-set on persist) · ⏸

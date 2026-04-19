@@ -22,10 +22,10 @@ const (
 	kindContains                      // *literal* → strings.Contains
 )
 
-// ignoreMatcher evaluates whether a file path should be excluded from sync.
+// linearIgnoreMatcher evaluates whether a file path should be excluded from sync.
 // Patterns are pre-classified at construction time so shouldIgnore avoids
 // per-call type checks and string operations (P20b).
-type ignoreMatcher struct {
+type linearIgnoreMatcher struct {
 	// builtinBase patterns match against path.Base only (no "/", no "**").
 	builtinBase []classifiedPattern
 	// basePatterns match against path.Base only (simple globs without "/").
@@ -77,10 +77,10 @@ func classifyGlob(pattern string) (patternKind, string) {
 	return kindGeneric, ""
 }
 
-// newIgnoreMatcher builds a matcher from config-level ignore patterns.
+// newLinearIgnoreMatcher builds a matcher from config-level ignore patterns.
 // Patterns are parsed once and pre-classified by type for fast matching.
-func newIgnoreMatcher(configPatterns []string) *ignoreMatcher {
-	m := &ignoreMatcher{}
+func newLinearIgnoreMatcher(configPatterns []string) *linearIgnoreMatcher {
+	m := &linearIgnoreMatcher{}
 
 	// Built-in ignores: all are simple basename globs (no "/" or "**").
 	for _, raw := range builtinIgnores {
@@ -180,7 +180,7 @@ func fastMatchPath(p *classifiedPattern, relPath string) bool {
 
 // shouldIgnore returns true if the given relative path should be excluded.
 // isDir indicates whether the path is a directory.
-func (m *ignoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
+func (m *linearIgnoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
 	// Compute basename once for all basename-only patterns.
 	base := path.Base(relPath)
 

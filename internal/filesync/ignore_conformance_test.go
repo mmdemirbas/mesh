@@ -31,16 +31,19 @@ type Matcher func(relPath string, isDir bool) bool
 // without leaking internal state.
 type MatcherFactory func(patterns []string) Matcher
 
-// linearFactory wraps the current production matcher.
+// linearFactory wraps the retained linear matcher. Kept as the conformance
+// reference after the trie was promoted to the production default: the
+// linear matcher's behavior is what the trie must still match, decision for
+// decision, across every corpus.
 var linearFactory MatcherFactory = func(patterns []string) Matcher {
-	return newIgnoreMatcher(patterns).shouldIgnore
+	return newLinearIgnoreMatcher(patterns).shouldIgnore
 }
 
-// trieFactory wraps the PF Phase 2 parallel matcher. It is the candidate
-// evaluated against linearFactory; the merge gate is zero divergence on
-// every case across the behavior, edge-case, and generated corpora.
+// trieFactory wraps the production (trie) matcher. Evaluated against
+// linearFactory; the merge gate is zero divergence across the behavior,
+// edge-case, and generated corpora.
 var trieFactory MatcherFactory = func(patterns []string) Matcher {
-	return newTrieIgnoreMatcher(patterns).shouldIgnore
+	return newIgnoreMatcher(patterns).shouldIgnore
 }
 
 // conformanceCase is one (path, isDir) pair the harness evaluates.

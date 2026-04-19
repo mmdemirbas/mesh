@@ -5797,6 +5797,10 @@ var benchIgnoreBasicPaths = []string{
 	"important.class",
 }
 
+// BenchmarkIgnoreMatcher measures the production (trie) matcher on the
+// basic corpus. The retained BenchmarkIgnoreMatcherLinear below measures
+// the retired linear matcher so perf regressions can be spotted against
+// the known baseline.
 func BenchmarkIgnoreMatcher(b *testing.B) {
 	m := newIgnoreMatcher(benchIgnoreBasicPatterns)
 	b.ReportAllocs()
@@ -5808,11 +5812,8 @@ func BenchmarkIgnoreMatcher(b *testing.B) {
 	}
 }
 
-// BenchmarkIgnoreMatcherTrie runs the PF Phase 2 trie on the same corpus
-// as BenchmarkIgnoreMatcher. Compare ns/op and allocs/op against the
-// linear baseline to decide whether the trie is worth flipping.
-func BenchmarkIgnoreMatcherTrie(b *testing.B) {
-	m := newTrieIgnoreMatcher(benchIgnoreBasicPatterns)
+func BenchmarkIgnoreMatcherLinear(b *testing.B) {
+	m := newLinearIgnoreMatcher(benchIgnoreBasicPatterns)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
@@ -5902,6 +5903,10 @@ var benchIgnoreRealisticPaths = []string{
 	"backend/server.go",
 }
 
+// BenchmarkIgnoreMatcherRealistic measures the production (trie) matcher
+// on the monorepo gitignore corpus. BenchmarkIgnoreMatcherRealisticLinear
+// exercises the retained linear matcher on the same corpus so perf
+// regressions can be spotted against the known baseline.
 func BenchmarkIgnoreMatcherRealistic(b *testing.B) {
 	m := newIgnoreMatcher(benchIgnoreRealisticPatterns)
 	b.ReportAllocs()
@@ -5914,12 +5919,8 @@ func BenchmarkIgnoreMatcherRealistic(b *testing.B) {
 	b.ReportMetric(float64(len(benchIgnoreRealisticPaths)), "paths/op")
 }
 
-// BenchmarkIgnoreMatcherRealisticTrie runs the PF Phase 2 trie on the same
-// corpus as BenchmarkIgnoreMatcherRealistic. Per the PF plan, the trie
-// must win across every bucket (shallow, deep, wide fan-out,
-// negation-heavy) before the default flips.
-func BenchmarkIgnoreMatcherRealisticTrie(b *testing.B) {
-	m := newTrieIgnoreMatcher(benchIgnoreRealisticPatterns)
+func BenchmarkIgnoreMatcherRealisticLinear(b *testing.B) {
+	m := newLinearIgnoreMatcher(benchIgnoreRealisticPatterns)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
@@ -5930,10 +5931,11 @@ func BenchmarkIgnoreMatcherRealisticTrie(b *testing.B) {
 	b.ReportMetric(float64(len(benchIgnoreRealisticPaths)), "paths/op")
 }
 
-// BenchmarkIgnoreMatcherConstruction pins the one-time cost of newMatcher
-// for the realistic corpus. The trie builds more structure at config load
-// in exchange for cheaper per-path matching; this benchmark surfaces the
-// amortization point (roughly: patterns × paths per scan).
+// BenchmarkIgnoreMatcherConstruction pins the one-time cost of
+// newIgnoreMatcher (trie) for the realistic corpus; the trie builds more
+// structure at config load in exchange for cheaper per-path matching.
+// BenchmarkIgnoreMatcherConstructionLinear covers the retained linear
+// path for regression comparison.
 func BenchmarkIgnoreMatcherConstruction(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
@@ -5941,10 +5943,10 @@ func BenchmarkIgnoreMatcherConstruction(b *testing.B) {
 	}
 }
 
-func BenchmarkIgnoreMatcherConstructionTrie(b *testing.B) {
+func BenchmarkIgnoreMatcherConstructionLinear(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		_ = newTrieIgnoreMatcher(benchIgnoreRealisticPatterns)
+		_ = newLinearIgnoreMatcher(benchIgnoreRealisticPatterns)
 	}
 }
 

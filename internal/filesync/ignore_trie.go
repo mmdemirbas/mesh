@@ -5,14 +5,12 @@ import (
 	"strings"
 )
 
-// trieIgnoreMatcher is the PF Phase 2 parallel implementation. It preserves
-// the exact semantics of ignoreMatcher (builtins short-circuit; base →
-// anchored → doublestar with last-match-wins within each group) but
-// replaces per-call linear scans with structure-bucketed lookups.
-//
-// Production still uses newIgnoreMatcher. This type exists for the
-// PF Phase 2 conformance gate and benchmarks; the merge gate is zero
-// divergence from linearFactory across the behavior corpus.
+// ignoreMatcher is the production ignore matcher. It preserves the exact
+// semantics of the reference linearIgnoreMatcher (builtins short-circuit;
+// base → anchored → doublestar with last-match-wins within each group) but
+// replaces per-call linear scans with structure-bucketed lookups. The
+// linear matcher is retained under linearIgnoreMatcher as the conformance
+// reference; any divergence on the behavior corpus is a merge blocker.
 //
 // Shape of the three groups:
 //
@@ -32,7 +30,7 @@ import (
 // map-based lookups are pre-collapsed to last-wins at construction and
 // slice-based groups are iterated backward so the first match is the
 // highest-ordinal one.
-type trieIgnoreMatcher struct {
+type ignoreMatcher struct {
 	// Base group.
 	litBase     map[string]baseFlags // keyed by basename
 	extSuffix   map[string]baseFlags // keyed by extension (after last ".")
@@ -170,15 +168,15 @@ type segEdge struct {
 // ignore.go; keep them in sync. A guard test in ignore_behavior_test.go
 // verifies the hardcoded forms still cover those patterns.
 const (
-	builtinTmpPrefix     = ".mesh-tmp-"        // from ".mesh-tmp-*"
+	builtinTmpPrefix     = ".mesh-tmp-"       // from ".mesh-tmp-*"
 	builtinDeltaContains = ".mesh-delta-tmp-" // from "*.mesh-delta-tmp-*"
 )
 
-// newTrieIgnoreMatcher builds the parallel matcher. Patterns are parsed
-// identically to newIgnoreMatcher so group membership is identical; only
-// the per-group storage differs.
-func newTrieIgnoreMatcher(configPatterns []string) *trieIgnoreMatcher {
-	m := &trieIgnoreMatcher{
+// newIgnoreMatcher builds the production matcher. Patterns are parsed
+// identically to newLinearIgnoreMatcher so group membership is identical;
+// only the per-group storage differs.
+func newIgnoreMatcher(configPatterns []string) *ignoreMatcher {
+	m := &ignoreMatcher{
 		litBase:     map[string]baseFlags{},
 		extSuffix:   map[string]baseFlags{},
 		litAnchored: map[string]baseFlags{},
@@ -412,7 +410,7 @@ func insertSegTrie(root *segNode, r trieRec) {
 // record loop is executed. The three configurable groups are evaluated
 // in base → anchored → doubleStar order with last-match-wins semantics
 // within each group.
-func (m *trieIgnoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
+func (m *ignoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
 	// One slash scan: base extraction, anchored-group guard, and
 	// secondToLastSegment all reuse lastSlash. Profiling showed the
 	// split scans were the biggest remaining waste on realistic paths.
