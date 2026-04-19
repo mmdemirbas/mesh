@@ -3995,6 +3995,7 @@ func TestHandleIndex_ExchangeRoundtrip(t *testing.T) {
 		Files: []*pb.FileInfo{
 			{Path: "remote.txt", Size: 200, Sha256: []byte("def456"), Sequence: 3},
 		},
+		ProtocolVersion: protocolVersion,
 	}
 	data, _ := proto.Marshal(req)
 
@@ -4050,10 +4051,11 @@ func TestHandleIndex_DeltaMode(t *testing.T) {
 
 	// Request with since=5: should only get new.txt (sequence 8 > 5).
 	req := &pb.IndexExchange{
-		DeviceId: "peer",
-		FolderId: "test",
-		Sequence: 5,
-		Since:    5,
+		DeviceId:        "peer",
+		FolderId:        "test",
+		Sequence:        5,
+		Since:           5,
+		ProtocolVersion: protocolVersion,
 	}
 	data, _ := proto.Marshal(req)
 
@@ -4259,7 +4261,7 @@ func TestHandleIndex_LoopbackTrusted(t *testing.T) {
 	ts := httptest.NewServer(srv.handler()) // connects from 127.0.0.1
 	defer ts.Close()
 
-	req := &pb.IndexExchange{DeviceId: "peer", FolderId: "test"}
+	req := &pb.IndexExchange{DeviceId: "peer", FolderId: "test", ProtocolVersion: protocolVersion}
 	data, _ := proto.Marshal(req)
 
 	resp, err := http.Post(ts.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
@@ -5096,7 +5098,7 @@ func TestHandleIndex_UnknownFolder(t *testing.T) {
 	ts := httptest.NewServer(srv.handler())
 	defer ts.Close()
 
-	req := &pb.IndexExchange{FolderId: "nonexistent"}
+	req := &pb.IndexExchange{FolderId: "nonexistent", ProtocolVersion: protocolVersion}
 	data, _ := proto.Marshal(req)
 
 	resp, err := http.Post(ts.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
@@ -5131,10 +5133,11 @@ func TestHandleIndex_RejectsExcessiveTotalPages(t *testing.T) {
 	defer ts.Close()
 
 	req := &pb.IndexExchange{
-		DeviceId:   "peer",
-		FolderId:   "test",
-		TotalPages: maxTotalPages + 1,
-		Page:       0,
+		DeviceId:        "peer",
+		FolderId:        "test",
+		TotalPages:      maxTotalPages + 1,
+		Page:            0,
+		ProtocolVersion: protocolVersion,
 	}
 	data, _ := proto.Marshal(req)
 	resp, err := http.Post(ts.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
@@ -5145,6 +5148,90 @@ func TestHandleIndex_RejectsExcessiveTotalPages(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for excessive totalPages, got %d", resp.StatusCode)
+	}
+}
+
+// Protocol version mismatch must be rejected with HTTP 400 before any
+// folder or content is touched. See docs/filesync/DESIGN-v1.md.
+func TestHandleIndex_RejectsProtocolVersionMismatch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	n.folders["test"] = &folderState{
+		cfg:   testFolderCfg(dir, "127.0.0.1"),
+		index: newFileIndex(),
+		peers: make(map[string]PeerState),
+	}
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	tests := []struct {
+		name    string
+		version uint32
+	}{
+		{"missing (v0)", 0},
+		{"future (v2)", 2},
+		{"large (v99)", 99},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &pb.IndexExchange{
+				DeviceId:        "peer",
+				FolderId:        "test",
+				ProtocolVersion: tc.version,
+			}
+			data, err := proto.Marshal(req)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			resp, err := http.Post(ts.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
+			if err != nil {
+				t.Fatalf("post: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("version=%d: got %d, want 400", tc.version, resp.StatusCode)
+			}
+		})
+	}
+}
+
+// buildIndexExchange must stamp the current protocol version on every
+// outgoing message, including the defensive empty return for unknown folders.
+func TestBuildIndexExchange_StampsProtocolVersion(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	idx := newFileIndex()
+	idx.Files["a.txt"] = FileEntry{Size: 1, SHA256: testHash("a"), Sequence: 1}
+	idx.Sequence = 1
+	n.folders["test"] = &folderState{
+		cfg:   testFolderCfg(dir, "127.0.0.1"),
+		index: idx,
+		peers: make(map[string]PeerState),
+	}
+
+	// Full, delta, and unknown-folder paths all stamp the version.
+	if got := n.buildIndexExchange("test", 0).GetProtocolVersion(); got != protocolVersion {
+		t.Errorf("full: got %d, want %d", got, protocolVersion)
+	}
+	if got := n.buildIndexExchange("test", 0).GetProtocolVersion(); got != protocolVersion {
+		t.Errorf("delta: got %d, want %d", got, protocolVersion)
+	}
+	if got := n.buildIndexExchange("missing", 0).GetProtocolVersion(); got != protocolVersion {
+		t.Errorf("unknown folder: got %d, want %d", got, protocolVersion)
 	}
 }
 
@@ -6679,12 +6766,13 @@ func TestMultiPageIndex_TotalFileCap(t *testing.T) {
 	}
 
 	page0 := &pb.IndexExchange{
-		DeviceId:   "peer1",
-		FolderId:   "test",
-		Sequence:   1,
-		Files:      files,
-		Page:       0,
-		TotalPages: 2,
+		DeviceId:        "peer1",
+		FolderId:        "test",
+		Sequence:        1,
+		Files:           files,
+		Page:            0,
+		TotalPages:      2,
+		ProtocolVersion: protocolVersion,
 	}
 	data, _ := proto.Marshal(page0)
 	resp, err := http.Post(srv.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
@@ -6698,12 +6786,13 @@ func TestMultiPageIndex_TotalFileCap(t *testing.T) {
 
 	// Page 1 with 1 more file should push over the 500k cap.
 	page1 := &pb.IndexExchange{
-		DeviceId:   "peer1",
-		FolderId:   "test",
-		Sequence:   1,
-		Files:      []*pb.FileInfo{{Path: "overflow.txt", Sequence: 1}},
-		Page:       1,
-		TotalPages: 2,
+		DeviceId:        "peer1",
+		FolderId:        "test",
+		Sequence:        1,
+		Files:           []*pb.FileInfo{{Path: "overflow.txt", Sequence: 1}},
+		Page:            1,
+		TotalPages:      2,
+		ProtocolVersion: protocolVersion,
 	}
 	data, _ = proto.Marshal(page1)
 	resp, err = http.Post(srv.URL+"/index", "application/x-protobuf", bytes.NewReader(data))

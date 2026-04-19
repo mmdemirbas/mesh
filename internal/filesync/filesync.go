@@ -2412,7 +2412,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.IndexExchange {
 	fs, ok := n.folders[folderID]
 	if !ok {
-		return &pb.IndexExchange{}
+		return &pb.IndexExchange{ProtocolVersion: protocolVersion}
 	}
 
 	fs.indexMu.RLock()
@@ -2445,11 +2445,12 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 			})
 		}
 		return &pb.IndexExchange{
-			DeviceId: n.deviceID,
-			FolderId: folderID,
-			Sequence: fs.index.Sequence,
-			Epoch:    fs.index.Epoch,
-			Files:    files,
+			DeviceId:        n.deviceID,
+			FolderId:        folderID,
+			Sequence:        fs.index.Sequence,
+			Epoch:           fs.index.Epoch,
+			Files:           files,
+			ProtocolVersion: protocolVersion,
 		}
 	}
 
@@ -2472,11 +2473,12 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 	}
 
 	return &pb.IndexExchange{
-		DeviceId: n.deviceID,
-		FolderId: folderID,
-		Sequence: fs.index.Sequence,
-		Epoch:    fs.index.Epoch,
-		Files:    files,
+		DeviceId:        n.deviceID,
+		FolderId:        folderID,
+		Sequence:        fs.index.Sequence,
+		Epoch:           fs.index.Epoch,
+		Files:           files,
+		ProtocolVersion: protocolVersion,
 	}
 }
 

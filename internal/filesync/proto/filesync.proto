@@ -14,6 +14,7 @@ message IndexExchange {
   int32  total_pages = 7;          // Total pages (0 or 1 = single page, legacy compat)
   bool   fetch       = 8;          // True = client is fetching a server response page
   string epoch       = 9;          // Random ID regenerated on index creation; used to detect index loss
+  uint32 protocol_version = 10;    // Filesync wire protocol version. Current: 1. Mismatches are rejected.
 }
 
 // FileInfo describes a single file (or a deletion tombstone) in the index.

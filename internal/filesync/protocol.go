@@ -56,6 +56,12 @@ const (
 	indexPageSize     = 10_000            // max files per index page
 	pendingTTL        = 5 * time.Minute   // stale pending exchange cleanup threshold
 	maxTotalPages     = 200               // caps incoming TotalPages to prevent OOM (200 × 10k = 2M files)
+
+	// protocolVersion is the current filesync wire protocol version.
+	// Every outgoing IndexExchange sets this; receivers reject mismatches
+	// with HTTP 400. There is no v0 — mesh filesync debuted at v1 and
+	// never shipped anything older. See docs/filesync/DESIGN-v1.md.
+	protocolVersion uint32 = 1
 )
 
 // server handles filesync HTTP endpoints.
@@ -158,6 +164,14 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	var req pb.IndexExchange
 	if err := proto.Unmarshal(body, &req); err != nil {
 		http.Error(w, "invalid protobuf: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if v := req.GetProtocolVersion(); v != protocolVersion {
+		slog.Warn("rejecting index exchange: protocol version mismatch",
+			"peer", req.GetDeviceId(), "folder", req.GetFolderId(),
+			"peer_version", v, "local_version", protocolVersion)
+		http.Error(w, fmt.Sprintf("protocol version mismatch: peer=%d local=%d", v, protocolVersion), http.StatusBadRequest)
 		return
 	}
 
@@ -329,12 +343,13 @@ func paginateResponse(resp *pb.IndexExchange) []*pb.IndexExchange {
 		start := int(i) * indexPageSize
 		end := min(start+indexPageSize, len(files))
 		pages = append(pages, &pb.IndexExchange{
-			DeviceId:   resp.GetDeviceId(),
-			FolderId:   resp.GetFolderId(),
-			Sequence:   resp.GetSequence(),
-			Files:      files[start:end],
-			Page:       i,
-			TotalPages: totalPages,
+			DeviceId:        resp.GetDeviceId(),
+			FolderId:        resp.GetFolderId(),
+			Sequence:        resp.GetSequence(),
+			Files:           files[start:end],
+			Page:            i,
+			TotalPages:      totalPages,
+			ProtocolVersion: protocolVersion,
 		})
 	}
 	return pages
@@ -787,6 +802,12 @@ func isLoopback(ip string) bool {
 // For large indices (> indexPageSize files), the exchange is paginated:
 // files are split into pages sent as separate HTTP requests.
 func sendIndex(ctx context.Context, client *http.Client, peerAddr string, exchange *pb.IndexExchange) (*pb.IndexExchange, error) {
+	// Defensive: callers construct IndexExchange via buildIndexExchange
+	// which stamps the version, but tests and other entry points may not.
+	// Stamp here so every wire message carries the current version.
+	if exchange.GetProtocolVersion() == 0 {
+		exchange.ProtocolVersion = protocolVersion
+	}
 	files := exchange.GetFiles()
 	if len(files) <= indexPageSize {
 		return sendSingleIndex(ctx, client, peerAddr, exchange)
@@ -826,13 +847,14 @@ func sendPaginatedIndex(ctx context.Context, client *http.Client, peerAddr strin
 		end := min(start+indexPageSize, len(files))
 
 		pageExchange := &pb.IndexExchange{
-			DeviceId:   clientDeviceID,
-			FolderId:   exchange.GetFolderId(),
-			Sequence:   exchange.GetSequence(),
-			Since:      exchange.GetSince(),
-			Files:      files[start:end],
-			Page:       page,
-			TotalPages: totalPages,
+			DeviceId:        clientDeviceID,
+			FolderId:        exchange.GetFolderId(),
+			Sequence:        exchange.GetSequence(),
+			Since:           exchange.GetSince(),
+			Files:           files[start:end],
+			Page:            page,
+			TotalPages:      totalPages,
+			ProtocolVersion: protocolVersion,
 		}
 
 		data, err := proto.Marshal(pageExchange)
@@ -876,10 +898,11 @@ func fetchResponsePages(ctx context.Context, client *http.Client, peerAddr, clie
 
 	for page := int32(1); page < firstPage.GetTotalPages(); page++ {
 		fetchReq := &pb.IndexExchange{
-			DeviceId: clientDeviceID,
-			FolderId: firstPage.GetFolderId(),
-			Page:     page,
-			Fetch:    true,
+			DeviceId:        clientDeviceID,
+			FolderId:        firstPage.GetFolderId(),
+			Page:            page,
+			Fetch:           true,
+			ProtocolVersion: protocolVersion,
 		}
 
 		data, err := proto.Marshal(fetchReq)
@@ -895,10 +918,11 @@ func fetchResponsePages(ctx context.Context, client *http.Client, peerAddr, clie
 	}
 
 	return &pb.IndexExchange{
-		DeviceId: firstPage.GetDeviceId(),
-		FolderId: firstPage.GetFolderId(),
-		Sequence: firstPage.GetSequence(),
-		Files:    allFiles,
+		DeviceId:        firstPage.GetDeviceId(),
+		FolderId:        firstPage.GetFolderId(),
+		Sequence:        firstPage.GetSequence(),
+		Files:           allFiles,
+		ProtocolVersion: firstPage.GetProtocolVersion(),
 	}, nil
 }
 
@@ -947,6 +971,10 @@ func postIndex(ctx context.Context, client *http.Client, peerAddr string, data [
 	var respIdx pb.IndexExchange
 	if err := proto.Unmarshal(respBody, &respIdx); err != nil {
 		return nil, fmt.Errorf("unmarshal response from %s: %w", peerAddr, err)
+	}
+
+	if v := respIdx.GetProtocolVersion(); v != protocolVersion {
+		return nil, fmt.Errorf("peer %s protocol version mismatch: peer=%d local=%d", peerAddr, v, protocolVersion)
 	}
 
 	return &respIdx, nil
