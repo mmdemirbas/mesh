@@ -6499,6 +6499,41 @@ func TestGetActivities_RecordAndCap(t *testing.T) {
 	}
 }
 
+func TestClientForPeer_PeerSpecificAndDefault(t *testing.T) {
+	t.Parallel()
+	peerClient := &http.Client{}
+	defaultClient := &http.Client{}
+	n := &Node{
+		peerClients:   map[string]*http.Client{"10.0.0.1:7756": peerClient},
+		defaultClient: defaultClient,
+	}
+	if got := n.clientForPeer("10.0.0.1:7756"); got != peerClient {
+		t.Error("configured peer must return its own client")
+	}
+	if got := n.clientForPeer("192.168.1.1:7756"); got != defaultClient {
+		t.Error("unconfigured peer must fall back to defaultClient")
+	}
+}
+
+func TestTLSStatusFor_PinnedAndNot(t *testing.T) {
+	t.Parallel()
+	n := &Node{
+		peerHasFingerprint: map[string]bool{
+			"10.0.0.1:7756": true,
+			"10.0.0.2:7756": false,
+		},
+	}
+	if got := n.tlsStatusFor("10.0.0.1:7756"); got != "encrypted · verified" {
+		t.Errorf("pinned peer status = %q, want 'encrypted · verified'", got)
+	}
+	if got := n.tlsStatusFor("10.0.0.2:7756"); got != "encrypted" {
+		t.Errorf("unpinned peer status = %q, want 'encrypted'", got)
+	}
+	if got := n.tlsStatusFor("10.0.0.99:7756"); got != "encrypted" {
+		t.Errorf("unknown peer status = %q, want 'encrypted'", got)
+	}
+}
+
 func TestSetConfigFolders_FallbackWhenNoActiveNodes(t *testing.T) {
 	// Not t.Parallel: mutates the global configFolders registry.
 	t.Cleanup(clearConfigFolders)
