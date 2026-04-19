@@ -694,6 +694,29 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	activeBefore := idx.cachedCount
 	seenPrevActive := 0
 
+	// PM: lazy-built sorted slice of index keys for prefix search. The
+	// error-dir branch used to iterate all of idx.Files to find descendants
+	// of a failed directory — O(N × M) across M errored directories. Sort
+	// once on the first error (O(N log N)) and binary-search each prefix
+	// (O(log N + matches)). The zero-error common case pays nothing.
+	var sortedPaths []string
+	descendantsOf := func(dir string) []string {
+		if sortedPaths == nil {
+			sortedPaths = make([]string, 0, len(idx.Files))
+			for rel := range idx.Files {
+				sortedPaths = append(sortedPaths, rel)
+			}
+			sort.Strings(sortedPaths)
+		}
+		prefix := dir + "/"
+		start := sort.SearchStrings(sortedPaths, prefix)
+		end := start
+		for end < len(sortedPaths) && strings.HasPrefix(sortedPaths[end], prefix) {
+			end++
+		}
+		return sortedPaths[start:end]
+	}
+
 	// P20a: parallel hash worker pool. Files that miss the fast path
 	// (stat changed) are sent to workers; results are drained after the walk.
 	hashCh := make(chan hashJob, 64)
@@ -769,7 +792,8 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 				continue
 			}
 			// H1: the directory was unreadable. Protect it and all known
-			// children from tombstoning.
+			// descendants from tombstoning. PM: use descendantsOf for an
+			// O(log N + matches) lookup instead of O(N) per error.
 			if dr.dirRel != "" {
 				if _, already := seen[dr.dirRel]; !already {
 					if e, ok := idx.Files[dr.dirRel]; ok && !e.Deleted {
@@ -778,15 +802,14 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 				}
 				seen[dr.dirRel] = struct{}{}
 				errorPaths[dr.dirRel] = struct{}{}
-				dirPrefix := dr.dirRel + "/"
-				for child, e := range idx.Files {
-					if strings.HasPrefix(child, dirPrefix) {
-						if _, already := seen[child]; !already && !e.Deleted {
+				for _, child := range descendantsOf(dr.dirRel) {
+					if _, already := seen[child]; !already {
+						if e := idx.Files[child]; !e.Deleted {
 							seenPrevActive++
 						}
-						seen[child] = struct{}{}
-						errorPaths[child] = struct{}{}
 					}
+					seen[child] = struct{}{}
+					errorPaths[child] = struct{}{}
 				}
 			}
 			stats.StatErrors++

@@ -105,7 +105,7 @@ there depend on items tracked here.
 | PF    | Trie-based ignore with cursor propagation            | 🟠 P1 | perf          | ⏳     | 🟥 L   | 🟡   | 📦    |
 | PK    | Clone elimination (COW / change-set on persist)      | 🟠 P1 | perf          | ⏳     | 🟧 M   | 🔴   | 📦    |
 | PL    | Incremental deletion detection                       | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
-| PM    | Directory-keyed child index                          | 🟠 P1 | perf          | ⏳     | 🟨 S   | 🟢   | 📄    |
+| PM    | Directory-keyed child index                          | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
 | PN    | Incremental `recomputeCache`                         | 🟠 P1 | perf          | ⏳     | 🟨 S   | 🟢   | 📄    |
 | R1    | Inode-based rename / move detection                  | 🟡 P2 | robustness    | 🔧     | 🟧 M   | 🟡   | 🔌    |
 | R2    | Formal folder-level state machine                    | 🟡 P2 | robustness    | ⏳     | 🟧 M   | 🟢   | 📦    |
@@ -550,7 +550,7 @@ Each entry follows the same structure:
   continue to pass. Eager fsnotify-remove path deferred; the scan-side
   short-circuit alone captures the common-case win.
 
-### PM · Directory-keyed child index · ⏳
+### PM · Directory-keyed child index · ✅
 
 - **Problem.** Error-path protection (`index.go:665-670`) scans the full
   index to find children of a failed directory. O(N × M) where M = number
@@ -570,6 +570,21 @@ Each entry follows the same structure:
   SQLite schema.
 - **Recommendation.** Ship (1) alongside PL — same kind of secondary
   index work.
+- **Verification.** `scanWithStats` now builds a lazy sorted slice
+  (`sortedPaths`) on the first directory-read error and binary-searches
+  the prefix via `descendantsOf`. Cost shape: zero when no errors occur;
+  O(N log N) sort + O(log N + matches) per error lookup when errors do
+  occur. The original O(N × M) scan across every idx.Files entry is
+  eliminated. The implementation lives inside `scanWithStats` — no
+  persistent secondary index on `FileIndex`, so nothing needs to be kept
+  consistent across mutations. Test: `TestScanUnreadableSubdirProtectsAllDescendants`
+  sets up a nested subtree (`top/a.txt`, `top/deep/b.txt`,
+  `top/deep/deeper/c.txt`) plus an unrelated sibling, chmods `top` to
+  0000, and verifies every descendant is protected from tombstoning
+  while the sibling stays untouched. Existing error-suppression tests
+  (`TestScanErrorsSuppressTombstones`,
+  `TestScanPerFileErrorAllowsOtherTombstones`,
+  `TestScanBulkErrorsSuppressAllTombstones`) continue to pass.
 
 ### PN · Incremental `recomputeCache` · ⏳
 

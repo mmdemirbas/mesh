@@ -1143,6 +1143,63 @@ func TestScanBulkErrorsSuppressAllTombstones(t *testing.T) {
 	}
 }
 
+// PM: when a subdirectory becomes unreadable, all descendants (direct and
+// nested) must be protected from tombstoning. Verifies the sorted-prefix
+// lookup returns every descendant.
+func TestScanUnreadableSubdirProtectsAllDescendants(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0000 on directories is a no-op on Windows")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+
+	// Layout:
+	//   top/a.txt
+	//   top/deep/b.txt
+	//   top/deep/deeper/c.txt
+	//   sibling.txt (outside the unreadable subtree)
+	writeFile(t, dir, "top/a.txt", "aa")
+	writeFile(t, dir, "top/deep/b.txt", "bb")
+	writeFile(t, dir, "top/deep/deeper/c.txt", "cc")
+	writeFile(t, dir, "sibling.txt", "ss")
+
+	idx := newFileIndex()
+	ignore := &ignoreMatcher{}
+	_, _, _, scanErr := idx.scan(context.Background(), dir, ignore)
+	if scanErr != nil {
+		t.Fatal(scanErr)
+	}
+
+	// Make the root of the subtree unreadable.
+	topPath := filepath.Join(dir, "top")
+	if err := os.Chmod(topPath, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(topPath, 0o755) })
+
+	// Re-scan. The unreadable dir produces readErr; all descendants must
+	// be protected from tombstoning.
+	_, _, _, scanErr = idx.scan(context.Background(), dir, ignore)
+	if scanErr != nil {
+		t.Fatal(scanErr)
+	}
+
+	for _, p := range []string{"top/a.txt", "top/deep/b.txt", "top/deep/deeper/c.txt"} {
+		entry, ok := idx.Files[p]
+		if !ok {
+			t.Errorf("%s disappeared from index", p)
+			continue
+		}
+		if entry.Deleted {
+			t.Errorf("%s must not be tombstoned while parent subtree is unreadable", p)
+		}
+	}
+	// sibling.txt is outside the protected subtree and must be untouched.
+	if e := idx.Files["sibling.txt"]; e.Deleted {
+		t.Error("sibling.txt must not be affected by unrelated subtree error")
+	}
+}
+
 // B10: scan must fail fast when folder root is inaccessible.
 func TestScanFolderRootInaccessible(t *testing.T) {
 	t.Parallel()
