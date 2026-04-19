@@ -153,7 +153,7 @@ Rule 1 (boundary gaps) and Rule 2 (reproducer gaps), not the number.
 | internal/config   | 83.3% | `Validate` branches at 62.2%; `Load` at 55.6% (boundary gap at `LoadNodeNames`/`ResolveAllowedPeerHosts` closed in `ba06243`) | None found in scan | None found (spot check: `0d57b1b` has TDD reproducer in prior `7661936`) | MED |
 | internal/filesync | 58.6% | HTTP handler rejection paths partly closed in `b5fde66` (method/protobuf/gzip on index,file,delta); `handleBundle` / `handleStatus` rejection paths still uncovered; `Start` / `syncLoop` / `syncFolder` 0% | None found in scan | None found on spot check (fix+test-commit pattern: `c6522c1` paired with `b4ac2cf`; `5aef218`/`9f2bf7d` ship tests inline) | MED |
 | internal/clipsync | 60.3% | All HTTP trust-boundary paths now tested against the real handlers: `/discover` (`41518a7`), and after `df08f4c` extracted the inline closures, `/sync`+`/clip`+`/files` rejection paths closed in `f6eed64`. `serveClip` 100%, `serveDiscover` 92.3%, `serveSync` 79.2%, `serveFiles` 75% | None found in scan | _TBD_ | LOW |
-| internal/tunnel   | 36.4% | Core SSH paths at 0%: `Run`, `NewSSHClient`, `runMultiplex`, `buildSSHConfig`, `runForwardSet`, `runRemoteForward`, `runLocalForward`, `handleTCPIPForward`, `handleDirectTCPIP`, `connectSSH`, `runSession` | _TBD_ | _TBD_ | HIGH |
+| internal/tunnel   | 37.7% | First bites taken: `snapshotAuthFailuresIn`/`evictOldAuthFailuresIn` parameterized and covered 100% in `b4b6934`; `dialerControlIPQoS` unix helper covered 88.9% in `517489b`. Core SSH runtime still at 0%: `Run`, `NewSSHClient`, `runMultiplex`, `buildSSHConfig`, `runForwardSet`, `runRemoteForward`, `runLocalForward`, `handleTCPIPForward`, `handleDirectTCPIP`, `connectSSH`, `runSession` — needs in-process SSH harness | _TBD_ | _TBD_ | HIGH |
 | internal/proxy    | 68.5% | Orchestration wrappers closed in `2a65b4f` (`RunStandaloneProxies` 85.7%, `RunStandaloneRelays` 79.6%). Core serving paths already tested | None found in scan | _TBD_ | LOW |
 | internal/gateway  | 84.1% | _Strong — 242 tests covering a2o/o2a translation + passthrough + streaming_ | _TBD_ | _TBD_ | LOW |
 | internal/netutil  | 98.1% | `ListenReusable` closed in `a41ddaf` (accept round-trip + empty-address wildcard bind) | None found in scan | None found | LOW |
@@ -166,13 +166,16 @@ Rule 1 (boundary gaps) and Rule 2 (reproducer gaps), not the number.
 Cursory coverage numbers only — no full rubric pass yet. Left for
 future audit cycles.
 
-- **tunnel (36.4%)**: largest known gap. Every core SSH runtime path
-  is at 0% — `Run`, `NewSSHClient`, `runMultiplex`, `buildSSHConfig`,
-  `runForwardSet`, `runRemoteForward`, `runLocalForward`,
-  `handleTCPIPForward`, `handleDirectTCPIP`, `connectSSH`,
-  `runSession`. Unit coverage requires an in-process SSH server over
-  `net.Pipe()` or real TCP, plus auth-material setup. This is a
-  multi-day effort — formerly PLAN.md D3.
+- **tunnel (37.7%)**: largest known gap. Quick-win helpers closed:
+  auth-failure snapshot and eviction (`b4b6934`, 100%) and the unix
+  `dialerControlIPQoS` wrapper (`517489b`, 88.9%). Every core SSH
+  runtime path is still at 0% — `Run`, `NewSSHClient`, `runMultiplex`,
+  `buildSSHConfig`, `runForwardSet`, `runRemoteForward`,
+  `runLocalForward`, `handleTCPIPForward`, `handleDirectTCPIP`,
+  `connectSSH`, `runSession`. Unit coverage of these paths requires an
+  in-process SSH server over `net.Pipe()` or real TCP, plus
+  auth-material setup. This is a multi-day effort — formerly PLAN.md
+  D3.
 - **gateway (84.1%)**: 242 tests, strongest unit suite in the repo.
   Likely in good shape; a focused audit can confirm.
 - **netutil (98.1%)**: audit closed in `a41ddaf`. `ListenReusable`
