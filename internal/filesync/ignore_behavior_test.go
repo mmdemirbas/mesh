@@ -166,7 +166,7 @@ var behaviorDoubleStar = []behaviorCase{
 	{[]string{"**/node_modules/**"}, "node_modules/x", false, true},
 	{[]string{"**/node_modules/**"}, "pkg/node_modules/x", false, true},
 	{[]string{"**/node_modules/**"}, "pkg/node_modules/x/y", false, false}, // too deep
-	{[]string{"**/node_modules/**"}, "node_modules", false, false},          // needs at least one trailing segment
+	{[]string{"**/node_modules/**"}, "node_modules", false, false},         // needs at least one trailing segment
 	{[]string{"**/node_modules/**"}, "foonode_modules/x", false, false},
 
 	// **/*.ext at any depth.
@@ -368,4 +368,12 @@ func runAllBehaviorTables(t *testing.T, factory MatcherFactory) {
 // reproduce case-for-case.
 func TestIgnoreBehaviorLinear(t *testing.T) {
 	runAllBehaviorTables(t, linearFactory)
+}
+
+// TestIgnoreBehaviorTrie is the merge gate for PF Phase 2. Every case that
+// passes on the linear matcher must produce the identical decision on the
+// trie. A failure here is either a trie bug (fix) or a linear quirk the
+// trie deliberately departs from (decide with the user; do not flip defaults).
+func TestIgnoreBehaviorTrie(t *testing.T) {
+	runAllBehaviorTables(t, trieFactory)
 }

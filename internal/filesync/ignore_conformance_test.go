@@ -36,6 +36,13 @@ var linearFactory MatcherFactory = func(patterns []string) Matcher {
 	return newIgnoreMatcher(patterns).shouldIgnore
 }
 
+// trieFactory wraps the PF Phase 2 parallel matcher. It is the candidate
+// evaluated against linearFactory; the merge gate is zero divergence on
+// every case across the behavior, edge-case, and generated corpora.
+var trieFactory MatcherFactory = func(patterns []string) Matcher {
+	return newTrieIgnoreMatcher(patterns).shouldIgnore
+}
+
 // conformanceCase is one (path, isDir) pair the harness evaluates.
 type conformanceCase struct {
 	path  string
@@ -288,6 +295,51 @@ func TestConformanceHarnessLargeScale(t *testing.T) {
 	if len(diffs) != 0 {
 		t.Fatalf("large-scale self-check failed: %d divergences (first: %s)",
 			len(diffs), diffs[0])
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Trie-vs-linear divergence gates
+// -----------------------------------------------------------------------------
+
+// TestTrieConformanceEdgeCases compares the trie to the linear matcher on
+// the handwritten edge-case corpus. A single divergence is a merge blocker.
+func TestTrieConformanceEdgeCases(t *testing.T) {
+	t.Parallel()
+	patterns := edgeCasePatterns()
+	cases := edgeCasePaths()
+	diffs := runConformance(patterns, cases, linearFactory, trieFactory)
+	if len(diffs) != 0 {
+		t.Fatalf("trie diverges from linear on %d edge-case(s): first: %s",
+			len(diffs), diffs[0])
+	}
+}
+
+// TestTrieConformanceSmallGenerated compares the trie to the linear matcher
+// on the small deterministic generated corpus (100 × 500). Runs on every
+// `go test` so any regression surfaces in the default suite.
+func TestTrieConformanceSmallGenerated(t *testing.T) {
+	t.Parallel()
+	patterns, cases := generateCorpus(smallScale)
+	diffs := runConformance(patterns, cases, linearFactory, trieFactory)
+	if len(diffs) != 0 {
+		t.Fatalf("trie diverges from linear on %d small-corpus case(s): first: %s",
+			len(diffs), diffs[0])
+	}
+}
+
+// TestTrieConformanceLargeScale is the 10k × 10k divergence gate. Opt-in
+// via MESH_CONFORMANCE_LARGE=1 to keep the default suite fast while still
+// giving the full-scale gate a single command to run.
+func TestTrieConformanceLargeScale(t *testing.T) {
+	if os.Getenv("MESH_CONFORMANCE_LARGE") != "1" {
+		t.Skip("set MESH_CONFORMANCE_LARGE=1 to run the 10k × 10k gate")
+	}
+	patterns, cases := generateCorpus(largeScale)
+	diffs := runConformance(patterns, cases, linearFactory, trieFactory)
+	if len(diffs) != 0 {
+		t.Fatalf("trie diverges from linear on %d large-corpus case(s) out of %d: first: %s",
+			len(diffs), len(cases), diffs[0])
 	}
 }
 
