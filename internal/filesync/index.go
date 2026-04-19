@@ -122,6 +122,14 @@ type PeerState struct {
 	PendingEpoch     string    `yaml:"pending_epoch,omitempty"` // H2b: new epoch detected, awaiting diff filter
 	Removed          bool      `yaml:"removed,omitempty"`       // M3: peer no longer in config
 	RemovedAt        time.Time `yaml:"removed_at,omitempty"`    // M3: when peer was marked removed
+
+	// C2: per-path ancestor hash — the content hash both sides last
+	// agreed on. Used by diff() to distinguish "only we modified" from
+	// "only they modified" from "both modified". Populated after each
+	// successful sync from paths where local and remote hashes match.
+	// Absence (nil map or missing key) → fall back to the C1 mtime
+	// heuristic.
+	BaseHashes map[string]Hash256 `yaml:"base_hashes,omitempty"`
 }
 
 // newFileIndex creates an empty index.
@@ -1105,16 +1113,27 @@ type DiffEntry struct {
 // actions needed to bring the local side up to date.
 // lastSeenSeq is the highest remote sequence we've previously processed from
 // this peer; it filters out already-seen remote entries.
-// lastSyncNS is PeerState.LastSync in Unix nanoseconds; it is used to decide
-// whether our local copy was modified after the last successful exchange
-// with this peer (C1 — mtime vs last-sync). This replaces the prior
-// cross-scale compare of local Sequence against the peer's last-seen remote
-// Sequence, which produced false-positive conflicts when one side had done
-// many more operations than the other.
-func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int64, direction string) []DiffEntry {
+// lastSyncNS is PeerState.LastSync in Unix nanoseconds. It drives the C1
+// mtime-vs-last-sync fallback when no ancestor hash is known for a path.
+// baseHashes is PeerState.BaseHashes, the per-path ancestor hash we and the
+// peer last agreed on. When present, diff() uses the ancestor to classify
+// divergences definitively: only-local, only-remote, or both. When absent
+// for a given path — bootstrap, first sync, or a freshly appearing file —
+// diff() falls back to the C1 mtime heuristic.
+func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int64, baseHashes map[string]Hash256, direction string) []DiffEntry {
 	canReceive := direction == "send-receive" || direction == "receive-only" || direction == "dry-run"
 	if !canReceive {
 		return nil
+	}
+
+	// locallyModified reports whether our copy of path has changed since
+	// we last agreed on content with this peer. The ancestor hash is the
+	// definitive signal; mtime-vs-lastSync is the fallback.
+	locallyModified := func(path string, lEntry FileEntry) bool {
+		if ancestor, ok := baseHashes[path]; ok {
+			return lEntry.SHA256 != ancestor
+		}
+		return lEntry.MtimeNS > lastSyncNS
 	}
 
 	var actions []DiffEntry
@@ -1133,9 +1152,9 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 				// and the local file was modified after that baseline,
 				// local wins over remote delete. The local version will
 				// propagate back to the peer on the next outbound sync.
-				// C1: compare local mtime against the wall-clock time of
-				// the last successful sync with this peer, not sequences.
-				if lastSeenSeq > 0 && lEntry.MtimeNS > lastSyncNS {
+				// C2: ancestor hash decides "locally modified" when known;
+				// C1: mtime-vs-lastSync is the fallback.
+				if lastSeenSeq > 0 && locallyModified(path, lEntry) {
 					continue
 				}
 				// H8: on first sync (lastSeenSeq=0), never delete a
@@ -1174,14 +1193,43 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 			continue // Same content
 		}
 
-		// Both sides have the file with different content.
-		// C1: "was our copy locally modified since we last talked to this
-		// peer?" — answered by comparing mtime to lastSyncNS. The previous
-		// heuristic compared our local Sequence to the peer's remote
-		// Sequence, which lives on a different scale and produced spurious
-		// conflicts whenever the two sides' operation counts diverged.
+		// Both sides have the file with different content. Classify the
+		// divergence — preferring the ancestor when we have one (C2),
+		// falling back to mtime (C1).
+		if ancestor, ok := baseHashes[path]; ok {
+			remoteMod := rEntry.SHA256 != ancestor
+			localMod := lEntry.SHA256 != ancestor
+			switch {
+			case remoteMod && localMod:
+				// Both diverged from the agreed ancestor → conflict.
+				actions = append(actions, DiffEntry{
+					Path:           path,
+					Action:         ActionConflict,
+					RemoteHash:     rEntry.SHA256,
+					RemoteSize:     rEntry.Size,
+					RemoteMtime:    rEntry.MtimeNS,
+					RemoteMode:     rEntry.Mode,
+					RemoteSequence: rEntry.Sequence,
+				})
+			case remoteMod:
+				// Only remote changed — download.
+				actions = append(actions, DiffEntry{
+					Path:           path,
+					Action:         ActionDownload,
+					RemoteHash:     rEntry.SHA256,
+					RemoteSize:     rEntry.Size,
+					RemoteMtime:    rEntry.MtimeNS,
+					RemoteMode:     rEntry.Mode,
+					RemoteSequence: rEntry.Sequence,
+				})
+				// case localMod only: local will propagate on our next
+				// outbound sync — nothing to do from the receive side.
+			}
+			continue
+		}
+
+		// No ancestor known. C1 mtime fallback.
 		if lEntry.MtimeNS <= lastSyncNS {
-			// Only remote changed.
 			actions = append(actions, DiffEntry{
 				Path:           path,
 				Action:         ActionDownload,
@@ -1192,7 +1240,6 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 				RemoteSequence: rEntry.Sequence,
 			})
 		} else {
-			// Both sides changed → conflict.
 			actions = append(actions, DiffEntry{
 				Path:           path,
 				Action:         ActionConflict,
@@ -1242,6 +1289,46 @@ func (idx *FileIndex) purgeTombstones(maxAge time.Duration, peers map[string]Pee
 		}
 	}
 	return purged
+}
+
+// updateBaseHashes folds a completed index exchange into the ancestor map
+// (C2). For every remote entry in this exchange:
+//
+//   - Tombstone: the path is no longer synced — drop any stale ancestor.
+//   - Hash matches our local non-deleted entry: both sides now agree on
+//     this content; record the shared hash as the ancestor.
+//   - Hash differs: leave any prior ancestor untouched. Successful
+//     downloads and conflict auto-resolves in syncFolder have already
+//     written the remote hash into our index, so a download that
+//     completed in this cycle shows up in the "matches" branch above.
+//     A failed download stays diverged — we keep the older ancestor so
+//     diff() can still classify it correctly next cycle.
+//
+// The remote index passed here is whatever the peer sent in this
+// exchange (full or delta). Unchanged paths not in the exchange keep
+// their prior ancestor in prior.
+func updateBaseHashes(prior map[string]Hash256, local *FileIndex, remote *FileIndex) map[string]Hash256 {
+	if remote == nil || len(remote.Files) == 0 {
+		return prior
+	}
+	out := prior
+	if out == nil {
+		out = make(map[string]Hash256, len(remote.Files))
+	}
+	for path, rEntry := range remote.Files {
+		if rEntry.Deleted {
+			delete(out, path)
+			continue
+		}
+		lEntry, ok := local.Files[path]
+		if !ok || lEntry.Deleted {
+			continue
+		}
+		if lEntry.SHA256 == rEntry.SHA256 {
+			out[path] = lEntry.SHA256
+		}
+	}
+	return out
 }
 
 // gcRemovedPeers deletes removed peer entries that are older than maxAge.

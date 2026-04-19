@@ -1365,15 +1365,20 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	fs.indexMu.RLock()
 	lastSeenSeq := int64(0)
 	var lastSyncNS int64
+	var baseHashes map[string]Hash256
 	var pendingEpoch string
 	if ps, ok := fs.peers[peerAddr]; ok {
 		lastSeenSeq = ps.LastSeenSequence
 		if !ps.LastSync.IsZero() {
 			lastSyncNS = ps.LastSync.UnixNano()
 		}
+		// C2: snapshot ancestor map for read-only use by diff(). The
+		// post-sync update mutates fs.peers under indexMu.Lock(), so the
+		// snapshot seen here remains valid for the duration of diff().
+		baseHashes = ps.BaseHashes
 		pendingEpoch = ps.PendingEpoch
 	}
-	actions := fs.index.diff(remoteFileIndex, lastSeenSeq, lastSyncNS, fs.cfg.Direction)
+	actions := fs.index.diff(remoteFileIndex, lastSeenSeq, lastSyncNS, baseHashes, fs.cfg.Direction)
 
 	// H2b: when an epoch change was detected on the previous cycle (restart
 	// detection stored PendingEpoch), filter out downloads for files we have
@@ -1424,11 +1429,16 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	if len(actions) == 0 {
 		// Update peer state even when nothing to do.
 		fs.indexMu.Lock()
+		// C2: preserve ancestor hashes across the PeerState rewrite, and
+		// extend them with any paths that now agree (same SHA on both
+		// sides) thanks to this exchange.
+		prior := fs.peers[peerAddr].BaseHashes
 		fs.peers[peerAddr] = PeerState{
 			LastSeenSequence: remoteIdx.GetSequence(),
 			LastSentSequence: ourCurrentSeq,
 			LastSync:         time.Now(),
 			LastEpoch:        resolvedEpoch,
+			BaseHashes:       updateBaseHashes(prior, fs.index, remoteFileIndex),
 		}
 		fs.peersDirty = true // P17a
 		fs.indexMu.Unlock()
@@ -1976,11 +1986,19 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 	// Update peer state.
 	fs.indexMu.Lock()
+	// C2: recompute ancestor hashes from the post-sync agreement between
+	// our index and the remote index we just exchanged. Successful
+	// downloads and conflict auto-resolves have already written remote
+	// hashes into fs.index, so paths now in agreement are picked up
+	// here. Failed downloads leave the hashes diverged and get no
+	// ancestor update — they are retried next cycle.
+	prior := fs.peers[peerAddr].BaseHashes
 	fs.peers[peerAddr] = PeerState{
 		LastSeenSequence: safeSeq,
 		LastSentSequence: ourCurrentSeq,
 		LastSync:         time.Now(),
 		LastEpoch:        resolvedEpoch,
+		BaseHashes:       updateBaseHashes(prior, fs.index, remoteFileIndex),
 	}
 	fs.peersDirty = true // P17a: peer state always changes (LastSync)
 	// P17a: mark index dirty only when file actions actually modified it.

@@ -92,7 +92,7 @@ there depend on items tracked here.
 | ID    | Item                                                 | Pri   | Area          | Status | Effort | Risk | Blast |
 |-------|------------------------------------------------------|-------|---------------|--------|--------|------|-------|
 | C1    | mtime vs last-sync in `diff()` (Idea A)              | 🔴 P0 | conflict      | ✅     | 🟩 XS  | 🟡   | 📄    |
-| C2    | Per-peer last-exchanged hash (Idea B / ancestor)     | 🔴 P0 | conflict      | ⏳     | 🟧 M   | 🟡   | 📦    |
+| C2    | Per-peer last-exchanged hash (Idea B / ancestor)     | 🔴 P0 | conflict      | ✅     | 🟧 M   | 🟡   | 📦    |
 | C3    | Per-block verify during write                        | 🔴 P0 | correctness   | ⏳     | 🟧 M   | 🟡   | 📦    |
 | C4    | Immediate multi-peer fallback on hash mismatch       | 🔴 P0 | correctness   | ⏳     | 🟨 S   | 🟢   | 📦    |
 | P17a  | Dirty flag — skip persist when unchanged             | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
@@ -135,6 +135,7 @@ All `done` entries re-verified against the tree on 2026-04-19.
 | P18b  | `cachedCount` / `cachedSize` on `FileIndex`; `activeCountAndSize()` is O(1) field read (~L389).             |
 | P18d  | Delta path uses `len(tail)` via `seqIndex` binary search (`filesync.go` ~L2031). Full path only on bootstrap. |
 | C1    | `diff()` takes `lastSyncNS` and compares `lEntry.MtimeNS` against it for both the B8 tombstone guard and the conflict classifier (`index.go`, `FileIndex.diff`). Caller in `syncFolder` passes `ps.LastSync.UnixNano()`. Covered by `TestDiffC1MtimeVsLastSync` and `TestDiffC1TombstoneMtimeVsLastSync`. |
+| C2    | `PeerState.BaseHashes` holds the last agreed hash per path; `diff()` uses it as the primary signal (ancestor match ⇒ download-or-skip, both diverged ⇒ conflict) and falls back to C1 mtime when absent. `updateBaseHashes` folds each completed exchange into the ancestor map (hash match records, tombstone drops, mismatch preserves prior). Caller in `syncFolder` snapshots `ps.BaseHashes` before diff and re-merges on both the no-action and sync-end paths. Covered by `TestDiffC2AncestorClassifier`, `TestDiffC2TombstoneAncestor`, and `TestUpdateBaseHashes`. |
 
 `P18c` is still pending: `fs.index.clone()` remains at `filesync.go:1030` (runScan) and `filesync.go:2151` (persistFolder).
 
