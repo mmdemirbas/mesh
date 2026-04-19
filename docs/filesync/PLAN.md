@@ -99,7 +99,7 @@ there depend on items tracked here.
 | P17b  | Gob persistence + YAML fallback                      | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟡   | 🔌    |
 | P18a  | Pre-size `seen` map                                  | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
 | P18b  | Incremental `activeCount` / `activeSize`             | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
-| P18c  | Eliminate index clone (scan into `pending`)          | 🟠 P1 | perf          | ⏳     | 🟧 M   | 🟡   | 📦    |
+| P18c  | Eliminate index clone (scan into `pending`)          | 🟠 P1 | perf          | 🔧     | 🟧 M   | 🟡   | 📦    |
 | P18d  | Cap `buildIndexExchange` pre-allocation              | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
 | P3sc  | Adaptive watch / scan                                | 🟠 P1 | perf          | ⏸     | 🟧 M   | 🟡   | 📦    |
 | PF    | Trie-based ignore with cursor propagation            | 🟠 P1 | perf          | 🔧     | 🟥 L   | 🟡   | 📦    |
@@ -370,7 +370,7 @@ Each entry follows the same structure:
 - **Open follow-up.** PN — make `recomputeCache` itself incremental on
   scan swap.
 
-### P18c · Eliminate index clone (scan into `pending`) · ⏳
+### P18c · Eliminate index clone (scan into `pending`) · 🔧
 
 - **Problem.** `runScan` calls `fs.index.clone()` before walking the tree,
   so the walker can mutate a private copy while readers see the old
@@ -404,6 +404,34 @@ Each entry follows the same structure:
 - **Recommendation.** Ship (1) once PL (deletion detection) lands, since
   PL provides the "seen" set needed to identify deletions under the new
   model.
+- **Verification (partial, Phase 1 shipped).** The full change-set
+  refactor was not shipped; it requires either per-lookup RLock (cost
+  acceptable but invasive — every read in `scanWithStats` changes) or
+  holding RLock for the full walk duration (regresses download
+  responsiveness during scan). Neither trade-off fit the risk budget.
+  Shipped instead: the allocation, not the algorithm. `runScan` now
+  recycles the clone backing map across scans. After swap the old
+  `Files` map is stashed on `folderState.reusableFiles`; the next scan
+  consumes it via `FileIndex.cloneInto(dst)`, which `clear`s and
+  re-populates without allocating. Semantically identical to the
+  previous clone — readers still see the old index until the swap;
+  writers (sync downloads) wait for the clone window they waited for
+  before (clone now runs under Write lock instead of RLock, which is
+  the same effective block since Write-lock acquirers already stall
+  for active RLocks). Measured
+  (darwin/arm64, Apple M1 Max, -count=3, steady state):
+  - n=1 000:   57 µs / 311 KB / 5 allocs  →  31 µs / 0 B / 0 allocs
+  - n=10 000:  575 µs / 2.49 MB / 33 allocs → 323 µs / 0 B / 0 allocs
+  - n=100 000: 7.5 ms / 19.9 MB / 257 allocs → 7.0 ms / 0 B / 0 allocs
+  Extrapolated to the 168 k-file production folder on a 60 s scan
+  cadence with 15 folders, the ~1.8 GB/hour of map allocation the
+  plan targeted is gone. `TestRunScanRecyclesCloneMap` pins the
+  ping-pong invariant so a future refactor cannot silently regress it.
+  The full scan-into-pending refactor (option 1) remains deferred:
+  it is still the correct endpoint for unblocking PK (stable snapshot
+  for persist), but the GC-pressure gain that motivated P18c has been
+  captured here with ~10 lines of change and a small, measurable
+  blast radius.
 
 ### P18d · Cap `buildIndexExchange` pre-allocation · ✅
 
