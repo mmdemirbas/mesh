@@ -813,7 +813,7 @@ func TestEpochGuardFiltersResurrectedFiles(t *testing.T) {
 
 	// Cycle 2 scenario: lastSeenSeq=0 (after restart detection zeroed it).
 	// diff() with lastSeenSeq=0 will produce ActionDownload for x.txt and z.txt.
-	actions := local.diff(remote, 0, "send-receive")
+	actions := local.diff(remote, 0, 0, "send-receive")
 
 	// Before filtering: should have downloads for both x.txt and z.txt.
 	downloads := map[string]bool{}
@@ -1346,11 +1346,15 @@ func TestRetryTracker_MaxCountCap(t *testing.T) {
 
 func TestDiff(t *testing.T) {
 	t.Parallel()
+	// C1: "locally modified" is decided by MtimeNS > lastSyncNS.
+	// lastSyncNS=2000 → b.txt (MtimeNS=1000) is unchanged, c.txt
+	// (MtimeNS=3000) was modified locally after the last sync.
+	const lastSyncNS = int64(2000)
 	local := newFileIndex()
 	local.Sequence = 5
-	local.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 3}
-	local.Files["b.txt"] = FileEntry{SHA256: testHash("bbb"), Sequence: 2}
-	local.Files["c.txt"] = FileEntry{SHA256: testHash("ccc"), Sequence: 5} // modified locally
+	local.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 3, MtimeNS: 1000}
+	local.Files["b.txt"] = FileEntry{SHA256: testHash("bbb"), Sequence: 2, MtimeNS: 1000}
+	local.Files["c.txt"] = FileEntry{SHA256: testHash("ccc"), Sequence: 5, MtimeNS: 3000} // modified locally
 
 	remote := newFileIndex()
 	remote.Sequence = 10
@@ -1359,7 +1363,7 @@ func TestDiff(t *testing.T) {
 	remote.Files["c.txt"] = FileEntry{SHA256: testHash("ccc2"), Sequence: 8} // both changed (conflict)
 	remote.Files["d.txt"] = FileEntry{SHA256: testHash("ddd"), Sequence: 9}  // new on remote
 
-	actions := local.diff(remote, 4, "send-receive")
+	actions := local.diff(remote, 4, lastSyncNS, "send-receive")
 
 	actionMap := make(map[string]DiffAction)
 	for _, a := range actions {
@@ -1380,13 +1384,159 @@ func TestDiff(t *testing.T) {
 	}
 }
 
+// C1: diff() must decide "was our copy locally modified since we last
+// talked to this peer?" from mtime vs lastSyncNS, not from comparing our
+// local Sequence to the peer's remote Sequence. The two sequence
+// counters live on different scales — a high local Sequence simply
+// means our folder has done many operations and says nothing about
+// whether this particular file was touched.
+func TestDiffC1MtimeVsLastSync(t *testing.T) {
+	t.Parallel()
+	const lastSyncNS = int64(5000)
+	const localSeq = int64(20) // deliberately larger than lastSeenSeq
+
+	cases := []struct {
+		name        string
+		localMtime  int64
+		lastSeenSeq int64
+		remoteSeq   int64
+		sameHash    bool
+		want        DiffAction
+		wantSkipped bool
+	}{
+		{
+			// Key regression case: local Sequence (20) > lastSeenSeq (5)
+			// would have been flagged conflict by the prior heuristic.
+			// C1 correctly classifies it as remote-only → download.
+			name:        "remote_only_modified",
+			localMtime:  3000,
+			lastSeenSeq: 5,
+			remoteSeq:   10,
+			want:        ActionDownload,
+		},
+		{
+			name:        "both_modified",
+			localMtime:  7000,
+			lastSeenSeq: 5,
+			remoteSeq:   10,
+			want:        ActionConflict,
+		},
+		{
+			name:        "neither_modified",
+			localMtime:  3000,
+			lastSeenSeq: 5,
+			remoteSeq:   10,
+			sameHash:    true,
+			wantSkipped: true,
+		},
+		{
+			// Remote Sequence below lastSeenSeq: the remote-side filter
+			// skips the entry entirely, independent of the mtime check.
+			name:        "local_only_modified",
+			localMtime:  7000,
+			lastSeenSeq: 10,
+			remoteSeq:   5,
+			wantSkipped: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			remoteHash := testHash("remote-version")
+			localHash := remoteHash
+			if !tc.sameHash {
+				localHash = testHash("local-version")
+			}
+
+			local := newFileIndex()
+			local.Files["x.txt"] = FileEntry{
+				SHA256:   localHash,
+				Sequence: localSeq,
+				MtimeNS:  tc.localMtime,
+				Size:     10,
+			}
+
+			remote := newFileIndex()
+			remote.Files["x.txt"] = FileEntry{
+				SHA256:   remoteHash,
+				Sequence: tc.remoteSeq,
+				Size:     10,
+			}
+
+			actions := local.diff(remote, tc.lastSeenSeq, lastSyncNS, "send-receive")
+			if tc.wantSkipped {
+				if len(actions) != 0 {
+					t.Fatalf("want no action, got %+v", actions)
+				}
+				return
+			}
+			if len(actions) != 1 {
+				t.Fatalf("want 1 action, got %d: %+v", len(actions), actions)
+			}
+			if actions[0].Action != tc.want {
+				t.Fatalf("want action %v, got %v", tc.want, actions[0].Action)
+			}
+		})
+	}
+}
+
+// C1: a delete tombstone from the peer must not destroy a locally
+// modified file. "Locally modified" is decided by mtime vs lastSyncNS,
+// not by comparing local Sequence to the peer's remote Sequence. A
+// local file with a high Sequence from pre-sync creation, but untouched
+// since last sync, should be deleted by the tombstone — the old
+// sequence-based heuristic would have preserved it.
+func TestDiffC1TombstoneMtimeVsLastSync(t *testing.T) {
+	t.Parallel()
+	const lastSyncNS = int64(5000)
+
+	cases := []struct {
+		name        string
+		localMtime  int64
+		wantDeleted bool
+	}{
+		{"unchanged_since_last_sync", 3000, true},
+		{"modified_after_last_sync", 7000, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			local := newFileIndex()
+			local.Files["x.txt"] = FileEntry{
+				SHA256:   testHash("local-version"),
+				Sequence: 20, // high local sequence
+				MtimeNS:  tc.localMtime,
+				Size:     10,
+			}
+
+			remote := newFileIndex()
+			remote.Files["x.txt"] = FileEntry{Deleted: true, Sequence: 10}
+
+			actions := local.diff(remote, 5, lastSyncNS, "send-receive")
+			if tc.wantDeleted {
+				if len(actions) != 1 || actions[0].Action != ActionDelete {
+					t.Fatalf("want delete, got %+v", actions)
+				}
+				return
+			}
+			for _, a := range actions {
+				if a.Path == "x.txt" {
+					t.Fatalf("locally modified file must not be deleted, got %v", a.Action)
+				}
+			}
+		})
+	}
+}
+
 func TestDiffReceiveOnly(t *testing.T) {
 	t.Parallel()
 	local := newFileIndex()
 	remote := newFileIndex()
 	remote.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 1}
 
-	actions := local.diff(remote, 0, "receive-only")
+	actions := local.diff(remote, 0, 0, "receive-only")
 	if len(actions) != 1 || actions[0].Action != ActionDownload {
 		t.Error("receive-only should allow downloads")
 	}
@@ -1398,7 +1548,7 @@ func TestDiffSendOnly(t *testing.T) {
 	remote := newFileIndex()
 	remote.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 1}
 
-	actions := local.diff(remote, 0, "send-only")
+	actions := local.diff(remote, 0, 0, "send-only")
 	if len(actions) != 0 {
 		t.Error("send-only should produce no actions (no receiving)")
 	}
@@ -1414,7 +1564,8 @@ func TestDiffDeleteTombstone(t *testing.T) {
 
 	// H8: lastSeenSeq > 0 means we've synced before — remote tombstone
 	// should delete the unchanged local file.
-	actions := local.diff(remote, 1, "send-receive")
+	// C1: local a.txt MtimeNS=0, lastSyncNS=1000 → not locally modified.
+	actions := local.diff(remote, 1, 1000, "send-receive")
 	if len(actions) != 1 || actions[0].Action != ActionDelete {
 		t.Errorf("expected delete action, got %v", actions)
 	}
@@ -1432,9 +1583,10 @@ func TestDiffPopulatesRemoteSequence(t *testing.T) {
 	remote.Files["new.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 7}
 	remote.Files["del.txt"] = FileEntry{Deleted: true, Sequence: 8}
 	// Also add del.txt to local so the delete action is generated.
+	// C1: MtimeNS=0 < lastSyncNS=1000 → not locally modified → delete proceeds.
 	local.Files["del.txt"] = FileEntry{SHA256: testHash("bbb"), Sequence: 1}
 
-	actions := local.diff(remote, 4, "send-receive")
+	actions := local.diff(remote, 4, 1000, "send-receive")
 	if len(actions) != 2 {
 		t.Fatalf("expected 2 actions, got %d", len(actions))
 	}
@@ -1458,14 +1610,15 @@ func TestDiffDeleteTombstone_LocalModifiedWins(t *testing.T) {
 	t.Parallel()
 	local := newFileIndex()
 	local.Sequence = 5
-	// Local file was modified after the last sync (seq 3 > lastSeenSeq 2).
-	local.Files["a.txt"] = FileEntry{SHA256: testHash("aaa-modified"), Sequence: 3}
+	// C1: local file was modified after the last sync
+	// (MtimeNS=2000 > lastSyncNS=1000).
+	local.Files["a.txt"] = FileEntry{SHA256: testHash("aaa-modified"), Sequence: 3, MtimeNS: 2000}
 
 	remote := newFileIndex()
 	remote.Sequence = 10
 	remote.Files["a.txt"] = FileEntry{Deleted: true, Sequence: 7}
 
-	actions := local.diff(remote, 2, "send-receive")
+	actions := local.diff(remote, 2, 1000, "send-receive")
 
 	for _, a := range actions {
 		if a.Path == "a.txt" {
@@ -1479,14 +1632,15 @@ func TestDiffDeleteTombstone_LocalUnchanged(t *testing.T) {
 	t.Parallel()
 	local := newFileIndex()
 	local.Sequence = 5
-	// Local file was NOT modified since last sync (seq 1 <= lastSeenSeq 2).
-	local.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 1}
+	// C1: local file was NOT modified since last sync
+	// (MtimeNS=500 <= lastSyncNS=1000).
+	local.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 1, MtimeNS: 500}
 
 	remote := newFileIndex()
 	remote.Sequence = 10
 	remote.Files["a.txt"] = FileEntry{Deleted: true, Sequence: 7}
 
-	actions := local.diff(remote, 2, "send-receive")
+	actions := local.diff(remote, 2, 1000, "send-receive")
 	if len(actions) != 1 || actions[0].Action != ActionDelete {
 		t.Errorf("expected delete for unchanged local file, got %v", actions)
 	}
@@ -1504,7 +1658,7 @@ func TestDiffDeleteTombstone_FirstSync(t *testing.T) {
 	remote.Files["a.txt"] = FileEntry{Deleted: true, Sequence: 5}
 
 	// lastSeenSeq=0 means we've never synced — guard protects local files.
-	actions := local.diff(remote, 0, "send-receive")
+	actions := local.diff(remote, 0, 0, "send-receive")
 	if len(actions) != 0 {
 		t.Errorf("H8: first-sync tombstone should not delete local file, got %v", actions)
 	}
@@ -1519,7 +1673,7 @@ func TestDiffDeleteTombstone_BothDeleted(t *testing.T) {
 	remote := newFileIndex()
 	remote.Files["a.txt"] = FileEntry{Deleted: true, Sequence: 5}
 
-	actions := local.diff(remote, 1, "send-receive")
+	actions := local.diff(remote, 1, 1000, "send-receive")
 	for _, a := range actions {
 		if a.Path == "a.txt" {
 			t.Errorf("no action expected when both sides deleted, got %v", a.Action)
@@ -1871,8 +2025,9 @@ func TestConflictAutoResolve_SameHash(t *testing.T) {
 	}
 
 	// diff() produces ActionConflict: local hash (old) != remote hash (new),
-	// and local seq (10) > lastSeenSeq (5) → both sides modified.
-	actions := localIdx.diff(remoteIdx, 5, "send-receive")
+	// and local MtimeNS (now-2h) > lastSyncNS (now-3h) → both sides modified.
+	lastSyncNS := time.Now().Add(-3 * time.Hour).UnixNano()
+	actions := localIdx.diff(remoteIdx, 5, lastSyncNS, "send-receive")
 	if len(actions) != 1 {
 		t.Fatalf("expected 1 action, got %d", len(actions))
 	}
@@ -1921,7 +2076,8 @@ func TestConflictAutoResolve_DifferentHash(t *testing.T) {
 		},
 	}
 
-	actions := localIdx.diff(remoteIdx, 5, "send-receive")
+	lastSyncNS := time.Now().Add(-1 * time.Hour).UnixNano()
+	actions := localIdx.diff(remoteIdx, 5, lastSyncNS, "send-receive")
 	if len(actions) != 1 || actions[0].Action != ActionConflict {
 		t.Fatalf("expected ActionConflict, got %v", actions)
 	}
@@ -1953,7 +2109,8 @@ func TestConflictAutoResolve_EmptyRemoteHash(t *testing.T) {
 		},
 	}
 	// diff sees different hashes (testHash("abc123") vs zero) → ActionConflict
-	actions := localIdx.diff(remoteIdx, 5, "send-receive")
+	lastSyncNS := time.Now().Add(-1 * time.Hour).UnixNano()
+	actions := localIdx.diff(remoteIdx, 5, lastSyncNS, "send-receive")
 	if len(actions) != 1 || actions[0].Action != ActionConflict {
 		t.Fatalf("expected ActionConflict, got %v", actions)
 	}
@@ -3847,7 +4004,7 @@ func TestTwoNodeSync(t *testing.T) {
 	// Compute diff: B should want to download from-a.txt.
 	fsB := nodeB.folders["test"]
 	fsB.indexMu.Lock()
-	actions := fsB.index.diff(remoteFileIndex, 0, "send-receive")
+	actions := fsB.index.diff(remoteFileIndex, 0, 0, "send-receive")
 	fsB.indexMu.Unlock()
 
 	if len(actions) != 1 {
@@ -4179,7 +4336,7 @@ func TestDryRunComputesDiffWithoutExecution(t *testing.T) {
 	}
 
 	// Dry-run should compute diff (canReceive = true).
-	actions := idx.diff(remote, 0, "dry-run")
+	actions := idx.diff(remote, 0, 0, "dry-run")
 	if len(actions) == 0 {
 		t.Fatal("dry-run diff should produce actions")
 	}
@@ -5249,7 +5406,7 @@ func TestDiffFirstSyncTombstone_RemoteOnly(t *testing.T) {
 
 	// Even on first sync, if local doesn't have the file, no action expected
 	// (can't delete what doesn't exist locally).
-	actions := local.diff(remote, 0, "send-receive")
+	actions := local.diff(remote, 0, 0, "send-receive")
 	if len(actions) != 0 {
 		t.Errorf("no action expected for remote-only tombstone, got %v", actions)
 	}
@@ -5260,12 +5417,13 @@ func TestDiffFirstSyncTombstone_RemoteOnly(t *testing.T) {
 func TestDiffTombstone_AfterFirstSync(t *testing.T) {
 	t.Parallel()
 	local := newFileIndex()
-	local.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 1}
+	// C1: MtimeNS=500 <= lastSyncNS=1000 → local copy is unchanged.
+	local.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 1, MtimeNS: 500}
 
 	remote := newFileIndex()
 	remote.Files["a.txt"] = FileEntry{Deleted: true, Sequence: 5}
 
-	actions := local.diff(remote, 3, "send-receive")
+	actions := local.diff(remote, 3, 1000, "send-receive")
 	if len(actions) != 1 || actions[0].Action != ActionDelete {
 		t.Errorf("expected delete after first sync, got %v", actions)
 	}

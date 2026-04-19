@@ -91,7 +91,7 @@ there depend on items tracked here.
 
 | ID    | Item                                                 | Pri   | Area          | Status | Effort | Risk | Blast |
 |-------|------------------------------------------------------|-------|---------------|--------|--------|------|-------|
-| C1    | mtime vs last-sync in `diff()` (Idea A)              | 🔴 P0 | conflict      | ⏳     | 🟩 XS  | 🟡   | 📄    |
+| C1    | mtime vs last-sync in `diff()` (Idea A)              | 🔴 P0 | conflict      | ✅     | 🟩 XS  | 🟡   | 📄    |
 | C2    | Per-peer last-exchanged hash (Idea B / ancestor)     | 🔴 P0 | conflict      | ⏳     | 🟧 M   | 🟡   | 📦    |
 | C3    | Per-block verify during write                        | 🔴 P0 | correctness   | ⏳     | 🟧 M   | 🟡   | 📦    |
 | C4    | Immediate multi-peer fallback on hash mismatch       | 🔴 P0 | correctness   | ⏳     | 🟨 S   | 🟢   | 📦    |
@@ -119,7 +119,7 @@ there depend on items tracked here.
 | C5    | 3-way text merge (Idea C)                            | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 📦    |
 | C6    | Full vector clocks per file (Idea D)                 | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 🔌    |
 
-Counts: **4** P0 · **12** P1 (5 ✅ / 7 ⏳) · **3** P2 · **6** P3 · **2** deferred.
+Counts: **4** P0 (1 ✅ / 3 ⏳) · **12** P1 (5 ✅ / 7 ⏳) · **3** P2 · **6** P3 · **2** deferred.
 
 ---
 
@@ -134,6 +134,7 @@ All `done` entries re-verified against the tree on 2026-04-19.
 | P18a  | `seen := make(map[string]struct{}, len(idx.Files))` in `index.go` (~L673).                                  |
 | P18b  | `cachedCount` / `cachedSize` on `FileIndex`; `activeCountAndSize()` is O(1) field read (~L389).             |
 | P18d  | Delta path uses `len(tail)` via `seqIndex` binary search (`filesync.go` ~L2031). Full path only on bootstrap. |
+| C1    | `diff()` takes `lastSyncNS` and compares `lEntry.MtimeNS` against it for both the B8 tombstone guard and the conflict classifier (`index.go`, `FileIndex.diff`). Caller in `syncFolder` passes `ps.LastSync.UnixNano()`. Covered by `TestDiffC1MtimeVsLastSync` and `TestDiffC1TombstoneMtimeVsLastSync`. |
 
 `P18c` is still pending: `fs.index.clone()` remains at `filesync.go:1030` (runScan) and `filesync.go:2151` (persistFolder).
 

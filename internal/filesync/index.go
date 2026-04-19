@@ -1103,8 +1103,15 @@ type DiffEntry struct {
 
 // diff compares the local index with a remote index and produces a list of
 // actions needed to bring the local side up to date.
-// lastSeenSeq is the highest sequence we've previously processed from this peer.
-func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, direction string) []DiffEntry {
+// lastSeenSeq is the highest remote sequence we've previously processed from
+// this peer; it filters out already-seen remote entries.
+// lastSyncNS is PeerState.LastSync in Unix nanoseconds; it is used to decide
+// whether our local copy was modified after the last successful exchange
+// with this peer (C1 — mtime vs last-sync). This replaces the prior
+// cross-scale compare of local Sequence against the peer's last-seen remote
+// Sequence, which produced false-positive conflicts when one side had done
+// many more operations than the other.
+func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int64, direction string) []DiffEntry {
 	canReceive := direction == "send-receive" || direction == "receive-only" || direction == "dry-run"
 	if !canReceive {
 		return nil
@@ -1126,7 +1133,9 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, direction strin
 				// and the local file was modified after that baseline,
 				// local wins over remote delete. The local version will
 				// propagate back to the peer on the next outbound sync.
-				if lastSeenSeq > 0 && lEntry.Sequence > lastSeenSeq {
+				// C1: compare local mtime against the wall-clock time of
+				// the last successful sync with this peer, not sequences.
+				if lastSeenSeq > 0 && lEntry.MtimeNS > lastSyncNS {
 					continue
 				}
 				// H8: on first sync (lastSeenSeq=0), never delete a
@@ -1166,8 +1175,12 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, direction strin
 		}
 
 		// Both sides have the file with different content.
-		// Check if only the remote changed (our entry was unchanged since last sync).
-		if lEntry.Sequence <= lastSeenSeq {
+		// C1: "was our copy locally modified since we last talked to this
+		// peer?" — answered by comparing mtime to lastSyncNS. The previous
+		// heuristic compared our local Sequence to the peer's remote
+		// Sequence, which lives on a different scale and produced spurious
+		// conflicts whenever the two sides' operation counts diverged.
+		if lEntry.MtimeNS <= lastSyncNS {
 			// Only remote changed.
 			actions = append(actions, DiffEntry{
 				Path:           path,

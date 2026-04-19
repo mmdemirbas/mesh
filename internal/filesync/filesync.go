@@ -1364,12 +1364,16 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	// so concurrent downloads that bumped Sequence are visible to diff().
 	fs.indexMu.RLock()
 	lastSeenSeq := int64(0)
+	var lastSyncNS int64
 	var pendingEpoch string
 	if ps, ok := fs.peers[peerAddr]; ok {
 		lastSeenSeq = ps.LastSeenSequence
+		if !ps.LastSync.IsZero() {
+			lastSyncNS = ps.LastSync.UnixNano()
+		}
 		pendingEpoch = ps.PendingEpoch
 	}
-	actions := fs.index.diff(remoteFileIndex, lastSeenSeq, fs.cfg.Direction)
+	actions := fs.index.diff(remoteFileIndex, lastSeenSeq, lastSyncNS, fs.cfg.Direction)
 
 	// H2b: when an epoch change was detected on the previous cycle (restart
 	// detection stored PendingEpoch), filter out downloads for files we have
