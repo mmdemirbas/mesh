@@ -841,11 +841,15 @@ Each entry follows the same structure:
     `TestScanDetectsRenameWithEdit`,
     `TestScanRenameHintClearedOnRescan`,
     `TestScanRenameIgnoresUnchangedPaths`.
-  - **Step 3 ⏳** — add `prev_path` to `FileInfo` proto and thread
-    through `buildIndexExchange` + diff. Proto3 unknown-field
-    tolerance means a capability flag is not strictly required for
-    forward/backward safety; tests will confirm before removing
-    the flag from the original plan.
+  - **Step 3 ✅** — `FileInfo.prev_path` added and threaded through
+    `buildIndexExchange` (both delta and full-iteration paths),
+    `protoToFileIndex`, and `FileIndex.diff`. `DiffEntry` gained
+    `RemotePrevPath`, set only on `ActionDownload`. Proto3
+    unknown-field tolerance confirms no capability flag is needed:
+    pre-hint peers silently discard the field. See
+    `TestPrevPathRoundTripsThroughProto`,
+    `TestDiffPropagatesPrevPath`,
+    `TestDiffOmitsPrevPathFromNonDownloads`.
   - **Step 4 ⏳** — receiver: pair matching delete+download
     (same hint), perform local rename, then apply `/delta`
     against old-path content. Content-hash sanity check guards
