@@ -158,7 +158,7 @@ Rule 1 (boundary gaps) and Rule 2 (reproducer gaps), not the number.
 | internal/gateway  | 84.7% | _Strong — 245 tests covering a2o/o2a translation + passthrough + streaming_. `AuditDirs`/`registerAuditDir`/`unregisterAuditDir` closed in `c6f07e5` (100%); `expandHome` 25% -> 87.5% | 5 raw `time.Sleep` audit-wait anti-patterns in `audit_wrap_test.go` and `passthrough_test.go` replaced with deadline-bounded polling via new `waitForRows` helper in `f1d2c8f` | Early-era fixes `4daf329` and `17668fb` have no inline tests but were swept up by later `cfe5ba5` ("Add missing tests from review findings") and `34a98d1` ("Add error path tests"). `7d44338` is lint/race hygiene. `32b285b` (ReadTimeout/IdleTimeout hardening) has no reproducer — defensive timeout injection is deterministic only through non-unit harnesses | LOW |
 | internal/netutil  | 98.1% | `ListenReusable` closed in `a41ddaf` (accept round-trip + empty-address wildcard bind) | None found in scan | None found | LOW |
 | internal/state    | 94.1% | Previously-0% exported Metrics/State setters and `SnapshotFull` closed in `7d6d926`; `StartEviction` still 0% but is a thin ticker wrapper around the already-tested `evictStale` | None found in scan | One fix commit: `3003671` (eviction removing active listeners/connections) — paired with `9ddbfc9 Add regression tests for state eviction production bug`. Clean | LOW |
-| cmd/mesh          | 57.5% | Pidfile lifecycle and `resolveNodesForDown` closed in `ebef6b3`. Residual 0% is interactive command entry points (`runDashboard`, `upCmd`, `downCmd`, `statusCmd`, `configCmd`, `initCmd`, `completionCmd`, `main`) — covered end-to-end by `e2e/scenarios` | None found in scan | 5 fix commits audited: `f4ca16a`/`9bdbce2`/`5e2fd1b`/`1294a97` all live in `admin_ui.go`'s embedded JS — no Go-testable surface; the one Go-side fix in `f4ca16a` (JSON-encode err.Error() in `/api/filesync/conflicts/diff`) needs live `activeNodes` state to exercise, which `admin_test.go`'s `buildAdminMux` harness lacks. `0fa78f8` (Ctrl+C force-exit watchdog) self-documents as requiring a process-level harness. Net: dashboard-JS regressions need a browser-test harness (Playwright) to pin; deferred to e2e | LOW |
+| cmd/mesh          | 57.5% | Pidfile lifecycle and `resolveNodesForDown` closed in `ebef6b3`. Residual 0% is interactive command entry points (`runDashboard`, `upCmd`, `downCmd`, `statusCmd`, `configCmd`, `initCmd`, `completionCmd`, `main`) — covered end-to-end by `e2e/scenarios` | None found in scan | 5 fix commits audited: the Go-side fix in `f4ca16a` (JSON-encode err.Error() in `/api/filesync/conflicts/diff`) closed in `a6d4c73` via reproducer test, after `b950766` exported `filesync.RegisterFolderForTest` to seed `activeNodes` without starting a full node. Remaining JS fixes (`f4ca16a`'s other two, `9bdbce2`, `5e2fd1b`, `1294a97`) live in `admin_ui.go`'s embedded JS — no Go-testable surface; need browser harness (deferred to its own ADR). `0fa78f8` (Ctrl+C force-exit watchdog) self-documents as requiring a process-level harness | LOW |
 | e2e/scenarios     | _N/A_ (tests themselves) | | | | |
 
 ### Phase 4 orientation (other packages)
@@ -395,6 +395,28 @@ Other targets considered:
   added.
 - `myersDiff` direction-choice `<` — existing `TestDiffLines` table
   cases cover both directions adequately. No test added.
+
+### 9. cmd/mesh reproducer for `/api/filesync/conflicts/diff` JSON encoding (committed `b950766`, `a6d4c73`)
+
+**Gap:** the Go-side portion of `f4ca16a` (switched the 500-path from
+`http.Error(w, `{"error":"` + err.Error() + `"}` ...)` to
+`json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})`)
+had no reproducer. The pre-fix body was malformed JSON whenever the
+error message contained a double quote. Previously untestable because
+`admin_test.go`'s `buildAdminMux` harness has no way to seed
+`activeNodes`, which `GetFolderPath` walks.
+
+**Fix:** narrow test-only helper `filesync.RegisterFolderForTest(id,
+path) func()` in `b950766` that inserts a minimal `Node` with one
+folder mapping and returns a cleanup closure. Reproducer in `a6d4c73`
+sends `path=bad"file.txt` (URL-encoded); `ComputeConflictDiff`
+returns `not a conflict file: bad"file.txt`; the handler must emit
+valid JSON. Verified by reverting the fix → test fails with `invalid
+character 'f' after object key:value pair`.
+
+Choice rationale: exported test-only helper vs. injection refactor
+of `buildAdminMux`'s signature (15 call sites). Helper pollutes the
+prod API by one symbol; refactor would cascade. Helper was smaller.
 
 ### 8. Infra finding: flake fix for new UDP tests
 
