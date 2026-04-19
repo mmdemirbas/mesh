@@ -109,32 +109,43 @@ func renderDashboardFrame(lines []string, start, end, vpHeight int, nodeNames []
 	for i := end - start; i < vpHeight; i++ {
 		buf.WriteString(eol)
 	}
-	writeDashboardFooter(&buf, start, vpHeight, totalLines, autoScroll)
+	writeDashboardFooter(&buf, start, vpHeight, totalLines, autoScroll, 0, 0, 0)
 	return buf.String()
 }
 
 // writeDashboardFooter emits a single-line footer with keybindings and
-// a scroll state indicator. No trailing newline — the footer sits on
+// scroll state indicators. No trailing newline — the footer sits on
 // the terminal's last row so the cursor stays put without triggering
 // a scroll. \033[K clears any stale content from the previous frame.
-func writeDashboardFooter(buf *strings.Builder, start, vpHeight, total int, autoScroll bool) {
-	hints := "q quit · ↑↓/jk scroll · g/G top/end · PgUp/PgDn page"
+// When content extends past the terminal's right edge (maxContentWidth
+// > width), a horizontal indicator shows the visible column range so
+// the user knows content is off-screen and how far they have panned.
+func writeDashboardFooter(buf *strings.Builder, start, vpHeight, total int, autoScroll bool, hScroll, width, maxContentWidth int) {
+	hints := "q quit · ↑↓ scroll · ←→ pan · g/G top/end · PgUp/Dn"
 	fmt.Fprintf(buf, "\033[K%s%s%s", cGray, hints, cReset)
 
-	if total <= vpHeight {
-		return
+	if total > vpHeight {
+		end := start + vpHeight
+		if end > total {
+			end = total
+		}
+		label := "paused"
+		color := cYellow
+		if autoScroll {
+			label = "LIVE"
+			color = cGreen
+		}
+		fmt.Fprintf(buf, "  %s[%s %d-%d/%d]%s", color, label, start+1, end, total, cReset)
 	}
-	end := start + vpHeight
-	if end > total {
-		end = total
+
+	if maxContentWidth > width {
+		colStart := hScroll + 1
+		colEnd := hScroll + width
+		if colEnd > maxContentWidth {
+			colEnd = maxContentWidth
+		}
+		fmt.Fprintf(buf, "  %s[col %d-%d/%d]%s", cCyan, colStart, colEnd, maxContentWidth, cReset)
 	}
-	label := "paused"
-	color := cYellow
-	if autoScroll {
-		label = "LIVE"
-		color = cGreen
-	}
-	fmt.Fprintf(buf, "  %s[%s %d-%d/%d]%s", color, label, start+1, end, total, cReset)
 }
 
 // writeDashboardHeader emits the header lines (node label, clock, uptime,
@@ -273,9 +284,11 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 	const eol = "\033[K\r\n"
 
 	scrollOffset := 0
+	hScroll := 0
 	autoScroll := true // follow tail when at bottom
 	lastBody := ""
 	lastHeaderHeight := 0
+	const hStep = 10 // columns per left/right keystroke
 
 	termSize := func() (int, int) {
 		w, h, err := term.GetSize(int(os.Stdout.Fd()))
@@ -285,12 +298,13 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 		return w, h
 	}
 
-	// writeTruncated emits s truncated to width columns so each logical
-	// line occupies exactly one terminal row. Without this, lines wider
-	// than the terminal wrap and push later content (including the
+	// writeSlice emits the [startCol, startCol+width) column range of s
+	// so each logical line occupies exactly one terminal row and
+	// horizontal scrolling pans the visible window. Without this, lines
+	// wider than the terminal wrap and push later content (including the
 	// header) off the top of the alt screen.
-	writeTruncated := func(buf *strings.Builder, s string, width int) {
-		buf.WriteString(truncateToVisibleWidth(s, width))
+	writeSlice := func(buf *strings.Builder, s string, startCol, width int) {
+		buf.WriteString(visibleSlice(s, startCol, width))
 	}
 
 	// headerToLines calls opts.renderHeader, then splits its output into
@@ -302,11 +316,11 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 		return strings.Split(raw, eol)
 	}
 
-	renderHeaderOnly := func(width int) {
+	renderHeaderOnly := func(width, hScroll int) {
 		var buf strings.Builder
 		buf.WriteString("\033[H")
 		for _, ln := range headerToLines() {
-			writeTruncated(&buf, ln, width)
+			writeSlice(&buf, ln, hScroll, width)
 			buf.WriteString(eol)
 		}
 		_, _ = os.Stdout.WriteString(buf.String())
@@ -346,12 +360,35 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 		start := scrollOffset
 		end := min(start+vpHeight, totalLines)
 
+		// Compute the widest visible content across header and body slice
+		// so horizontal scroll clamps to just enough to reveal every line.
+		// Footer is anchored at column 0 and excluded.
+		maxContentWidth := 0
+		for _, ln := range headerLines {
+			if w := visibleLen(ln); w > maxContentWidth {
+				maxContentWidth = w
+			}
+		}
+		for i := start; i < end; i++ {
+			if w := visibleLen(lines[i]); w > maxContentWidth {
+				maxContentWidth = w
+			}
+		}
+		maxHScroll := max(maxContentWidth-width, 0)
+		if hScroll > maxHScroll {
+			hScroll = maxHScroll
+		}
+		if hScroll < 0 {
+			hScroll = 0
+		}
+
 		// Capture the exact byte sequence that will fill the body region.
-		// Including vpHeight, start, total, autoScroll, and width in the
-		// key means terminal resizes (which change truncation), scroll
-		// shifts, and follow-mode toggles naturally invalidate the cache.
+		// Including vpHeight, start, total, autoScroll, width, and
+		// hScroll in the key means terminal resizes (which change the
+		// visible slice), vertical/horizontal pans, and follow-mode
+		// toggles naturally invalidate the cache.
 		var sig strings.Builder
-		fmt.Fprintf(&sig, "%d|%d|%d|%d|%t|", width, vpHeight, start, totalLines, autoScroll)
+		fmt.Fprintf(&sig, "%d|%d|%d|%d|%t|%d|", width, vpHeight, start, totalLines, autoScroll, hScroll)
 		for i := start; i < end; i++ {
 			sig.WriteString(lines[i])
 			sig.WriteByte('\n')
@@ -362,7 +399,7 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 			// Body is unchanged — redraw only the header region so the clock
 			// and uptime advance without rewriting the rest of the screen.
 			// This is what keeps the view flicker-free between ticks.
-			renderHeaderOnly(width)
+			renderHeaderOnly(width, hScroll)
 			return true
 		}
 		lastBody = body
@@ -370,20 +407,22 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 		var buf strings.Builder
 		buf.WriteString("\033[H")
 		for _, ln := range headerLines {
-			writeTruncated(&buf, ln, width)
+			writeSlice(&buf, ln, hScroll, width)
 			buf.WriteString(eol)
 		}
 		buf.WriteString(eol) // blank line after header
 		for i := start; i < end; i++ {
-			writeTruncated(&buf, lines[i], width)
+			writeSlice(&buf, lines[i], hScroll, width)
 			buf.WriteString(eol)
 		}
 		for i := end - start; i < vpHeight; i++ {
 			buf.WriteString(eol)
 		}
 		var footerBuf strings.Builder
-		writeDashboardFooter(&footerBuf, start, vpHeight, totalLines, autoScroll)
-		writeTruncated(&buf, footerBuf.String(), width)
+		writeDashboardFooter(&footerBuf, start, vpHeight, totalLines, autoScroll, hScroll, width, maxContentWidth)
+		// Footer stays anchored at column 0 (no horizontal scroll) so
+		// keybindings remain visible; truncate to width if narrower.
+		writeSlice(&buf, footerBuf.String(), 0, width)
 		_, _ = os.Stdout.WriteString(buf.String())
 		return true
 	}
@@ -454,6 +493,18 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 					case 'B': // down
 						scrollOffset++
 						changed = true
+					case 'C': // right
+						hScroll += hStep
+						changed = true
+					case 'D': // left
+						hScroll -= hStep
+						changed = true
+					case 'H': // Home — snap fully left (\033[H)
+						hScroll = 0
+						changed = true
+					case 'F': // End — snap fully right (\033[F)
+						hScroll = 1 << 30 // clamped to maxHScroll in render
+						changed = true
 					case '5': // page up (\033[5~)
 						_, h := termSize()
 						scrollOffset -= h - lastHeaderHeight - 1 - footerHeight
@@ -481,12 +532,24 @@ func runLiveView(ctx context.Context, cancel context.CancelFunc, opts liveViewOp
 				case 'j': // vim down
 					scrollOffset++
 					changed = true
+				case 'h': // vim left
+					hScroll -= hStep
+					changed = true
+				case 'l': // vim right
+					hScroll += hStep
+					changed = true
 				case 'G': // vim end
 					autoScroll = true
 					changed = true
 				case 'g': // vim home
 					scrollOffset = 0
 					autoScroll = false
+					changed = true
+				case '0': // snap fully left
+					hScroll = 0
+					changed = true
+				case '$': // snap fully right
+					hScroll = 1 << 30 // clamped in render
 					changed = true
 				}
 			}

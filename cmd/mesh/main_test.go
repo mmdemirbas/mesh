@@ -431,6 +431,46 @@ func TestTruncateToVisibleWidth(t *testing.T) {
 	}
 }
 
+// TestVisibleSlice pins horizontal-scroll semantics: content before
+// startCol is hidden, the visible window preserves ANSI state that
+// was active at the cut point, and wide characters straddling either
+// boundary are dropped rather than split.
+func TestVisibleSlice(t *testing.T) {
+	// 中文abc column layout: 中(0-1) 文(2-3) a(4) b(5) c(6).
+	tests := []struct {
+		name     string
+		input    string
+		startCol int
+		width    int
+		want     string
+	}{
+		{"startCol 0 matches truncate", "hello world", 0, 5, "hello"},
+		{"skip then take", "hello world", 6, 5, "world"},
+		{"skip into middle", "abcdefghij", 3, 4, "defg"},
+		{"startCol past end returns empty", "hello", 10, 5, ""},
+		{"startCol exactly at end returns empty", "hello", 5, 5, ""},
+		{"preserve SGR across cut", "\033[31mabcdef\033[0m", 3, 3, "\033[31mdef\033[0m"},
+		{"SGR only-before-cut re-emitted", "\033[31mabcdef", 3, 3, "\033[31mdef\033[0m"},
+		{"SGR reset at cut point clears state", "\033[31mabc\033[0mdef", 3, 3, "def"},
+		{"CJK skip lands on wide-char boundary", "中文abc", 2, 3, "文a"},
+		{"CJK mid-wide-char startCol snaps forward", "中文abc", 1, 3, "文a"},
+		{"CJK width-straddle at right drops wide char", "中文abc", 0, 3, "中"},
+		{"zero width returns empty regardless of startCol", "hello", 2, 0, ""},
+		{"negative width returns empty", "hello", 0, -1, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := visibleSlice(tt.input, tt.startCol, tt.width)
+			if got != tt.want {
+				t.Errorf("visibleSlice(%q, %d, %d) = %q, want %q", tt.input, tt.startCol, tt.width, got, tt.want)
+			}
+			if vw := visibleLen(got); tt.width > 0 && vw > tt.width {
+				t.Errorf("visible width %d exceeds max %d for %q", vw, tt.width, got)
+			}
+		})
+	}
+}
+
 func TestRenderStatus_Empty(t *testing.T) {
 	cfg := &config.Config{}
 	output, _ := renderStatus(cfg, nil, nil, "testnode")
@@ -2278,8 +2318,11 @@ func TestRenderDashboardFrame_FooterLiveAndPaused(t *testing.T) {
 	if !strings.Contains(live, "q quit") {
 		t.Error("footer must show the q-quit keybinding hint")
 	}
-	if !strings.Contains(live, "↑↓/jk scroll") {
-		t.Error("footer must show the scroll hint")
+	if !strings.Contains(live, "↑↓ scroll") {
+		t.Error("footer must show the vertical scroll hint")
+	}
+	if !strings.Contains(live, "←→ pan") {
+		t.Error("footer must show the horizontal pan hint")
 	}
 	if !strings.Contains(live, "[LIVE 6-8/8]") {
 		t.Errorf("LIVE footer should show current range, got: %q", live)

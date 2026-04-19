@@ -41,28 +41,82 @@ func visibleLen(s string) int {
 	return n
 }
 
-// truncateToVisibleWidth returns s truncated so its visible width does
-// not exceed maxWidth. ANSI CSI escape sequences are copied through
-// without counting toward width. A trailing reset (\033[0m) is appended
-// when the input contained any SGR sequence so truncation never leaves
-// color or bold bleeding into the rest of the line.
-func truncateToVisibleWidth(s string, maxWidth int) string {
+// visibleSlice returns the portion of s that would appear in a terminal
+// column range [startCol, startCol+maxWidth) if s were printed at
+// column 0. ANSI CSI escape sequences are copied through without
+// counting toward width, and any SGR state that was active at startCol
+// is prepended so color/bold survives the horizontal cut. A trailing
+// \033[0m is appended when the output contains any SGR so it does not
+// bleed into the rest of the line. Wide characters (e.g. CJK, emoji)
+// that would straddle a column boundary are dropped rather than split.
+func visibleSlice(s string, startCol, maxWidth int) string {
 	if maxWidth <= 0 {
 		return ""
 	}
-	var b strings.Builder
-	b.Grow(len(s))
-	sawSGR := false
-	w := 0
+	var out strings.Builder
+	out.Grow(len(s))
+
+	// First pass: walk up to startCol, tracking active SGR state so we
+	// can re-emit it at the start of the slice. Zero-width SGR sequences
+	// are consumed even after col has reached startCol, so a reset
+	// (\033[0m) sitting exactly at the cut point clears state rather
+	// than leaking a stale color into the output. When startCol is 0
+	// there is nothing to skip, so all escapes pass through the copy
+	// phase verbatim (preserving escape-only inputs intact).
+	var activeSGR strings.Builder
+	col := 0
 	prevWidth := 0
-	for i := 0; i < len(s); {
+	i := 0
+	if startCol > 0 {
+		for i < len(s) {
+			if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+				j := i + 2
+				for j < len(s) && (s[j] < '@' || s[j] > '~') {
+					j++
+				}
+				if j < len(s) {
+					if s[j] == 'm' {
+						// \033[0m resets state; any other SGR extends it.
+						if j == i+3 && s[i+2] == '0' {
+							activeSGR.Reset()
+						} else {
+							activeSGR.WriteString(s[i : j+1])
+						}
+					}
+					i = j + 1
+					continue
+				}
+			}
+			if col >= startCol {
+				break
+			}
+			r, size := utf8.DecodeRuneInString(s[i:])
+			cw := runeWidth(r)
+			if r == 0xFE0F && prevWidth == 1 {
+				cw = 1
+			}
+			col += cw
+			prevWidth = cw
+			i += size
+		}
+	}
+
+	sawSGR := false
+	if activeSGR.Len() > 0 {
+		out.WriteString(activeSGR.String())
+		sawSGR = true
+	}
+
+	// Second pass: copy up to maxWidth columns of visible content.
+	w := 0
+	for i < len(s) && w < maxWidth {
 		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
 			j := i + 2
 			for j < len(s) && (s[j] < '@' || s[j] > '~') {
 				j++
 			}
 			if j < len(s) {
-				b.WriteString(s[i : j+1])
+				out.WriteString(s[i : j+1])
 				if s[j] == 'm' {
 					sawSGR = true
 				}
@@ -78,15 +132,20 @@ func truncateToVisibleWidth(s string, maxWidth int) string {
 		if w+cw > maxWidth {
 			break
 		}
-		b.WriteString(s[i : i+size])
+		out.WriteString(s[i : i+size])
 		w += cw
 		prevWidth = cw
 		i += size
 	}
 	if sawSGR && w > 0 {
-		b.WriteString("\033[0m")
+		out.WriteString("\033[0m")
 	}
-	return b.String()
+	return out.String()
+}
+
+// truncateToVisibleWidth is the startCol=0 case of visibleSlice.
+func truncateToVisibleWidth(s string, maxWidth int) string {
+	return visibleSlice(s, 0, maxWidth)
 }
 
 // stripANSI removes ANSI CSI escape sequences from s.
