@@ -41,6 +41,11 @@ type classifiedPattern struct {
 	dirOnly  bool
 	kind     patternKind
 	fixed    string // for kindLiteral: the literal; kindStarSuffix: ".ext"; kindPrefixStar: "prefix"
+	// Pre-split components for double-star patterns. Populated at config
+	// load time so matchDoubleStar avoids a strings.SplitN allocation per
+	// path. Both fields are empty for non-double-star patterns.
+	dsPrefix string // prefix before "**", with trailing "/" trimmed
+	dsSuffix string // suffix after "**", with leading "/" trimmed
 }
 
 // classifyGlob determines the fast-match strategy for a simple glob pattern
@@ -90,6 +95,13 @@ func newIgnoreMatcher(configPatterns []string) *ignoreMatcher {
 		}
 		switch {
 		case strings.Contains(p.pattern, "**"):
+			// Pre-split on the first "**" so matchDoubleStarPresplit avoids a
+			// per-call strings.SplitN allocation (~150 allocs/op observed in
+			// BenchmarkIgnoreMatcherRealistic before this change).
+			if parts := strings.SplitN(p.pattern, "**", 2); len(parts) == 2 {
+				cp.dsPrefix = strings.TrimSuffix(parts[0], "/")
+				cp.dsSuffix = strings.TrimPrefix(parts[1], "/")
+			}
 			m.doubleStarPatterns = append(m.doubleStarPatterns, cp)
 		case strings.Contains(p.pattern, "/"):
 			cp.kind, cp.fixed = classifyGlob(p.pattern)
@@ -171,15 +183,18 @@ func (m *ignoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
 
 	ignored := false
 
-	// Basename-only patterns (no "/" or "**").
+	// Basename-only patterns (no "/" or "**"). Gitignore unanchored patterns
+	// match against the basename only — `path.Match(pattern, fullPath)` where
+	// the pattern has no "/" cannot succeed when the path has "/" (the glob
+	// `*` never crosses a separator). So fastMatchBase is sufficient; the
+	// earlier fastMatchPath fallback was a no-op that paid two glob compiles
+	// on every miss (PF: profiling showed it was >50% of shouldIgnore CPU).
 	for i := range m.basePatterns {
 		p := &m.basePatterns[i]
 		if p.dirOnly && !isDir {
 			continue
 		}
 		if fastMatchBase(p, base) {
-			ignored = !p.negation
-		} else if fastMatchPath(p, relPath) {
 			ignored = !p.negation
 		}
 	}
@@ -201,7 +216,7 @@ func (m *ignoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
 		if p.dirOnly && !isDir {
 			continue
 		}
-		if matchDoubleStar(p.pattern, relPath) {
+		if matchDoubleStarPresplit(p, relPath) {
 			ignored = !p.negation
 		}
 	}
@@ -229,33 +244,38 @@ func matchPattern(pattern, relPath string) bool {
 	return matched
 }
 
-// matchDoubleStar handles ** glob patterns.
+// matchDoubleStar handles ** glob patterns. Splits on "**" per call —
+// used by tests and the matchPattern fallback. The hot path goes through
+// matchDoubleStarPresplit to avoid the per-call allocation.
 func matchDoubleStar(pattern, filePath string) bool {
-	// Split on ** and try to match prefix + suffix with any number of middle segments.
 	parts := strings.SplitN(pattern, "**", 2)
 	if len(parts) != 2 {
 		matched, _ := path.Match(pattern, filePath)
 		return matched
 	}
-
-	prefix := parts[0]
+	prefix := strings.TrimSuffix(parts[0], "/")
 	suffix := strings.TrimPrefix(parts[1], "/")
+	return doubleStarMatch(prefix, suffix, filePath)
+}
 
-	// Prefix must match the start of the path.
+// matchDoubleStarPresplit uses the dsPrefix/dsSuffix fields populated at
+// config load time so the hot path skips strings.SplitN.
+func matchDoubleStarPresplit(p *classifiedPattern, filePath string) bool {
+	return doubleStarMatch(p.dsPrefix, p.dsSuffix, filePath)
+}
+
+// doubleStarMatch is the shared ** matching logic. prefix has no trailing
+// "/" and suffix has no leading "/".
+func doubleStarMatch(prefix, suffix, filePath string) bool {
 	if prefix != "" {
-		prefix = strings.TrimSuffix(prefix, "/")
 		if !strings.HasPrefix(filePath, prefix+"/") && filePath != prefix {
 			return false
 		}
 		filePath = strings.TrimPrefix(filePath, prefix+"/")
 	}
-
-	// Suffix must match the end (or some tail) of the remaining path.
 	if suffix == "" {
 		return true
 	}
-
-	// Try matching suffix against the path and all sub-paths.
 	for {
 		if matched, _ := path.Match(suffix, filePath); matched {
 			return true

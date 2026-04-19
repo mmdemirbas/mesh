@@ -5463,6 +5463,76 @@ func BenchmarkScanDeepTree(b *testing.B) {
 	}
 }
 
+// TestShouldIgnoreReferenceConformance pins shouldIgnore's decisions for a
+// broad corpus (patterns × paths). Any future optimization must reproduce
+// exactly these decisions; a per-case table means a regression is pointed
+// at the pattern/path that broke.
+func TestShouldIgnoreReferenceConformance(t *testing.T) {
+	t.Parallel()
+	patterns := []string{
+		".git/", ".svn/", ".DS_Store", "node_modules/",
+		"*.class", "*.o", "*.pyc", "*.log", "*.tmp",
+		"tmp-*", "cache-*",
+		"src/generated/", "docs/build/",
+		"**/test-output/**", "**/node_modules/**",
+		"!important.class", "!keep.log",
+	}
+	m := newIgnoreMatcher(patterns)
+	cases := []struct {
+		path   string
+		isDir  bool
+		ignore bool
+	}{
+		// literals at root
+		{".git", true, true},
+		{".DS_Store", false, true},
+		{"node_modules", true, true},
+		// literals nested
+		{"sub/.git", true, true},
+		{"sub/.DS_Store", false, true},
+		// dir-only as file
+		{".git", false, false}, // .git/ is dir-only; file named .git not ignored
+		// suffixes
+		{"Foo.class", false, true},
+		{"deep/nested/bar.o", false, true},
+		{"debug.log", false, true},
+		// negations
+		{"important.class", false, false},
+		{"keep.log", false, false},
+		{"sub/important.class", false, false},
+		// prefix-stars
+		{"tmp-123", false, true},
+		{"cache-abc", false, true},
+		{"deep/tmp-xyz", false, true},
+		// anchored
+		{"src/generated", true, true},
+		{"docs/build", true, true},
+		{"src/generated/foo.go", false, false}, // file inside anchored dir — shouldIgnore does NOT walk up
+		// double-star (current matcher handles at most one ** per pattern;
+		// multi-** patterns are not matched — pin that behavior until PF
+		// revisits gitignore conformance)
+		{"foo/test-output/bar", false, true},
+		{"x/y/z/test-output/report.html", false, true},
+		// no match
+		{"src/main.go", false, false},
+		{"README.md", false, false},
+		{"Makefile", false, false},
+		// builtin always wins
+		{".mesh-tmp-xyz", false, true},
+		{"sub/.mesh-tmp-xyz", false, true},
+		{"foo.mesh-delta-tmp-abcd", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%s_isDir=%v", tc.path, tc.isDir), func(t *testing.T) {
+			t.Parallel()
+			got := m.shouldIgnore(tc.path, tc.isDir)
+			if got != tc.ignore {
+				t.Errorf("shouldIgnore(%q, isDir=%v) = %v, want %v", tc.path, tc.isDir, got, tc.ignore)
+			}
+		})
+	}
+}
+
 func BenchmarkIgnoreMatcher(b *testing.B) {
 	patterns := []string{
 		"*.class", "*.o", "*.pyc", "*.swp", "*.swo",
@@ -5486,6 +5556,95 @@ func BenchmarkIgnoreMatcher(b *testing.B) {
 			m.shouldIgnore(p, false)
 		}
 	}
+}
+
+// BenchmarkIgnoreMatcherRealistic mirrors a real monorepo gitignore: ~60
+// patterns (literals, suffixes, prefix-stars, anchored, and double-star),
+// applied to 50 mixed paths. This is the shape the PF hotspot notes refer
+// to — 310k files × this per-call cost = the reported ~3.6s scan-time.
+func BenchmarkIgnoreMatcherRealistic(b *testing.B) {
+	patterns := []string{
+		// literals
+		".git/", ".svn/", ".hg/", ".DS_Store", "Thumbs.db",
+		"node_modules/", "__pycache__/", ".pytest_cache/", ".tox/",
+		".mypy_cache/", ".idea/", ".vscode/", ".gradle/", ".nuxt/",
+		"target/", "build/", "dist/", "out/", "bin/", "obj/",
+		"vendor/", "Pods/", "coverage/", ".next/", ".cache/",
+		// suffixes
+		"*.class", "*.o", "*.pyc", "*.pyo", "*.swp", "*.swo",
+		"*.log", "*.tmp", "*.bak", "*.orig", "*.rej",
+		"*.jar", "*.war", "*.ear", "*.zip", "*.tar",
+		"*.gz", "*.tgz", "*.rar", "*.7z", "*.iso",
+		"*.dll", "*.exe", "*.so", "*.dylib", "*.a",
+		// prefix-stars
+		"tmp-*", "cache-*", "backup-*",
+		// anchored
+		"src/generated/", "docs/build/", "tools/dist/",
+		// double-star
+		"**/test-output/**", "**/node_modules/**", "**/.gradle/**",
+		// negations
+		"!important.class", "!keep.log",
+	}
+	m := newIgnoreMatcher(patterns)
+	paths := []string{
+		"src/main/java/com/example/App.java",
+		"src/main/java/com/example/App.class",
+		"src/main/java/com/example/util/Helper.java",
+		"src/main/resources/config.yaml",
+		"src/test/java/com/example/AppTest.java",
+		"build/libs/app.jar",
+		"build/classes/com/example/App.class",
+		"build/reports/test-output/index.html",
+		"node_modules/lodash/index.js",
+		"node_modules/react/react.js",
+		"deep/nested/path/to/some/file.txt",
+		".git/objects/pack/pack-abc.idx",
+		".git/refs/heads/main",
+		"important.class",
+		"keep.log",
+		"debug.log",
+		"error.log",
+		"docs/source/intro.md",
+		"docs/build/html/index.html",
+		"scripts/deploy.sh",
+		"scripts/test.py",
+		"scripts/build.sh",
+		"config/prod.yaml",
+		"config/dev.yaml",
+		"README.md",
+		"LICENSE",
+		"Makefile",
+		"CMakeLists.txt",
+		"pom.xml",
+		"package.json",
+		"requirements.txt",
+		"go.mod",
+		"go.sum",
+		"a/b/c/d/e/f/g/deep.txt",
+		"vendor/github.com/foo/bar.go",
+		"tools/dist/release.zip",
+		"src/generated/proto.pb.go",
+		"tmp-123/scratch.txt",
+		"backup-20260101/data.bin",
+		"coverage/index.html",
+		".vscode/settings.json",
+		".idea/workspace.xml",
+		"Pods/Manifest.lock",
+		"obj/Debug/app.obj",
+		"bin/Release/app.exe",
+		"cache-xyz/entry",
+		"target/debug/app",
+		".DS_Store",
+		"Thumbs.db",
+		"backend/server.go",
+	}
+	b.ResetTimer()
+	for b.Loop() {
+		for _, p := range paths {
+			m.shouldIgnore(p, false)
+		}
+	}
+	b.ReportMetric(float64(len(paths)), "paths/op")
 }
 
 func BenchmarkBlockSignatures(b *testing.B) {
