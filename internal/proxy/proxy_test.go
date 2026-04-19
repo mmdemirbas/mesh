@@ -9,8 +9,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/mmdemirbas/mesh/internal/config"
+	"github.com/mmdemirbas/mesh/internal/state"
 )
 
 func TestDialViaSocks5_Success(t *testing.T) {
@@ -534,4 +538,136 @@ func mockSocks5ServerIPv6Bind(t *testing.T, conn net.Conn, targetAddr string) {
 	_, _ = io.Copy(conn, targetConn)
 	_ = conn.(*net.TCPConn).CloseWrite()
 	<-done
+}
+
+// freePort returns an address on 127.0.0.1 that is currently unused.
+// TOCTOU-prone but standard practice for testing servers that bind by
+// address rather than by existing listener.
+func freePort(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	return addr
+}
+
+// TestRunStandaloneRelays_EndToEnd pins the orchestration wrapper behavior:
+// a config.Listener of type "relay" results in bytes flowing from a client
+// connection through to the configured target.
+func TestRunStandaloneRelays_EndToEnd(t *testing.T) {
+	t.Parallel()
+
+	// Echo target
+	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = targetLn.Close() }()
+	go func() {
+		conn, err := targetLn.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = io.Copy(conn, conn)
+		_ = conn.(*net.TCPConn).CloseWrite()
+	}()
+
+	bind := freePort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	RunStandaloneRelays(ctx, []config.Listener{
+		{Type: "relay", Bind: bind, Target: targetLn.Addr().String()},
+		{Type: "socks", Bind: "ignored"}, // filter path: must be skipped
+	}, slog.Default(), &wg)
+
+	// Wait until the relay is listening.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snap, ok := state.Global.Snapshot()["relay:"+bind]
+		if ok && snap.Status == state.Listening {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	conn, err := net.DialTimeout("tcp", bind, time.Second)
+	if err != nil {
+		t.Fatalf("dial relay: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	payload := []byte("hello-via-relay")
+	_, _ = conn.Write(payload)
+	_ = conn.(*net.TCPConn).CloseWrite()
+
+	got, _ := io.ReadAll(conn)
+	if string(got) != string(payload) {
+		t.Errorf("echoed = %q, want %q", got, payload)
+	}
+
+	cancel()
+	wg.Wait()
+}
+
+// TestRunStandaloneProxies_StartsSOCKS confirms the proxy wrapper starts a
+// SOCKS5 server that handles a real CONNECT, and skips non-socks/http
+// entries rather than failing.
+func TestRunStandaloneProxies_StartsSOCKS(t *testing.T) {
+	t.Parallel()
+
+	// Echo target
+	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = targetLn.Close() }()
+	go func() {
+		conn, err := targetLn.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = io.Copy(conn, conn)
+		_ = conn.(*net.TCPConn).CloseWrite()
+	}()
+
+	bind := freePort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	RunStandaloneProxies(ctx, []config.Listener{
+		{Type: "socks", Bind: bind},
+		{Type: "relay", Bind: "ignored"}, // filter path: must be skipped
+	}, slog.Default(), &wg)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snap, ok := state.Global.Snapshot()["proxy:"+bind]
+		if ok && snap.Status == state.Listening {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	conn, err := DialViaSocks5(net.Dial, bind, targetLn.Addr().String())
+	if err != nil {
+		t.Fatalf("DialViaSocks5: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	payload := []byte("hello-via-socks-wrapper")
+	_, _ = conn.Write(payload)
+	_ = conn.(*net.TCPConn).CloseWrite()
+	got, _ := io.ReadAll(conn)
+	if string(got) != string(payload) {
+		t.Errorf("echoed = %q, want %q", got, payload)
+	}
+
+	cancel()
+	wg.Wait()
 }
