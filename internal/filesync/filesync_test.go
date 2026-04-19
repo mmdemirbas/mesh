@@ -2752,6 +2752,60 @@ func TestApplyDelta(t *testing.T) {
 	_ = os.Remove(tmpPath)
 }
 
+// TestApplyDelta_TruncatesOldTailBeyondRemoteSize pins the Truncate step in
+// assembleDelta. Existing tests size the assembled output to exactly
+// remoteFileSize, so Truncate is a no-op and its removal slips past mutation
+// testing. Here the old file is larger than the new remote size, no blocks are
+// changed, and the reconstructed file must be trimmed to the remote size.
+func TestApplyDelta_TruncatesOldTailBeyondRemoteSize(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Old file: 12 bytes, three full 4-byte blocks.
+	writeFile(t, dir, "old.bin", "AAAABBBBcccc")
+
+	// No block changes; remoteFileSize is smaller than the old file, so the
+	// delta-assembly loop writes 12 bytes and Truncate must clip to 10.
+	tmpPath, err := applyDelta(
+		filepath.Join(dir, "old.bin"),
+		filepath.Join(dir, "result.bin"),
+		"testpeer", 4, 10, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(tmpPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "AAAABBBBcc" {
+		t.Errorf("delta result = %q, want 'AAAABBBBcc' (truncate to remoteFileSize)", got)
+	}
+	_ = os.Remove(tmpPath)
+}
+
+// TestApplyDeltaRoot_TruncatesOldTailBeyondRemoteSize mirrors the above for
+// the os.Root variant so both call paths pin the Truncate invariant.
+func TestApplyDeltaRoot_TruncatesOldTailBeyondRemoteSize(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "old.bin", "AAAABBBBcccc")
+	root := openTestRoot(t, dir)
+
+	tmpRelPath, err := applyDeltaRoot(root, "old.bin", "testpeer", 4, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, tmpRelPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "AAAABBBBcc" {
+		t.Errorf("delta result = %q, want 'AAAABBBBcc' (truncate to remoteFileSize)", got)
+	}
+	_ = root.Remove(tmpRelPath)
+}
+
 func TestDeltaEndpoint_ReducesTransfer(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
