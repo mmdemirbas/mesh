@@ -106,7 +106,7 @@ there depend on items tracked here.
 | PK    | Clone elimination (COW / change-set on persist)      | 🟠 P1 | perf          | ⏳     | 🟧 M   | 🔴   | 📦    |
 | PL    | Incremental deletion detection                       | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
 | PM    | Directory-keyed child index                          | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
-| PN    | Incremental `recomputeCache`                         | 🟠 P1 | perf          | ⏳     | 🟨 S   | 🟢   | 📄    |
+| PN    | Incremental `recomputeCache`                         | 🟠 P1 | perf          | ⏸      | 🟨 S   | 🟢   | 📄    |
 | R1    | Inode-based rename / move detection                  | 🟡 P2 | robustness    | 🔧     | 🟧 M   | 🟡   | 🔌    |
 | R2    | Formal folder-level state machine                    | 🟡 P2 | robustness    | ⏳     | 🟧 M   | 🟢   | 📦    |
 | R3    | Peer-level failure blacklist                         | 🟡 P2 | robustness    | 🔧     | 🟨 S   | 🟢   | 📦    |
@@ -652,7 +652,7 @@ Each entry follows the same structure:
   `TestScanPerFileErrorAllowsOtherTombstones`,
   `TestScanBulkErrorsSuppressAllTombstones`) continue to pass.
 
-### PN · Incremental `recomputeCache` · ⏳
+### PN · Incremental `recomputeCache` · ⏸
 
 - **Problem.** `recomputeCache` rebuilds the active-files cache
   (advisory, used by `claimPath` dedup) from scratch after every scan
@@ -665,7 +665,14 @@ Each entry follows the same structure:
 - **Impact.** O(delta) per scan instead of O(N).
 - **Blast radius.** 📄 single helper.
 - **Syncthing handling.** Not applicable.
-- **Recommendation.** Ship (1) after P18c. Pure incremental win; cheap.
+- **Recommendation.** Measurement deferred the change. On M1 Max, the
+  full walk is ~13 µs at 1 k entries, ~200 µs at 10 k, ~1.5 ms at 100 k
+  with zero allocations (`BenchmarkRecomputeCache` pins the baseline).
+  At the production 168 k-file size the cost is ~2 ms once per 60 s
+  scan cycle. PN's incremental delta would shave ~2 ms per minute
+  against the scan's multi-second cost — not worth the complexity. If
+  scan frequency becomes adaptive and increases an order of magnitude,
+  revisit.
 
 ---
 
