@@ -97,6 +97,25 @@ func TestAutoCert_CreatesMissingParentDir(t *testing.T) {
 	}
 }
 
+// TestFingerprint_PinnedPEM is the algorithm anchor for Fingerprint.
+//
+// The expected value is the SHA-256 of testdata/pinned.crt's DER bytes,
+// computed out-of-band with `openssl x509 -noout -fingerprint -sha256`.
+// Every other fingerprint test in this file compares values produced by
+// Fingerprint against each other, so a hash-algorithm change (or a bug
+// in sha256sum) would go unnoticed. This test anchors the algorithm.
+func TestFingerprint_PinnedPEM(t *testing.T) {
+	t.Parallel()
+	cert, err := tls.LoadX509KeyPair("testdata/pinned.crt", "testdata/pinned.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "sha256:626f6f09e36cd1e092ec5aad40b57a6eb385ced03f826a73fb78bc1449c74f90"
+	if got := Fingerprint(cert); got != want {
+		t.Errorf("Fingerprint = %q, want %q", got, want)
+	}
+}
+
 func TestFingerprint_Stable(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
