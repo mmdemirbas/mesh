@@ -264,6 +264,146 @@ superseded; individual fixes land as part of per-package audit work.
 
 _New entries: add only from real findings. Do not pre-fill speculatively._
 
+## 2026-04-19 audit sweep
+
+Eight-task pass driven by "areas where test coverage could be most
+impactful." Each item lists the gap, the fix, and the commit.
+
+### 1. clipsync UDP subsystem (committed `a6ee3b4`, amended `23a47ea`)
+
+**Gap:** `cleanupPeers` and `runUDPServer` had no unit coverage — they
+were only exercised via the e2e S3 scenario. A protocol-level regression
+(wrong proto field, silently-dropped beacon, bad stale-peer threshold)
+would only surface in a containerized run.
+
+**Fix:** `internal/clipsync/clipsync_udp_test.go` — seven targeted tests
+plus two fuzz targets on `pb.Beacon` marshal/unmarshal. `newUDPTestNode`
+helper installs a timeout-bounded `defaultClient` to avoid a nil-panic
+in the goroutine-spawned `registerPeerHTTP`. `sendAndWaitForPeerCount`
+re-emits the beacon on a 20 ms cadence during the 3 s deadline poll —
+survives the bind-race where the test sends before `runUDPServer` has
+bound its socket. Replaced the initial
+`TestRunUDPBeacon_EmitsValidProto` with `TestBeaconMarshal_RoundTrip`
+once we confirmed UDP broadcast targets aren't observable on loopback;
+the full beacon emit path is covered by e2e S3 instead.
+
+### 2. Gateway translation oracle anchors
+
+**Gap:** cross-API SSE translation tests asserted on whole reassembled
+events but did not pin the canonicalization rules (tool-call id
+prefixing, empty-content normalization, text+tool-call ordering). A
+mutation that flipped the id prefix (`toolu_` → `call_`) or dropped
+empty content blocks would pass whole-event equality while breaking the
+downstream client contract.
+
+**Fix:** pinned oracle assertions on id-prefix and content-canonical
+rules in existing SSE tests — committed in the earlier batch; no new
+file. Reference point is
+`internal/gateway/sse_reassembly_test.go::TestReassemble_*` where the
+expected snapshots are now hardcoded rather than computed.
+
+### 3. filesync/watcher.go helpers
+
+**Gap:** ignore-matching and debounce-dedup logic in the watcher
+shipped without unit coverage; the live integration covered the happy
+path only.
+
+**Fix:** targeted tests for the pure helpers. See watcher test file for
+details.
+
+### 4. SSE reassembly property tests (committed `4efb1f7`)
+
+**Gap:** hand-rolled chunk boundaries in the existing SSE tests missed
+two regression classes: (1) content fragmented across arbitrary
+boundaries, including mid-multi-byte-rune splits, and (2) tool-call
+arguments split across multiple `delta` events.
+
+**Fix:** appended three property tests × 5 seeds = 18 subtests to
+`internal/gateway/sse_reassembly_test.go`:
+- Anthropic `text_delta` reassembly under random rune-boundary splits.
+- Anthropic `input_json_delta` reassembly (tool args JSON).
+- OpenAI `tool_calls[].function.arguments` reassembly.
+
+`randomSplit` uses `[]rune(s)` so snowmen (`☃`) and the fox emoji
+(`🦊`) aren't cut mid-byte — an early byte-level implementation
+produced U+FFFD in `json.Marshal` output and failed the round-trip.
+
+### 5. filesync/perflog race fix + pure builders (committed `50f1166`)
+
+**Gap discovered mid-sweep:** adding parallel tests surfaced a
+pre-existing race from commit `b9a17aa` — `globalPerfLog.logger` was a
+plain pointer mutated by parallel tests without synchronization. Worse
+than the race: parallel-test file contamination. When
+`TestPersistFolder_Concurrent` ran alongside logger-asserting tests,
+its `perfEmit` calls leaked into the test-local logger and corrupted
+the line-count assertions.
+
+**Fix:**
+1. Converted `globalPerfLog.logger` to `atomic.Pointer[perfLogger]`.
+2. Extracted pure event builders `perfSyncEvent(...)` and
+   `perfSnapshotEvent(folders)` returning `map[string]any`. The three
+   output-shape tests now assert on the builder directly — no global
+   logger touched, no parallel contamination possible.
+3. `swapPerfLoggerForTest(t, pl)` helper using atomic Store/Load +
+   `t.Cleanup` for the two tests that genuinely need the global (nil-
+   safety asserts).
+
+This is a generalizable pattern: if a test only needs the *shape* of
+an event, split the builder from the emit — the test never touches the
+mutable global.
+
+### 6. filesync live-loop unit pinning (committed `58b598d`)
+
+**Gap:** `syncLoop` and `scanLoop` had no unit-level goroutine-exit
+tests. Blocking on `firstScanDone` with a cancelled ctx, or on a
+nil/live `folderWatcher.dirtyCh`, could regress into goroutine leaks
+that survived mesh restarts and only surfaced under long-running
+stress.
+
+**Fix:** `internal/filesync/loops_test.go` (162 lines). `minimalNode()`
+builds a `Node` with an empty folders map (so `syncAllPeers` is a
+no-op) and exercises five lifecycle invariants:
+- `syncLoop` exits when ctx is cancelled pre-firstScan.
+- `syncLoop` exits when ctx is cancelled post-firstScan (parked on
+  ticker).
+- `syncLoop` drains `scanTrigger` and stays responsive to further
+  triggers.
+- `scanLoop` exits on ctx cancel with a nil watcher.
+- `scanLoop` exits on ctx cancel with a live `folderWatcher.dirtyCh`.
+
+### 7. Mutation-resistance sweep — `assembleDelta` Truncate (committed `d0def65`)
+
+**Gap:** `out.Truncate(remoteFileSize)` in
+`internal/filesync/blockhash.go::assembleDelta` was not covered.
+Existing `TestApplyDelta` and `TestApplyDeltaRoot` sized the
+reconstructed file to exactly `remoteFileSize` (3 blocks of 4 bytes
+with a 2-byte final partial, summing to 10 = `remoteFileSize`), so
+Truncate was a no-op and its removal passed silently.
+
+**Fix:** two tests in `filesync_test.go`:
+- `TestApplyDelta_TruncatesOldTailBeyondRemoteSize`
+- `TestApplyDeltaRoot_TruncatesOldTailBeyondRemoteSize`
+
+Both use an old file of 12 bytes, `remoteFileSize`=10, no block
+changes. The delta-assembly loop writes the full 12 bytes from three
+unchanged reads; Truncate must clip to 10. Removing Truncate makes
+both tests fail.
+
+Other targets considered:
+- `pruneConflicts` `<=` vs `<` boundary — equivalent mutation
+  (`toDelete = 0` makes the delete loop a no-op either way). No test
+  added.
+- `myersDiff` direction-choice `<` — existing `TestDiffLines` table
+  cases cover both directions adequately. No test added.
+
+### 8. Infra finding: flake fix for new UDP tests
+
+During sweep #1, `TestRunUDPServer_AcceptsValidBeacon` flaked under
+full-repo load — the `runUDPServer` goroutine sometimes hadn't bound
+by the time the test sent its seed beacons. Fixed with the
+`sendAndWaitForPeerCount` deadline-polling helper described in #1.
+Verified via five stable `-count=5 -race` reruns.
+
 ## Rollout
 
 1. **Phase 1 — land this doc and the rubric.** Done.
