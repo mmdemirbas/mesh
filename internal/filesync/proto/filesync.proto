@@ -24,7 +24,7 @@ message FileInfo {
   int64  mtime_ns  = 3;           // Unix nanoseconds
   bytes  sha256    = 4;           // 32 bytes
   bool   deleted   = 5;           // Tombstone flag
-  int64  sequence  = 6;           // Per-file monotonic counter
+  int64  sequence  = 6;           // Per-device ordering only (delta shortcut). Conflict semantics live in version.
   uint32 mode      = 7;           // Unix permission bits (e.g., 0644)
   // prev_path is a single-use rename hint (R1 Phase 2). Set by the sender
   // when it detects that a new path has the same filesystem inode as a
@@ -34,6 +34,17 @@ message FileInfo {
   // field ignore it and download normally (safe fallback via proto3
   // unknown-field tolerance).
   string prev_path = 8;
+  // C6: per-file vector clock. Each Counter carries a device_id (10-char
+  // Crockford base32) and the number of local writes observed on that
+  // device. Conflict detection compares vectors by strict domination.
+  repeated Counter version = 9;
+}
+
+// Counter is a single entry in a vector clock: how many writes device_id
+// has observed for a given file. See docs/filesync/DESIGN-v1.md §1.
+message Counter {
+  string device_id = 1;           // 10-char Crockford base32
+  uint64 value     = 2;
 }
 
 // BundleRequest lists file paths to download in a single round-trip (P19).
