@@ -1444,12 +1444,20 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 			if !ok {
 				return
 			}
+			// RFC 4254 §7.2: the forwarded-tcpip message must carry the address
+			// at which the connection was made. When the client originally
+			// requested port 0, the server assigned an ephemeral port and
+			// returned it in the tcpip-forward reply; the client registers its
+			// listener under that actual port. Sending the original (zero)
+			// BindPort here would make the client reject the channel with
+			// "no forward for address" because its forwardList is keyed by
+			// actualPort.
 			payload := ssh.Marshal(struct {
 				DestAddr   string
 				DestPort   uint32
 				OriginAddr string
 				OriginPort uint32
-			}{fwdReq.BindAddr, fwdReq.BindPort, origin.IP.String(), uint32(origin.Port)})
+			}{fwdReq.BindAddr, actualPort, origin.IP.String(), uint32(origin.Port)})
 
 			ch, reqs, err := sshConn.OpenChannel("forwarded-tcpip", payload)
 			if err != nil {
