@@ -6313,3 +6313,239 @@ func TestHandleStatus_RejectsNonGet(t *testing.T) {
 		t.Errorf("POST /status = %d, want 405", resp.StatusCode)
 	}
 }
+
+func TestActionName(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   DiffAction
+		want string
+	}{
+		{ActionDownload, "download"},
+		{ActionConflict, "conflict"},
+		{ActionDelete, "delete"},
+		{DiffAction(99), "unknown"},
+	}
+	for _, c := range cases {
+		if got := actionName(c.in); got != c.want {
+			t.Errorf("actionName(%v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestBuildPendingSummary_CountsAndBytes(t *testing.T) {
+	t.Parallel()
+	entries := []DiffEntry{
+		{Path: "a.txt", Action: ActionDownload, RemoteSize: 100},
+		{Path: "b.txt", Action: ActionDownload, RemoteSize: 200},
+		{Path: "c.txt", Action: ActionConflict, RemoteSize: 50},
+		{Path: "d.txt", Action: ActionDelete, RemoteSize: 0},
+	}
+	ps := buildPendingSummary(entries)
+	if ps.Downloads != 2 {
+		t.Errorf("Downloads = %d, want 2", ps.Downloads)
+	}
+	if ps.Conflicts != 1 {
+		t.Errorf("Conflicts = %d, want 1", ps.Conflicts)
+	}
+	if ps.Deletes != 1 {
+		t.Errorf("Deletes = %d, want 1", ps.Deletes)
+	}
+	if ps.Bytes != 350 {
+		t.Errorf("Bytes = %d, want 350", ps.Bytes)
+	}
+	if len(ps.Files) != 4 {
+		t.Errorf("Files len = %d, want 4", len(ps.Files))
+	}
+	if ps.Files[0].Action != "download" {
+		t.Errorf("Files[0].Action = %q, want download", ps.Files[0].Action)
+	}
+	if ps.UpdatedAt.IsZero() {
+		t.Error("UpdatedAt should be set to time.Now()")
+	}
+}
+
+func TestBuildPendingSummary_PreviewCap(t *testing.T) {
+	t.Parallel()
+	entries := make([]DiffEntry, 75)
+	for i := range entries {
+		entries[i] = DiffEntry{Path: "f", Action: ActionDownload, RemoteSize: 1}
+	}
+	ps := buildPendingSummary(entries)
+	if ps.Downloads != 75 {
+		t.Errorf("Downloads = %d, want 75 (counts are uncapped)", ps.Downloads)
+	}
+	if len(ps.Files) != pendingFilePreviewLimit {
+		t.Errorf("Files len = %d, want %d (preview is capped)", len(ps.Files), pendingFilePreviewLimit)
+	}
+}
+
+func TestClonePendingSummary_DeepCopiesFiles(t *testing.T) {
+	t.Parallel()
+	src := PendingSummary{
+		Downloads: 2,
+		Bytes:     500,
+		Files: []PendingFile{
+			{Path: "a.txt", Action: "download", Size: 300},
+			{Path: "b.txt", Action: "download", Size: 200},
+		},
+	}
+	cp := clonePendingSummary(src)
+	if cp == nil {
+		t.Fatal("clone returned nil")
+	}
+	// Mutate the clone's slice and confirm the original is unaffected.
+	cp.Files[0].Path = "MUTATED"
+	if src.Files[0].Path != "a.txt" {
+		t.Errorf("src Files[0].Path = %q, clone must not alias", src.Files[0].Path)
+	}
+	if cp.Downloads != 2 || cp.Bytes != 500 {
+		t.Errorf("scalar fields not copied: %+v", cp)
+	}
+}
+
+func TestClonePendingSummary_EmptyFiles(t *testing.T) {
+	t.Parallel()
+	src := PendingSummary{Downloads: 1}
+	cp := clonePendingSummary(src)
+	if cp.Files != nil {
+		t.Errorf("empty Files should remain nil, got %v", cp.Files)
+	}
+}
+
+func TestGetFolderPath_FoundAndMissing(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	n := &Node{folders: map[string]*folderState{
+		"path-test": {cfg: config.FolderCfg{ID: "path-test", Path: dir}},
+	}}
+	activeNodes.Register(n)
+	defer activeNodes.Unregister(n)
+
+	got, ok := GetFolderPath("path-test")
+	if !ok {
+		t.Fatal("expected path-test to be found")
+	}
+	if got != dir {
+		t.Errorf("path = %q, want %q", got, dir)
+	}
+
+	if _, ok := GetFolderPath("does-not-exist"); ok {
+		t.Error("unknown folder must return ok=false")
+	}
+}
+
+func TestGetConflicts_PopulatedAndEmpty(t *testing.T) {
+	t.Parallel()
+	n := &Node{folders: map[string]*folderState{
+		"conf-a": {
+			cfg:       config.FolderCfg{ID: "conf-a"},
+			conflicts: []string{"a.sync-conflict-x", "b.sync-conflict-y"},
+		},
+		"conf-b": {
+			cfg: config.FolderCfg{ID: "conf-b"},
+		},
+	}}
+	activeNodes.Register(n)
+	defer activeNodes.Unregister(n)
+
+	var mine []ConflictInfo
+	for _, c := range GetConflicts() {
+		if c.FolderID == "conf-a" || c.FolderID == "conf-b" {
+			mine = append(mine, c)
+		}
+	}
+	if len(mine) != 2 {
+		t.Fatalf("GetConflicts returned %d entries for conf-a/b, want 2: %+v", len(mine), mine)
+	}
+	if mine[0].Path != "a.sync-conflict-x" {
+		t.Errorf("Path[0] = %q, want a.sync-conflict-x", mine[0].Path)
+	}
+}
+
+func TestGetActivities_RecordAndCap(t *testing.T) {
+	t.Parallel()
+	n := &Node{folders: map[string]*folderState{
+		"act-test": {cfg: config.FolderCfg{ID: "act-test"}},
+	}}
+	activeNodes.Register(n)
+	defer activeNodes.Unregister(n)
+
+	// Record more than activityHistorySize activities; oldest must be dropped.
+	const extra = 10
+	for i := range activityHistorySize + extra {
+		n.recordActivity(SyncActivity{
+			Time:   time.Unix(int64(i), 0),
+			Folder: "act-test",
+			Peer:   "10.0.0.1:7756",
+			Files:  i,
+		})
+	}
+	var mine []SyncActivity
+	for _, a := range GetActivities() {
+		if a.Folder == "act-test" {
+			mine = append(mine, a)
+		}
+	}
+	if len(mine) != activityHistorySize {
+		t.Fatalf("got %d act-test activities, want %d (capped)", len(mine), activityHistorySize)
+	}
+	// Activities are sorted descending by time, so the newest (Files=extra+limit-1)
+	// must be first and the oldest kept (Files=extra) must be last.
+	if mine[0].Files != activityHistorySize+extra-1 {
+		t.Errorf("newest Files = %d, want %d", mine[0].Files, activityHistorySize+extra-1)
+	}
+	if mine[len(mine)-1].Files != extra {
+		t.Errorf("oldest-kept Files = %d, want %d (activities before this should be dropped)", mine[len(mine)-1].Files, extra)
+	}
+}
+
+func TestSetConfigFolders_FallbackWhenNoActiveNodes(t *testing.T) {
+	// Not t.Parallel: mutates the global configFolders registry.
+	t.Cleanup(clearConfigFolders)
+	clearConfigFolders()
+
+	SetConfigFolders(config.FilesyncCfg{
+		ResolvedFolders: []config.FolderCfg{
+			{
+				ID:             "z-folder",
+				Path:           "/tmp/z",
+				Direction:      "send-receive",
+				Peers:          []string{"10.0.0.1:7756"},
+				PeerNames:      []string{"hw"},
+				IgnorePatterns: []string{"*.tmp"},
+			},
+			{
+				ID:        "a-folder",
+				Path:      "/tmp/a",
+				Direction: "disabled",
+				Peers:     nil,
+			},
+		},
+	})
+
+	// With no activeNodes, GetFolderStatuses must fall back to configFolders.
+	// Sibling tests register their own nodes so we filter to our two IDs.
+	got := GetFolderStatuses()
+	var mine []FolderStatus
+	for _, s := range got {
+		if s.ID == "z-folder" || s.ID == "a-folder" {
+			mine = append(mine, s)
+		}
+	}
+	if len(mine) != 2 {
+		t.Fatalf("got %d of our folders, want 2: %+v", len(mine), mine)
+	}
+	// SetConfigFolders sorts by ID ascending, so a-folder comes first.
+	if mine[0].ID != "a-folder" {
+		t.Errorf("sorted[0] = %q, want a-folder", mine[0].ID)
+	}
+	if mine[1].Scanning != true {
+		t.Errorf("send-receive folder should be marked Scanning=true pre-start")
+	}
+	if mine[0].Scanning != false {
+		t.Errorf("disabled folder should have Scanning=false")
+	}
+	if mine[1].Peers[0].Name != "hw" || mine[1].Peers[0].Addr != "10.0.0.1:7756" {
+		t.Errorf("z-folder peer = %+v, want {Name:hw Addr:10.0.0.1:7756}", mine[1].Peers[0])
+	}
+}
