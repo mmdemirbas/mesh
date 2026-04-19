@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,9 +25,12 @@ type perfLogger struct {
 	size int64
 }
 
+// logger is stored via atomic.Pointer so parallel tests can swap it
+// under -race without tripping the detector. In production it is
+// written once from initPerfLog and never reassigned.
 var globalPerfLog struct {
 	once   sync.Once
-	logger *perfLogger
+	logger atomic.Pointer[perfLogger]
 }
 
 // initPerfLog initializes the global perf logger. Called once from Start().
@@ -40,13 +44,13 @@ func initPerfLog(meshDir, nodeName string) {
 			// Non-fatal: perf logging is best-effort.
 			return
 		}
-		globalPerfLog.logger = pl
+		globalPerfLog.logger.Store(pl)
 	})
 }
 
 // closePerfLog closes the global perf logger.
 func closePerfLog() {
-	if pl := globalPerfLog.logger; pl != nil {
+	if pl := globalPerfLog.logger.Load(); pl != nil {
 		pl.mu.Lock()
 		defer pl.mu.Unlock()
 		if pl.f != nil {
@@ -128,7 +132,7 @@ func (pl *perfLogger) backupPath(n int) string {
 // --- Emit helpers ---
 
 func perfEmit(event map[string]any) {
-	if pl := globalPerfLog.logger; pl != nil {
+	if pl := globalPerfLog.logger.Load(); pl != nil {
 		pl.emit(event)
 	}
 }
@@ -172,8 +176,9 @@ func perfPersist(folder string, indexBytes int, indexMs, peersMs float64, skippe
 	})
 }
 
-// perfSync emits a sync event.
-func perfSync(folder, peer string, remoteEntries, downloads, conflicts, deletes, failed int, durationMs float64, firstFailReason string) {
+// perfSyncEvent builds the event map for a sync event. Split out so
+// tests can assert on the field shape without touching the global logger.
+func perfSyncEvent(folder, peer string, remoteEntries, downloads, conflicts, deletes, failed int, durationMs float64, firstFailReason string) map[string]any {
 	m := map[string]any{
 		"event":          "sync",
 		"folder":         folder,
@@ -188,11 +193,18 @@ func perfSync(folder, peer string, remoteEntries, downloads, conflicts, deletes,
 	if firstFailReason != "" {
 		m["failure_reason"] = firstFailReason
 	}
-	perfEmit(m)
+	return m
+}
+
+// perfSync emits a sync event.
+func perfSync(folder, peer string, remoteEntries, downloads, conflicts, deletes, failed int, durationMs float64, firstFailReason string) {
+	perfEmit(perfSyncEvent(folder, peer, remoteEntries, downloads, conflicts, deletes, failed, durationMs, firstFailReason))
 }
 
 // perfSnapshot emits a periodic process-level snapshot.
-func perfSnapshot(folders map[string]*folderState) {
+// perfSnapshotEvent builds the snapshot event map. Split out so tests can
+// assert on field shape without touching the global logger.
+func perfSnapshotEvent(folders map[string]*folderState) map[string]any {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 
@@ -212,7 +224,7 @@ func perfSnapshot(folders map[string]*folderState) {
 		})
 	}
 
-	perfEmit(map[string]any{
+	return map[string]any{
 		"event":       "snapshot",
 		"goroutines":  runtime.NumGoroutine(),
 		"heap_mb":     memStats.HeapAlloc / (1024 * 1024),
@@ -220,7 +232,11 @@ func perfSnapshot(folders map[string]*folderState) {
 		"gc_pause_us": memStats.PauseNs[(memStats.NumGC+255)%256] / 1000,
 		"open_fds":    countOpenFDs(),
 		"folders":     folderStats,
-	})
+	}
+}
+
+func perfSnapshot(folders map[string]*folderState) {
+	perfEmit(perfSnapshotEvent(folders))
 }
 
 func ms(d time.Duration) float64 {

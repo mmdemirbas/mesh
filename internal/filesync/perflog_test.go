@@ -30,6 +30,18 @@ func newTestPerfLogger(t *testing.T) *perfLogger {
 	return pl
 }
 
+// swapPerfLoggerForTest atomically installs pl as the global logger for
+// the duration of the test, restoring the prior pointer on cleanup. pl
+// may be nil (nil-global assertion tests). Using the atomic pointer API
+// prevents -race flags when this test overlaps with another that calls
+// perfEmit via the production code path (e.g. TestPersistFolder_Concurrent).
+func swapPerfLoggerForTest(t *testing.T, pl *perfLogger) {
+	t.Helper()
+	saved := globalPerfLog.logger.Load()
+	globalPerfLog.logger.Store(pl)
+	t.Cleanup(func() { globalPerfLog.logger.Store(saved) })
+}
+
 func readLines(t *testing.T, path string) []string {
 	t.Helper()
 	f, err := os.Open(path) //nolint:gosec // test fixture
@@ -217,10 +229,7 @@ func TestPerfLogger_ConcurrentEmit(t *testing.T) {
 func TestPerfEmit_NilGlobalIsNoop(t *testing.T) {
 	t.Parallel()
 	// Sanity: when the global is nil, perfEmit is a silent no-op.
-	// Saved and restored to avoid cross-test interference.
-	saved := globalPerfLog.logger
-	globalPerfLog.logger = nil
-	defer func() { globalPerfLog.logger = saved }()
+	swapPerfLoggerForTest(t, nil)
 	perfEmit(map[string]any{"event": "nope"})
 }
 
@@ -238,37 +247,25 @@ func TestClosePerfLog_NilSafe(t *testing.T) {
 	t.Parallel()
 	// With logger == nil the close path is a silent no-op (mirrors the
 	// production invariant that perf logging is best-effort).
-	saved := globalPerfLog.logger
-	defer func() { globalPerfLog.logger = saved }()
-	globalPerfLog.logger = nil
+	swapPerfLoggerForTest(t, nil)
 	closePerfLog()
 }
 
 func TestPerfSync_EmitsExpectedFields(t *testing.T) {
 	t.Parallel()
-	pl := newTestPerfLogger(t)
-	saved := globalPerfLog.logger
-	globalPerfLog.logger = pl
-	defer func() { globalPerfLog.logger = saved }()
-
-	perfSync("f1", "peer-a", 10, 3, 1, 0, 2, 42.5, "boom")
-	lines := readLines(t, pl.path)
-	if len(lines) != 1 {
-		t.Fatalf("lines = %d, want 1", len(lines))
-	}
-	var got map[string]any
-	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	// Assert on perfSyncEvent directly — the wrapper perfSync just calls
+	// perfEmit on this map, and asserting via the emit path is racy with
+	// other tests that touch the global logger (e.g. TestPersistFolder_Concurrent).
+	got := perfSyncEvent("f1", "peer-a", 10, 3, 1, 0, 2, 42.5, "boom")
 	for k, want := range map[string]any{
 		"event":          "sync",
 		"folder":         "f1",
 		"peer":           "peer-a",
-		"remote_entries": float64(10),
-		"downloads":      float64(3),
-		"conflicts":      float64(1),
-		"deletes":        float64(0),
-		"failed":         float64(2),
+		"remote_entries": 10,
+		"downloads":      3,
+		"conflicts":      1,
+		"deletes":        0,
+		"failed":         2,
 		"duration_ms":    42.5,
 		"failure_reason": "boom",
 	} {
@@ -280,56 +277,35 @@ func TestPerfSync_EmitsExpectedFields(t *testing.T) {
 
 func TestPerfSync_OmitsEmptyFailureReason(t *testing.T) {
 	t.Parallel()
-	pl := newTestPerfLogger(t)
-	saved := globalPerfLog.logger
-	globalPerfLog.logger = pl
-	defer func() { globalPerfLog.logger = saved }()
-
-	perfSync("f1", "p", 0, 0, 0, 0, 0, 0, "")
-	lines := readLines(t, pl.path)
-	if len(lines) != 1 {
-		t.Fatalf("want 1 line")
-	}
-	if strings.Contains(lines[0], "failure_reason") {
-		t.Errorf("failure_reason should be omitted when empty: %s", lines[0])
+	got := perfSyncEvent("f1", "p", 0, 0, 0, 0, 0, 0, "")
+	if _, has := got["failure_reason"]; has {
+		t.Errorf("failure_reason should be omitted when empty: %+v", got)
 	}
 }
 
 func TestPerfSnapshot_EmitsFolderStats(t *testing.T) {
 	t.Parallel()
-	pl := newTestPerfLogger(t)
-	saved := globalPerfLog.logger
-	globalPerfLog.logger = pl
-	defer func() { globalPerfLog.logger = saved }()
-
 	idx := newFileIndex()
 	idx.Sequence = 7
 	idx.setEntry("a", FileEntry{Size: 100})
 	idx.setEntry("b", FileEntry{Size: 250})
-
 	folders := map[string]*folderState{
 		"fid": {index: idx},
 	}
-	perfSnapshot(folders)
-
-	lines := readLines(t, pl.path)
-	if len(lines) != 1 {
-		t.Fatalf("lines = %d", len(lines))
-	}
-	var got map[string]any
-	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
-		t.Fatal(err)
-	}
+	got := perfSnapshotEvent(folders)
 	if got["event"] != "snapshot" {
 		t.Errorf("event = %v", got["event"])
 	}
-	fs, ok := got["folders"].([]any)
+	fs, ok := got["folders"].([]map[string]any)
 	if !ok || len(fs) != 1 {
 		t.Fatalf("folders payload = %+v", got["folders"])
 	}
-	f0 := fs[0].(map[string]any)
-	if f0["id"] != "fid" || f0["sequence"].(float64) != 7 {
-		t.Errorf("folder entry = %+v", f0)
+	f0 := fs[0]
+	if f0["id"] != "fid" {
+		t.Errorf("folder id = %v", f0["id"])
+	}
+	if f0["sequence"] != int64(7) {
+		t.Errorf("folder sequence = %v (%T)", f0["sequence"], f0["sequence"])
 	}
 }
 
