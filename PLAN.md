@@ -27,19 +27,11 @@ When working on items from this plan, follow these rules:
 
 ---
 
-## Tier 1 — Fix Now
+## Filesync
 
-Crashes, active CVEs, broken functionality, exploitable security issues.
-
-(All items completed.)
-
----
-
-## Tier 2 — Fix Soon
-
-Security hardening, correctness, data integrity, protocol compliance.
-
-(All items completed.)
+Filesync roadmap (performance, correctness, conflict handling, differentiation
+features) lives in [`docs/filesync/PLAN.md`](docs/filesync/PLAN.md). All
+filesync items are tracked there.
 
 ---
 
@@ -47,90 +39,11 @@ Security hardening, correctness, data integrity, protocol compliance.
 
 Performance, UX, reliability, code quality, documentation, DevOps.
 
-### Robustness & Error Handling
-
-(All items completed.)
-
 ### Performance
 
 | ID   | Component | Item                                         | Notes |
 |------|-----------|----------------------------------------------|-------|
-| [P3](#p3-adaptive-watchscan) | filesync | Adaptive watch/scan | Self-tuning heuristic. Design below. |
 | P14  | tunnel | Parallel target probing (Happy Eyeballs) | Stagger-start all targets concurrently in `probeTarget` instead of sequential. First to connect wins, respecting target order preference within a short tie-break window. Reduces worst-case probe time from sum(timeouts) to max(stagger, fastest_target). Nice-to-have. |
-| [PF](#pf-trie-based-ignore-with-cursor-propagation) | filesync | Trie-based ignore with cursor propagation | Segment trie replaces linear pattern scan. Phase 2. |
-| [PK](#pk-clone-elimination-cow) | filesync | Clone elimination (COW or change-map) | O(N) index clone → O(1) snapshot. Phase 3. |
-| [PL](#pl-incremental-deletion-detection) | filesync | Incremental deletion detection | O(N) full-index scan → track via fsnotify/scan diff. Phase 3. |
-| [PM](#pm-directory-keyed-child-index) | filesync | Directory-keyed child index for error protection | O(N×M) error-path scan → O(children). Phase 3. |
-| [PN](#pn-incremental-recomputecache) | filesync | Incremental recomputeCache | O(N) rebuild → incremental update on swap. Phase 3. |
-
-#### P3: Adaptive Watch/Scan
-
-Goal: dynamically watch frequently-changing paths with fsnotify, poll the rest. No new config properties. Self-tuning.
-
-**Change frequency tracking:** `map[string]*FrequencyEntry` with `{changeCount, windowStart, lastDemotedAt}`. Increment on fsnotify event or scan-detected change. Reset windows older than 5 minutes. "Hot" = >5 changes per 5-minute window.
-
-**Promotion:** After each scan, if a directory is hot and unwatched, and total watch count < soft limit (3000), add to fsnotify.
-
-**Demotion:** 0 changes across 2 consecutive windows (~10 min) → remove watch. 10-min cooldown before re-promoting.
-
-**Edge cases:**
-- *Burst in new directory:* Detected on next scan, promoted then.
-- *Directory deletion:* fsnotify Remove event; stale cleanup (5-min interval) as safety net.
-- *Large initial scan:* No promotions on first scan. Second scan begins adaptive behavior.
-- *Watch limit pressure:* Sort by frequency, promote top N that fit.
-
-#### PA–PE: Phase 1 — Low-Hanging Fruit
-
-Source: perf-log analysis (client-perf.jsonl 1511 lines / server-perf.jsonl 355 lines, 15 folders, 310k files) + deep algorithmic audit. These items have clear wins with minimal risk.
-
-**PA: Move ignore check before stat** — **DONE** (already addressed by P20c parallel walker). The walker in `readDirEntries` already evaluates `ignore.shouldIgnore()` at line 519, before `d.Info()` stat at line 544. No work needed.
-
-**PB: Skip unchanged peer persist** — **DONE** (already addressed by P17a). `persistFolder` uses `indexDirty`/`peersDirty` flags and skips serialization when nothing changed.
-
-PC, PD, PE done.
-
-#### PF: Trie-Based Ignore with Cursor Propagation
-
-- **Problem:** Ignore matching is the #1 scan bottleneck (3.6s per scan on the 310k-file client). Current `shouldIgnore` evaluates patterns linearly — O(P) per path segment where P = pattern count. For deep trees this is O(depth × P) per file.
-- **Solution:** Build a segment-based trie from all ignore patterns at config load time. Each trie node holds: `{children map[string]*trieNode, wildcardChildren []*trieNode, terminal bool, negate bool}`. During filesystem walk, propagate a *cursor* (pointer into the trie) from parent to child directory. Each directory descent is O(1) amortized trie lookup + wildcard fan-out instead of re-evaluating all patterns from scratch.
-- **Design notes:** Gitignore semantics require: (1) later rules override earlier, (2) negation patterns un-ignore, (3) directory-only patterns (trailing `/`), (4) `**` matches zero or more segments. The trie handles these by storing rule priority and checking negate flags at terminals. `**` nodes create self-loops (cursor stays at same node AND advances to child).
-- **Expected gain:** 10-100x for deep trees with many patterns. For shallow trees with few patterns, overhead is comparable to linear scan.
-- **Risk:** Medium — complex implementation, must exactly match gitignore semantics. Extensive test suite required.
-- **Phase:** 2. Design before implement.
-
-PG, PH, PI, PJ done.
-
-#### PK: Clone Elimination (COW)
-
-- **Problem:** `FileIndex.clone()` (index.go:89-97) copies the entire `Files` map on every persist snapshot. For 310k entries, this is ~50 MB allocation per persist.
-- **Solution:** Copy-on-write: `clone()` returns a read-only reference sharing the underlying map. Mutations go through a change-set overlay. Flatten on persist.
-- **Expected gain:** O(1) snapshot instead of O(N) copy. For the client's 15 folders, eliminates ~750 MB/hr of transient allocations.
-- **Risk:** High — COW adds complexity to every map access. Bugs manifest as data corruption.
-- **Phase:** 3.
-
-#### PL: Incremental Deletion Detection
-
-- **Problem:** Deletion detection (index.go:834-848) iterates the full index to find entries not seen in the current scan. O(N) per scan.
-- **Solution:** Track "seen" paths during scan in a set. After scan, iterate only the set difference. Or: use fsnotify DELETE events to mark deletions immediately, with periodic full scan as safety net.
-- **Expected gain:** Reduces deletion detection from O(N) to O(deleted) in the common case (few deletions).
-- **Risk:** Low-medium. fsnotify can miss events; the periodic scan safety net is essential.
-- **Phase:** 3.
-
-#### PM: Directory-Keyed Child Index
-
-- **Problem:** Error-path protection (index.go:665-670) scans the full index to find children of a failed directory. O(N×M) where M = failed directories.
-- **Solution:** Maintain a `dirChildren map[string][]string` secondary index. On scan, populate incrementally. On error, look up O(children) instead of O(N).
-- **Expected gain:** O(children) vs O(N) per failed directory. Rarely hit in practice but prevents pathological slowdowns.
-- **Risk:** Low — secondary index is append-only during scan.
-- **Phase:** 3.
-
-#### PN: Incremental recomputeCache
-
-- **Problem:** `recomputeCache` (index.go:340-350) rebuilds the entire `liveFiles` set from the full index after every swap. O(N).
-- **Solution:** Track additions/removals during scan diff and apply incrementally to the cache.
-- **Expected gain:** O(delta) vs O(N) per scan cycle.
-- **Risk:** Low — cache is advisory (used for `claimPath` dedup). Stale entries cause redundant downloads, not data loss.
-- **Phase:** 3.
 
 ### UX & CLI
 
@@ -152,10 +65,6 @@ PG, PH, PI, PJ done.
 | Unmapped dynamic ports | REMOVE | Debug-only noise → web UI diagnostics. |
 | Per-row metrics | SIMPLIFIED | tx/rx shown only on producer rows (listeners and individual forwards). Connection-name, forward-set, and dynamic sub-rows are clean. Bytes still roll up into the sshd listener row and the grand total. |
 | Log tail | REMOVED | Caused layout shifts and flicker as new lines arrived. Full log stays in the admin UI and on disk. |
-
-### Cross-Platform
-
-(All items completed.)
 
 ### Protocol Compatibility
 
@@ -295,13 +204,6 @@ PG, PH, PI, PJ done.
 **Effort:** M.
 
 ---
-
-## Tier 4 — Features
-
-(All items completed.)
-
----
-
 
 ## Tier 5 — Bug Hunting
 
