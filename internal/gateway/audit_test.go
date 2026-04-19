@@ -343,3 +343,60 @@ func findFile(t *testing.T, dir string) string {
 	t.Fatalf("no jsonl file in %s", dir)
 	return ""
 }
+
+func TestAuditDirs_RegistersAndSnapshots(t *testing.T) {
+	// Not t.Parallel — mutates the package-level auditDirs map.
+	const name = "audit-dirs-test-gw"
+	dir := t.TempDir()
+	t.Cleanup(func() { unregisterAuditDir(name) })
+	registerAuditDir(name, dir)
+
+	snap := AuditDirs()
+	got, ok := snap[name]
+	if !ok {
+		t.Fatalf("%q missing from snapshot: %+v", name, snap)
+	}
+	if got != dir {
+		t.Errorf("AuditDirs()[%q] = %q, want %q", name, got, dir)
+	}
+
+	// Snapshot must be a copy; mutating it does not affect the registry.
+	snap[name] = "/mutated"
+	if AuditDirs()[name] != dir {
+		t.Error("AuditDirs snapshot must be a copy, not a live view")
+	}
+}
+
+func TestAuditDirs_UnregisterRemoves(t *testing.T) {
+	// Not t.Parallel — mutates the package-level auditDirs map.
+	const name = "audit-dirs-unreg-test-gw"
+	dir := t.TempDir()
+	registerAuditDir(name, dir)
+	unregisterAuditDir(name)
+	if _, ok := AuditDirs()[name]; ok {
+		t.Error("entry still present after unregister")
+	}
+}
+
+func TestExpandHome(t *testing.T) {
+	t.Parallel()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("cannot determine home dir: %v", err)
+	}
+	cases := []struct {
+		in, want string
+	}{
+		{"~", home},
+		{"~/foo/bar", filepath.Join(home, "foo/bar")},
+		{"/absolute/path", "/absolute/path"},
+		{"relative/path", "relative/path"},
+		{"", ""},
+		{"~user", "~user"}, // only ~/ or bare ~ expand; ~user pass-through
+	}
+	for _, c := range cases {
+		if got := expandHome(c.in); got != c.want {
+			t.Errorf("expandHome(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
