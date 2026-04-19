@@ -886,11 +886,13 @@ Each entry follows the same structure:
   `GetFolderStatuses`. `TestPeerRetryTracker` pins the state machine
   (below-threshold no backoff, threshold activation, doubling, clear
   resets, cap at `retryMaxDelay`, `backedOffPeers` filtering).
-- **Open follow-up.** Verify the web UI at `/ui/filesync` renders
-  `FolderPeer.BackoffRemaining` distinctly from file-level quarantine
-  and transient network error, so an operator can tell the three
-  states apart at a glance. If the current surface collapses them,
-  open a small UI item to split the indicator.
+- **UI follow-up shipped.** The filesync peer row in `admin_ui.go`
+  renders a `backing off · <duration>` badge whenever the API
+  reports a non-zero `backoff_remaining`. This gives three visually
+  distinct states: peer backing off (yellow badge), file quarantined
+  (yellow count with per-file list), and transient peer error (red
+  `last_error` line). `TestAdminUIRendersPeerBackoff` pins the
+  rendering against future refactors.
 
 <a id="d1"></a>
 ### D1 · FastCDC content-defined chunking
