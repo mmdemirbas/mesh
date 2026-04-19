@@ -6065,3 +6065,134 @@ func BenchmarkHashFile(b *testing.B) {
 		_, _ = hashFile(path)
 	}
 }
+
+// --- Protocol rejection-path tests (boundary contract) ---
+//
+// These pin the HTTP rejection behavior for malformed input. Each is a
+// trust-boundary contract: wrong method, malformed body, unparseable
+// protobuf. Existing tests cover the happy path and the forbidden-peer
+// path; these complete the contract-test triad.
+
+func TestHandleIndex_RejectsNonPost(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  map[string]*folderState{"test": {cfg: testFolderCfg(dir, "127.0.0.1")}},
+		deviceID: "test-device",
+	}
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/index")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("GET /index = %d, want 405", resp.StatusCode)
+	}
+}
+
+func TestHandleIndex_RejectsMalformedProtobuf(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  map[string]*folderState{"test": {cfg: testFolderCfg(dir, "127.0.0.1")}},
+		deviceID: "test-device",
+	}
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// Not a valid protobuf wire format.
+	body := bytes.NewReader([]byte("this is not a protobuf"))
+	resp, err := http.Post(ts.URL+"/index", "application/x-protobuf", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("malformed protobuf = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestHandleIndex_RejectsBadGzip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  map[string]*folderState{"test": {cfg: testFolderCfg(dir, "127.0.0.1")}},
+		deviceID: "test-device",
+	}
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// Body claims gzip but isn't.
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/index", bytes.NewReader([]byte("not gzipped")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Encoding", "gzip")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad gzip = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestHandleFile_RejectsNonGet(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "f.txt", "data")
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  map[string]*folderState{"test": {cfg: testFolderCfg(dir, "127.0.0.1")}},
+		deviceID: "test-device",
+	}
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/file?folder=test&path=f.txt", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("POST /file = %d, want 405", resp.StatusCode)
+	}
+}
+
+func TestHandleDelta_RejectsMalformedProtobuf(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  map[string]*folderState{"test": {cfg: testFolderCfg(dir, "127.0.0.1")}},
+		deviceID: "test-device",
+	}
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/delta", "application/x-protobuf", bytes.NewReader([]byte("garbage")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("malformed delta protobuf = %d, want 400", resp.StatusCode)
+	}
+}
