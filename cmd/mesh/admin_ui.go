@@ -2333,12 +2333,15 @@ function renderFolderDetail(f) {
     const errHtml = p.last_error
       ? '<div style="color:var(--red);font-size:11px;margin-top:2px">'+x(p.last_error)+'</div>'
       : '';
+    const backoffHtml = (p.backoff_remaining||0) > 0
+      ? ' <span class="badge badge-warn" title="Peer in consecutive-failure backoff; sync attempts are paused.">backing off &middot; '+fmtElapsed(Math.round(p.backoff_remaining/1e6))+'</span>'
+      : '';
     return '<tr>'
       + '<td>'+x(p.name||'-')+'</td>'
       + '<td style="font-family:var(--mono)">'+x(p.addr)+'</td>'
       + '<td>'+fmtTime(p.last_sync)+'</td>'
       + '<td style="font-family:var(--mono)">'+(p.last_seen_sequence||0)+' / '+(p.last_sent_sequence||0)+'</td>'
-      + '<td>'+plan+planAge+errHtml+'</td>'
+      + '<td>'+plan+planAge+backoffHtml+errHtml+'</td>'
       + '<td>'+(total ? fmtTokens(total) : '0')+'</td>'
       + '</tr>';
   }).join('') : '<tr><td colspan="6" style="color:var(--text-muted)">No peers configured</td></tr>';
