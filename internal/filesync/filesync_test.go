@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -363,6 +364,60 @@ func TestFileIndexClone(t *testing.T) {
 	}
 	if orig.Path != clone.Path {
 		t.Errorf("clone.Path = %q, want %q", clone.Path, orig.Path)
+	}
+}
+
+// TestRunScanRecyclesCloneMap pins P18c: the Files map backing is recycled
+// across scans via fs.reusableFiles to eliminate the ~30 MB per-scan
+// allocation on large folders. The second scan must not hold a reference
+// to the first scan's Files map, and must still produce correct results.
+func TestRunScanRecyclesCloneMap(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "one.txt", "a")
+	writeFile(t, dir, "two.txt", "b")
+
+	fs := &folderState{
+		cfg:           config.FolderCfg{ID: "f1", Path: dir, Direction: "send-receive"},
+		index:         newFileIndex(),
+		ignore:        &ignoreMatcher{},
+		peers:         map[string]PeerState{},
+		pending:       map[string]PendingSummary{},
+		peerLastError: map[string]string{},
+	}
+	fs.index.Path = dir
+	n := &Node{folders: map[string]*folderState{"f1": fs}}
+
+	n.runScan(context.Background(), nil)
+	firstFilesMap := fs.index.Files
+	if len(firstFilesMap) != 2 {
+		t.Fatalf("first scan: want 2 entries, got %d", len(firstFilesMap))
+	}
+	if fs.reusableFiles == nil {
+		t.Fatalf("expected reusableFiles to be populated after first scan")
+	}
+
+	// Second scan: expect reusableFiles to be consumed (set to nil during
+	// setup, then re-populated with the previous scan's map after swap).
+	writeFile(t, dir, "three.txt", "c")
+	recycledBefore := fs.reusableFiles
+	n.runScan(context.Background(), nil)
+
+	if len(fs.index.Files) != 3 {
+		t.Fatalf("second scan: want 3 entries, got %d", len(fs.index.Files))
+	}
+	if fs.reusableFiles == nil {
+		t.Fatalf("expected reusableFiles to be re-populated after second scan")
+	}
+	// The ping-pong invariant: after the second scan, reusableFiles should
+	// point to the FIRST scan's map (swapped out during scan 2), not to
+	// the map that was recycled INTO scan 2.
+	if reflect.ValueOf(fs.reusableFiles).Pointer() == reflect.ValueOf(recycledBefore).Pointer() {
+		t.Errorf("reusableFiles was not rotated; same map across scans")
+	}
+	// The live index must not share the recycled map either.
+	if reflect.ValueOf(fs.index.Files).Pointer() == reflect.ValueOf(fs.reusableFiles).Pointer() {
+		t.Errorf("fs.index.Files and fs.reusableFiles alias the same map")
 	}
 }
 
@@ -5460,6 +5515,55 @@ func BenchmarkScanDeepTree(b *testing.B) {
 	for b.Loop() {
 		idx := newFileIndex()
 		_, _, _, _ = idx.scan(context.Background(), dir, ignore)
+	}
+}
+
+// BenchmarkIndexClone measures the per-scan deep-copy cost. The production
+// scan path clones the index so the walker mutates a private copy while
+// readers see the old one. For a 168 k-entry folder that is the largest
+// single allocation in steady-state scanning (~30 MB). P18c reduces it.
+func BenchmarkIndexClone(b *testing.B) {
+	for _, n := range []int{1_000, 10_000, 100_000} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			idx := newFileIndex()
+			for i := range n {
+				idx.Files[fmt.Sprintf("dir%03d/file%05d.dat", i/100, i)] = FileEntry{
+					Size: int64(i), MtimeNS: int64(i) * 1000, Sequence: int64(i),
+				}
+			}
+			idx.recomputeCache()
+			b.ResetTimer()
+			b.ReportAllocs()
+			for b.Loop() {
+				_ = idx.clone()
+			}
+		})
+	}
+}
+
+// BenchmarkIndexCloneReused measures the P18c pool-reuse path. The runScan
+// loop stashes the old Files map after swap and recycles it on the next
+// clone, so steady-state scans allocate zero map memory.
+func BenchmarkIndexCloneReused(b *testing.B) {
+	for _, n := range []int{1_000, 10_000, 100_000} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			idx := newFileIndex()
+			for i := range n {
+				idx.Files[fmt.Sprintf("dir%03d/file%05d.dat", i/100, i)] = FileEntry{
+					Size: int64(i), MtimeNS: int64(i) * 1000, Sequence: int64(i),
+				}
+			}
+			idx.recomputeCache()
+			// Warm the recycled map to simulate steady state (first runScan
+			// allocates, subsequent ones reuse).
+			recycled := make(map[string]FileEntry, n)
+			b.ResetTimer()
+			b.ReportAllocs()
+			for b.Loop() {
+				c := idx.cloneInto(recycled)
+				recycled = c.Files
+			}
+		})
 	}
 }
 

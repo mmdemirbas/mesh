@@ -434,6 +434,10 @@ type folderState struct {
 	peersDirty  bool              // P17a: true when peer state changed since last persist
 	isNetworkFS bool              // C2: true when folder root is on a network filesystem
 	metrics     FolderSyncMetrics // lock-free counters for Prometheus
+	// P18c: recycled scan-clone backing map. Stashed after swap, reused on
+	// the next runScan to avoid a ~30 MB/scan allocation on large folders.
+	// Accessed only under indexMu.
+	reusableFiles map[string]FileEntry
 }
 
 // claimPath attempts to mark a path as in-flight for download. Returns false
@@ -1032,8 +1036,15 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		// operates on a private copy. Readers (GetFolderStatuses, syncLoop)
 		// see the old index until we swap.
 		snapStart := time.Now()
-		fs.indexMu.RLock()
-		idxCopy := fs.index.clone()
+		// P18c: acquire the write lock briefly for setup. We take ownership
+		// of reusableFiles (the map recycled from the previous scan), then
+		// clone into it. Holding write lock for the clone matches the prior
+		// RLock duration — readers still observe the old index; writers
+		// (sync downloads) wait for the same clone window they did before.
+		fs.indexMu.Lock()
+		recycled := fs.reusableFiles
+		fs.reusableFiles = nil
+		idxCopy := fs.index.cloneInto(recycled)
 		scanStartSeq := fs.index.Sequence
 		ignore := fs.ignore
 		existingFiles := len(fs.index.Files)
@@ -1041,7 +1052,7 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		for k, v := range fs.peers {
 			peersCopy[k] = v
 		}
-		fs.indexMu.RUnlock()
+		fs.indexMu.Unlock()
 		snapDuration := time.Since(snapStart)
 
 		state.Global.Update("filesync-folder", id, state.Scanning, "scanning "+fs.cfg.Path)
@@ -1084,6 +1095,11 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		if fs.index.Sequence > idxCopy.Sequence {
 			idxCopy.Sequence = fs.index.Sequence
 		}
+		// P18c: stash the old Files map for reuse by the next runScan. Safe
+		// because no reader retains a reference across indexMu boundaries —
+		// every lookup re-reads fs.index.Files under the lock. The old index
+		// struct is discarded; only its map backing is recycled.
+		fs.reusableFiles = fs.index.Files
 		fs.index = idxCopy
 		fs.index.recomputeCache()  // P18b: refresh after scan+merge
 		fs.index.rebuildSeqIndex() // PG: rebuild secondary sequence index

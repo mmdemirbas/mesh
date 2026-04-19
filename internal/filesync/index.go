@@ -151,13 +151,26 @@ func generateEpoch() string {
 // mutates a private copy and readers (admin UI, dashboard) never block on
 // the folder's write lock.
 func (idx *FileIndex) clone() *FileIndex {
-	files := make(map[string]FileEntry, len(idx.Files))
-	for k, v := range idx.Files {
-		files[k] = v
+	return idx.cloneInto(nil)
+}
+
+// cloneInto returns a deep copy reusing `dst` as the Files backing map.
+// If dst is nil or has insufficient capacity, a fresh map is allocated.
+// Callers use this with a recycled map from the previous scan to eliminate
+// the ~30 MB per-scan allocation on large folders (P18c).
+func (idx *FileIndex) cloneInto(dst map[string]FileEntry) *FileIndex {
+	if dst == nil {
+		dst = make(map[string]FileEntry, len(idx.Files))
+	} else {
+		clear(dst)
 	}
-	c := &FileIndex{Path: idx.Path, Sequence: idx.Sequence, Epoch: idx.Epoch, DeviceID: idx.DeviceID,
-		Files: files, cachedCount: idx.cachedCount, cachedSize: idx.cachedSize}
-	return c
+	for k, v := range idx.Files {
+		dst[k] = v
+	}
+	return &FileIndex{
+		Path: idx.Path, Sequence: idx.Sequence, Epoch: idx.Epoch, DeviceID: idx.DeviceID,
+		Files: dst, cachedCount: idx.cachedCount, cachedSize: idx.cachedSize,
+	}
 }
 
 // prevPath returns the backup path for double-write persistence.
