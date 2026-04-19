@@ -101,10 +101,10 @@ there depend on items tracked here.
 | P18b  | Incremental `activeCount` / `activeSize`             | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
 | P18c  | Eliminate index clone (scan into `pending`)          | 🟠 P1 | perf          | ⏳     | 🟧 M   | 🟡   | 📦    |
 | P18d  | Cap `buildIndexExchange` pre-allocation              | 🟠 P1 | perf          | ✅     | 🟩 XS  | 🟢   | 📄    |
-| P3sc  | Adaptive watch / scan                                | 🟠 P1 | perf          | ⏳     | 🟧 M   | 🟡   | 📦    |
+| P3sc  | Adaptive watch / scan                                | 🟠 P1 | perf          | ⏸     | 🟧 M   | 🟡   | 📦    |
 | PF    | Trie-based ignore with cursor propagation            | 🟠 P1 | perf          | ⏳     | 🟥 L   | 🟡   | 📦    |
 | PK    | Clone elimination (COW / change-set on persist)      | 🟠 P1 | perf          | ⏳     | 🟧 M   | 🔴   | 📦    |
-| PL    | Incremental deletion detection                       | 🟠 P1 | perf          | ⏳     | 🟨 S   | 🟢   | 📄    |
+| PL    | Incremental deletion detection                       | 🟠 P1 | perf          | ✅     | 🟨 S   | 🟢   | 📄    |
 | PM    | Directory-keyed child index                          | 🟠 P1 | perf          | ⏳     | 🟨 S   | 🟢   | 📄    |
 | PN    | Incremental `recomputeCache`                         | 🟠 P1 | perf          | ⏳     | 🟨 S   | 🟢   | 📄    |
 | R1    | Inode-based rename / move detection                  | 🟡 P2 | robustness    | 🔧     | 🟧 M   | 🟡   | 🔌    |
@@ -449,6 +449,11 @@ Each entry follows the same structure:
   answer is `fanotify` (see D3) which lifts the per-FD limit entirely.
 - **Recommendation.** Ship (1). D3 (fanotify) supersedes it on modern
   Linux but is opt-in; (1) is the universal fallback.
+- **Status.** Deferred. The performance pressure that motivated this
+  item has eased after other landed perf work; the item may be
+  cancelled outright after field validation on large folders. Revisit
+  only if production tells us realtime coverage for unwatched
+  directories is actually needed.
 
 ### PF · Trie-based ignore with cursor propagation · ⏳
 
@@ -511,7 +516,7 @@ Each entry follows the same structure:
   shows persist-time allocation still dominates. Heavy test matrix is a
   prerequisite.
 
-### PL · Incremental deletion detection · ⏳
+### PL · Incremental deletion detection · ✅
 
 - **Problem.** After scan, `index.go:834-848` iterates the whole index to
   find entries the scan did not visit. O(N) per scan.
@@ -530,6 +535,20 @@ Each entry follows the same structure:
 - **Syncthing handling.** Syncthing uses the DB diff directly — the
   per-scan delta is a query, not a scan.
 - **Recommendation.** Ship (3). Required prerequisite for P18c.
+- **Verification.** `scanWithStats` now captures `activeBefore := idx.cachedCount`
+  at entry and counts `seenPrevActive` during the walk (incremented whenever a
+  path added to `seen` was previously active in `idx.Files`). When
+  `seenPrevActive == activeBefore`, every previously-active file was re-seen
+  and the O(N) deletion loop is skipped entirely. The test-only `scan()`
+  wrapper mirrors production by calling `recomputeCache()` after each scan so
+  the short-circuit is correctness-safe in tests. Tests:
+  `TestScanShortCircuitNoDeletions` pins the no-deletion path (sequence
+  unchanged, no tombstones); `TestScanShortCircuitDetectsDeletion` pins the
+  must-iterate path (tombstone still written when a file is gone). Existing
+  deletion tests (`TestScanDetectsDeletion`, `TestScanDeletion_TombstoneMtimeIsNow`,
+  `TestScanErrorsSuppressTombstones`, `TestScanEmptyWalkWithExistingIndex`)
+  continue to pass. Eager fsnotify-remove path deferred; the scan-side
+  short-circuit alone captures the common-case win.
 
 ### PM · Directory-keyed child index · ⏳
 

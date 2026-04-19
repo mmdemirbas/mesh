@@ -646,6 +646,10 @@ func readDirEntries(ctx context.Context, job dirJob, ignore *ignoreMatcher, temp
 // and the number of directories walked (excluding the root and ignored subtrees).
 func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignoreMatcher) (changed bool, activeCount, dirCount int, err error) {
 	changed, activeCount, dirCount, _, _, err = idx.scanWithStats(ctx, folderRoot, ignore, defaultMaxIndexFiles)
+	// PL: production callers refresh cachedCount after scan (see filesync.go).
+	// The test-only wrapper mirrors that so PL's short-circuit has an
+	// accurate activeBefore on the next call.
+	idx.recomputeCache()
 	return
 }
 
@@ -681,6 +685,14 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	seen := make(map[string]struct{}, len(idx.Files)) // P18a: pre-size to avoid rehash cascades
 	errorPaths := make(map[string]struct{})           // paths with walk/stat/hash errors — exempt from tombstoning
 	tempCutoff := time.Now().Add(-maxTempFileAge)
+
+	// PL: short-circuit deletion detection. If every previously-active file
+	// was re-seen on disk, the deletion-detection O(N) loop can be skipped.
+	// activeBefore is the pre-scan count (cachedCount is not recomputed until
+	// after scan); seenPrevActive is incremented when a path that existed
+	// and was not deleted before the scan is added to seen.
+	activeBefore := idx.cachedCount
+	seenPrevActive := 0
 
 	// P20a: parallel hash worker pool. Files that miss the fast path
 	// (stat changed) are sent to workers; results are drained after the walk.
@@ -759,11 +771,19 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			// H1: the directory was unreadable. Protect it and all known
 			// children from tombstoning.
 			if dr.dirRel != "" {
+				if _, already := seen[dr.dirRel]; !already {
+					if e, ok := idx.Files[dr.dirRel]; ok && !e.Deleted {
+						seenPrevActive++
+					}
+				}
 				seen[dr.dirRel] = struct{}{}
 				errorPaths[dr.dirRel] = struct{}{}
 				dirPrefix := dr.dirRel + "/"
-				for child := range idx.Files {
+				for child, e := range idx.Files {
 					if strings.HasPrefix(child, dirPrefix) {
+						if _, already := seen[child]; !already && !e.Deleted {
+							seenPrevActive++
+						}
 						seen[child] = struct{}{}
 						errorPaths[child] = struct{}{}
 					}
@@ -785,6 +805,10 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 				err = errIndexCapExceeded
 				break
 			}
+			existing, exists := idx.Files[wf.rel]
+			if _, already := seen[wf.rel]; !already && exists && !existing.Deleted {
+				seenPrevActive++ // PL
+			}
 			seen[wf.rel] = struct{}{}
 
 			if wf.infoErr != nil {
@@ -792,8 +816,6 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 				errorPaths[wf.rel] = struct{}{}
 				continue
 			}
-
-			existing, exists := idx.Files[wf.rel]
 			mtimeNS := wf.info.ModTime().UnixNano()
 			size := wf.info.Size()
 			mode := uint32(wf.info.Mode().Perm())
@@ -946,19 +968,26 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 				"hash_errors", stats.HashErrors,
 				"stat_errors", stats.StatErrors)
 		}
-		// Mark deletions: entries in index not seen on disk.
-		for rel, entry := range idx.Files {
-			if entry.Deleted {
-				continue
-			}
-			if _, ok := seen[rel]; !ok {
-				idx.Sequence++
-				entry.Deleted = true
-				entry.MtimeNS = time.Now().UnixNano() // deletion time, not last-modification time
-				entry.Sequence = idx.Sequence
-				idx.Files[rel] = entry
-				changed = true
-				stats.Deletions++
+		// PL: short-circuit when every previously-active file was re-seen.
+		// seenPrevActive counts paths added to seen that were active before
+		// the scan. When cachedCount is accurate, seenPrevActive == activeBefore
+		// proves no deletions. Any other relation (under/over) means either
+		// a real deletion or a stale cache — fall through to the full loop.
+		if seenPrevActive != activeBefore {
+			// Mark deletions: entries in index not seen on disk.
+			for rel, entry := range idx.Files {
+				if entry.Deleted {
+					continue
+				}
+				if _, ok := seen[rel]; !ok {
+					idx.Sequence++
+					entry.Deleted = true
+					entry.MtimeNS = time.Now().UnixNano() // deletion time, not last-modification time
+					entry.Sequence = idx.Sequence
+					idx.Files[rel] = entry
+					changed = true
+					stats.Deletions++
+				}
 			}
 		}
 	}

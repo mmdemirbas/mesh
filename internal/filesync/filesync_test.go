@@ -929,6 +929,64 @@ func TestScanDeletion_TombstoneMtimeIsNow(t *testing.T) {
 	}
 }
 
+// PL: short-circuit deletion detection when every previously-active file
+// was re-seen on disk. With cachedCount accurate (as in production after
+// recomputeCache), the O(N) deletion loop must be skipped.
+func TestScanShortCircuitNoDeletions(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "a.txt", "hello")
+	writeFile(t, dir, "b.txt", "world")
+	writeFile(t, dir, "sub/c.txt", "nested")
+
+	idx := newFileIndex()
+	ignore := &ignoreMatcher{}
+	_, _, _, _ = idx.scan(context.Background(), dir, ignore)
+	idx.recomputeCache() // mimic production post-scan cache refresh
+
+	seqBefore := idx.Sequence
+
+	// Re-scan with no deletions. Every previously-active file is still
+	// present, so no tombstones should be written and Sequence must stay put.
+	changed, _, _, _ := idx.scan(context.Background(), dir, ignore)
+	if changed {
+		t.Fatal("expected no change when no files deleted")
+	}
+	if idx.Sequence != seqBefore {
+		t.Errorf("sequence advanced without deletions: before=%d after=%d", seqBefore, idx.Sequence)
+	}
+	for rel, entry := range idx.Files {
+		if entry.Deleted {
+			t.Errorf("unexpected tombstone for %q after no-op scan", rel)
+		}
+	}
+}
+
+// PL: even when cachedCount makes the short-circuit eligible, a deletion
+// must still be detected (short-circuit must not mask real deletions).
+func TestScanShortCircuitDetectsDeletion(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "a.txt", "hello")
+	writeFile(t, dir, "b.txt", "world")
+
+	idx := newFileIndex()
+	ignore := &ignoreMatcher{}
+	_, _, _, _ = idx.scan(context.Background(), dir, ignore)
+	idx.recomputeCache()
+
+	_ = os.Remove(filepath.Join(dir, "b.txt"))
+
+	changed, _, _, _ := idx.scan(context.Background(), dir, ignore)
+	if !changed {
+		t.Fatal("expected change after deletion")
+	}
+	entry, ok := idx.Files["b.txt"]
+	if !ok || !entry.Deleted {
+		t.Fatalf("b.txt should be tombstoned, got ok=%v entry=%+v", ok, entry)
+	}
+}
+
 func TestScanRespectsIgnore(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -1115,6 +1173,7 @@ func TestScanEmptyWalkWithExistingIndex(t *testing.T) {
 	idx := newFileIndex()
 	idx.Files["doc.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 1, Size: 5, MtimeNS: 1}
 	idx.Files["img.png"] = FileEntry{SHA256: testHash("bbb"), Sequence: 2, Size: 10, MtimeNS: 2}
+	idx.recomputeCache() // PL precondition: cachedCount must reflect manual inserts.
 
 	// Point the scan at an empty but existing directory (simulates a
 	// legitimate empty folder after all files were deleted).
