@@ -5776,118 +5776,174 @@ func TestShouldIgnoreReferenceConformance(t *testing.T) {
 	}
 }
 
+// Shared pattern/path corpora so the linear and trie benchmarks compare
+// on identical inputs. Changing one of these updates both sides at once.
+var benchIgnoreBasicPatterns = []string{
+	"*.class", "*.o", "*.pyc", "*.swp", "*.swo",
+	".git/", ".svn/", "node_modules/", "__pycache__/",
+	"target/", "build/", "dist/", ".gradle/",
+	"**/test-output/**", "!important.class",
+}
+
+var benchIgnoreBasicPaths = []string{
+	"src/main/java/com/example/App.java",
+	"src/main/java/com/example/App.class",
+	"build/libs/app.jar",
+	"node_modules/lodash/index.js",
+	"deep/nested/path/to/some/file.txt",
+	".git/objects/pack/pack-abc.idx",
+	"important.class",
+}
+
 func BenchmarkIgnoreMatcher(b *testing.B) {
-	patterns := []string{
-		"*.class", "*.o", "*.pyc", "*.swp", "*.swo",
-		".git/", ".svn/", "node_modules/", "__pycache__/",
-		"target/", "build/", "dist/", ".gradle/",
-		"**/test-output/**", "!important.class",
-	}
-	m := newIgnoreMatcher(patterns)
-	paths := []string{
-		"src/main/java/com/example/App.java",
-		"src/main/java/com/example/App.class",
-		"build/libs/app.jar",
-		"node_modules/lodash/index.js",
-		"deep/nested/path/to/some/file.txt",
-		".git/objects/pack/pack-abc.idx",
-		"important.class",
-	}
+	m := newIgnoreMatcher(benchIgnoreBasicPatterns)
+	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		for _, p := range paths {
+		for _, p := range benchIgnoreBasicPaths {
 			m.shouldIgnore(p, false)
 		}
 	}
 }
 
-// BenchmarkIgnoreMatcherRealistic mirrors a real monorepo gitignore: ~60
-// patterns (literals, suffixes, prefix-stars, anchored, and double-star),
-// applied to 50 mixed paths. This is the shape the PF hotspot notes refer
-// to — 310k files × this per-call cost = the reported ~3.6s scan-time.
-func BenchmarkIgnoreMatcherRealistic(b *testing.B) {
-	patterns := []string{
-		// literals
-		".git/", ".svn/", ".hg/", ".DS_Store", "Thumbs.db",
-		"node_modules/", "__pycache__/", ".pytest_cache/", ".tox/",
-		".mypy_cache/", ".idea/", ".vscode/", ".gradle/", ".nuxt/",
-		"target/", "build/", "dist/", "out/", "bin/", "obj/",
-		"vendor/", "Pods/", "coverage/", ".next/", ".cache/",
-		// suffixes
-		"*.class", "*.o", "*.pyc", "*.pyo", "*.swp", "*.swo",
-		"*.log", "*.tmp", "*.bak", "*.orig", "*.rej",
-		"*.jar", "*.war", "*.ear", "*.zip", "*.tar",
-		"*.gz", "*.tgz", "*.rar", "*.7z", "*.iso",
-		"*.dll", "*.exe", "*.so", "*.dylib", "*.a",
-		// prefix-stars
-		"tmp-*", "cache-*", "backup-*",
-		// anchored
-		"src/generated/", "docs/build/", "tools/dist/",
-		// double-star
-		"**/test-output/**", "**/node_modules/**", "**/.gradle/**",
-		// negations
-		"!important.class", "!keep.log",
-	}
-	m := newIgnoreMatcher(patterns)
-	paths := []string{
-		"src/main/java/com/example/App.java",
-		"src/main/java/com/example/App.class",
-		"src/main/java/com/example/util/Helper.java",
-		"src/main/resources/config.yaml",
-		"src/test/java/com/example/AppTest.java",
-		"build/libs/app.jar",
-		"build/classes/com/example/App.class",
-		"build/reports/test-output/index.html",
-		"node_modules/lodash/index.js",
-		"node_modules/react/react.js",
-		"deep/nested/path/to/some/file.txt",
-		".git/objects/pack/pack-abc.idx",
-		".git/refs/heads/main",
-		"important.class",
-		"keep.log",
-		"debug.log",
-		"error.log",
-		"docs/source/intro.md",
-		"docs/build/html/index.html",
-		"scripts/deploy.sh",
-		"scripts/test.py",
-		"scripts/build.sh",
-		"config/prod.yaml",
-		"config/dev.yaml",
-		"README.md",
-		"LICENSE",
-		"Makefile",
-		"CMakeLists.txt",
-		"pom.xml",
-		"package.json",
-		"requirements.txt",
-		"go.mod",
-		"go.sum",
-		"a/b/c/d/e/f/g/deep.txt",
-		"vendor/github.com/foo/bar.go",
-		"tools/dist/release.zip",
-		"src/generated/proto.pb.go",
-		"tmp-123/scratch.txt",
-		"backup-20260101/data.bin",
-		"coverage/index.html",
-		".vscode/settings.json",
-		".idea/workspace.xml",
-		"Pods/Manifest.lock",
-		"obj/Debug/app.obj",
-		"bin/Release/app.exe",
-		"cache-xyz/entry",
-		"target/debug/app",
-		".DS_Store",
-		"Thumbs.db",
-		"backend/server.go",
-	}
+// BenchmarkIgnoreMatcherTrie runs the PF Phase 2 trie on the same corpus
+// as BenchmarkIgnoreMatcher. Compare ns/op and allocs/op against the
+// linear baseline to decide whether the trie is worth flipping.
+func BenchmarkIgnoreMatcherTrie(b *testing.B) {
+	m := newTrieIgnoreMatcher(benchIgnoreBasicPatterns)
+	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		for _, p := range paths {
+		for _, p := range benchIgnoreBasicPaths {
 			m.shouldIgnore(p, false)
 		}
 	}
-	b.ReportMetric(float64(len(paths)), "paths/op")
+}
+
+// Realistic monorepo gitignore: ~60 patterns (literals, suffixes,
+// prefix-stars, anchored, and double-star) × 50 mixed paths. Matches the
+// shape the PF hotspot notes refer to — 310k files × this per-call cost
+// = the reported ~3.6s scan-time.
+var benchIgnoreRealisticPatterns = []string{
+	// literals
+	".git/", ".svn/", ".hg/", ".DS_Store", "Thumbs.db",
+	"node_modules/", "__pycache__/", ".pytest_cache/", ".tox/",
+	".mypy_cache/", ".idea/", ".vscode/", ".gradle/", ".nuxt/",
+	"target/", "build/", "dist/", "out/", "bin/", "obj/",
+	"vendor/", "Pods/", "coverage/", ".next/", ".cache/",
+	// suffixes
+	"*.class", "*.o", "*.pyc", "*.pyo", "*.swp", "*.swo",
+	"*.log", "*.tmp", "*.bak", "*.orig", "*.rej",
+	"*.jar", "*.war", "*.ear", "*.zip", "*.tar",
+	"*.gz", "*.tgz", "*.rar", "*.7z", "*.iso",
+	"*.dll", "*.exe", "*.so", "*.dylib", "*.a",
+	// prefix-stars
+	"tmp-*", "cache-*", "backup-*",
+	// anchored
+	"src/generated/", "docs/build/", "tools/dist/",
+	// double-star
+	"**/test-output/**", "**/node_modules/**", "**/.gradle/**",
+	// negations
+	"!important.class", "!keep.log",
+}
+
+var benchIgnoreRealisticPaths = []string{
+	"src/main/java/com/example/App.java",
+	"src/main/java/com/example/App.class",
+	"src/main/java/com/example/util/Helper.java",
+	"src/main/resources/config.yaml",
+	"src/test/java/com/example/AppTest.java",
+	"build/libs/app.jar",
+	"build/classes/com/example/App.class",
+	"build/reports/test-output/index.html",
+	"node_modules/lodash/index.js",
+	"node_modules/react/react.js",
+	"deep/nested/path/to/some/file.txt",
+	".git/objects/pack/pack-abc.idx",
+	".git/refs/heads/main",
+	"important.class",
+	"keep.log",
+	"debug.log",
+	"error.log",
+	"docs/source/intro.md",
+	"docs/build/html/index.html",
+	"scripts/deploy.sh",
+	"scripts/test.py",
+	"scripts/build.sh",
+	"config/prod.yaml",
+	"config/dev.yaml",
+	"README.md",
+	"LICENSE",
+	"Makefile",
+	"CMakeLists.txt",
+	"pom.xml",
+	"package.json",
+	"requirements.txt",
+	"go.mod",
+	"go.sum",
+	"a/b/c/d/e/f/g/deep.txt",
+	"vendor/github.com/foo/bar.go",
+	"tools/dist/release.zip",
+	"src/generated/proto.pb.go",
+	"tmp-123/scratch.txt",
+	"backup-20260101/data.bin",
+	"coverage/index.html",
+	".vscode/settings.json",
+	".idea/workspace.xml",
+	"Pods/Manifest.lock",
+	"obj/Debug/app.obj",
+	"bin/Release/app.exe",
+	"cache-xyz/entry",
+	"target/debug/app",
+	".DS_Store",
+	"Thumbs.db",
+	"backend/server.go",
+}
+
+func BenchmarkIgnoreMatcherRealistic(b *testing.B) {
+	m := newIgnoreMatcher(benchIgnoreRealisticPatterns)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		for _, p := range benchIgnoreRealisticPaths {
+			m.shouldIgnore(p, false)
+		}
+	}
+	b.ReportMetric(float64(len(benchIgnoreRealisticPaths)), "paths/op")
+}
+
+// BenchmarkIgnoreMatcherRealisticTrie runs the PF Phase 2 trie on the same
+// corpus as BenchmarkIgnoreMatcherRealistic. Per the PF plan, the trie
+// must win across every bucket (shallow, deep, wide fan-out,
+// negation-heavy) before the default flips.
+func BenchmarkIgnoreMatcherRealisticTrie(b *testing.B) {
+	m := newTrieIgnoreMatcher(benchIgnoreRealisticPatterns)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		for _, p := range benchIgnoreRealisticPaths {
+			m.shouldIgnore(p, false)
+		}
+	}
+	b.ReportMetric(float64(len(benchIgnoreRealisticPaths)), "paths/op")
+}
+
+// BenchmarkIgnoreMatcherConstruction pins the one-time cost of newMatcher
+// for the realistic corpus. The trie builds more structure at config load
+// in exchange for cheaper per-path matching; this benchmark surfaces the
+// amortization point (roughly: patterns × paths per scan).
+func BenchmarkIgnoreMatcherConstruction(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = newIgnoreMatcher(benchIgnoreRealisticPatterns)
+	}
+}
+
+func BenchmarkIgnoreMatcherConstructionTrie(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = newTrieIgnoreMatcher(benchIgnoreRealisticPatterns)
+	}
 }
 
 func BenchmarkBlockSignatures(b *testing.B) {
