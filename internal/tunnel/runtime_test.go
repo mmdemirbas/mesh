@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/mmdemirbas/mesh/internal/config"
+	"github.com/mmdemirbas/mesh/internal/proxy"
 	"github.com/mmdemirbas/mesh/internal/state"
 	"golang.org/x/crypto/ssh"
 )
@@ -810,4 +812,249 @@ func totalAuthFailures(m map[string]int64) int64 {
 		n += v
 	}
 	return n
+}
+
+// --- runLocalProxy / runRemoteProxy roundtrip tests ---
+//
+// These exercise the proxy paths inside runSession (type "socks" and "http"
+// dispatch to runLocalProxy / runRemoteProxy instead of the -L/-R forward
+// variants). Both directions are end-to-end: a real SOCKS5 or HTTP CONNECT
+// handshake is performed against the mesh-spawned listener, and the payload
+// is echoed by a localhost target.
+
+// startEchoServer starts a localhost TCP echo and returns its address. It
+// accepts repeatedly until the listener is closed; each accepted connection
+// is echoed until EOF and closed.
+func startEchoServer(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// httpConnectAndEcho performs an HTTP CONNECT handshake on conn against
+// targetAddr, then writes want and reads len(want) bytes back via the tunnel.
+func httpConnectAndEcho(t *testing.T, conn net.Conn, targetAddr string, want []byte) {
+	t.Helper()
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", targetAddr, targetAddr); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	r := bufio.NewReader(conn)
+	statusLine, err := r.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if !strings.HasPrefix(statusLine, "HTTP/1.1 200") {
+		t.Fatalf("CONNECT status = %q, want 200", strings.TrimSpace(statusLine))
+	}
+	// Consume header block up to the terminating blank line.
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read header: %v", err)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+	if _, err := conn.Write(want); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	got := make([]byte, len(want))
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	// The CONNECT response may have been followed immediately by echoed
+	// bytes; pull the remainder through the same buffered reader so no data
+	// is lost if the target responded before we stopped reading headers.
+	if _, err := io.ReadFull(r, got); err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("echo got %q, want %q", got, want)
+	}
+}
+
+func TestRun_LocalProxySOCKSRoundtrip(t *testing.T) {
+	peer := startTestSSHPeer(t)
+	echoAddr := startEchoServer(t)
+
+	localBind := freePort(t)
+	name := "rt-local-proxy-socks"
+	client := NewSSHClient(config.Connection{
+		Name:    name,
+		Targets: []string{"test@" + peer.addr},
+		Retry:   "100ms",
+		Auth: config.AuthCfg{
+			Key:        peer.clientKeyPath,
+			KnownHosts: peer.knownHosts,
+		},
+		Forwards: []config.ForwardSet{{
+			Name:  "fset",
+			Local: []config.Forward{{Type: "socks", Bind: localBind}},
+		}},
+	}, "test-node", slog.Default())
+
+	stop := runSSHClient(t, client)
+	defer stop()
+
+	waitForCompState(t, "connection:"+name+" [fset]", state.Connected, 5*time.Second)
+	waitForCompState(t, "forward:"+name+" [fset] "+localBind, state.Listening, 5*time.Second)
+
+	// SOCKS5 handshake to echo target; data must round-trip via the SSH tunnel
+	// (local proxy dials echoAddr through client.Dial on the peer side).
+	conn, err := proxy.DialViaSocks5(net.Dial, localBind, echoAddr)
+	if err != nil {
+		t.Fatalf("DialViaSocks5: %v", err)
+	}
+	defer conn.Close()
+
+	want := []byte("local-proxy-socks-roundtrip")
+	if _, err := conn.Write(want); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := make([]byte, len(want))
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestRun_LocalProxyHTTPConnectRoundtrip(t *testing.T) {
+	peer := startTestSSHPeer(t)
+	echoAddr := startEchoServer(t)
+
+	localBind := freePort(t)
+	name := "rt-local-proxy-http"
+	client := NewSSHClient(config.Connection{
+		Name:    name,
+		Targets: []string{"test@" + peer.addr},
+		Retry:   "100ms",
+		Auth: config.AuthCfg{
+			Key:        peer.clientKeyPath,
+			KnownHosts: peer.knownHosts,
+		},
+		Forwards: []config.ForwardSet{{
+			Name:  "fset",
+			Local: []config.Forward{{Type: "http", Bind: localBind}},
+		}},
+	}, "test-node", slog.Default())
+
+	stop := runSSHClient(t, client)
+	defer stop()
+
+	waitForCompState(t, "connection:"+name+" [fset]", state.Connected, 5*time.Second)
+	waitForCompState(t, "forward:"+name+" [fset] "+localBind, state.Listening, 5*time.Second)
+
+	conn, err := dialWithRetry(localBind, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial local http proxy: %v", err)
+	}
+	defer conn.Close()
+
+	httpConnectAndEcho(t, conn, echoAddr, []byte("local-proxy-http-roundtrip"))
+}
+
+func TestRun_RemoteProxySOCKSRoundtrip(t *testing.T) {
+	peer := startTestSSHPeer(t)
+	echoAddr := startEchoServer(t)
+
+	name := "rt-remote-proxy-socks"
+	client := NewSSHClient(config.Connection{
+		Name:    name,
+		Targets: []string{"test@" + peer.addr},
+		Retry:   "100ms",
+		Auth: config.AuthCfg{
+			Key:        peer.clientKeyPath,
+			KnownHosts: peer.knownHosts,
+		},
+		Forwards: []config.ForwardSet{{
+			Name:   "fset",
+			Remote: []config.Forward{{Type: "socks", Bind: "127.0.0.1:0"}},
+		}},
+	}, "test-node", slog.Default())
+
+	stop := runSSHClient(t, client)
+	defer stop()
+
+	waitForCompState(t, "connection:"+name+" [fset]", state.Connected, 5*time.Second)
+	comp := waitForCompState(t, "forward:"+name+" [fset] 127.0.0.1:0", state.Listening, 5*time.Second)
+	if comp.BoundAddr == "" {
+		t.Fatal("expected BoundAddr on remote-proxy component")
+	}
+
+	// Connect through the peer-bound SOCKS port. ServeSocks is invoked with a
+	// nil dialer, so the target is dialed locally (i.e. via net.Dial on the
+	// client side). echoAddr is reachable there.
+	conn, err := proxy.DialViaSocks5(net.Dial, comp.BoundAddr, echoAddr)
+	if err != nil {
+		t.Fatalf("DialViaSocks5: %v", err)
+	}
+	defer conn.Close()
+
+	want := []byte("remote-proxy-socks-roundtrip")
+	if _, err := conn.Write(want); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := make([]byte, len(want))
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestRun_RemoteProxyHTTPConnectRoundtrip(t *testing.T) {
+	peer := startTestSSHPeer(t)
+	echoAddr := startEchoServer(t)
+
+	name := "rt-remote-proxy-http"
+	client := NewSSHClient(config.Connection{
+		Name:    name,
+		Targets: []string{"test@" + peer.addr},
+		Retry:   "100ms",
+		Auth: config.AuthCfg{
+			Key:        peer.clientKeyPath,
+			KnownHosts: peer.knownHosts,
+		},
+		Forwards: []config.ForwardSet{{
+			Name:   "fset",
+			Remote: []config.Forward{{Type: "http", Bind: "127.0.0.1:0"}},
+		}},
+	}, "test-node", slog.Default())
+
+	stop := runSSHClient(t, client)
+	defer stop()
+
+	waitForCompState(t, "connection:"+name+" [fset]", state.Connected, 5*time.Second)
+	comp := waitForCompState(t, "forward:"+name+" [fset] 127.0.0.1:0", state.Listening, 5*time.Second)
+	if comp.BoundAddr == "" {
+		t.Fatal("expected BoundAddr on remote-proxy component")
+	}
+
+	conn, err := dialWithRetry(comp.BoundAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial remote http proxy: %v", err)
+	}
+	defer conn.Close()
+
+	httpConnectAndEcho(t, conn, echoAddr, []byte("remote-proxy-http-roundtrip"))
 }
