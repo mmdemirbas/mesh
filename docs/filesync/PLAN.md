@@ -109,7 +109,7 @@ there depend on items tracked here.
 | PN    | Incremental `recomputeCache`                         | 🟠 P1 | perf          | ⏳     | 🟨 S   | 🟢   | 📄    |
 | R1    | Inode-based rename / move detection                  | 🟡 P2 | robustness    | 🔧     | 🟧 M   | 🟡   | 🔌    |
 | R2    | Formal folder-level state machine                    | 🟡 P2 | robustness    | ⏳     | 🟧 M   | 🟢   | 📦    |
-| R3    | Peer-level failure blacklist                         | 🟡 P2 | robustness    | ⏳     | 🟨 S   | 🟢   | 📦    |
+| R3    | Peer-level failure blacklist                         | 🟡 P2 | robustness    | 🔧     | 🟨 S   | 🟢   | 📦    |
 | D1    | FastCDC content-defined chunking                     | 🟢 P3 | differentiate | ⏳     | 🟥 L   | 🔴   | 🔌    |
 | D2    | BLAKE3 instead of SHA-256                            | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🔴   | 🔌    |
 | D3    | Linux `fanotify` backend                             | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🟡   | 📦    |
@@ -727,7 +727,7 @@ Each entry follows the same structure:
   something real to coordinate (rename handling needs explicit
   quiescence).
 
-### R3 · Peer-level failure blacklist
+### R3 · Peer-level failure blacklist · 🔧
 
 - **Problem.** Today a peer that serves consistently wrong data is
   indistinguishable from a network error. Each bad file requires its own
@@ -751,10 +751,21 @@ Each entry follows the same structure:
   triggered by repeated errors or manual action.
 - **Recommendation.** Ship (1). Pairs well with C4 for a consistent
   retry story.
-
----
-
-## 🟢 P3 — Differentiation
+- **Verification.** Option (1) is shipped. A per-folder
+  `peerRetryTracker` counts consecutive `sendIndex` failures per peer
+  and activates backoff after `peerRetryThreshold` (3) strikes.
+  `syncFolder` gates at entry: if the peer is backed off, it records a
+  `Retrying` state with the remaining delay and skips the attempt. A
+  successful exchange calls `clear(peer)` and resets the count. Backoff
+  delay reuses the file-level `backoffDelay` curve (exponential, capped
+  at `retryMaxDelay`) offset by the threshold, so a peer that keeps
+  failing widens its own window without code duplication. Scope is
+  per-folder — a peer unreachable for folder A does not affect folder
+  B. Dashboard surface is the new `FolderPeer.BackoffRemaining` field
+  (`json:"backoff_remaining,omitempty"`) populated by
+  `GetFolderStatuses`. `TestPeerRetryTracker` pins the state machine
+  (below-threshold no backoff, threshold activation, doubling, clear
+  resets, cap at `retryMaxDelay`, `backedOffPeers` filtering).
 
 ### D1 · FastCDC content-defined chunking
 
