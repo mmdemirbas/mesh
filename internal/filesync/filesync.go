@@ -2,9 +2,7 @@ package filesync
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/tls"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -847,8 +845,6 @@ func (n *Node) tlsStatusFor(addr string) string {
 
 // Start initializes and runs the filesync node. Blocks until ctx is cancelled.
 func Start(ctx context.Context, cfg config.FilesyncCfg) error {
-	deviceID := generateDeviceID()
-
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("user home dir: %w", err)
@@ -856,6 +852,11 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	meshDir := filepath.Join(home, ".mesh")
 	dataDir := filepath.Join(meshDir, "filesync")
 	initPerfLog(meshDir, cfg.NodeName)
+
+	deviceID, err := loadOrCreateDeviceID(dataDir)
+	if err != nil {
+		return fmt.Errorf("device id: %w", err)
+	}
 
 	// Resolve TLS certificate for this node's HTTP server.
 	tlsDir := filepath.Join(meshDir, "tls")
@@ -2617,11 +2618,4 @@ func localMtime(fs *folderState, relPath string) int64 {
 		return entry.MtimeNS
 	}
 	return 0
-}
-
-// generateDeviceID creates a random 16-character hex device identifier.
-func generateDeviceID() string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
 }
