@@ -777,80 +777,86 @@ func (n *Node) pullHTTP(peerAddr string) {
 	n.processPayload(&p, len(body), peerAddr)
 }
 
-func (n *Node) runHTTPServer(ctx context.Context) {
-	mux := http.NewServeMux()
+// serveSync handles POST /sync — peers push their clipboard payload here.
+// Unit-testable via httptest.NewRecorder.
+func (n *Node) serveSync(w http.ResponseWriter, r *http.Request) {
+	if !n.canReceiveFrom(r.RemoteAddr) {
+		http.Error(w, "Forbidden by ACL", http.StatusForbidden)
+		return
+	}
 
-	mux.HandleFunc("/sync", func(w http.ResponseWriter, r *http.Request) {
-		if !n.canReceiveFrom(r.RemoteAddr) {
-			http.Error(w, "Forbidden by ACL", http.StatusForbidden)
-			return
+	r.Body = http.MaxBytesReader(w, r.Body, n.maxReqBodySize)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		if err.Error() == "http: request body too large" {
+			slog.Warn("Rejected oversized sync payload", "from", cleanLogStr(r.RemoteAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
+			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, "bad request", http.StatusBadRequest)
 		}
-
-		r.Body = http.MaxBytesReader(w, r.Body, n.maxReqBodySize)
-		body, err := io.ReadAll(r.Body)
+		return
+	}
+	if r.Header.Get("Content-Encoding") == "gzip" {
+		body, err = gzipDecode(body)
 		if err != nil {
-			if err.Error() == "http: request body too large" {
-				slog.Warn("Rejected oversized sync payload", "from", cleanLogStr(r.RemoteAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
-				http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
-			} else {
-				http.Error(w, "bad request", http.StatusBadRequest)
-			}
-			return
-		}
-		if r.Header.Get("Content-Encoding") == "gzip" {
-			body, err = gzipDecode(body)
-			if err != nil {
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
-		}
-		var p pb.SyncPayload
-		if err := proto.Unmarshal(body, &p); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
+	}
+	var p pb.SyncPayload
+	if err := proto.Unmarshal(body, &p); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
 
-		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		peerHostPort := net.JoinHostPort(host, fmt.Sprintf("%d", n.port))
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	peerHostPort := net.JoinHostPort(host, fmt.Sprintf("%d", n.port))
 
-		slog.Info("Received pushed payload via HTTP POST", "formats", len(p.GetFormats()), "from", cleanLogStr(r.RemoteAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
-		n.processPayload(&p, len(body), peerHostPort)
-	})
+	slog.Info("Received pushed payload via HTTP POST", "formats", len(p.GetFormats()), "from", cleanLogStr(r.RemoteAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
+	n.processPayload(&p, len(body), peerHostPort)
+}
 
-	mux.HandleFunc("/clip", func(w http.ResponseWriter, r *http.Request) {
-		if !n.canReceiveFrom(r.RemoteAddr) {
-			http.Error(w, "Forbidden by ACL", http.StatusForbidden)
-			return
-		}
+// serveClip handles GET /clip — the pull-back fallback peers hit when
+// asymmetric connectivity prevents us from reaching them.
+func (n *Node) serveClip(w http.ResponseWriter, r *http.Request) {
+	if !n.canReceiveFrom(r.RemoteAddr) {
+		http.Error(w, "Forbidden by ACL", http.StatusForbidden)
+		return
+	}
 
-		n.stateMu.Lock()
-		data := n.lastPayload
-		n.stateMu.Unlock()
+	n.stateMu.Lock()
+	data := n.lastPayload
+	n.stateMu.Unlock()
 
-		if data == nil {
-			http.Error(w, "No content", http.StatusNotFound)
-			return
-		}
+	if data == nil {
+		http.Error(w, "No content", http.StatusNotFound)
+		return
+	}
 
-		w.Header().Set("Content-Type", "application/x-protobuf")
-		w.Header().Set("Content-Encoding", "gzip")
-		_, _ = w.Write(data)
-	})
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	w.Header().Set("Content-Encoding", "gzip")
+	_, _ = w.Write(data)
+}
 
+// serveFiles wraps the file server with the ACL gate so unauthenticated
+// peers can't list the files directory.
+func (n *Node) serveFiles(w http.ResponseWriter, r *http.Request) {
+	if !n.canReceiveFrom(r.RemoteAddr) {
+		http.Error(w, "Forbidden by ACL", http.StatusForbidden)
+		return
+	}
+	http.StripPrefix("/files/", http.FileServer(http.Dir(n.filesDir))).ServeHTTP(w, r)
+}
+
+func (n *Node) runHTTPServer(ctx context.Context) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sync", n.serveSync)
+	mux.HandleFunc("/clip", n.serveClip)
 	// HTTP-based peer discovery for firewall-blocked networks.
 	// When a peer discovers us via UDP, it calls this endpoint so we
 	// also register it — even if our UDP replies cannot reach it.
 	mux.HandleFunc("/discover", n.serveDiscover)
-
-	// Serve files for peers to download, with ACL check
-	fileServer := http.StripPrefix("/files/", http.FileServer(http.Dir(n.filesDir)))
-	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
-		if !n.canReceiveFrom(r.RemoteAddr) {
-			http.Error(w, "Forbidden by ACL", http.StatusForbidden)
-			return
-		}
-		fileServer.ServeHTTP(w, r)
-	})
+	mux.HandleFunc("/files/", n.serveFiles)
 
 	srv := &http.Server{
 		Handler:           mux,
