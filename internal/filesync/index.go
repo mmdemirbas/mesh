@@ -497,20 +497,45 @@ type ScanStats struct {
 	IgnoreDuration time.Duration // cumulative time spent in ignore.shouldIgnore
 	DeletionScan   time.Duration // post-walk tombstone pass
 
-	EntriesVisited  int // total WalkDir callbacks
-	DirsWalked      int // directories descended (excluding root)
-	DirsIgnored     int // directories skipped by ignore rules
-	FilesIgnored    int // files skipped by ignore rules
-	SymlinksSkipped int
-	TempCleaned     int // stale .mesh-tmp-* / .mesh-delta-tmp removed
-	FastPathHits    int // stat matched — skipped rehash
-	FilesHashed     int
-	BytesHashed     int64 // sum of sizes of hashed files
-	StatErrors      int
-	HashErrors      int
-	TocTouSkips     int // files skipped because stat changed during hashing
-	Deletions       int // tombstones created in this pass
-	RenamesDetected int // R1 Phase 2: tombstone/new-entry pairs paired by inode
+	EntriesVisited     int // total WalkDir callbacks
+	DirsWalked         int // directories descended (excluding root)
+	DirsIgnored        int // directories skipped by ignore rules
+	FilesIgnored       int // files skipped by ignore rules
+	SymlinksSkipped    int
+	TempCleaned        int // stale .mesh-tmp-* / .mesh-delta-tmp removed
+	FastPathHits       int // stat matched — skipped rehash
+	FilesHashed        int
+	BytesHashed        int64 // sum of sizes of hashed files
+	StatErrors         int
+	HashErrors         int
+	TocTouSkips        int // files skipped because stat changed during hashing
+	Deletions          int // tombstones created in this pass
+	RenamesDetected    int // R1 Phase 2: tombstone/new-entry pairs paired by inode
+	RenameHintsSkipped int // R1 Phase 2: inode-matched pairs rejected by isRenameHintLikely (likely inode reuse)
+}
+
+// isRenameHintLikely returns true when an inode-based rename hint has a
+// realistic chance of being a genuine rename rather than an ext4-style
+// inode-reuse collision. It rejects pairs whose sizes differ by more
+// than 10x in either direction: a 1 GB asset shrinking to 1 KB (or the
+// reverse) is almost always a freed inode reallocated to an unrelated
+// file, and emitting a hint for it only buys a wasteful block-sig
+// round-trip before the receiver falls back to a full download.
+//
+// The gate is deliberately narrow. Similar-size pairs pass through
+// regardless of absolute size, because even a tiny legitimate rename
+// still saves the receiver one full download. Dramatic size mismatches
+// are the dominant inode-reuse pattern worth filtering in bookkeeping;
+// near-equal reuse collisions are a correctness concern handled by the
+// delta protocol's hash verification, not here.
+func isRenameHintLikely(oldSize, newSize int64) bool {
+	if oldSize <= 0 || newSize <= 0 {
+		return true
+	}
+	if newSize*10 < oldSize || oldSize*10 < newSize {
+		return false
+	}
+	return true
 }
 
 // hashJob is a file path to hash, sent from the walk to the worker pool.
@@ -1151,12 +1176,28 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 					// PrevPath so the sync cycle can propagate the hint
 					// to peers. Still emit the tombstone so capability-
 					// less peers drop the old path correctly.
+					//
+					// Inode reuse hazard: filesystems (ext4 in
+					// particular) eagerly recycle inode numbers after
+					// deletion. A just-freed inode can land on an
+					// unrelated file, producing a bogus "rename" hint.
+					// Correctness is preserved by the delta protocol's
+					// hash verification, but the bogus hint costs a
+					// wasted round-trip. isRenameHintLikely filters
+					// the obvious reuse cases (tiny files, large size
+					// deltas) so the hint only fires when the
+					// bandwidth win has a realistic chance of paying
+					// off.
 					if entry.Inode != 0 {
 						if newRel, found := inodeToNewPath[entry.Inode]; found && newRel != rel {
 							if newEntry, ok := idx.Files[newRel]; ok {
-								newEntry.PrevPath = rel
-								idx.Files[newRel] = newEntry
-								stats.RenamesDetected++
+								if isRenameHintLikely(entry.Size, newEntry.Size) {
+									newEntry.PrevPath = rel
+									idx.Files[newRel] = newEntry
+									stats.RenamesDetected++
+								} else {
+									stats.RenameHintsSkipped++
+								}
 							}
 						}
 					}

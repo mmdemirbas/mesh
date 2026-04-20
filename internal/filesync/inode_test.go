@@ -695,3 +695,115 @@ func TestApplyHintRenamesSkipsPathsClaimedByPlanRenames(t *testing.T) {
 		t.Errorf("FilesRenamed=%d, want 0 (planRenames accounts for its own)", got)
 	}
 }
+
+// TestIsRenameHintLikely pins the size-gate contract that filters
+// inode-reuse false positives out of R1 Phase 2 rename hints. The
+// helper rejects inode-matched pairs whose sizes differ by more than
+// an order of magnitude in either direction; similar-size pairs pass
+// through regardless of absolute size. See the doc comment on
+// isRenameHintLikely for the rationale.
+func TestIsRenameHintLikely(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		oldSize int64
+		newSize int64
+		want    bool
+	}{
+		{"tiny rename is accepted", 7, 7, true},
+		{"near-equal small sizes are accepted", 900, 1_000, true},
+		{"near-equal large sizes are accepted", 500_000, 480_000, true},
+		{"old size zero passes", 0, 1_000_000, true},
+		{"new size zero passes", 1_000_000, 0, true},
+		{"both zero is accepted", 0, 0, true},
+		{"just under 10x shrink is accepted", 900_000, 100_000, true},
+		{"just under 10x growth is accepted", 100_000, 900_000, true},
+		{"exactly 10x shrink stays inside the gate", 10_000_000, 1_000_000, true},
+		{"exactly 10x growth stays inside the gate", 1_000_000, 10_000_000, true},
+		{"over 10x shrink is rejected", 11_000_000, 1_000_000, false},
+		{"over 10x growth is rejected", 1_000_000, 11_000_000, false},
+		{"huge old small new: classic ext4 reuse", 1_000_000_000, 1_000_000, false},
+		{"small old huge new: inverse reuse", 1_000, 1_000_000_000, false},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := isRenameHintLikely(c.oldSize, c.newSize)
+			if got != c.want {
+				t.Errorf("isRenameHintLikely(%d, %d) = %v, want %v",
+					c.oldSize, c.newSize, got, c.want)
+			}
+		})
+	}
+}
+
+// TestScanSkipsRenameHintOnSizeMismatch exercises the scan-level gate
+// that protects against inode-reuse false positives. When a deleted
+// file and a new file share an inode but the new file's size differs
+// from the old by more than an order of magnitude, the hint is
+// suppressed — that pattern is almost always an ext4-style inode
+// reuse, and emitting a hint for it only buys a wasted block-sig
+// round-trip before the receiver falls back to a full download.
+//
+// Reproducing a genuine kernel inode recycle inside a test is
+// platform-dependent and flaky, so this scenario uses a real rename
+// followed by an aggressive truncate. The kernel preserves the inode
+// across rename; the truncate pushes the size ratio past the 10x
+// gate. Either interpretation (real rename with massive edit;
+// hypothetical inode reuse) is correctly handled by skipping the
+// hint.
+func TestScanSkipsRenameHintOnSizeMismatch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// Old file: 1 MiB. New file after rename + truncate: 4 bytes.
+	// That is a ~262_000x shrink, well past the 10x gate.
+	large := make([]byte, 1024*1024)
+	for i := range large {
+		large[i] = byte(i)
+	}
+	fullOld := filepath.Join(dir, "large.bin")
+	if err := os.WriteFile(fullOld, large, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	idx := newFileIndex()
+	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
+		t.Fatal(err)
+	}
+	idx.recomputeCache()
+	if idx.Files["large.bin"].Inode == 0 {
+		t.Fatal("precondition failed: first scan must populate inode")
+	}
+
+	// Rename preserves the inode; a fresh write truncates to a size
+	// that defeats the ratio gate.
+	fullNew := filepath.Join(dir, "small.bin")
+	if err := os.Rename(fullOld, fullNew); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fullNew, []byte("tiny"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if stats.RenamesDetected != 0 {
+		t.Errorf("RenamesDetected=%d, want 0 (size-gate must suppress hint)", stats.RenamesDetected)
+	}
+	if stats.RenameHintsSkipped != 1 {
+		t.Errorf("RenameHintsSkipped=%d, want 1", stats.RenameHintsSkipped)
+	}
+	if got := idx.Files["small.bin"].PrevPath; got != "" {
+		t.Errorf("PrevPath=%q, want empty (gate must clear the hint)", got)
+	}
+	if tomb, ok := idx.Files["large.bin"]; !ok || !tomb.Deleted {
+		t.Error("old path tombstone not emitted")
+	}
+}
