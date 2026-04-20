@@ -699,7 +699,14 @@ func downloadBundle(ctx context.Context, client *http.Client, peerAddr, folderID
 		return nil, entries
 	}
 	defer func() { _ = zr.Close() }()
-	tr := tar.NewReader(zr)
+	// Cap the decompressed stream independently of the compressed cap. A
+	// zstd bomb can inflate 128 MB of ciphertext into arbitrarily many
+	// gigabytes; without this limit tar.Reader would pull the entire
+	// decompressed payload. The slack above maxBundleTotal accommodates
+	// tar header overhead (512 B per entry, up to maxBundlePaths entries
+	// plus per-entry padding to the next 512-byte boundary).
+	const tarOverhead = int64(maxBundlePaths) * 1024 // header + worst-case padding per entry
+	tr := tar.NewReader(io.LimitReader(zr, maxBundleTotal+tarOverhead))
 
 	received := make(map[string]bool, len(entries))
 	suffix := peerSuffix(peerAddr)

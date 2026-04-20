@@ -3385,6 +3385,89 @@ func TestDownloadBundle_CapsResponseBody(t *testing.T) {
 	}
 }
 
+// TestDownloadBundle_CapsDecompressedStream pins the zstd-bomb
+// defense. A malicious peer that returns a well-formed zstd frame
+// wrapping a tar payload far larger than maxBundleTotal must not
+// cause unbounded memory or disk consumption on the client. The
+// compressed body cap alone is insufficient — a ~1 MB zstd frame can
+// inflate to many GB of zero-padded tar — so downloadBundle wraps the
+// decompressed stream in a second LimitReader.
+func TestDownloadBundle_CapsDecompressedStream(t *testing.T) {
+	t.Parallel()
+
+	// Build a tar that declares a single entry ~10x maxBundleTotal in
+	// size. The payload is all zeros, so zstd compresses it to a tiny
+	// frame well under the compressed cap — the compressed LimitReader
+	// does not trip.
+	const bombSize = int64(maxBundleTotal) * 10
+	var tarBuf bytes.Buffer
+	tw := tar.NewWriter(&tarBuf)
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     "huge.bin",
+		Mode:     0o644,
+		Size:     bombSize,
+		Typeflag: tar.TypeReg,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Stream zero bytes in 1 MB chunks so the test does not allocate
+	// bombSize bytes on the heap.
+	chunk := make([]byte, 1<<20)
+	remaining := bombSize
+	for remaining > 0 {
+		n := int64(len(chunk))
+		if n > remaining {
+			n = remaining
+		}
+		if _, err := tw.Write(chunk[:n]); err != nil {
+			t.Fatal(err)
+		}
+		remaining -= n
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	compressed := zstdutil.Encode(tarBuf.Bytes())
+	if int64(len(compressed)) > maxBundleTotal {
+		t.Fatalf("compressed bomb unexpectedly exceeded compressed cap: %d bytes", len(compressed))
+	}
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.Header().Set("Content-Encoding", "zstd")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(compressed)
+	}))
+	defer srv.Close()
+
+	clientDir := t.TempDir()
+	entries := []bundleEntry{
+		{Path: "huge.bin", ExpectedHash: Hash256{}, RemoteSize: 10},
+	}
+	ok, retry := downloadBundle(t.Context(),
+		srv.Client(),
+		srv.Listener.Addr().String(),
+		"test",
+		entries,
+		openTestRoot(t, clientDir),
+		nil,
+	)
+	if len(ok) != 0 {
+		t.Errorf("expected no successful entries from zstd bomb, got %v", ok)
+	}
+	if len(retry) != len(entries) {
+		t.Errorf("expected all entries returned for retry, got %d of %d", len(retry), len(entries))
+	}
+
+	// The LimitReader should stop the tar reader well before bombSize
+	// bytes materialize on disk. Sanity-check: no partial file larger
+	// than the decompressed cap should have landed.
+	if info, err := os.Stat(filepath.Join(clientDir, "huge.bin")); err == nil {
+		t.Errorf("huge.bin materialized unexpectedly: size=%d", info.Size())
+	}
+}
+
 // postIndex must reject an empty response body. All postIndex callers
 // (sendSingleIndex, sendPaginatedIndex final page, fetchResponsePages)
 // expect a populated IndexExchange; silently returning a zero value
