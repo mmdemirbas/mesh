@@ -579,3 +579,50 @@ func TestVectorClock_Clone(t *testing.T) {
 		t.Fatalf("clone aliases receiver: src[A] = %d after mutating clone", src["A"])
 	}
 }
+
+func TestVectorClock_Merge(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		a, b    VectorClock
+		want    VectorClock
+		wantNil bool
+	}{
+		{"both-nil", nil, nil, nil, true},
+		{"nil-and-nonempty", nil, VectorClock{"A": 1}, VectorClock{"A": 1}, false},
+		{"nonempty-and-nil", VectorClock{"A": 1}, nil, VectorClock{"A": 1}, false},
+		{"disjoint-keys-union", VectorClock{"A": 1}, VectorClock{"B": 2}, VectorClock{"A": 1, "B": 2}, false},
+		{"overlapping-keys-take-max", VectorClock{"A": 3, "B": 1}, VectorClock{"A": 2, "B": 5}, VectorClock{"A": 3, "B": 5}, false},
+		{"drops-zero-entries", VectorClock{"A": 0, "B": 2}, VectorClock{"C": 0}, VectorClock{"B": 2}, false},
+		{"all-zero-returns-nil", VectorClock{"A": 0}, VectorClock{"B": 0}, nil, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.a.merge(tc.b)
+			if tc.wantNil {
+				if got != nil {
+					t.Fatalf("merge(%v, %v) = %v, want nil", tc.a, tc.b, got)
+				}
+				return
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("merge(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Fatalf("merge(%v, %v)[%s] = %d, want %d", tc.a, tc.b, k, got[k], v)
+				}
+			}
+		})
+	}
+
+	// Immutability: merge must not alias either receiver.
+	a := VectorClock{"A": 1}
+	b := VectorClock{"B": 2}
+	m := a.merge(b)
+	m["A"] = 99
+	m["B"] = 99
+	if a["A"] != 1 || b["B"] != 2 {
+		t.Fatalf("merge aliased receivers: a=%v b=%v", a, b)
+	}
+}

@@ -1846,15 +1846,18 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				}
 				// Write the new-path entry with remote metadata.
 				fs.index.Sequence++
+				// C6: merge local and remote clocks. Merge (not clone)
+				// preserves any local components the peer did not carry,
+				// e.g., a pre-C6 peer sending an empty clock, or a local
+				// tombstone at rp.NewPath from an earlier delete.
+				newLocal := fs.index.Files[rp.NewPath]
 				fs.index.setEntry(rp.NewPath, FileEntry{
 					Size:     rp.RemoteSize,
 					MtimeNS:  rp.RemoteMtime,
 					SHA256:   rp.RemoteHash,
 					Sequence: fs.index.Sequence,
 					Mode:     rp.RemoteMode,
-					// C6: adopt the peer's vector clock — this write
-					// reflects their observation, not ours.
-					Version: rp.RemoteVersion.clone(),
+					Version:  newLocal.Version.merge(rp.RemoteVersion),
 				})
 				fs.retries.clearAll(rp.OldPath)
 				fs.retries.clearAll(rp.NewPath)
@@ -1963,14 +1966,17 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					for _, path := range ok {
 						a := actionMap[path]
 						fs.index.Sequence++
+						// C6: merge clocks so any local component the peer
+						// did not carry (rolling upgrade, concurrent local
+						// write) survives the adopt.
+						localPrev := fs.index.Files[path]
 						fs.index.setEntry(path, FileEntry{
 							Size:     a.RemoteSize,
 							MtimeNS:  a.RemoteMtime,
 							SHA256:   a.RemoteHash,
 							Sequence: fs.index.Sequence,
 							Mode:     a.RemoteMode,
-							// C6: adopt the peer's clock on successful download.
-							Version: a.RemoteVersion.clone(),
+							Version:  localPrev.Version.merge(a.RemoteVersion),
 						})
 						fs.retries.clearAll(path)
 					}
@@ -2097,14 +2103,16 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				// Update local index and clear retry tracking on success.
 				fs.indexMu.Lock()
 				fs.index.Sequence++
+				// C6: merge clocks — adopt must not drop local components
+				// the peer did not carry.
+				localPrev := fs.index.Files[action.Path]
 				fs.index.setEntry(action.Path, FileEntry{
 					Size:     action.RemoteSize,
 					MtimeNS:  action.RemoteMtime,
 					SHA256:   action.RemoteHash,
 					Sequence: fs.index.Sequence,
 					Mode:     action.RemoteMode,
-					// C6: adopt the peer's clock on successful download.
-					Version: action.RemoteVersion.clone(),
+					Version:  localPrev.Version.merge(action.RemoteVersion),
 				})
 				fs.retries.clearAll(action.Path)
 				fs.indexMu.Unlock()
@@ -2139,15 +2147,17 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						}
 						fs.indexMu.Lock()
 						fs.index.Sequence++
+						// C6: identical content — merge clocks so the
+						// path converges without losing local components
+						// the peer did not carry.
+						localPrev := fs.index.Files[action.Path]
 						fs.index.setEntry(action.Path, FileEntry{
 							Size:     action.RemoteSize,
 							MtimeNS:  action.RemoteMtime,
 							SHA256:   action.RemoteHash,
 							Sequence: fs.index.Sequence,
 							Mode:     action.RemoteMode,
-							// C6: identical content — adopt the peer's
-							// clock so the path converges.
-							Version: action.RemoteVersion.clone(),
+							Version:  localPrev.Version.merge(action.RemoteVersion),
 						})
 						fs.indexMu.Unlock()
 						slog.Info("conflict auto-resolved: identical content",
@@ -2269,14 +2279,16 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 					fs.indexMu.Lock()
 					fs.index.Sequence++
+					// C6: remote wins — merge clocks so local components
+					// the peer did not carry survive the adopt.
+					localPrev := fs.index.Files[action.Path]
 					fs.index.setEntry(action.Path, FileEntry{
 						Size:     action.RemoteSize,
 						MtimeNS:  action.RemoteMtime,
 						SHA256:   action.RemoteHash,
 						Sequence: fs.index.Sequence,
 						Mode:     action.RemoteMode,
-						// C6: remote wins — adopt their clock.
-						Version: action.RemoteVersion.clone(),
+						Version:  localPrev.Version.merge(action.RemoteVersion),
 					})
 					fs.retries.clearAll(action.Path)
 					fs.indexMu.Unlock()
@@ -2336,12 +2348,12 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					entry.Deleted = true
 					entry.MtimeNS = time.Now().UnixNano()
 					entry.Sequence = fs.index.Sequence
-					// C6: adopt the peer's tombstone clock when present
-					// (tombstone write came from them). Fall back to a
-					// self-bump when the peer has no clock so the local
-					// entry still carries a non-empty vector.
+					// C6: merge the peer's tombstone clock with our own so
+					// any local component the peer did not carry survives.
+					// Fall back to a self-bump when the peer has no clock
+					// so the local entry still carries a non-empty vector.
 					if len(action.RemoteVersion) > 0 {
-						entry.Version = action.RemoteVersion.clone()
+						entry.Version = entry.Version.merge(action.RemoteVersion)
 					} else if fs.index.selfID != "" {
 						entry.Version = entry.Version.bump(fs.index.selfID)
 					}

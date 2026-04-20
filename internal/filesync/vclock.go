@@ -134,3 +134,30 @@ func (v VectorClock) clone() VectorClock {
 	}
 	return out
 }
+
+// merge returns the per-component max of v and other, union of keys.
+// Used when adopting a peer's clock after applying their write: we must
+// preserve any local components the peer did not carry so our prior
+// observations are not lost (e.g., during rolling upgrades when the
+// peer ran a pre-C6 build and sent an empty clock). Zero values are
+// dropped. Either side may be nil.
+func (v VectorClock) merge(other VectorClock) VectorClock {
+	if len(v) == 0 && len(other) == 0 {
+		return nil
+	}
+	out := make(VectorClock, len(v)+len(other))
+	for k, val := range v {
+		if val > 0 {
+			out[k] = val
+		}
+	}
+	for k, val := range other {
+		if val > out[k] {
+			out[k] = val
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
