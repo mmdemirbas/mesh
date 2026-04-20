@@ -3,7 +3,6 @@ package filesync
 import (
 	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -27,6 +26,7 @@ import (
 
 	"github.com/mmdemirbas/mesh/internal/config"
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
+	"github.com/mmdemirbas/mesh/internal/zstdutil"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -2990,13 +2990,13 @@ func TestHandleBundle_RoundTrip(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
 	}
 
-	// Decode tar+gzip response (Accept-Encoding: gzip prevents auto-decompress).
-	gr, err := gzip.NewReader(resp.Body)
+	// Decode tar+zstd response.
+	zr, err := zstdutil.NewReader(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = gr.Close() }()
-	tr := tar.NewReader(gr)
+	defer func() { _ = zr.Close() }()
+	tr := tar.NewReader(zr)
 
 	received := make(map[string]string)
 	for {
@@ -3135,12 +3135,12 @@ func TestHandleBundle_PathTraversal(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	gr, err := gzip.NewReader(resp.Body)
+	zr, err := zstdutil.NewReader(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = gr.Close() }()
-	tr := tar.NewReader(gr)
+	defer func() { _ = zr.Close() }()
+	tr := tar.NewReader(zr)
 
 	count := 0
 	for {
@@ -5244,12 +5244,12 @@ func TestDownloadBundle_PathTraversalInTarEntry(t *testing.T) {
 	// The server should either reject the path or the file simply won't be
 	// found (os.Root prevents traversal). Either way, no file should be served.
 	if resp.StatusCode == http.StatusOK {
-		gr, err := gzip.NewReader(resp.Body)
+		zr, err := zstdutil.NewReader(resp.Body)
 		if err != nil {
 			return // empty/invalid response is fine
 		}
-		defer func() { _ = gr.Close() }()
-		tr := tar.NewReader(gr)
+		defer func() { _ = zr.Close() }()
+		tr := tar.NewReader(zr)
 		for {
 			hdr, err := tr.Next()
 			if err != nil {
@@ -5556,6 +5556,12 @@ func readBody(t *testing.T, resp *http.Response) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if resp.Header.Get("Content-Encoding") == "zstd" {
+		data, err = zstdutil.Decode(data, 64*1024*1024)
+		if err != nil {
+			t.Fatalf("zstd decode: %v", err)
+		}
+	}
 	return data
 }
 
@@ -5583,8 +5589,7 @@ func testFolderCfg(dir, peerIP string) config.FolderCfg {
 	}
 }
 
-// bundlePost sends a POST to /bundle with Accept-Encoding: gzip to prevent
-// Go's http.Transport from auto-decompressing the gzip response.
+// bundlePost sends a POST to /bundle expecting a zstd-encoded tar response.
 func bundlePost(t *testing.T, baseURL string, body []byte) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, baseURL+"/bundle", bytes.NewReader(body))
@@ -5592,7 +5597,7 @@ func bundlePost(t *testing.T, baseURL string, body []byte) *http.Response {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/x-protobuf")
-	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("Accept-Encoding", "zstd")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -7403,12 +7408,12 @@ func TestHandleIndex_RejectsBadGzip(t *testing.T) {
 	ts := httptest.NewServer(srv.handler())
 	defer ts.Close()
 
-	// Body claims gzip but isn't.
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/index", bytes.NewReader([]byte("not gzipped")))
+	// Body claims zstd but isn't.
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/index", bytes.NewReader([]byte("not zstd")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Content-Encoding", "zstd")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -7416,7 +7421,7 @@ func TestHandleIndex_RejectsBadGzip(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("bad gzip = %d, want 400", resp.StatusCode)
+		t.Errorf("bad zstd = %d, want 400", resp.StatusCode)
 	}
 }
 
@@ -7522,12 +7527,12 @@ func TestHandleBundle_RejectsBadGzip(t *testing.T) {
 	ts := httptest.NewServer(srv.handler())
 	defer ts.Close()
 
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/bundle", bytes.NewReader([]byte("not gzipped")))
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/bundle", bytes.NewReader([]byte("not zstd")))
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/x-protobuf")
-	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Content-Encoding", "zstd")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -7535,7 +7540,7 @@ func TestHandleBundle_RejectsBadGzip(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("bundle with bad gzip = %d, want 400", resp.StatusCode)
+		t.Errorf("bundle with bad zstd = %d, want 400", resp.StatusCode)
 	}
 }
 

@@ -3,7 +3,6 @@ package filesync
 import (
 	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,30 +19,27 @@ import (
 	"golang.org/x/time/rate"
 
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
-	"github.com/mmdemirbas/mesh/internal/gziputil"
+	"github.com/mmdemirbas/mesh/internal/zstdutil"
 	"google.golang.org/protobuf/proto"
 )
 
-func gzipEncode(data []byte) ([]byte, error) {
-	return gziputil.Encode(data)
+func zstdEncode(data []byte) []byte {
+	return zstdutil.Encode(data)
 }
 
-func gzipDecode(data []byte) ([]byte, error) {
-	return gziputil.Decode(data, maxIndexPayload*4)
+func zstdDecode(data []byte) ([]byte, error) {
+	return zstdutil.Decode(data, maxIndexPayload*4)
 }
 
-// writeProtoGzip marshals msg, gzip-compresses, and writes to w.
-func writeProtoGzip(w http.ResponseWriter, msg proto.Message) error {
+// writeProtoZstd marshals msg, zstd-compresses, and writes to w.
+func writeProtoZstd(w http.ResponseWriter, msg proto.Message) error {
 	data, err := proto.Marshal(msg)
 	if err != nil {
 		return err
 	}
-	compressed, err := gzipEncode(data)
-	if err != nil {
-		return err
-	}
+	compressed := zstdEncode(data)
 	w.Header().Set("Content-Type", "application/x-protobuf")
-	w.Header().Set("Content-Encoding", "gzip")
+	w.Header().Set("Content-Encoding", "zstd")
 	_, err = w.Write(compressed)
 	return err
 }
@@ -153,8 +149,8 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.Header.Get("Content-Encoding") == "gzip" {
-		body, err = gzipDecode(body)
+	if r.Header.Get("Content-Encoding") == "zstd" {
+		body, err = zstdDecode(body)
 		if err != nil {
 			http.Error(w, "decompress body: "+err.Error(), http.StatusBadRequest)
 			return
@@ -201,7 +197,7 @@ func (s *server) handleSinglePageIndex(w http.ResponseWriter, req *pb.IndexExcha
 	slog.Debug("received index from peer", "folder", folderID, "files", len(req.GetFiles()))
 
 	resp := s.node.buildIndexExchange(folderID, req.GetSince())
-	if err := writeProtoGzip(w, resp); err != nil {
+	if err := writeProtoZstd(w, resp); err != nil {
 		http.Error(w, "write response: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -289,7 +285,7 @@ func (s *server) handleMultiPageIndex(w http.ResponseWriter, req *pb.IndexExchan
 		"received_files", len(pe.files), "response_files", len(resp.GetFiles()),
 		"response_pages", len(respPages))
 
-	if err := writeProtoGzip(w, respPages[0]); err != nil {
+	if err := writeProtoZstd(w, respPages[0]); err != nil {
 		http.Error(w, "write response: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -321,7 +317,7 @@ func (s *server) handleIndexFetch(w http.ResponseWriter, req *pb.IndexExchange) 
 		s.pending.Delete(key)
 	}
 
-	if err := writeProtoGzip(w, pe.responsePages[page]); err != nil {
+	if err := writeProtoZstd(w, pe.responsePages[page]); err != nil {
 		http.Error(w, "write response page: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -426,8 +422,8 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleBundle serves multiple small files in a single tar+gzip response (P19).
-// POST /bundle — body: BundleRequest (protobuf, gzip), response: tar+gzip stream.
+// handleBundle serves multiple small files in a single tar+zstd response (P19).
+// POST /bundle — body: BundleRequest (protobuf, zstd), response: tar+zstd stream.
 // Files that can't be read are silently skipped; the client detects missing
 // entries by comparing received tar paths against the request.
 func (s *server) handleBundle(w http.ResponseWriter, r *http.Request) {
@@ -446,14 +442,12 @@ func (s *server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// F9: check Content-Encoding header instead of silent gzip fallback,
-	// consistent with handleIndex (line 149).
 	decoded := body
-	if r.Header.Get("Content-Encoding") == "gzip" {
-		var gzErr error
-		decoded, gzErr = gzipDecode(body)
-		if gzErr != nil {
-			http.Error(w, "gzip decode: "+gzErr.Error(), http.StatusBadRequest)
+	if r.Header.Get("Content-Encoding") == "zstd" {
+		var zErr error
+		decoded, zErr = zstdDecode(body)
+		if zErr != nil {
+			http.Error(w, "zstd decode: "+zErr.Error(), http.StatusBadRequest)
 			return
 		}
 	}
@@ -495,10 +489,14 @@ func (s *server) handleBundle(w http.ResponseWriter, r *http.Request) {
 	folder.indexMu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/x-tar")
-	w.Header().Set("Content-Encoding", "gzip")
-	gw := gzip.NewWriter(w)
-	defer func() { _ = gw.Close() }()
-	tw := tar.NewWriter(gw)
+	w.Header().Set("Content-Encoding", "zstd")
+	zw, err := zstdutil.NewWriter(w)
+	if err != nil {
+		http.Error(w, "zstd writer: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = zw.Close() }()
+	tw := tar.NewWriter(zw)
 	defer func() { _ = tw.Close() }()
 
 	writer := newRateLimitedWriter(r.Context(), tw, s.node.rateLimiter)
@@ -911,12 +909,9 @@ func fetchResponsePages(ctx context.Context, client *http.Client, peerAddr, clie
 	}, nil
 }
 
-// postIndex sends a gzip-compressed index request and returns the parsed response.
+// postIndex sends a zstd-compressed index request and returns the parsed response.
 func postIndex(ctx context.Context, client *http.Client, peerAddr string, data []byte) (*pb.IndexExchange, error) {
-	compressed, err := gzipEncode(data)
-	if err != nil {
-		return nil, fmt.Errorf("compress index: %w", err)
-	}
+	compressed := zstdEncode(data)
 
 	u := fmt.Sprintf("https://%s/index", peerAddr)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(compressed))
@@ -924,7 +919,7 @@ func postIndex(ctx context.Context, client *http.Client, peerAddr string, data [
 		return nil, fmt.Errorf("create index request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-protobuf")
-	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Content-Encoding", "zstd")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("post index to %s: %w", peerAddr, err)
@@ -946,8 +941,8 @@ func postIndex(ctx context.Context, client *http.Client, peerAddr string, data [
 		return &pb.IndexExchange{}, nil
 	}
 
-	if resp.Header.Get("Content-Encoding") == "gzip" {
-		respBody, err = gzipDecode(respBody)
+	if resp.Header.Get("Content-Encoding") == "zstd" {
+		respBody, err = zstdDecode(respBody)
 		if err != nil {
 			return nil, fmt.Errorf("decompress response from %s: %w", peerAddr, err)
 		}
@@ -965,12 +960,9 @@ func postIndex(ctx context.Context, client *http.Client, peerAddr string, data [
 	return &respIdx, nil
 }
 
-// postIndexAck sends a gzip-compressed index page and expects an empty ack.
+// postIndexAck sends a zstd-compressed index page and expects an empty ack.
 func postIndexAck(ctx context.Context, client *http.Client, peerAddr string, data []byte) error {
-	compressed, err := gzipEncode(data)
-	if err != nil {
-		return fmt.Errorf("compress index: %w", err)
-	}
+	compressed := zstdEncode(data)
 
 	u := fmt.Sprintf("https://%s/index", peerAddr)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(compressed))
@@ -978,7 +970,7 @@ func postIndexAck(ctx context.Context, client *http.Client, peerAddr string, dat
 		return fmt.Errorf("create index request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-protobuf")
-	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Content-Encoding", "zstd")
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("post index to %s: %w", peerAddr, err)

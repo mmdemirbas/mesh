@@ -3,7 +3,6 @@ package filesync
 import (
 	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -21,7 +20,7 @@ import (
 	"golang.org/x/time/rate"
 
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
-	"github.com/mmdemirbas/mesh/internal/gziputil"
+	"github.com/mmdemirbas/mesh/internal/zstdutil"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -626,7 +625,7 @@ func bundleBatches(entries []bundleEntry) [][]bundleEntry {
 	return batches
 }
 
-// downloadBundle fetches multiple small files in a single tar+gzip round-trip (P19).
+// downloadBundle fetches multiple small files in a single tar+zstd round-trip (P19).
 // Returns the paths that were successfully written and the entries that need retry.
 func downloadBundle(ctx context.Context, client *http.Client, peerAddr, folderID string, entries []bundleEntry, root *os.Root, limiter *rate.Limiter) (successful []string, retry []bundleEntry) {
 	// Build request.
@@ -644,10 +643,7 @@ func downloadBundle(ctx context.Context, client *http.Client, peerAddr, folderID
 	if err != nil {
 		return nil, entries
 	}
-	compressed, err := gziputil.Encode(reqData)
-	if err != nil {
-		return nil, entries
-	}
+	compressed := zstdutil.Encode(reqData)
 
 	reqURL := fmt.Sprintf("https://%s/bundle", peerAddr)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(compressed))
@@ -655,10 +651,11 @@ func downloadBundle(ctx context.Context, client *http.Client, peerAddr, folderID
 		return nil, entries
 	}
 	httpReq.Header.Set("Content-Type", "application/x-protobuf")
-	httpReq.Header.Set("Content-Encoding", "gzip")
-	// Prevent Go's http.Transport from auto-decompressing the gzip response;
-	// we need the raw gzip stream to feed into tar.NewReader via gzip.NewReader.
-	httpReq.Header.Set("Accept-Encoding", "gzip")
+	httpReq.Header.Set("Content-Encoding", "zstd")
+	// We handle decompression below; signal an encoding we do not want Go's
+	// Transport to auto-decompress ("identity" or anything other than gzip).
+	// The server returns Content-Encoding: zstd regardless.
+	httpReq.Header.Set("Accept-Encoding", "zstd")
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
@@ -671,17 +668,17 @@ func downloadBundle(ctx context.Context, client *http.Client, peerAddr, folderID
 		return nil, entries
 	}
 
-	// Read tar+gzip response.
+	// Read tar+zstd response.
 	var reader io.Reader = resp.Body
 	if limiter != nil {
 		reader = newRateLimitedReader(ctx, reader, limiter)
 	}
-	gr, err := gzip.NewReader(reader)
+	zr, err := zstdutil.NewReader(reader)
 	if err != nil {
 		return nil, entries
 	}
-	defer func() { _ = gr.Close() }()
-	tr := tar.NewReader(gr)
+	defer func() { _ = zr.Close() }()
+	tr := tar.NewReader(zr)
 
 	received := make(map[string]bool, len(entries))
 	suffix := peerSuffix(peerAddr)
