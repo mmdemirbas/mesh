@@ -683,10 +683,13 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 				payload = zstdutil.Encode(c.Data)
 			}
 		}
+		// Hash: reuse delta's backing array rather than copying. delta
+		// is alive until after proto.Marshal returns; Marshal copies
+		// bytes into its wire buffer, so no lifetime hazard.
 		pbBlocks[i] = &pb.DeltaBlock{
 			Offset: c.Offset,
 			Length: int32(c.Length),
-			Hash:   append([]byte(nil), c.Hash[:]...),
+			Hash:   delta[i].Hash[:],
 			Data:   payload,
 			Raw:    raw,
 		}
@@ -773,7 +776,7 @@ func (s *server) handleBlockSigs(w http.ResponseWriter, r *http.Request) {
 		pbBlocks[i] = &pb.Block{
 			Offset: b.Offset,
 			Length: int32(b.Length),
-			Hash:   append([]byte(nil), b.Hash[:]...),
+			Hash:   sigBlocks[i].Hash[:],
 		}
 	}
 	resp := &pb.BlockSignatures{

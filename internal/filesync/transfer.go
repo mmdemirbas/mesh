@@ -489,7 +489,7 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 		pbLocal[i] = &pb.Block{
 			Offset: b.Offset,
 			Length: int32(b.Length),
-			Hash:   append([]byte(nil), b.Hash[:]...),
+			Hash:   localBlocks[i].Hash[:],
 		}
 	}
 	sigReq := &pb.BlockSignatures{
