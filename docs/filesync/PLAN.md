@@ -121,6 +121,7 @@ here.
 | [R1](#r1) | Inode-based rename / move detection                  | 🟡 P2 | robustness    | ✅     | 🟧 M   | 🟡   | 🔌    |
 | [R2](#r2) | Formal folder-level state machine                    | 🟡 P2 | robustness    | ❌     | 🟧 M   | 🟢   | 📦    |
 | [R3](#r3) | Peer-level failure blacklist                         | 🟡 P2 | robustness    | ✅     | 🟨 S   | 🟢   | 📦    |
+| [C7](#c7) | End-to-end transfer integrity trailer                | 🟡 P2 | robustness    | ⏸     | 🟧 M   | 🔴   | 🔌    |
 | [D1](#d1) | FastCDC content-defined chunking                     | 🟢 P3 | differentiate | ⏳     | 🟥 L   | 🔴   | 🔌    |
 | [D2](#d2) | BLAKE3 instead of SHA-256                            | 🟢 P3 | differentiate | ⏸      | 🟧 M   | 🔴   | 🔌    |
 | [D3](#d3) | Linux `fanotify` backend                             | 🟢 P3 | differentiate | ⏳     | 🟧 M   | 🟡   | 📦    |
@@ -130,7 +131,7 @@ here.
 | [C5](#c5) | 3-way text merge (Idea C)                            | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 📦    |
 | [C6](#c6) | Full vector clocks per file (Idea D)                 | ⚪    | conflict      | ⏸      | 🟥 L   | 🔴   | 🔌    |
 
-Counts: **4** P0 ✅ · **12** P1 (9 ✅ / 0 🔧 / 3 ⏸) · **3** P2 (2 ✅ / 1 ❌) · **6** P3 (5 ⏳ / 1 ⏸) · **2** deferred.
+Counts: **4** P0 ✅ · **12** P1 (9 ✅ / 0 🔧 / 3 ⏸) · **4** P2 (2 ✅ / 1 ❌ / 1 ⏸) · **6** P3 (5 ⏳ / 1 ⏸) · **2** deferred.
 
 ---
 
@@ -988,6 +989,136 @@ Each entry follows the same structure:
   `last_error` line). `TestAdminUIRendersPeerBackoff` pins the
   rendering against future refactors.
 
+<a id="c7"></a>
+### C7 · End-to-end transfer integrity trailer · ⏸ Deferred
+
+[↑ back to summary](#summary-table)
+
+- **Problem.** The sender's `handleFile` path in `protocol.go` opens
+  the file at transmission time and streams bytes via `io.Copy`,
+  separate from the scan-time hashing pass that produced the index
+  entry. The receiver's `downloadToVerifiedTemp` in `transfer.go`
+  compares the assembled bytes against `expectedHash` — a hash read
+  from the prior index exchange, not from the bytes actually on the
+  wire. When a file mutates on the sender between scan and
+  transmission (active log writers, the `mesh-log` folder in
+  production), the bytes delivered are internally coherent with the
+  file as it existed at read time but do not match the advertised
+  hash. Receiver rejects, retries, and eventually converges after the
+  sender rescans.
+- **Why it matters.** No integrity is lost. The existing whole-file
+  hash check in `downloadToVerifiedTemp` catches every mismatch
+  before rename, so corruption never lands on disk. The cost is
+  convergence latency and wasted bandwidth on active-writer files:
+  each attempt runs a full transfer that the receiver then discards.
+  Production perf logs show 1028 `hash_mismatch` and 3291
+  `quarantined` events concentrated in one actively-written folder.
+  C7 would let the receiver accept bytes proven coherent with the
+  sender's transmission-time view (trailer hash matches the streamed
+  bytes), even when the advertised hash is stale, turning "reject
+  and retry" into "accept and let the next scan update the index".
+- **Fix options.**
+  1. Emit an HTTP trailer on `GET /file` and on the assembled body
+     of `POST /delta`: `X-Mesh-File-Sha256` (hex) plus
+     `X-Mesh-File-Len` (bytes sent). Sender opens the file, `fstat`s
+     once for `(sentLen, sentMtime)`, clamps all reads to
+     `[0, sentLen)`, accumulates SHA-256 while writing to the
+     response, emits the trailer at end of body. Receiver streams
+     into `downloadToVerifiedTemp`, accumulates its own hash, and
+     compares to the trailer. The advertised index hash becomes an
+     advisory change-detection hint rather than the integrity
+     authority.
+  2. Prepend a fixed-size prologue with size and hash before the
+     body. Requires hashing the file once before starting the
+     response — double disk read or a full in-memory buffer.
+     Unacceptable for files in the multi-GB range.
+  3. Do nothing. Rely on the existing whole-file check plus faster
+     scan cadence via `P3sc` (adaptive watch / scan) to shrink the
+     scan-transmit window from a different direction with less
+     protocol surface.
+- **Risks.**
+  - *HTTP trailer fragility.* Go's `net/http` implements trailers,
+    but many reverse proxies strip them silently. Safe for the
+    current direct peer-to-peer deployment; locks out any future
+    fronting proxy without a transport revisit. `resp.Trailer` is
+    only populated after the body is fully consumed, so any short
+    read, context cancel, or mid-stream error leaves it empty.
+    Receiver must treat an empty trailer as "no integrity guarantee",
+    reject the payload, and retry.
+  - *Offset-resume hash seeding.* The receiver's running SHA-256
+    must be seeded from the already-on-disk temp bytes when
+    resuming. If those bytes diverge from what the sender's stream
+    produces for `[0, offset)` on this attempt, the final hash
+    mismatches — correct behavior, but a new "trailer mismatch
+    after resume" pattern operators must learn to interpret.
+  - *Delta path double hash.* The trailer covers the reassembled
+    file, not the wire bytes, because the wire carries only changed
+    blocks plus block signatures. Receiver must hash the assembled
+    temp file after reconstruction. Folded into the assembly write
+    loop this is one extra pass worth of CPU on delta transfers and
+    nothing more, but the fold is easy to get wrong.
+  - *Post-send index update.* Updating the sender's index to record
+    "we just sent bytes H at sequence S" requires a new write path
+    that races with the scanner. Needed for convergence only if the
+    scanner's cadence is too slow to close the mismatch window on
+    its own. Scope-reducer: drop it, let the next scan cycle close
+    the index. Most of the remaining risk concentrates here.
+  - *Test non-determinism.* The race being fixed — file mutated
+    between sender `fstat` and sender `io.Copy` — does not reproduce
+    deterministically without a test-only hook on the sender's read
+    path. That hook is production-visible code (build tag or
+    unexported field) carried for the sake of one test suite.
+  - *New failure categories.* `trailer_missing` and
+    `trailer_mismatch` need distinct dashboard and log treatment
+    from the existing `hash_mismatch` perf reason to avoid noisy
+    quarantine reports.
+  - *Atomic deployment.* Both peers must ship together. Old senders
+    omit the trailer and new receivers reject them. Acceptable for
+    the current 3-peer deployment; forecloses any partial rollout.
+  - *Correctness vs performance trade-off is delicate.* The gap
+    being closed is not a data-loss gap — the whole-file check
+    already catches corruption. The proposal shifts the integrity
+    authority from the index to the wire, which is a protocol-level
+    change for what is materially a convergence-speed win on a
+    specific workload (logs). Owner flagged this as risky on both
+    axes; a future implementation must carry the trade-off framing
+    explicitly.
+- **Impact.**
+  - *Perf:* one SHA-256 pass per transferred byte on each side.
+    Roughly 500 MB/s per core, well above LAN throughput — negligible
+    on whole-file transfers. Delta receivers pay an extra pass over
+    the reassembled file, foldable into the write loop.
+  - *Correctness:* the integrity guarantee does not change. The
+    existing whole-file hash already covers the same invariant. C7
+    changes the *source of truth* for that invariant from the index
+    to the trailer, removing the scan-transmit coherence gap.
+  - *UX:* fewer retry loops on active-writer files. In the observed
+    deployment this is a `mesh-log`-specific win.
+- **Blast radius.** 🔌 wire-visible addition. Touches `handleFile`,
+  `handleDelta`, and `handleBlockSigs` on the sender side;
+  `downloadToVerifiedTemp`, `downloadWhole`,
+  `downloadWithBlockVerify`, and `downloadFileDelta` on the receiver
+  side; optionally a post-send update helper in `index.go`. A new
+  `trailer.go` holds the header constants and helpers.
+- **Syncthing handling.** Syncthing's block-addressable model makes
+  this category of gap impossible by construction: every block is
+  requested by its own hash, and the hash is computed from the same
+  bytes the protocol delivers. There is no scan-time vs
+  transmit-time duality. See `RESEARCH.md §4`. C7 is the minimum
+  patch that removes the gap without adopting the full block-
+  addressable model.
+- **Recommendation.** Defer. The gap is observable but not
+  integrity-breaking, and the adaptive-scan work in `P3sc` attacks
+  the same symptom from a direction with smaller protocol surface.
+  Reopen C7 only when either of the following triggers fires:
+  (a) `P3sc` ships and the `mesh-log` retry-loop rate does not fall
+  into the single-digits-per-hour range, or (b) a folder outside
+  `mesh-log` starts producing sustained `hash_mismatch` events. When
+  reopened, scope to option (1) minus the post-send index update —
+  let the next scan cycle close the index, and keep the wire change
+  limited to the trailer itself. Carry the `senderMidReadHook` test
+  hook behind a build tag, not an unexported field.
+
 <a id="d1"></a>
 ### D1 · FastCDC content-defined chunking
 
@@ -1246,6 +1377,10 @@ group is safe to ship independently.
 15. **D2** — deferred. See `HASH-ALGORITHM.md` for the reopen
     criteria.
 16. **D5** — sparse files; defer until a user workload needs it.
+17. **C7** — deferred. End-to-end transfer integrity trailer.
+    Reopen triggers and scope constraints live in the C7 section.
+    Do not schedule until the triggers fire; the owner has flagged
+    the correctness-vs-performance trade-off as risky.
 
 ---
 
