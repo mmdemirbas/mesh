@@ -15,6 +15,7 @@ import (
 
 // ServeSocks accepts connections on listener and handles SOCKS5 for each.
 func ServeSocks(ctx context.Context, listener net.Listener, dialer func(string, string) (net.Conn, error), log *slog.Logger, metrics *state.Metrics) {
+	sem := make(chan struct{}, maxProxyConns)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -32,7 +33,17 @@ func ServeSocks(ctx context.Context, listener net.Listener, dialer func(string, 
 			continue
 		}
 		netutil.ApplyTCPKeepAlive(conn, 0)
-		go handleSocks5(conn, dialer, log, metrics)
+		select {
+		case sem <- struct{}{}:
+		default:
+			log.Warn("SOCKS connection cap reached; dropping", "limit", maxProxyConns, "remote", conn.RemoteAddr())
+			_ = conn.Close()
+			continue
+		}
+		go func(c net.Conn) {
+			defer func() { <-sem }()
+			handleSocks5(c, dialer, log, metrics)
+		}(conn)
 	}
 }
 

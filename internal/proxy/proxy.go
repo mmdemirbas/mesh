@@ -13,6 +13,14 @@ import (
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
+// maxProxyConns caps concurrent client connections per proxy listener.
+// Each connection consumes a goroutine plus, during data relay, two
+// 32-KiB copy buffers. Without a cap, a single misbehaving client can
+// exhaust FDs or goroutine/memory budget on a long-lived listener.
+// Var rather than const so tests can lower the cap without spinning up
+// 4097 real sockets.
+var maxProxyConns = 4096
+
 // RunStandaloneProxies starts all standalone (always-on) SOCKS/HTTP proxies.
 // Each proxy goroutine is tracked via the provided WaitGroup.
 func RunStandaloneProxies(ctx context.Context, proxies []config.Listener, log *slog.Logger, wg *sync.WaitGroup) {
@@ -85,6 +93,7 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Listener, log *slo
 			metrics.StartTime.Store(time.Now().UnixNano())
 			rLog.Info("TCP relay listening")
 
+			sem := make(chan struct{}, maxProxyConns)
 			for {
 				conn, err := ln.Accept()
 				if err != nil {
@@ -101,8 +110,16 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Listener, log *slo
 					continue
 				}
 				netutil.ApplyTCPKeepAlive(conn, 0)
+				select {
+				case sem <- struct{}{}:
+				default:
+					rLog.Warn("relay connection cap reached; dropping", "limit", maxProxyConns, "remote", conn.RemoteAddr())
+					_ = conn.Close()
+					continue
+				}
 
 				go func(c net.Conn) {
+					defer func() { <-sem }()
 					defer func() { _ = c.Close() }()
 					targetConn, err := net.DialTimeout("tcp", r.Target, 10*time.Second)
 					if err != nil {

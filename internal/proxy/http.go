@@ -47,6 +47,7 @@ func ServeHTTPProxy(ctx context.Context, listener net.Listener, target string, l
 
 // ServeHTTPProxyWithDialer accepts connections and uses the provided dialer for upstream targets.
 func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer func(string) (net.Conn, error), log *slog.Logger, metrics *state.Metrics) {
+	sem := make(chan struct{}, maxProxyConns)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -64,7 +65,17 @@ func ServeHTTPProxyWithDialer(ctx context.Context, listener net.Listener, dialer
 			continue
 		}
 		netutil.ApplyTCPKeepAlive(conn, 0)
-		go handleHTTPProxy(conn, dialer, log, metrics)
+		select {
+		case sem <- struct{}{}:
+		default:
+			log.Warn("HTTP proxy connection cap reached; dropping", "limit", maxProxyConns, "remote", conn.RemoteAddr())
+			_ = conn.Close()
+			continue
+		}
+		go func(c net.Conn) {
+			defer func() { <-sem }()
+			handleHTTPProxy(c, dialer, log, metrics)
+		}(conn)
 	}
 }
 
