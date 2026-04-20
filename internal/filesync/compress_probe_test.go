@@ -31,6 +31,12 @@ func TestIsIncompressible(t *testing.T) {
 		{"binary not-compressed", []byte{0x7f, 0x45, 0x4c, 0x46, 0x02}, false}, // ELF
 		{"empty", nil, false},
 		{"too short", []byte{0x28, 0xb5}, false},
+		// "ftyp" substring outside the ISO BMFF atom offset (4..7) must not
+		// trigger the probe — otherwise "filetype" text files would be
+		// flagged as incompressible.
+		{"ftyp word in text", []byte("# filetype: markdown\nhello\n"), false},
+		{"ftyp at offset 0", []byte("ftyp...."), false},
+		{"ftyp at offset 8", append([]byte("01234567"), []byte("ftyp....")...), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

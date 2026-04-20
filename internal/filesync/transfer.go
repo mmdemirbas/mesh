@@ -537,8 +537,9 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 	}
 
 	// N4: validate remote file size before allocating loops/memory.
+	// 0 is legal (empty file) — assembleDelta writes an empty tmp.
 	remoteFileSize := deltaResp.GetFileSize()
-	if remoteFileSize <= 0 || remoteFileSize > maxSyncFileSize {
+	if remoteFileSize < 0 || remoteFileSize > maxSyncFileSize {
 		return "", fmt.Errorf("delta file size out of range for %s: %d", relPath, remoteFileSize)
 	}
 

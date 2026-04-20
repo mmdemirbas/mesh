@@ -55,24 +55,19 @@ func probeIncompressibleRoot(root *os.Root, relPath string) (bool, error) {
 
 // isIncompressible reports whether head — the first magicProbeLen bytes
 // of a file (or fewer if the file is shorter) — matches any known
-// already-compressed format. An .mp4 signature lives at byte offset 4
-// (ftyp box); we detect it by probing for the "ftyp" literal within the
-// first 64 bytes.
+// already-compressed format. ISO BMFF containers (mp4, mov, m4a, …)
+// carry the "ftyp" atom at byte offset 4..7 per ISO/IEC 14496-12, so
+// the probe requires that exact offset rather than scanning — otherwise
+// innocuous text containing "ftyp" (e.g. the word "filetype") would be
+// treated as incompressible.
 func isIncompressible(head []byte) bool {
 	for _, m := range incompressibleMagics {
 		if bytes.HasPrefix(head, m) {
 			return true
 		}
 	}
-	// mp4/mov: "ftyp" box marker at bytes 4..7 (or sometimes a bit later).
-	if n := len(head); n >= 12 {
-		scan := head
-		if n > 64 {
-			scan = head[:64]
-		}
-		if bytes.Contains(scan, []byte("ftyp")) {
-			return true
-		}
+	if len(head) >= 8 && bytes.Equal(head[4:8], []byte("ftyp")) {
+		return true
 	}
 	return false
 }

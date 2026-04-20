@@ -551,6 +551,11 @@ func (s *server) handleBundle(w http.ResponseWriter, r *http.Request) {
 // handleDelta receives block signatures from a peer and responds with only
 // the blocks that differ between the peer's local version and our version.
 // POST /delta — body: BlockSignatures (protobuf), response: DeltaResponse (protobuf)
+//
+// Compression is per-block inside the protobuf (DeltaBlock.data is zstd-encoded
+// unless the incompressibility probe marks the file raw), not body-level. The
+// response therefore has no Content-Encoding header — the receiver decodes each
+// block individually based on DeltaBlock.raw.
 func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

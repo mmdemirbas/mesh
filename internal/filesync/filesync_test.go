@@ -6597,9 +6597,9 @@ func TestDeltaFileSize_Validation(t *testing.T) {
 		wantErr  bool
 	}{
 		{"negative", -1, true},
-		{"zero", 0, true},
 		{"too large", maxSyncFileSize + 1, true},
 	}
+	// FileSize=0 is legal (empty file) — covered by TestHandleDelta_EmptyFile.
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -6745,6 +6745,71 @@ func TestHandleDelta_CompressesPayload(t *testing.T) {
 	}
 	if totalCompressed >= totalPlain {
 		t.Fatalf("compression did not shrink payload: compressed=%d plain=%d", totalCompressed, totalPlain)
+	}
+}
+
+// Empty files must survive the delta path end-to-end: handleDelta
+// returns file_size=0 with no blocks; downloadFileDelta assembles a
+// zero-byte result without falling back. Regression test for the
+// `remoteFileSize <= 0` guard that used to reject 0.
+func TestHandleDelta_EmptyFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "empty.bin"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	n := &Node{cfg: testCfg(dir, "127.0.0.1"), folders: make(map[string]*folderState), deviceID: "test-device"}
+	n.folders["test"] = &folderState{cfg: testFolderCfg(dir, "127.0.0.1"), root: openTestRoot(t, dir)}
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req := &pb.BlockSignatures{FolderId: "test", Path: "empty.bin", FileSize: 0}
+	reqData, _ := proto.Marshal(req)
+	resp, err := http.Post(ts.URL+"/delta", "application/x-protobuf", bytes.NewReader(reqData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var deltaResp pb.DeltaResponse
+	if err := proto.Unmarshal(readBody(t, resp), &deltaResp); err != nil {
+		t.Fatal(err)
+	}
+	if deltaResp.GetFileSize() != 0 {
+		t.Fatalf("file_size = %d, want 0", deltaResp.GetFileSize())
+	}
+	if len(deltaResp.GetBlocks()) != 0 {
+		t.Fatalf("expected 0 blocks for empty file, got %d", len(deltaResp.GetBlocks()))
+	}
+
+	// Now exercise the receiver side via assembleDelta directly: 0 chunks
+	// + remoteFileSize=0 must produce a zero-byte output.
+	recvDir := t.TempDir()
+	oldPath := filepath.Join(recvDir, "old.bin")
+	outPath := filepath.Join(recvDir, "out.bin")
+	if err := os.WriteFile(oldPath, []byte("stale content overwritten"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.Create(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.Open(oldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := assembleDelta(out, old, 0, nil); err != nil {
+		t.Fatalf("assembleDelta empty: %v", err)
+	}
+	_ = out.Close()
+	_ = old.Close()
+	got, _ := os.ReadFile(outPath)
+	if len(got) != 0 {
+		t.Fatalf("assembled output = %d bytes, want 0", len(got))
 	}
 }
 
