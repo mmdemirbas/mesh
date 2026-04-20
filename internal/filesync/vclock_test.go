@@ -582,11 +582,12 @@ func actionPathMap(actions []DiffEntry) map[string]DiffEntry {
 	return out
 }
 
-// TestFileIndex_CloneInto_DeepCopiesVersion pins that scan clones do not
-// alias Version maps — mutating the clone must not reach into the
-// source. Without this, the scan's private copy would corrupt the live
-// index observed by syncs and the admin UI.
-func TestFileIndex_CloneInto_DeepCopiesVersion(t *testing.T) {
+// TestFileIndex_CloneInto_BumpDoesNotAliasSource pins that the clone's
+// expected mutation path — replacing Version via bump/merge — does not
+// reach into the source. VectorClock maps are shared by reference
+// between source and clone (P18d); the invariant is that all production
+// mutations allocate a new map via bump/merge, which this test exercises.
+func TestFileIndex_CloneInto_BumpDoesNotAliasSource(t *testing.T) {
 	t.Parallel()
 
 	src := newFileIndex()
@@ -598,12 +599,16 @@ func TestFileIndex_CloneInto_DeepCopiesVersion(t *testing.T) {
 
 	cp := src.clone()
 	entry := cp.Files["a.txt"]
-	entry.Version["A"] = 999
+	entry.Version = entry.Version.bump("A")
 	cp.Files["a.txt"] = entry
 
 	if src.Files["a.txt"].Version["A"] != 1 {
-		t.Fatalf("clone aliases Version: src[A]=%d after mutating clone",
+		t.Fatalf("bump on clone entry reached source: src[A]=%d",
 			src.Files["a.txt"].Version["A"])
+	}
+	if cp.Files["a.txt"].Version["A"] != 2 {
+		t.Fatalf("bump did not advance clone: cp[A]=%d",
+			cp.Files["a.txt"].Version["A"])
 	}
 }
 

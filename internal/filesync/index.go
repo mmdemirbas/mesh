@@ -185,9 +185,11 @@ func (idx *FileIndex) cloneInto(dst map[string]FileEntry) *FileIndex {
 		clear(dst)
 	}
 	for k, v := range idx.Files {
-		// C6: deep-copy the vector clock so mutations on the cloned
-		// index (scan bumps) do not alias the source's Version maps.
-		v.Version = v.Version.clone()
+		// C6: VectorClock is shared by reference. All production mutation
+		// paths (bump, merge) allocate a new map rather than mutating in
+		// place, so aliasing between source and clone is safe. Direct
+		// in-place mutation (`entry.Version[k] = v`) is a contract
+		// violation — tests that need to mutate must call .clone() first.
 		dst[k] = v
 	}
 	return &FileIndex{
