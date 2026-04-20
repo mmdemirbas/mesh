@@ -39,12 +39,6 @@ func (v VectorClock) bump(self string) VectorClock {
 	return out
 }
 
-// equal reports whether v and other have identical entries. Absent keys
-// compare equal to explicit zero entries.
-func (v VectorClock) equal(other VectorClock) bool {
-	return compareClocks(v, other) == ClockEqual
-}
-
 // compareClocks returns the strict ordering between a and b. Missing keys
 // are treated as zero.
 func compareClocks(a, b VectorClock) ClockOrder {

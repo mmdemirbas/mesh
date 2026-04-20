@@ -544,6 +544,11 @@ func (fs *folderState) applyHintRenames(ctx context.Context, folderID, peerAddr 
 			oldEntry.Deleted = true
 			oldEntry.MtimeNS = time.Now().UnixNano()
 			oldEntry.Sequence = fs.index.Sequence
+			// C6: local tombstone for the rename source is a local
+			// write — bump self.
+			if fs.index.selfID != "" {
+				oldEntry.Version = oldEntry.Version.bump(fs.index.selfID)
+			}
 			fs.index.setEntry(oldPath, oldEntry)
 		}
 		fs.retries.clearAll(oldPath)
@@ -1004,6 +1009,9 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 				"folder", fcfg.ID, "old_path", idx.Path, "new_path", fcfg.Path)
 		}
 		idx.Path = fcfg.Path
+		// C6: pin the local device ID so scan can bump the per-file
+		// vector clock on local writes.
+		idx.selfID = n.deviceID
 
 		ignore := newIgnoreMatcher(fcfg.IgnorePatterns)
 

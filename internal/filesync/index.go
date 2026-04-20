@@ -119,6 +119,12 @@ type FileIndex struct {
 	// sequence); consumers must verify against Files map. Rebuilt after
 	// scan swap and index load; appended to by setEntry.
 	seqIndex []seqEntry `yaml:"-"`
+
+	// C6: this node's device ID (10-char Crockford base32). Populated by
+	// folderState init from Node.deviceID. Used by scan to bump the
+	// per-file VectorClock on local writes. Empty in tests that build a
+	// FileIndex directly; bump is skipped in that case.
+	selfID string `yaml:"-"`
 }
 
 // seqEntry maps a sequence number to a path for the secondary index.
@@ -179,11 +185,15 @@ func (idx *FileIndex) cloneInto(dst map[string]FileEntry) *FileIndex {
 		clear(dst)
 	}
 	for k, v := range idx.Files {
+		// C6: deep-copy the vector clock so mutations on the cloned
+		// index (scan bumps) do not alias the source's Version maps.
+		v.Version = v.Version.clone()
 		dst[k] = v
 	}
 	return &FileIndex{
 		Path: idx.Path, Sequence: idx.Sequence, Epoch: idx.Epoch, DeviceID: idx.DeviceID,
 		Files: dst, cachedCount: idx.cachedCount, cachedSize: idx.cachedSize,
+		selfID: idx.selfID,
 	}
 }
 
@@ -1004,6 +1014,13 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		}
 
 		idx.Sequence++
+		// C6: this is a local write — bump our counter in the prior
+		// vector (nil when the path is new). Skipped when selfID is
+		// empty (tests that construct FileIndex directly).
+		var version VectorClock
+		if idx.selfID != "" {
+			version = p.old.Version.bump(idx.selfID)
+		}
 		idx.Files[p.rel] = FileEntry{
 			Size:        p.size,
 			MtimeNS:     p.mtimeNS,
@@ -1011,6 +1028,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			Sequence:    idx.Sequence,
 			Mode:        p.mode,
 			Inode:       effectiveInode,
+			Version:     version,
 			HashState:   r.hashState,
 			HashedBytes: p.size,
 			PrefixCheck: r.prefixCheck,
@@ -1144,6 +1162,10 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 					entry.Deleted = true
 					entry.MtimeNS = time.Now().UnixNano() // deletion time, not last-modification time
 					entry.Sequence = idx.Sequence
+					// C6: local deletion is a new write — bump self.
+					if idx.selfID != "" {
+						entry.Version = entry.Version.bump(idx.selfID)
+					}
 					idx.Files[rel] = entry
 					changed = true
 					stats.Deletions++
