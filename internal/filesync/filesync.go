@@ -27,6 +27,12 @@ import (
 
 const (
 	tombstoneMaxAge = 30 * 24 * time.Hour // 30 days
+	// C3: stale download temp files older than this are removed on
+	// startup. Anything younger is kept so downloadWithBlockVerify can
+	// resume from the last verified block boundary across a process
+	// restart. Seven days is longer than any plausible retry window
+	// and far shorter than a sync graveyard.
+	tempFileMaxAge = 7 * 24 * time.Hour
 )
 
 // activeNodes tracks running filesync nodes for admin API access.
@@ -973,6 +979,15 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			}
 			continue
 		}
+
+		// C3: remove abandoned download temp files from previous crashed
+		// runs. Recent temps (within tempFileMaxAge) are preserved so
+		// downloadWithBlockVerify can resume across a restart; older ones
+		// are either stale (the peer's file has moved on) or leftovers
+		// from an uninstall/config change and would otherwise accumulate
+		// forever. Runs off the hot path — a filesystem walk is fine at
+		// folder init.
+		cleanTempFiles(fcfg.Path, tempFileMaxAge)
 
 		// Load or create index.
 		idxPath := filepath.Join(dataDir, fcfg.ID, "index.yaml")
