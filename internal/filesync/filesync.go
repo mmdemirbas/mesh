@@ -1223,7 +1223,8 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		}
 	}
 
-	// Clean up state.
+	// Clean up state. Only the "filesync" bind accumulates metrics
+	// (via GetMetrics); folders and peers are status-only entries.
 	for _, fcfg := range cfg.ResolvedFolders {
 		state.Global.Delete("filesync-folder", fcfg.ID)
 		for _, peer := range fcfg.Peers {
@@ -1231,6 +1232,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		}
 	}
 	state.Global.Delete("filesync", cfg.Bind)
+	state.Global.DeleteMetrics("filesync", cfg.Bind)
 
 	return nil
 }
