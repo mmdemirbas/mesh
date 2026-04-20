@@ -298,6 +298,86 @@ func TestScan_EmptySelfIDSkipsBump(t *testing.T) {
 	}
 }
 
+// TestDiff_PopulatesRemoteVersion pins that diff() carries the peer's
+// vector clock forward on every action type. Without this, receive-side
+// handlers have no way to adopt the remote clock and each sync would
+// leave stale Version maps in the local index.
+func TestDiff_PopulatesRemoteVersion(t *testing.T) {
+	t.Parallel()
+
+	// Remote has: p_new.txt (new), p_mod.txt (content changed), p_del.txt (tombstoned).
+	// Local has: p_mod.txt (older content), p_del.txt (unchanged).
+	local := &FileIndex{Files: map[string]FileEntry{
+		"p_mod.txt": {Size: 1, MtimeNS: 1, SHA256: testHash("local-old")},
+		"p_del.txt": {Size: 1, MtimeNS: 1, SHA256: testHash("stable")},
+	}}
+	remote := &FileIndex{Files: map[string]FileEntry{
+		"p_new.txt": {
+			Size: 1, MtimeNS: 10, SHA256: testHash("new"), Sequence: 1,
+			Version: VectorClock{"PEER-AA": 1},
+		},
+		"p_mod.txt": {
+			Size: 1, MtimeNS: 10, SHA256: testHash("remote-new"), Sequence: 2,
+			Version: VectorClock{"PEER-AA": 2},
+		},
+		"p_del.txt": {
+			Deleted: true, Size: 1, MtimeNS: 10, Sequence: 3,
+			Version: VectorClock{"PEER-AA": 3},
+		},
+	}}
+	// lastSeenSeq=0 so remote entries are all new; lastSyncNS=100 (>local mtimes)
+	// so C1 mtime fallback classifies p_mod.txt as Download (local unchanged).
+	// Also set lastSeenSeq to allow tombstone delivery (lastSeenSeq > 0 branch).
+	actions := local.diff(remote, 0, 100, nil, "send-receive")
+
+	byPath := map[string]DiffEntry{}
+	for _, a := range actions {
+		byPath[a.Path] = a
+	}
+
+	if got := byPath["p_new.txt"].RemoteVersion["PEER-AA"]; got != 1 {
+		t.Errorf("p_new.txt RemoteVersion[PEER-AA]=%d, want 1", got)
+	}
+	if got := byPath["p_mod.txt"].RemoteVersion["PEER-AA"]; got != 2 {
+		t.Errorf("p_mod.txt RemoteVersion[PEER-AA]=%d, want 2 (action=%v)",
+			got, byPath["p_mod.txt"].Action)
+	}
+	// Tombstones are only emitted when lastSeenSeq > 0, so rerun with a baseline.
+	actions2 := local.diff(remote, 0, 100, nil, "send-receive") // p_del.txt suppressed
+	if _, ok := actionPathMap(actions2)["p_del.txt"]; ok {
+		t.Fatal("unexpected: tombstone emitted on first sync")
+	}
+	actions3 := local.diff(remote, 0, 100, map[string]Hash256{
+		"p_del.txt": testHash("stable"),
+	}, "send-receive")
+	// Still no delete because H8 first-sync guard is gated on lastSeenSeq=0.
+	if _, ok := actionPathMap(actions3)["p_del.txt"]; ok {
+		t.Fatal("first-sync guard broken")
+	}
+	// Now with a baseline (lastSeenSeq > 0) the tombstone is emitted.
+	actions4 := local.diff(remote, 0 /*lastSeen*/, 100, nil, "send-receive")
+	_ = actions4
+	withBaseline := local.diff(remote, 2, 100, nil, "send-receive")
+	del, ok := actionPathMap(withBaseline)["p_del.txt"]
+	if !ok {
+		t.Fatal("tombstone not emitted with lastSeenSeq=2")
+	}
+	if del.Action != ActionDelete {
+		t.Fatalf("p_del.txt action=%v, want ActionDelete", del.Action)
+	}
+	if got := del.RemoteVersion["PEER-AA"]; got != 3 {
+		t.Errorf("p_del.txt RemoteVersion[PEER-AA]=%d, want 3", got)
+	}
+}
+
+func actionPathMap(actions []DiffEntry) map[string]DiffEntry {
+	out := make(map[string]DiffEntry, len(actions))
+	for _, a := range actions {
+		out[a.Path] = a
+	}
+	return out
+}
+
 // TestFileIndex_CloneInto_DeepCopiesVersion pins that scan clones do not
 // alias Version maps — mutating the clone must not reach into the
 // source. Without this, the scan's private copy would corrupt the live

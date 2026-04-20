@@ -1852,6 +1852,9 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					SHA256:   rp.RemoteHash,
 					Sequence: fs.index.Sequence,
 					Mode:     rp.RemoteMode,
+					// C6: adopt the peer's vector clock — this write
+					// reflects their observation, not ours.
+					Version: rp.RemoteVersion.clone(),
 				})
 				fs.retries.clearAll(rp.OldPath)
 				fs.retries.clearAll(rp.NewPath)
@@ -1966,6 +1969,8 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 							SHA256:   a.RemoteHash,
 							Sequence: fs.index.Sequence,
 							Mode:     a.RemoteMode,
+							// C6: adopt the peer's clock on successful download.
+							Version: a.RemoteVersion.clone(),
 						})
 						fs.retries.clearAll(path)
 					}
@@ -2098,6 +2103,8 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					SHA256:   action.RemoteHash,
 					Sequence: fs.index.Sequence,
 					Mode:     action.RemoteMode,
+					// C6: adopt the peer's clock on successful download.
+					Version: action.RemoteVersion.clone(),
 				})
 				fs.retries.clearAll(action.Path)
 				fs.indexMu.Unlock()
@@ -2138,6 +2145,9 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 							SHA256:   action.RemoteHash,
 							Sequence: fs.index.Sequence,
 							Mode:     action.RemoteMode,
+							// C6: identical content — adopt the peer's
+							// clock so the path converges.
+							Version: action.RemoteVersion.clone(),
 						})
 						fs.indexMu.Unlock()
 						slog.Info("conflict auto-resolved: identical content",
@@ -2265,6 +2275,8 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						SHA256:   action.RemoteHash,
 						Sequence: fs.index.Sequence,
 						Mode:     action.RemoteMode,
+						// C6: remote wins — adopt their clock.
+						Version: action.RemoteVersion.clone(),
 					})
 					fs.retries.clearAll(action.Path)
 					fs.indexMu.Unlock()
@@ -2324,6 +2336,15 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					entry.Deleted = true
 					entry.MtimeNS = time.Now().UnixNano()
 					entry.Sequence = fs.index.Sequence
+					// C6: adopt the peer's tombstone clock when present
+					// (tombstone write came from them). Fall back to a
+					// self-bump when the peer has no clock so the local
+					// entry still carries a non-empty vector.
+					if len(action.RemoteVersion) > 0 {
+						entry.Version = action.RemoteVersion.clone()
+					} else if fs.index.selfID != "" {
+						entry.Version = entry.Version.bump(fs.index.selfID)
+					}
 					fs.index.setEntry(action.Path, entry)
 					fs.indexMu.Unlock()
 					fs.metrics.FilesDeleted.Add(1)

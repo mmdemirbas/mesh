@@ -1329,6 +1329,11 @@ type DiffEntry struct {
 	// ActionDelete to perform a local rename plus /delta instead of a full
 	// re-download. Never set on non-download actions.
 	RemotePrevPath string
+	// C6: the peer's vector clock for this path. Receive-side handlers
+	// adopt this into FileEntry.Version after the local write is durable
+	// so subsequent compareClocks calls reflect what we observed. Nil
+	// when the peer has no clock (pre-C6 legacy or empty).
+	RemoteVersion VectorClock
 }
 
 // diff compares the local index with a remote index and produces a list of
@@ -1392,6 +1397,7 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 					Path:           path,
 					Action:         ActionDelete,
 					RemoteSequence: rEntry.Sequence,
+					RemoteVersion:  rEntry.Version,
 				})
 			}
 			continue
@@ -1408,6 +1414,7 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 				RemoteMode:     rEntry.Mode,
 				RemoteSequence: rEntry.Sequence,
 				RemotePrevPath: rEntry.PrevPath,
+				RemoteVersion:  rEntry.Version,
 			})
 			continue
 		}
@@ -1433,6 +1440,7 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 					RemoteMtime:    rEntry.MtimeNS,
 					RemoteMode:     rEntry.Mode,
 					RemoteSequence: rEntry.Sequence,
+					RemoteVersion:  rEntry.Version,
 				})
 			case remoteMod:
 				// Only remote changed — download.
@@ -1445,6 +1453,7 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 					RemoteMode:     rEntry.Mode,
 					RemoteSequence: rEntry.Sequence,
 					RemotePrevPath: rEntry.PrevPath,
+					RemoteVersion:  rEntry.Version,
 				})
 				// case localMod only: local will propagate on our next
 				// outbound sync — nothing to do from the receive side.
@@ -1463,6 +1472,7 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 				RemoteMode:     rEntry.Mode,
 				RemoteSequence: rEntry.Sequence,
 				RemotePrevPath: rEntry.PrevPath,
+				RemoteVersion:  rEntry.Version,
 			})
 		} else {
 			actions = append(actions, DiffEntry{
@@ -1473,6 +1483,7 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 				RemoteMtime:    rEntry.MtimeNS,
 				RemoteMode:     rEntry.Mode,
 				RemoteSequence: rEntry.Sequence,
+				RemoteVersion:  rEntry.Version,
 			})
 		}
 	}
@@ -1569,6 +1580,10 @@ type RenamePlan struct {
 	RemoteMode  uint32
 	NewSequence int64 // peer's sequence for the new-path entry
 	DelSequence int64 // peer's sequence for the tombstone
+	// C6: peer's vector clock on the new-path entry. Adopted into the
+	// local index after the rename lands so subsequent diffs see the
+	// remote's write history. Nil when the peer has no clock.
+	RemoteVersion VectorClock
 }
 
 // planRenames finds download/delete action pairs that can be resolved
@@ -1626,14 +1641,15 @@ func planRenames(actions []DiffEntry, local *FileIndex) ([]RenamePlan, map[strin
 		pick := queue[0]
 		delsByHash[a.RemoteHash] = queue[1:]
 		plans = append(plans, RenamePlan{
-			OldPath:     pick.path,
-			NewPath:     a.Path,
-			RemoteHash:  a.RemoteHash,
-			RemoteSize:  a.RemoteSize,
-			RemoteMtime: a.RemoteMtime,
-			RemoteMode:  a.RemoteMode,
-			NewSequence: a.RemoteSequence,
-			DelSequence: pick.seq,
+			OldPath:       pick.path,
+			NewPath:       a.Path,
+			RemoteHash:    a.RemoteHash,
+			RemoteSize:    a.RemoteSize,
+			RemoteMtime:   a.RemoteMtime,
+			RemoteMode:    a.RemoteMode,
+			NewSequence:   a.RemoteSequence,
+			DelSequence:   pick.seq,
+			RemoteVersion: a.RemoteVersion,
 		})
 		skip[a.Path] = true
 		skip[pick.path] = true
