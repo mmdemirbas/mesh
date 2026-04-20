@@ -1,5 +1,11 @@
 package tunnel
 
+import (
+	"fmt"
+	"io"
+	"os"
+)
+
 // Caps on client-supplied environment variables. RFC 4254 does not
 // bound the number of "env" requests per session, so an authenticated
 // peer could flood the accumulator before issuing "shell" or "exec".
@@ -9,6 +15,31 @@ const (
 	maxAcceptedEnvVars = 128  // total entries permitted per session
 	maxEnvValueSize    = 8192 // per-value byte cap (name not included)
 )
+
+// maxBannerSize caps the on-disk size of the banner and MOTD files. The
+// SSH banner is sent on every pre-auth connection, so a runaway file
+// path pointed at a log or data file would amplify into massive
+// bandwidth per client on top of the memory cost at startup.
+const maxBannerSize = 64 * 1024
+
+// readFileCapped reads up to limit+1 bytes from path and returns an
+// error if the file exceeds limit. Used for config-sourced files whose
+// runaway size would be a DoS surface.
+func readFileCapped(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path) //nolint:gosec // G304: path from user config, validated at load time
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("file %q exceeds %d-byte cap", path, limit)
+	}
+	return data, nil
+}
 
 // envMatches returns true if name matches any pattern in allowlist.
 // Patterns support trailing wildcard (e.g., "LC_*" matches "LC_ALL").

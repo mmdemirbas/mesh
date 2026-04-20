@@ -306,9 +306,11 @@ func (s *SSHServer) Run(ctx context.Context) error {
 	}
 	sshCfg.AddHostKey(hostKey)
 
-	// Pre-auth banner (RFC 4252 section 5.4)
+	// Pre-auth banner (RFC 4252 section 5.4). Capped to keep a
+	// misconfigured path (e.g., a large log file) from OOM-ing startup
+	// or ballooning per-connection bandwidth.
 	if s.cfg.Banner != "" {
-		bannerData, err := os.ReadFile(s.cfg.Banner) //nolint:gosec // G304: path from user config, validated at load time
+		bannerData, err := readFileCapped(s.cfg.Banner, maxBannerSize)
 		if err != nil {
 			s.log.Warn("Failed to read banner file", "path", s.cfg.Banner, "error", err)
 		} else {
@@ -319,10 +321,11 @@ func (s *SSHServer) Run(ctx context.Context) error {
 		}
 	}
 
-	// Read MOTD file at startup for post-auth display
+	// Read MOTD file at startup for post-auth display. Same cap as
+	// banner: a single runaway config shouldn't OOM the server.
 	var motdText []byte
 	if s.cfg.MOTD != "" {
-		motdText, err = os.ReadFile(s.cfg.MOTD) //nolint:gosec // G304: path from user config, validated at load time
+		motdText, err = readFileCapped(s.cfg.MOTD, maxBannerSize)
 		if err != nil {
 			s.log.Warn("Failed to read motd file", "path", s.cfg.MOTD, "error", err)
 			motdText = nil
