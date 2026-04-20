@@ -2727,6 +2727,9 @@ func (n *Node) persistFolder(folderID string, force bool) {
 		peersPath := filepath.Join(n.dataDir, folderID, "peers.yaml")
 		if err := savePeerStates(peersPath, peersSnapshot); err != nil {
 			slog.Warn("failed to save peer states", "folder", folderID, "error", err)
+			fs.indexMu.Lock()
+			fs.peersDirty = true // retry next time — mirror the index-save handling
+			fs.indexMu.Unlock()
 		}
 		peersMs = ms(time.Since(peersStart))
 	}
