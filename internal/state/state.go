@@ -249,18 +249,21 @@ func (s *State) StartEviction(ctx context.Context) {
 }
 
 // evictStale removes components not updated within componentTTL and their orphaned metrics.
-// Components in stable states (Listening, Connected) are exempt — they represent
-// long-running goroutines that update state once at startup and then serve
-// indefinitely. Only transient states (Starting, Connecting, Retrying, Failed)
-// are subject to eviction, since those indicate a component that likely crashed
-// or leaked without proper cleanup.
+// Components in stable states (Listening, Connected, Scanning) are exempt — they
+// represent long-running goroutines that update state once at startup and then
+// serve indefinitely. Scanning is exempt because a filesync initial scan of a
+// large folder (500k+ files) can exceed componentTTL before the status flips
+// to Connected, and the scan goroutine does not re-Update during the walk.
+// Only transient states (Starting, Connecting, Retrying, Failed) are subject
+// to eviction, since those indicate a component that likely crashed or leaked
+// without proper cleanup.
 func (s *State) evictStale(now time.Time) {
 	cutoff := now.Add(-componentTTL)
 
 	s.mu.Lock()
 	var evicted []string
 	for key, comp := range s.components {
-		if comp.Status == Listening || comp.Status == Connected {
+		if comp.Status == Listening || comp.Status == Connected || comp.Status == Scanning {
 			continue // stable long-lived components are never evicted
 		}
 		if !comp.LastUpdated.IsZero() && comp.LastUpdated.Before(cutoff) {

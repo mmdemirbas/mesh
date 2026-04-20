@@ -344,13 +344,17 @@ func TestEvictStale_RemovesOldTransientEntries(t *testing.T) {
 func TestEvictStale_SkipsStableStates(t *testing.T) {
 	t.Parallel()
 	s := newState()
-	// Listening and Connected are stable — should never be evicted.
+	// Listening, Connected, and Scanning are stable — should never be evicted.
+	// Scanning is exempted because a large filesync folder's initial scan can
+	// exceed componentTTL before the walk flips the status to Connected, and
+	// the scan goroutine doesn't re-Update during the walk.
 	s.Update("server", "listener", Listening, "")
 	s.Update("connection", "conn", Connected, "target")
+	s.Update("filesync-folder", "docs", Scanning, "initial scan")
 
-	// Backdate both beyond TTL.
+	// Backdate all three beyond TTL.
 	s.mu.Lock()
-	for _, key := range []string{"server:listener", "connection:conn"} {
+	for _, key := range []string{"server:listener", "connection:conn", "filesync-folder:docs"} {
 		comp := s.components[key]
 		comp.LastUpdated = time.Now().Add(-2 * componentTTL)
 		s.components[key] = comp
@@ -365,6 +369,9 @@ func TestEvictStale_SkipsStableStates(t *testing.T) {
 	}
 	if _, ok := snap["connection:conn"]; !ok {
 		t.Error("Connected component should NOT be evicted regardless of age")
+	}
+	if _, ok := snap["filesync-folder:docs"]; !ok {
+		t.Error("Scanning component should NOT be evicted regardless of age")
 	}
 }
 
