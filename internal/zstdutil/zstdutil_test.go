@@ -52,6 +52,40 @@ func TestDecodeRejectsCorrupt(t *testing.T) {
 	}
 }
 
+// Zip-bomb guard: a small zstd frame that decompresses to a huge
+// payload must not allocate beyond maxSize. We encode 64 MiB of zeros
+// (which compresses to a few hundred bytes), then decode with a 1 KiB
+// cap. The streaming decode + LimitReader must reject before the
+// output is materialized.
+func TestDecodeEnforcesLimitBeforeAllocating(t *testing.T) {
+	huge := make([]byte, 64*1024*1024) // all zeros; highly compressible
+	enc := Encode(huge)
+	if len(enc) > 100*1024 {
+		t.Fatalf("compressed size %d larger than expected — test premise broken", len(enc))
+	}
+	out, err := Decode(enc, 1024)
+	if err == nil {
+		t.Fatalf("expected limit error; got %d bytes back", len(out))
+	}
+	// klauspost rejects pre-allocation when the frame's declared window
+	// > WithDecoderMaxMemory ("window size exceeded"); our post-stream
+	// check reports "exceeds limit". Either is acceptable — both prove
+	// the payload was never fully materialized.
+	msg := err.Error()
+	if !strings.Contains(msg, "exceeds limit") && !strings.Contains(msg, "window size exceeded") {
+		t.Fatalf("error does not reference limit: %v", err)
+	}
+}
+
+func TestDecodeRejectsNonPositiveMax(t *testing.T) {
+	enc := Encode([]byte("hi"))
+	for _, m := range []int64{0, -1, -1 << 20} {
+		if _, err := Decode(enc, m); err == nil {
+			t.Fatalf("expected error for maxSize=%d", m)
+		}
+	}
+}
+
 func TestEncodeIsConcurrencySafe(t *testing.T) {
 	data := bytes.Repeat([]byte("filesync"), 500)
 	want := Encode(data)

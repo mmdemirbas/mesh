@@ -2,6 +2,7 @@
 package zstdutil
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"sync"
@@ -12,8 +13,6 @@ import (
 var (
 	encoderOnce sync.Once
 	encoder     *zstd.Encoder
-	decoderOnce sync.Once
-	decoder     *zstd.Decoder
 )
 
 func getEncoder() *zstd.Encoder {
@@ -26,13 +25,6 @@ func getEncoder() *zstd.Encoder {
 	return encoder
 }
 
-func getDecoder() *zstd.Decoder {
-	decoderOnce.Do(func() {
-		decoder, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
-	})
-	return decoder
-}
-
 // Encode compresses data using zstd at the default level. The package
 // uses a shared encoder; klauspost's EncodeAll is goroutine-safe.
 func Encode(data []byte) []byte {
@@ -40,16 +32,30 @@ func Encode(data []byte) []byte {
 }
 
 // Decode decompresses zstd data. maxSize caps the output to prevent
-// zip bombs. Returns an error if the decompressed data exceeds maxSize.
+// zip bombs — it is enforced while streaming so a frame that inflates
+// past the cap never allocates the full output. Returns an error if
+// the decompressed data exceeds maxSize.
 func Decode(data []byte, maxSize int64) ([]byte, error) {
-	out, err := getDecoder().DecodeAll(data, nil)
+	if maxSize <= 0 {
+		return nil, fmt.Errorf("zstdutil: maxSize must be positive, got %d", maxSize)
+	}
+	r, err := zstd.NewReader(bytes.NewReader(data),
+		zstd.WithDecoderConcurrency(1),
+		zstd.WithDecoderMaxMemory(uint64(maxSize)),
+	)
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(out)) > maxSize {
+	defer r.Close()
+	var buf bytes.Buffer
+	n, err := io.Copy(&buf, io.LimitReader(r, maxSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if n > maxSize {
 		return nil, fmt.Errorf("decompressed data exceeds limit (%d bytes)", maxSize)
 	}
-	return out, nil
+	return buf.Bytes(), nil
 }
 
 // NewReader wraps r in a zstd stream reader. Caller must call Close on
