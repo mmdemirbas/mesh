@@ -256,18 +256,36 @@ func TestPerfSync_EmitsExpectedFields(t *testing.T) {
 	// Assert on perfSyncEvent directly — the wrapper perfSync just calls
 	// perfEmit on this map, and asserting via the emit path is racy with
 	// other tests that touch the global logger (e.g. TestPersistFolder_Concurrent).
-	got := perfSyncEvent("f1", "peer-a", 10, 3, 1, 0, 2, 42.5, "boom")
+	got := perfSyncEvent("f1", "peer-a", SyncPerfSummary{
+		RemoteEntries:   10,
+		Downloads:       3,
+		Conflicts:       1,
+		Deletes:         0,
+		Failed:          2,
+		Renames:         1,
+		BytesPlanned:    10_000,
+		BytesDownloaded: 9_500,
+		BytesSavedRname: 500,
+		DurationMs:      42.5,
+		IndexFetchMs:    3.2,
+		FirstFailReason: "boom",
+	})
 	for k, want := range map[string]any{
-		"event":          "sync",
-		"folder":         "f1",
-		"peer":           "peer-a",
-		"remote_entries": 10,
-		"downloads":      3,
-		"conflicts":      1,
-		"deletes":        0,
-		"failed":         2,
-		"duration_ms":    42.5,
-		"failure_reason": "boom",
+		"event":             "sync",
+		"folder":            "f1",
+		"peer":              "peer-a",
+		"remote_entries":    10,
+		"downloads":         3,
+		"conflicts":         1,
+		"deletes":           0,
+		"failed":            2,
+		"renames":           1,
+		"bytes_planned":     int64(10_000),
+		"bytes_downloaded":  int64(9_500),
+		"bytes_saved_rname": int64(500),
+		"duration_ms":       42.5,
+		"index_fetch_ms":    3.2,
+		"failure_reason":    "boom",
 	} {
 		if got[k] != want {
 			t.Errorf("%s = %v, want %v", k, got[k], want)
@@ -277,7 +295,7 @@ func TestPerfSync_EmitsExpectedFields(t *testing.T) {
 
 func TestPerfSync_OmitsEmptyFailureReason(t *testing.T) {
 	t.Parallel()
-	got := perfSyncEvent("f1", "p", 0, 0, 0, 0, 0, 0, "")
+	got := perfSyncEvent("f1", "p", SyncPerfSummary{})
 	if _, has := got["failure_reason"]; has {
 		t.Errorf("failure_reason should be omitted when empty: %+v", got)
 	}
@@ -306,6 +324,100 @@ func TestPerfSnapshot_EmitsFolderStats(t *testing.T) {
 	}
 	if f0["sequence"] != int64(7) {
 		t.Errorf("folder sequence = %v (%T)", f0["sequence"], f0["sequence"])
+	}
+	// Cumulative counters must be present so downstream analysis can
+	// diff them across snapshots even when they're zero.
+	for _, k := range []string{
+		"bytes_downloaded", "bytes_uploaded", "bytes_saved_rname",
+		"files_downloaded", "files_renamed", "files_conflicted", "files_deleted",
+		"peer_syncs", "sync_errors", "index_exchanges", "scan_count",
+		"peer_count", "pending_syncs",
+	} {
+		if _, has := f0[k]; !has {
+			t.Errorf("snapshot folder stats missing %q", k)
+		}
+	}
+}
+
+func TestPerfDownload_EmitsExpectedFields(t *testing.T) {
+	t.Parallel()
+	got := perfDownloadEvent(DownloadPerfSummary{
+		Folder:       "f1",
+		Peer:         "peer-b",
+		SizeBytes:    2048,
+		BytesOnWire:  256,
+		BytesReused:  1792,
+		ChunksTotal:  8,
+		ChunksReused: 7,
+		Mode:         "delta",
+		Resumed:      false,
+		Retries:      1,
+		FirstByteMs:  12.3,
+		TotalMs:      45.6,
+	})
+	for k, want := range map[string]any{
+		"event":         "download",
+		"folder":        "f1",
+		"peer":          "peer-b",
+		"size_bytes":    int64(2048),
+		"bytes_on_wire": int64(256),
+		"bytes_reused":  int64(1792),
+		"chunks_total":  8,
+		"chunks_reused": 7,
+		"mode":          "delta",
+		"resumed":       false,
+		"retries":       1,
+		"first_byte_ms": 12.3,
+		"total_ms":      45.6,
+	} {
+		if got[k] != want {
+			t.Errorf("%s = %v (%T), want %v (%T)", k, got[k], got[k], want, want)
+		}
+	}
+	if _, has := got["error"]; has {
+		t.Errorf("error should be omitted when empty: %+v", got)
+	}
+}
+
+func TestPerfScan_EmitsEnrichedFields(t *testing.T) {
+	t.Parallel()
+	// Swap in a capturing logger for this test.
+	tmp := t.TempDir()
+	pl := &perfLogger{path: filepath.Join(tmp, "t.jsonl")}
+	if err := pl.open(); err != nil {
+		t.Fatal(err)
+	}
+	swapPerfLoggerForTest(t, pl)
+	stats := ScanStats{
+		DirsWalked:      3,
+		DirsIgnored:     1,
+		FilesIgnored:    2,
+		SymlinksSkipped: 1,
+		TempCleaned:     5,
+		RenamesDetected: 4,
+	}
+	perfScan("fid", stats, 10, 3, true, 1.0, 2.0, 3.0, MemDelta{HeapDeltaBytes: 1024, AllocsDelta: 77})
+	lines := readLines(t, pl.path)
+	if len(lines) != 1 {
+		t.Fatalf("lines = %d, want 1", len(lines))
+	}
+	var ev map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &ev); err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[string]any{
+		"dirs_walked":      float64(3),
+		"dirs_ignored":     float64(1),
+		"files_ignored":    float64(2),
+		"symlinks_skipped": float64(1),
+		"temp_cleaned":     float64(5),
+		"renames_detected": float64(4),
+		"heap_delta_bytes": float64(1024),
+		"alloc_delta":      float64(77),
+	} {
+		if ev[k] != want {
+			t.Errorf("%s = %v, want %v", k, ev[k], want)
+		}
 	}
 }
 

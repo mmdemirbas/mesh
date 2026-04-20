@@ -78,7 +78,7 @@ func (pl *perfLogger) open() error {
 }
 
 func (pl *perfLogger) emit(event map[string]any) {
-	if pl == nil || pl.f == nil {
+	if pl == nil {
 		return
 	}
 	event["ts"] = time.Now().UTC().Format(time.RFC3339Nano)
@@ -137,31 +137,63 @@ func perfEmit(event map[string]any) {
 	}
 }
 
-// perfScan emits a scan event.
-func perfScan(folder string, stats ScanStats, activeFiles, dirs int, changed bool, snapMs, purgeMs, swapMs float64) {
+// perfScan emits a scan event. memDelta captures heap and alloc growth
+// over the scan so profile regressions attribute to a specific scan
+// rather than surfacing only in the periodic snapshot.
+func perfScan(folder string, stats ScanStats, activeFiles, dirs int, changed bool, snapMs, purgeMs, swapMs float64, memDelta MemDelta) {
 	perfEmit(map[string]any{
-		"event":           "scan",
-		"folder":          folder,
-		"walk_ms":         ms(stats.WalkDuration),
-		"hash_ms":         ms(stats.HashDuration),
-		"stat_ms":         ms(stats.StatDuration),
-		"ignore_ms":       ms(stats.IgnoreDuration),
-		"deletion_ms":     ms(stats.DeletionScan),
-		"snapshot_ms":     snapMs,
-		"purge_ms":        purgeMs,
-		"swap_ms":         swapMs,
-		"entries_visited": stats.EntriesVisited,
-		"dirs":            dirs,
-		"active_files":    activeFiles,
-		"files_hashed":    stats.FilesHashed,
-		"bytes_hashed":    stats.BytesHashed,
-		"fast_path_hits":  stats.FastPathHits,
-		"deletions":       stats.Deletions,
-		"stat_errors":     stats.StatErrors,
-		"hash_errors":     stats.HashErrors,
-		"toctou_skips":    stats.TocTouSkips,
-		"changed":         changed,
+		"event":            "scan",
+		"folder":           folder,
+		"walk_ms":          ms(stats.WalkDuration),
+		"hash_ms":          ms(stats.HashDuration),
+		"stat_ms":          ms(stats.StatDuration),
+		"ignore_ms":        ms(stats.IgnoreDuration),
+		"deletion_ms":      ms(stats.DeletionScan),
+		"snapshot_ms":      snapMs,
+		"purge_ms":         purgeMs,
+		"swap_ms":          swapMs,
+		"entries_visited":  stats.EntriesVisited,
+		"dirs":             dirs,
+		"dirs_walked":      stats.DirsWalked,
+		"dirs_ignored":     stats.DirsIgnored,
+		"files_ignored":    stats.FilesIgnored,
+		"symlinks_skipped": stats.SymlinksSkipped,
+		"temp_cleaned":     stats.TempCleaned,
+		"renames_detected": stats.RenamesDetected,
+		"active_files":     activeFiles,
+		"files_hashed":     stats.FilesHashed,
+		"bytes_hashed":     stats.BytesHashed,
+		"fast_path_hits":   stats.FastPathHits,
+		"deletions":        stats.Deletions,
+		"stat_errors":      stats.StatErrors,
+		"hash_errors":      stats.HashErrors,
+		"toctou_skips":     stats.TocTouSkips,
+		"heap_delta_bytes": memDelta.HeapDeltaBytes,
+		"alloc_delta":      memDelta.AllocsDelta,
+		"changed":          changed,
 	})
+}
+
+// MemDelta captures runtime memory growth over a measured interval.
+// Heap delta may be negative when GC runs during the window.
+type MemDelta struct {
+	HeapDeltaBytes int64
+	AllocsDelta    uint64 // cumulative allocation count delta
+}
+
+// captureMemDelta reads MemStats at scope entry. Pair with .Close(after).
+// Use the returned `after` call to compute the delta at scope exit.
+func captureMemStats() (runtime.MemStats, func() MemDelta) {
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	return before, func() MemDelta {
+		var after runtime.MemStats
+		runtime.ReadMemStats(&after)
+		return MemDelta{
+			HeapDeltaBytes: int64(after.HeapAlloc) - int64(before.HeapAlloc),
+			AllocsDelta:    after.Mallocs - before.Mallocs,
+		}
+	}
 }
 
 // perfPersist emits a persist event.
@@ -176,29 +208,99 @@ func perfPersist(folder string, indexBytes int, indexMs, peersMs float64, skippe
 	})
 }
 
+// SyncPerfSummary captures byte-level telemetry for one sync cycle so
+// the JSONL can reason about throughput, rename savings, and delta
+// efficiency without re-deriving counts from individual events.
+type SyncPerfSummary struct {
+	RemoteEntries   int
+	Downloads       int
+	Conflicts       int
+	Deletes         int
+	Failed          int
+	Renames         int   // R1 resolutions (no bytes on wire)
+	BytesPlanned    int64 // sum of RemoteSize across planned actions
+	BytesDownloaded int64 // actual bytes read from peers this cycle
+	BytesSavedRname int64 // bytes avoided via local rename
+	DurationMs      float64
+	IndexFetchMs    float64 // time spent fetching/decoding peer index
+	FirstFailReason string
+}
+
 // perfSyncEvent builds the event map for a sync event. Split out so
 // tests can assert on the field shape without touching the global logger.
-func perfSyncEvent(folder, peer string, remoteEntries, downloads, conflicts, deletes, failed int, durationMs float64, firstFailReason string) map[string]any {
+func perfSyncEvent(folder, peer string, s SyncPerfSummary) map[string]any {
 	m := map[string]any{
-		"event":          "sync",
-		"folder":         folder,
-		"peer":           peer,
-		"remote_entries": remoteEntries,
-		"downloads":      downloads,
-		"conflicts":      conflicts,
-		"deletes":        deletes,
-		"failed":         failed,
-		"duration_ms":    durationMs,
+		"event":             "sync",
+		"folder":            folder,
+		"peer":              peer,
+		"remote_entries":    s.RemoteEntries,
+		"downloads":         s.Downloads,
+		"conflicts":         s.Conflicts,
+		"deletes":           s.Deletes,
+		"failed":            s.Failed,
+		"renames":           s.Renames,
+		"bytes_planned":     s.BytesPlanned,
+		"bytes_downloaded":  s.BytesDownloaded,
+		"bytes_saved_rname": s.BytesSavedRname,
+		"index_fetch_ms":    s.IndexFetchMs,
+		"duration_ms":       s.DurationMs,
 	}
-	if firstFailReason != "" {
-		m["failure_reason"] = firstFailReason
+	if s.FirstFailReason != "" {
+		m["failure_reason"] = s.FirstFailReason
 	}
 	return m
 }
 
 // perfSync emits a sync event.
-func perfSync(folder, peer string, remoteEntries, downloads, conflicts, deletes, failed int, durationMs float64, firstFailReason string) {
-	perfEmit(perfSyncEvent(folder, peer, remoteEntries, downloads, conflicts, deletes, failed, durationMs, firstFailReason))
+func perfSync(folder, peer string, s SyncPerfSummary) {
+	perfEmit(perfSyncEvent(folder, peer, s))
+}
+
+// DownloadPerfSummary captures per-file transfer telemetry. Mode is
+// "whole", "delta", or "resume". FirstByteMs is the TTFB for the primary
+// HTTP response; TotalMs covers write+fsync+rename.
+type DownloadPerfSummary struct {
+	Folder       string
+	Peer         string
+	SizeBytes    int64
+	BytesOnWire  int64 // bytes read from the response body (post-gzip)
+	BytesReused  int64 // delta mode: bytes taken from local copy
+	ChunksTotal  int
+	ChunksReused int // delta mode: chunks resolved from local hashes
+	Mode         string
+	Resumed      bool
+	Retries      int
+	FirstByteMs  float64
+	TotalMs      float64
+	Error        string // empty on success
+}
+
+// perfDownloadEvent builds the download event map.
+func perfDownloadEvent(s DownloadPerfSummary) map[string]any {
+	m := map[string]any{
+		"event":         "download",
+		"folder":        s.Folder,
+		"peer":          s.Peer,
+		"size_bytes":    s.SizeBytes,
+		"bytes_on_wire": s.BytesOnWire,
+		"bytes_reused":  s.BytesReused,
+		"chunks_total":  s.ChunksTotal,
+		"chunks_reused": s.ChunksReused,
+		"mode":          s.Mode,
+		"resumed":       s.Resumed,
+		"retries":       s.Retries,
+		"first_byte_ms": s.FirstByteMs,
+		"total_ms":      s.TotalMs,
+	}
+	if s.Error != "" {
+		m["error"] = s.Error
+	}
+	return m
+}
+
+// perfDownload emits a per-file download event.
+func perfDownload(s DownloadPerfSummary) {
+	perfEmit(perfDownloadEvent(s))
 }
 
 // perfSnapshot emits a periodic process-level snapshot.
@@ -214,13 +316,32 @@ func perfSnapshotEvent(folders map[string]*folderState) map[string]any {
 		count, size := fs.index.activeCountAndSize()
 		seq := fs.index.Sequence
 		mapLen := len(fs.index.Files)
+		peerCount := len(fs.peers)
+		pendingCount := len(fs.pending)
 		fs.indexMu.RUnlock()
+		// Reading cumulative atomics requires no lock; they are
+		// monotonic so a concurrent sync only raises them.
 		folderStats = append(folderStats, map[string]any{
-			"id":          id,
-			"active":      count,
-			"total_bytes": size,
-			"sequence":    seq,
-			"map_entries": mapLen,
+			"id":                id,
+			"active":            count,
+			"total_bytes":       size,
+			"sequence":          seq,
+			"map_entries":       mapLen,
+			"peer_count":        peerCount,
+			"pending_syncs":     pendingCount,
+			"bytes_downloaded":  fs.metrics.BytesDownloaded.Load(),
+			"bytes_uploaded":    fs.metrics.BytesUploaded.Load(),
+			"bytes_saved_rname": fs.metrics.BytesSavedByRename.Load(),
+			"files_downloaded":  fs.metrics.FilesDownloaded.Load(),
+			"files_renamed":     fs.metrics.FilesRenamed.Load(),
+			"files_conflicted":  fs.metrics.FilesConflicted.Load(),
+			"files_deleted":     fs.metrics.FilesDeleted.Load(),
+			"peer_syncs":        fs.metrics.PeerSyncs.Load(),
+			"sync_errors":       fs.metrics.SyncErrors.Load(),
+			"index_exchanges":   fs.metrics.IndexExchanges.Load(),
+			"scan_count":        fs.metrics.ScanCount.Load(),
+			"last_scan_ms":      float64(fs.metrics.ScanDurationNS.Load()) / 1e6,
+			"last_sync_ms":      float64(fs.metrics.PeerSyncNS.Load()) / 1e6,
 		})
 	}
 

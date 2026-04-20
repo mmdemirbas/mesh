@@ -1283,6 +1283,7 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		}
 
 		folderStart := time.Now()
+		_, memAfter := captureMemStats()
 
 		// Snapshot the current index under a short read lock so the walk
 		// operates on a private copy. Readers (GetFolderStatuses, syncLoop)
@@ -1418,7 +1419,7 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 			"active_files", count,
 			"changed", changed,
 		)
-		perfScan(id, stats, countAfterSwap, dirs, changed, ms(snapDuration), ms(purgeDuration), ms(swapDuration))
+		perfScan(id, stats, countAfterSwap, dirs, changed, ms(snapDuration), ms(purgeDuration), ms(swapDuration), memAfter())
 
 		// Always log the first scan per folder at INFO so a single run gives
 		// baseline evidence (walk/hash time, file counts, FD-pressure phase)
@@ -1552,6 +1553,12 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	}
 
 	syncStart := time.Now()
+	// Snapshot cumulative byte counters so the perf event can report the
+	// per-cycle delta without threading a counter through every download
+	// path. Safe: these atomics only increase during the sync we own.
+	bytesDownloadedBefore := fs.metrics.BytesDownloaded.Load()
+	bytesSavedByRenameBefore := fs.metrics.BytesSavedByRename.Load()
+	filesRenamedBefore := fs.metrics.FilesRenamed.Load()
 	state.Global.Update("filesync-folder", folderID, state.Connecting, "syncing with "+peerAddr)
 
 	// Build and send our index, requesting only entries newer than what we've seen.
@@ -1580,7 +1587,9 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	// is generous even for paginated multi-page exchanges over slow links.
 	indexCtx, indexCancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer indexCancel()
+	indexFetchStart := time.Now()
 	remoteIdx, err := sendIndex(indexCtx, n.clientForPeer(peerAddr), peerAddr, exchange)
+	indexFetchMs := ms(time.Since(indexFetchStart))
 	if err != nil {
 		slog.Debug("sync failed", "folder", folderID, "peer", peerAddr, "error", err)
 		state.Global.Update("filesync-peer", stateKey, state.Retrying, err.Error())
@@ -2080,7 +2089,16 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				defer func() { <-sem }()
 
 				dlStart := time.Now()
+				// Observe whether a local copy exists *before* the download so
+				// perfDownload can report the likely transfer mode without
+				// plumbing stats through every call site. Same existence check
+				// as downloadFileDelta.
+				hadLocal := false
+				if _, statErr := fs.root.Stat(action.Path); statErr == nil {
+					hadLocal = true
+				}
 				err := downloadFromPeer(ctx, n.clientForPeer(peerAddr), peerAddr, folderID, action.Path, action.RemoteHash, fs.root, n.rateLimiter)
+				dlDur := time.Since(dlStart)
 				if err != nil {
 					slog.Warn("download failed", "folder", folderID, "path", action.Path, "peer", peerAddr, "error", err)
 					fs.indexMu.Lock()
@@ -2091,10 +2109,33 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					failedSeqs = append(failedSeqs, action.RemoteSequence)
 					failMu.Unlock()
 					fs.metrics.SyncErrors.Add(1)
+					mode := "full"
+					if hadLocal {
+						mode = "delta"
+					}
+					perfDownload(DownloadPerfSummary{
+						Folder:    folderID,
+						Peer:      peerAddr,
+						SizeBytes: action.RemoteSize,
+						Mode:      mode,
+						TotalMs:   ms(dlDur),
+						Error:     err.Error(),
+					})
 					return
 				}
 				slog.Debug("file downloaded", "folder", folderID, "path", action.Path,
-					"peer", peerAddr, "size", action.RemoteSize, "duration", time.Since(dlStart))
+					"peer", peerAddr, "size", action.RemoteSize, "duration", dlDur)
+				mode := "full"
+				if hadLocal {
+					mode = "delta"
+				}
+				perfDownload(DownloadPerfSummary{
+					Folder:    folderID,
+					Peer:      peerAddr,
+					SizeBytes: action.RemoteSize,
+					Mode:      mode,
+					TotalMs:   ms(dlDur),
+				})
 
 				// C2: post-write verification on network filesystems.
 				if fs.isNetworkFS {
@@ -2493,7 +2534,20 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	slog.Debug("sync cycle complete", "folder", folderID, "peer", peerAddr,
 		"duration", syncDuration, "downloads", downloads, "conflicts", conflicts,
 		"deletes", deletes, "errors", len(failedSeqs), "bytes", totalBytes)
-	perfSync(folderID, peerAddr, remoteEntries, downloads, conflicts, deletes, len(failedSeqs), ms(syncDuration), firstFailReason)
+	perfSync(folderID, peerAddr, SyncPerfSummary{
+		RemoteEntries:   remoteEntries,
+		Downloads:       downloads,
+		Conflicts:       conflicts,
+		Deletes:         deletes,
+		Failed:          len(failedSeqs),
+		Renames:         int(fs.metrics.FilesRenamed.Load() - filesRenamedBefore),
+		BytesPlanned:    totalBytes,
+		BytesDownloaded: fs.metrics.BytesDownloaded.Load() - bytesDownloadedBefore,
+		BytesSavedRname: fs.metrics.BytesSavedByRename.Load() - bytesSavedByRenameBefore,
+		DurationMs:      ms(syncDuration),
+		IndexFetchMs:    indexFetchMs,
+		FirstFailReason: firstFailReason,
+	})
 }
 
 // buildIndexExchange creates a protobuf IndexExchange from the local index.
