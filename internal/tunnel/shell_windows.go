@@ -230,15 +230,25 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					}
 					continue
 				}
-				if envMatches(envReq.Name, acceptEnv) {
-					clientEnv = append(clientEnv, envReq.Name+"="+envReq.Value)
-					if req.WantReply {
-						_ = req.Reply(true, nil)
-					}
-				} else {
+				// Env requests that arrive after cmd.Start cannot take
+				// effect — the process was launched with the captured
+				// slice. Reply false so the client isn't misled.
+				if cmd != nil {
 					if req.WantReply {
 						_ = req.Reply(false, nil)
 					}
+					continue
+				}
+				accept, _ := acceptEnvRequest(len(clientEnv), envReq.Name, envReq.Value, acceptEnv)
+				if !accept {
+					if req.WantReply {
+						_ = req.Reply(false, nil)
+					}
+					continue
+				}
+				clientEnv = append(clientEnv, envReq.Name+"="+envReq.Value)
+				if req.WantReply {
+					_ = req.Reply(true, nil)
 				}
 
 			case "subsystem":

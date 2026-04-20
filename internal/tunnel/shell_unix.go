@@ -396,16 +396,28 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 				}
 				continue
 			}
-			if envMatches(envReq.Name, acceptEnv) {
-				clientEnv = append(clientEnv, envReq.Name+"="+envReq.Value)
-				if req.WantReply {
-					_ = req.Reply(true, nil)
-				}
-			} else {
-				log.Debug("Rejected env var", "name", envReq.Name)
+			// Env requests that arrive after the process has already
+			// been launched cannot take effect — cmd.Env was captured
+			// at Start. Reply false so the client isn't misled into
+			// thinking the var was injected.
+			if cmd != nil {
+				log.Debug("Rejected env var after shell start", "name", envReq.Name)
 				if req.WantReply {
 					_ = req.Reply(false, nil)
 				}
+				continue
+			}
+			accept, reason := acceptEnvRequest(len(clientEnv), envReq.Name, envReq.Value, acceptEnv)
+			if !accept {
+				log.Debug("Rejected env var", "name", envReq.Name, "reason", reason)
+				if req.WantReply {
+					_ = req.Reply(false, nil)
+				}
+				continue
+			}
+			clientEnv = append(clientEnv, envReq.Name+"="+envReq.Value)
+			if req.WantReply {
+				_ = req.Reply(true, nil)
 			}
 
 		case "auth-agent-req@openssh.com":
