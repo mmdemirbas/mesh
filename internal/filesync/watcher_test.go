@@ -6,6 +6,7 @@ import (
 	"slices"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -125,10 +126,23 @@ func TestFolderWatcher_RemoveStaleWatches(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fw.removeStaleWatches()
-
-	remaining := w.WatchList()
-	slices.Sort(remaining)
+	// On macOS kqueue, fsnotify's WatchList and the kernel state can
+	// briefly diverge after the underlying directory is deleted: kqueue
+	// delivers the auto-removal asynchronously, so removeStaleWatches
+	// may observe the stale entry and call Remove before fsnotify's
+	// internal map has caught up. Both orderings are legitimate; poll
+	// until convergence with a bounded deadline.
+	var remaining []string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		fw.removeStaleWatches()
+		remaining = w.WatchList()
+		slices.Sort(remaining)
+		if len(remaining) == 1 && remaining[0] == keep {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if len(remaining) != 1 || remaining[0] != keep {
 		t.Errorf("watch list after stale removal = %v, want [%s]", remaining, keep)
 	}
