@@ -1577,9 +1577,12 @@ func updateBaseHashes(prior map[string]Hash256, local *FileIndex, remote *FileIn
 	if remote == nil || len(remote.Files) == 0 {
 		return prior
 	}
-	out := prior
-	if out == nil {
-		out = make(map[string]Hash256, len(remote.Files))
+	// Return a fresh map: aliasing prior and mutating it in place violates
+	// the "preserve prior" contract the callers rely on, and is a
+	// footgun if any future caller wants to inspect prior after the call.
+	out := make(map[string]Hash256, len(prior)+len(remote.Files))
+	for k, v := range prior {
+		out[k] = v
 	}
 	for path, rEntry := range remote.Files {
 		if rEntry.Deleted {

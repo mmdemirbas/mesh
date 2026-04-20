@@ -2032,6 +2032,59 @@ func TestUpdateBaseHashes(t *testing.T) {
 	}
 }
 
+// updateBaseHashes must not mutate the caller's prior map. The function
+// returns a fresh map so callers can still inspect prior after the call.
+// Regression: a previous implementation aliased prior and mutated it in
+// place; safe only because all production callers immediately overwrote
+// the owning PeerState, but a latent trap for any future caller.
+func TestUpdateBaseHashes_DoesNotAliasPrior(t *testing.T) {
+	t.Parallel()
+
+	prior := map[string]Hash256{
+		"a.txt": testHash("a-ancestor"),
+		"b.txt": testHash("b-ancestor"),
+	}
+	// Snapshot the original so we can compare after the call.
+	priorCopy := make(map[string]Hash256, len(prior))
+	for k, v := range prior {
+		priorCopy[k] = v
+	}
+
+	local := newFileIndex()
+	local.Files["a.txt"] = FileEntry{SHA256: testHash("a-new"), Size: 10}
+	local.Files["b.txt"] = FileEntry{SHA256: testHash("b-new"), Size: 10}
+
+	remote := newFileIndex()
+	// Agreement: update ancestor for a.txt.
+	remote.Files["a.txt"] = FileEntry{SHA256: testHash("a-new"), Sequence: 1, Size: 10}
+	// Tombstone: must drop ancestor for b.txt.
+	remote.Files["b.txt"] = FileEntry{Deleted: true, Sequence: 2}
+
+	out := updateBaseHashes(prior, local, remote)
+
+	// prior must be unchanged.
+	if len(prior) != len(priorCopy) {
+		t.Fatalf("prior mutated: len %d, want %d", len(prior), len(priorCopy))
+	}
+	for k, want := range priorCopy {
+		if got, ok := prior[k]; !ok || got != want {
+			t.Errorf("prior[%q] mutated: got %x ok=%v, want %x", k, got, ok, want)
+		}
+	}
+	// out reflects the exchange.
+	if got, ok := out["a.txt"]; !ok || got != testHash("a-new") {
+		t.Errorf("out[a.txt] = %x ok=%v, want ancestor updated", got, ok)
+	}
+	if _, ok := out["b.txt"]; ok {
+		t.Errorf("out[b.txt] tombstone must drop ancestor")
+	}
+	// Mutating out must not affect prior.
+	out["a.txt"] = testHash("post-call")
+	if prior["a.txt"] == testHash("post-call") {
+		t.Errorf("out and prior still aliased")
+	}
+}
+
 // R1: a download at new-path paired with a delete at old-path, where
 // the local file at old-path already holds the downloaded content, is
 // resolved by a local rename with zero bytes over the wire.
