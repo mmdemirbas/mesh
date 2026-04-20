@@ -2304,6 +2304,27 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					// NOT added to failedSeqs: doing so would hold
 					// lastSeenSeq below RemoteSequence, re-triggering
 					// the same conflict every cycle indefinitely.
+					//
+					// R11: merge remote's clock components into local and
+					// bump self so the resolved entry dominates what we saw
+					// from the peer. Without this, the next time the peer
+					// pushes the same (or any concurrent) state, our clock
+					// will still be concurrent with theirs and we'll enter
+					// conflict again. File contents are unchanged — only
+					// the clock and sequence advance to encode the
+					// "local-wins" decision.
+					fs.indexMu.Lock()
+					entry, exists := fs.index.Files[action.Path]
+					if exists && !entry.Deleted {
+						fs.index.Sequence++
+						entry.Sequence = fs.index.Sequence
+						entry.Version = entry.Version.merge(action.RemoteVersion)
+						if fs.index.selfID != "" {
+							entry.Version = entry.Version.bump(fs.index.selfID)
+						}
+						fs.index.setEntry(action.Path, entry)
+					}
+					fs.indexMu.Unlock()
 				}
 				slog.Info("resolved conflict", "folder", folderID, "path", action.Path, "winner", winner)
 			}()

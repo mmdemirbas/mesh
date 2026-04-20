@@ -622,6 +622,46 @@ func TestVectorClock_Clone(t *testing.T) {
 	}
 }
 
+// TestLocalWinsConflict_ResolvedStateNoLongerConflicts pins R11: after
+// a local-wins conflict resolution, the local entry's clock dominates
+// the peer's observed clock so the next diff does not re-emit
+// ActionConflict for the same state. Without the merge+bump, the
+// concurrent state is persisted and every subsequent diff (once
+// lastSeenSeq advances below the remote sequence) would flap through
+// conflict resolution again.
+func TestLocalWinsConflict_ResolvedStateNoLongerConflicts(t *testing.T) {
+	t.Parallel()
+
+	remoteVersion := VectorClock{"SELF": 1, "PEER": 2}
+	// Pre-resolve local state: concurrent with remote.
+	preLocal := VectorClock{"SELF": 2, "PEER": 1}
+	if got := compareClocks(preLocal, remoteVersion); got != ClockConcurrent {
+		t.Fatalf("pre-resolution clocks must be concurrent, got %v", got)
+	}
+
+	// Apply the R11 resolution logic: merge remote into local, then
+	// bump self. This is the same sequence folderState.applyActions
+	// executes on the local-wins branch.
+	resolved := preLocal.merge(remoteVersion).bump("SELF")
+
+	// The resolved clock must dominate the remote — otherwise the next
+	// diff will see ClockConcurrent and produce ActionConflict again.
+	if got := compareClocks(resolved, remoteVersion); got != ClockAfter {
+		t.Fatalf("post-resolution clock must dominate remote, got %v (resolved=%v)", got, resolved)
+	}
+
+	// Sanity: the resolution preserved the remote's PEER observation.
+	if resolved["PEER"] < remoteVersion["PEER"] {
+		t.Fatalf("resolution lost peer component: resolved[PEER]=%d want >= %d",
+			resolved["PEER"], remoteVersion["PEER"])
+	}
+	// And it bumped SELF past the pre-state.
+	if resolved["SELF"] <= preLocal["SELF"] {
+		t.Fatalf("resolution did not bump self: resolved[SELF]=%d want > %d",
+			resolved["SELF"], preLocal["SELF"])
+	}
+}
+
 func TestVectorClock_Merge(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
