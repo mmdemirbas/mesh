@@ -181,12 +181,22 @@ type MemDelta struct {
 	AllocsDelta    uint64 // cumulative allocation count delta
 }
 
-// captureMemDelta reads MemStats at scope entry. Pair with .Close(after).
-// Use the returned `after` call to compute the delta at scope exit.
+// captureMemStats reads MemStats at scope entry. The returned closure
+// computes the delta at scope exit. When the perf logger is disabled
+// (not yet initialized, or initialization failed), both calls skip the
+// underlying runtime.ReadMemStats — which does a stop-the-world pause —
+// and the delta closure returns a zero MemDelta. Keeping the happy-path
+// cost at zero matters because scans run frequently on large folders.
 func captureMemStats() (runtime.MemStats, func() MemDelta) {
+	if globalPerfLog.logger.Load() == nil {
+		return runtime.MemStats{}, func() MemDelta { return MemDelta{} }
+	}
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
 	return before, func() MemDelta {
+		if globalPerfLog.logger.Load() == nil {
+			return MemDelta{}
+		}
 		var after runtime.MemStats
 		runtime.ReadMemStats(&after)
 		return MemDelta{
