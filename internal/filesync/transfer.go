@@ -560,10 +560,20 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 			Hash:   hash256FromBytes(b.GetHash()),
 		}
 		if data := b.GetData(); len(data) > 0 {
-			if len(data) != c.Length {
-				return "", fmt.Errorf("delta chunk %d data len=%d want %d", i, len(data), c.Length)
+			// D6: payload is zstd-compressed unless the sender marked the
+			// file as already-compressed (raw=true).
+			plain := data
+			if !b.GetRaw() {
+				var decErr error
+				plain, decErr = zstdutil.Decode(data, int64(fastCDCMax))
+				if decErr != nil {
+					return "", fmt.Errorf("delta chunk %d zstd decode: %w", i, decErr)
+				}
 			}
-			c.Data = data
+			if len(plain) != c.Length {
+				return "", fmt.Errorf("delta chunk %d data len=%d want %d", i, len(plain), c.Length)
+			}
+			c.Data = plain
 		}
 		chunks[i] = c
 	}

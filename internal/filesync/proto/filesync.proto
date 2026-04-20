@@ -48,7 +48,7 @@ message Counter {
 }
 
 // BundleRequest lists file paths to download in a single round-trip (P19).
-// Response is a tar+gzip stream; files absent from the tar are retried individually.
+// Response is a tar+zstd stream; files absent from the tar are retried individually.
 message BundleRequest {
   string folder_id     = 1;
   repeated string paths = 2;
@@ -85,10 +85,14 @@ message DeltaResponse {
 }
 
 // DeltaBlock identifies one sender-side chunk. data is populated iff
-// the receiver does not already have this hash.
+// the receiver does not already have this hash. When raw is false
+// (default), data is zstd-compressed; when raw is true, data is sent
+// uncompressed because the source file's magic bytes indicate a format
+// that is already compressed. See docs/filesync/DESIGN-v1.md §3.
 message DeltaBlock {
   int64 offset = 1;                // Offset in the remote file
-  int32 length = 2;                // Chunk length in bytes
-  bytes hash   = 3;                // SHA-256 of chunk content, 32 bytes
+  int32 length = 2;                // Chunk length in bytes (uncompressed)
+  bytes hash   = 3;                // SHA-256 of chunk content, 32 bytes (uncompressed)
   bytes data   = 4;                // Chunk bytes, empty if receiver has hash locally
+  bool  raw    = 5;                // true = data is uncompressed (incompressible source)
 }

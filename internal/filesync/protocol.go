@@ -635,14 +635,32 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build response.
+	// D6: magic-byte probe — if the file's leading bytes indicate an
+	// already-compressed format, mark every block raw and skip zstd.
+	raw, err := probeIncompressibleRoot(folder.root, deltaRelPath)
+	if err != nil {
+		http.Error(w, "probe: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Build response. For compressible files we zstd-encode each chunk's
+	// data; for raw files we emit data verbatim with raw=true.
 	pbBlocks := make([]*pb.DeltaBlock, len(delta))
 	for i, c := range delta {
+		var payload []byte
+		if len(c.Data) > 0 {
+			if raw {
+				payload = c.Data
+			} else {
+				payload = zstdutil.Encode(c.Data)
+			}
+		}
 		pbBlocks[i] = &pb.DeltaBlock{
 			Offset: c.Offset,
 			Length: int32(c.Length),
 			Hash:   append([]byte(nil), c.Hash[:]...),
-			Data:   c.Data,
+			Data:   payload,
+			Raw:    raw,
 		}
 	}
 	resp := &pb.DeltaResponse{

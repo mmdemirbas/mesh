@@ -313,7 +313,7 @@ func (x *Counter) GetValue() uint64 {
 }
 
 // BundleRequest lists file paths to download in a single round-trip (P19).
-// Response is a tar+gzip stream; files absent from the tar are retried individually.
+// Response is a tar+zstd stream; files absent from the tar are retried individually.
 type BundleRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	FolderId      string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
@@ -559,13 +559,17 @@ func (x *DeltaResponse) GetBlocks() []*DeltaBlock {
 }
 
 // DeltaBlock identifies one sender-side chunk. data is populated iff
-// the receiver does not already have this hash.
+// the receiver does not already have this hash. When raw is false
+// (default), data is zstd-compressed; when raw is true, data is sent
+// uncompressed because the source file's magic bytes indicate a format
+// that is already compressed. See docs/filesync/DESIGN-v1.md §3.
 type DeltaBlock struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Offset        int64                  `protobuf:"varint,1,opt,name=offset,proto3" json:"offset,omitempty"` // Offset in the remote file
-	Length        int32                  `protobuf:"varint,2,opt,name=length,proto3" json:"length,omitempty"` // Chunk length in bytes
-	Hash          []byte                 `protobuf:"bytes,3,opt,name=hash,proto3" json:"hash,omitempty"`      // SHA-256 of chunk content, 32 bytes
+	Length        int32                  `protobuf:"varint,2,opt,name=length,proto3" json:"length,omitempty"` // Chunk length in bytes (uncompressed)
+	Hash          []byte                 `protobuf:"bytes,3,opt,name=hash,proto3" json:"hash,omitempty"`      // SHA-256 of chunk content, 32 bytes (uncompressed)
 	Data          []byte                 `protobuf:"bytes,4,opt,name=data,proto3" json:"data,omitempty"`      // Chunk bytes, empty if receiver has hash locally
+	Raw           bool                   `protobuf:"varint,5,opt,name=raw,proto3" json:"raw,omitempty"`       // true = data is uncompressed (incompressible source)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -628,6 +632,13 @@ func (x *DeltaBlock) GetData() []byte {
 	return nil
 }
 
+func (x *DeltaBlock) GetRaw() bool {
+	if x != nil {
+		return x.Raw
+	}
+	return false
+}
+
 var File_internal_filesync_proto_filesync_proto protoreflect.FileDescriptor
 
 const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
@@ -673,13 +684,14 @@ const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
 	"\x04hash\x18\x03 \x01(\fR\x04hash\"Z\n" +
 	"\rDeltaResponse\x12\x1b\n" +
 	"\tfile_size\x18\x01 \x01(\x03R\bfileSize\x12,\n" +
-	"\x06blocks\x18\x02 \x03(\v2\x14.filesync.DeltaBlockR\x06blocks\"d\n" +
+	"\x06blocks\x18\x02 \x03(\v2\x14.filesync.DeltaBlockR\x06blocks\"v\n" +
 	"\n" +
 	"DeltaBlock\x12\x16\n" +
 	"\x06offset\x18\x01 \x01(\x03R\x06offset\x12\x16\n" +
 	"\x06length\x18\x02 \x01(\x05R\x06length\x12\x12\n" +
 	"\x04hash\x18\x03 \x01(\fR\x04hash\x12\x12\n" +
-	"\x04data\x18\x04 \x01(\fR\x04dataB4Z2github.com/mmdemirbas/mesh/internal/filesync/protob\x06proto3"
+	"\x04data\x18\x04 \x01(\fR\x04data\x12\x10\n" +
+	"\x03raw\x18\x05 \x01(\bR\x03rawB4Z2github.com/mmdemirbas/mesh/internal/filesync/protob\x06proto3"
 
 var (
 	file_internal_filesync_proto_filesync_proto_rawDescOnce sync.Once

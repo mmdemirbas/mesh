@@ -6690,6 +6690,112 @@ func TestHandleDelta_CapsPeerBlocks(t *testing.T) {
 	}
 }
 
+// D6: handleDelta zstd-compresses inline chunk data and decompressing
+// it reproduces the original bytes. raw=false on compressible payloads.
+func TestHandleDelta_CompressesPayload(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	plain := bytes.Repeat([]byte("this is highly compressible text "), 4096)
+	if err := os.WriteFile(filepath.Join(dir, "data.txt"), plain, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	n := &Node{cfg: testCfg(dir, "127.0.0.1"), folders: make(map[string]*folderState), deviceID: "test-device"}
+	n.folders["test"] = &folderState{cfg: testFolderCfg(dir, "127.0.0.1"), root: openTestRoot(t, dir)}
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	// Peer has no matching hashes → every chunk carries inline data.
+	req := &pb.BlockSignatures{FolderId: "test", Path: "data.txt", FileSize: int64(len(plain))}
+	reqData, _ := proto.Marshal(req)
+	resp, err := http.Post(ts.URL+"/delta", "application/x-protobuf", bytes.NewReader(reqData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var deltaResp pb.DeltaResponse
+	if err := proto.Unmarshal(readBody(t, resp), &deltaResp); err != nil {
+		t.Fatal(err)
+	}
+
+	var totalCompressed, totalPlain int
+	for _, b := range deltaResp.GetBlocks() {
+		if b.GetRaw() {
+			t.Fatalf("text file marked raw, want compressed")
+		}
+		if len(b.GetData()) == 0 {
+			continue
+		}
+		dec, err := zstdutil.Decode(b.GetData(), int64(fastCDCMax))
+		if err != nil {
+			t.Fatalf("decode chunk: %v", err)
+		}
+		if len(dec) != int(b.GetLength()) {
+			t.Fatalf("decoded len=%d want %d", len(dec), b.GetLength())
+		}
+		totalCompressed += len(b.GetData())
+		totalPlain += len(dec)
+	}
+	if totalPlain == 0 {
+		t.Fatal("no inline data in response")
+	}
+	if totalCompressed >= totalPlain {
+		t.Fatalf("compression did not shrink payload: compressed=%d plain=%d", totalCompressed, totalPlain)
+	}
+}
+
+// D6: handleDelta marks incompressible files (magic-byte match) raw and
+// ships their chunks verbatim instead of paying compression overhead.
+func TestHandleDelta_RawForIncompressibleFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Synthetic .zst — the magic-byte probe alone drives the decision.
+	body := fastCDCTestData(77, fastCDCAvg*2)
+	content := append([]byte{0x28, 0xb5, 0x2f, 0xfd}, body...)
+	if err := os.WriteFile(filepath.Join(dir, "blob.zst"), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	n := &Node{cfg: testCfg(dir, "127.0.0.1"), folders: make(map[string]*folderState), deviceID: "test-device"}
+	n.folders["test"] = &folderState{cfg: testFolderCfg(dir, "127.0.0.1"), root: openTestRoot(t, dir)}
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	req := &pb.BlockSignatures{FolderId: "test", Path: "blob.zst", FileSize: int64(len(content))}
+	reqData, _ := proto.Marshal(req)
+	resp, err := http.Post(ts.URL+"/delta", "application/x-protobuf", bytes.NewReader(reqData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var deltaResp pb.DeltaResponse
+	if err := proto.Unmarshal(readBody(t, resp), &deltaResp); err != nil {
+		t.Fatal(err)
+	}
+
+	reassembled := make([]byte, 0, len(content))
+	for _, b := range deltaResp.GetBlocks() {
+		if len(b.GetData()) == 0 {
+			t.Fatalf("chunk offset=%d has no data (peer sent empty signatures)", b.GetOffset())
+		}
+		if !b.GetRaw() {
+			t.Fatalf("raw flag not set on incompressible file")
+		}
+		if len(b.GetData()) != int(b.GetLength()) {
+			t.Fatalf("raw data len=%d want %d", len(b.GetData()), b.GetLength())
+		}
+		reassembled = append(reassembled, b.GetData()...)
+	}
+	if !bytes.Equal(reassembled, content) {
+		t.Fatalf("raw reassembly mismatch: got %d bytes, want %d", len(reassembled), len(content))
+	}
+}
+
 // N10: persistFolder serialization — concurrent calls should not corrupt.
 func TestPersistFolder_Concurrent(t *testing.T) {
 	t.Parallel()
