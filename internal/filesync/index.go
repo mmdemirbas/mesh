@@ -1338,15 +1338,25 @@ type DiffEntry struct {
 
 // diff compares the local index with a remote index and produces a list of
 // actions needed to bring the local side up to date.
-// lastSeenSeq is the highest remote sequence we've previously processed from
-// this peer; it filters out already-seen remote entries.
+//
+// C6 semantics drive classification when both sides carry non-empty vector
+// clocks:
+//   - local dominates remote → skip (our write is newer).
+//   - remote dominates local → Download (or Delete for remote tombstone).
+//   - concurrent → Conflict; the C1 mtime tiebreak later picks a winner
+//     and preserves the loser as .sync-conflict-*.
+//
+// When either side has an empty clock — legacy indexes loaded from pre-C6
+// persistence, or an entry that has not been re-scanned yet — diff() falls
+// back to the C1/C2 mtime-and-ancestor heuristic. The fallback is bug-
+// compatible with pre-C6 behavior so rolling upgrades can't deadlock.
+//
+// lastSeenSeq is the highest remote sequence we've previously processed
+// from this peer; it filters out already-seen remote entries.
 // lastSyncNS is PeerState.LastSync in Unix nanoseconds. It drives the C1
 // mtime-vs-last-sync fallback when no ancestor hash is known for a path.
-// baseHashes is PeerState.BaseHashes, the per-path ancestor hash we and the
-// peer last agreed on. When present, diff() uses the ancestor to classify
-// divergences definitively: only-local, only-remote, or both. When absent
-// for a given path — bootstrap, first sync, or a freshly appearing file —
-// diff() falls back to the C1 mtime heuristic.
+// baseHashes is PeerState.BaseHashes, the per-path ancestor hash we and
+// the peer last agreed on.
 func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int64, baseHashes map[string]Hash256, direction string) []DiffEntry {
 	canReceive := direction == "send-receive" || direction == "receive-only" || direction == "dry-run"
 	if !canReceive {
@@ -1365,6 +1375,40 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 
 	var actions []DiffEntry
 
+	downloadEntry := func(path string, rEntry FileEntry) DiffEntry {
+		return DiffEntry{
+			Path:           path,
+			Action:         ActionDownload,
+			RemoteHash:     rEntry.SHA256,
+			RemoteSize:     rEntry.Size,
+			RemoteMtime:    rEntry.MtimeNS,
+			RemoteMode:     rEntry.Mode,
+			RemoteSequence: rEntry.Sequence,
+			RemotePrevPath: rEntry.PrevPath,
+			RemoteVersion:  rEntry.Version,
+		}
+	}
+	conflictEntry := func(path string, rEntry FileEntry) DiffEntry {
+		return DiffEntry{
+			Path:           path,
+			Action:         ActionConflict,
+			RemoteHash:     rEntry.SHA256,
+			RemoteSize:     rEntry.Size,
+			RemoteMtime:    rEntry.MtimeNS,
+			RemoteMode:     rEntry.Mode,
+			RemoteSequence: rEntry.Sequence,
+			RemoteVersion:  rEntry.Version,
+		}
+	}
+	deleteEntry := func(path string, rEntry FileEntry) DiffEntry {
+		return DiffEntry{
+			Path:           path,
+			Action:         ActionDelete,
+			RemoteSequence: rEntry.Sequence,
+			RemoteVersion:  rEntry.Version,
+		}
+	}
+
 	for path, rEntry := range remote.Files {
 		if rEntry.Sequence <= lastSeenSeq {
 			continue // Already processed
@@ -1373,88 +1417,91 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 		lEntry, localExists := idx.Files[path]
 
 		if rEntry.Deleted {
-			// Remote deleted the file.
-			if localExists && !lEntry.Deleted {
-				// B8: if we have a prior sync baseline (lastSeenSeq > 0)
-				// and the local file was modified after that baseline,
-				// local wins over remote delete. The local version will
-				// propagate back to the peer on the next outbound sync.
-				// C2: ancestor hash decides "locally modified" when known;
-				// C1: mtime-vs-lastSync is the fallback.
-				if lastSeenSeq > 0 && locallyModified(path, lEntry) {
-					continue
-				}
-				// H8: on first sync (lastSeenSeq=0), never delete a
-				// locally-existing file based on a remote tombstone. The
-				// local file was never shared with this peer, so the
-				// tombstone refers to a deletion the peer saw from a
-				// third party. The local file will propagate back on
-				// the next outbound cycle.
-				if lastSeenSeq == 0 {
-					continue
-				}
-				actions = append(actions, DiffEntry{
-					Path:           path,
-					Action:         ActionDelete,
-					RemoteSequence: rEntry.Sequence,
-					RemoteVersion:  rEntry.Version,
-				})
+			// Remote tombstoned. Decide whether to apply the delete.
+			if !localExists || lEntry.Deleted {
+				continue
 			}
+			// H8: never honor a remote tombstone on the first sync with
+			// this peer — the tombstone refers to a deletion they saw
+			// from a third party and our local copy was never shared.
+			if lastSeenSeq == 0 {
+				continue
+			}
+			// C6: if both sides have clocks, the vector decides.
+			if len(lEntry.Version) > 0 && len(rEntry.Version) > 0 {
+				switch compareClocks(lEntry.Version, rEntry.Version) {
+				case ClockAfter, ClockEqual:
+					// Local write dominates the tombstone (or matches it,
+					// which can't happen for alive-vs-deleted but is
+					// harmless). Keep local.
+					continue
+				case ClockConcurrent:
+					// Write/delete race — write wins. Syncthing uses the
+					// same rule and it matches user expectations.
+					continue
+				case ClockBefore:
+					actions = append(actions, deleteEntry(path, rEntry))
+					continue
+				}
+			}
+			// Legacy fallback: ancestor/mtime heuristic.
+			if locallyModified(path, lEntry) {
+				continue
+			}
+			actions = append(actions, deleteEntry(path, rEntry))
 			continue
 		}
 
 		if !localExists || lEntry.Deleted {
 			// Remote has a file we don't have.
-			actions = append(actions, DiffEntry{
-				Path:           path,
-				Action:         ActionDownload,
-				RemoteHash:     rEntry.SHA256,
-				RemoteSize:     rEntry.Size,
-				RemoteMtime:    rEntry.MtimeNS,
-				RemoteMode:     rEntry.Mode,
-				RemoteSequence: rEntry.Sequence,
-				RemotePrevPath: rEntry.PrevPath,
-				RemoteVersion:  rEntry.Version,
-			})
+			// C6: if our tombstone dominates the remote write, the remote
+			// is resurrecting a path we have already deleted. Fall back to
+			// Download — the peer is more recent. But if our tombstone
+			// clock dominates, skip (our delete wins).
+			if localExists && lEntry.Deleted &&
+				len(lEntry.Version) > 0 && len(rEntry.Version) > 0 {
+				if compareClocks(lEntry.Version, rEntry.Version) == ClockAfter {
+					continue
+				}
+			}
+			actions = append(actions, downloadEntry(path, rEntry))
 			continue
 		}
 
 		if lEntry.SHA256 == rEntry.SHA256 {
-			continue // Same content
+			continue // Same content — no action regardless of clocks.
 		}
 
-		// Both sides have the file with different content. Classify the
-		// divergence — preferring the ancestor when we have one (C2),
-		// falling back to mtime (C1).
+		// Both sides have the file with different content.
+		// C6: vector-clock classification takes precedence when both
+		// sides have non-empty clocks.
+		if len(lEntry.Version) > 0 && len(rEntry.Version) > 0 {
+			switch compareClocks(lEntry.Version, rEntry.Version) {
+			case ClockEqual:
+				// Clocks equal but hashes differ — shouldn't happen in a
+				// correctly-operating system, but be safe: treat as
+				// conflict so data is never silently lost.
+				actions = append(actions, conflictEntry(path, rEntry))
+			case ClockAfter:
+				// Local dominates — skip (our side propagates outbound).
+			case ClockBefore:
+				actions = append(actions, downloadEntry(path, rEntry))
+			case ClockConcurrent:
+				actions = append(actions, conflictEntry(path, rEntry))
+			}
+			continue
+		}
+
+		// Legacy fallback — preserves pre-C6 behavior for entries loaded
+		// from an index that predates vector-clock persistence.
 		if ancestor, ok := baseHashes[path]; ok {
 			remoteMod := rEntry.SHA256 != ancestor
 			localMod := lEntry.SHA256 != ancestor
 			switch {
 			case remoteMod && localMod:
-				// Both diverged from the agreed ancestor → conflict.
-				actions = append(actions, DiffEntry{
-					Path:           path,
-					Action:         ActionConflict,
-					RemoteHash:     rEntry.SHA256,
-					RemoteSize:     rEntry.Size,
-					RemoteMtime:    rEntry.MtimeNS,
-					RemoteMode:     rEntry.Mode,
-					RemoteSequence: rEntry.Sequence,
-					RemoteVersion:  rEntry.Version,
-				})
+				actions = append(actions, conflictEntry(path, rEntry))
 			case remoteMod:
-				// Only remote changed — download.
-				actions = append(actions, DiffEntry{
-					Path:           path,
-					Action:         ActionDownload,
-					RemoteHash:     rEntry.SHA256,
-					RemoteSize:     rEntry.Size,
-					RemoteMtime:    rEntry.MtimeNS,
-					RemoteMode:     rEntry.Mode,
-					RemoteSequence: rEntry.Sequence,
-					RemotePrevPath: rEntry.PrevPath,
-					RemoteVersion:  rEntry.Version,
-				})
+				actions = append(actions, downloadEntry(path, rEntry))
 				// case localMod only: local will propagate on our next
 				// outbound sync — nothing to do from the receive side.
 			}
@@ -1463,28 +1510,9 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 
 		// No ancestor known. C1 mtime fallback.
 		if lEntry.MtimeNS <= lastSyncNS {
-			actions = append(actions, DiffEntry{
-				Path:           path,
-				Action:         ActionDownload,
-				RemoteHash:     rEntry.SHA256,
-				RemoteSize:     rEntry.Size,
-				RemoteMtime:    rEntry.MtimeNS,
-				RemoteMode:     rEntry.Mode,
-				RemoteSequence: rEntry.Sequence,
-				RemotePrevPath: rEntry.PrevPath,
-				RemoteVersion:  rEntry.Version,
-			})
+			actions = append(actions, downloadEntry(path, rEntry))
 		} else {
-			actions = append(actions, DiffEntry{
-				Path:           path,
-				Action:         ActionConflict,
-				RemoteHash:     rEntry.SHA256,
-				RemoteSize:     rEntry.Size,
-				RemoteMtime:    rEntry.MtimeNS,
-				RemoteMode:     rEntry.Mode,
-				RemoteSequence: rEntry.Sequence,
-				RemoteVersion:  rEntry.Version,
-			})
+			actions = append(actions, conflictEntry(path, rEntry))
 		}
 	}
 

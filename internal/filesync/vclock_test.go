@@ -370,6 +370,168 @@ func TestDiff_PopulatesRemoteVersion(t *testing.T) {
 	}
 }
 
+// TestDiff_VectorClockClassifier pins that diff() uses compareClocks as
+// the primary classifier when both sides carry non-empty vector clocks.
+// Each subtest exercises one of the four ClockOrder cases.
+func TestDiff_VectorClockClassifier(t *testing.T) {
+	t.Parallel()
+
+	// All tests use lastSyncNS=0 so the C1 mtime fallback would classify
+	// every divergence as Download — any Conflict or skip must come from
+	// the clock path.
+	tests := []struct {
+		name   string
+		local  VectorClock
+		remote VectorClock
+		// localMtime is set so the mtime fallback would DIFFER from the
+		// clock answer — proves the clock path actually ran.
+		localMtime int64
+		want       DiffAction // 0 == skip (no action emitted)
+		wantSkip   bool
+	}{
+		{
+			name:     "remote-dominates-download",
+			local:    VectorClock{"SELF": 1},
+			remote:   VectorClock{"SELF": 1, "PEER": 1},
+			want:     ActionDownload,
+			wantSkip: false,
+		},
+		{
+			name:       "local-dominates-skip",
+			local:      VectorClock{"SELF": 2, "PEER": 1},
+			remote:     VectorClock{"SELF": 1, "PEER": 1},
+			localMtime: 1, // mtime says local is OLDER — would be Download via fallback
+			wantSkip:   true,
+		},
+		{
+			name:     "concurrent-conflict",
+			local:    VectorClock{"SELF": 2, "PEER": 1},
+			remote:   VectorClock{"SELF": 1, "PEER": 2},
+			want:     ActionConflict,
+			wantSkip: false,
+		},
+		{
+			name:     "equal-but-hash-differs-defensive-conflict",
+			local:    VectorClock{"SELF": 1, "PEER": 1},
+			remote:   VectorClock{"SELF": 1, "PEER": 1},
+			want:     ActionConflict,
+			wantSkip: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			local := &FileIndex{Files: map[string]FileEntry{
+				"p.txt": {
+					Size: 1, MtimeNS: tc.localMtime,
+					SHA256: testHash("local"), Version: tc.local,
+				},
+			}}
+			remote := &FileIndex{Files: map[string]FileEntry{
+				"p.txt": {
+					Size: 1, MtimeNS: 999, Sequence: 1,
+					SHA256: testHash("remote"), Version: tc.remote,
+				},
+			}}
+			actions := local.diff(remote, 0, 0, nil, "send-receive")
+			if tc.wantSkip {
+				if len(actions) != 0 {
+					t.Fatalf("expected skip, got %+v", actions)
+				}
+				return
+			}
+			if len(actions) != 1 {
+				t.Fatalf("want 1 action, got %d: %+v", len(actions), actions)
+			}
+			if actions[0].Action != tc.want {
+				t.Fatalf("action=%v, want %v", actions[0].Action, tc.want)
+			}
+		})
+	}
+}
+
+// TestDiff_LegacyFallbackWhenClockMissing pins that an entry without a
+// vector clock on either side falls through to the pre-C6 mtime heuristic
+// so rolling upgrades from pre-C6 indexes keep syncing.
+func TestDiff_LegacyFallbackWhenClockMissing(t *testing.T) {
+	t.Parallel()
+
+	// Local has no clock (legacy); remote has a clock. Mtime says local
+	// predates the last sync → the fallback must classify as Download.
+	local := &FileIndex{Files: map[string]FileEntry{
+		"p.txt": {Size: 1, MtimeNS: 1, SHA256: testHash("old-local")},
+	}}
+	remote := &FileIndex{Files: map[string]FileEntry{
+		"p.txt": {
+			Size: 1, MtimeNS: 500, Sequence: 1,
+			SHA256: testHash("remote-newer"), Version: VectorClock{"PEER": 1},
+		},
+	}}
+	actions := local.diff(remote, 0, 100, nil, "send-receive")
+	if len(actions) != 1 || actions[0].Action != ActionDownload {
+		t.Fatalf("legacy fallback did not emit Download: %+v", actions)
+	}
+}
+
+// TestDiff_RemoteTombstoneVsLocalWriteConcurrent pins the "write wins over
+// concurrent delete" rule: when a local write and a remote tombstone are
+// concurrent (neither dominates), keep the local file.
+func TestDiff_RemoteTombstoneVsLocalWriteConcurrent(t *testing.T) {
+	t.Parallel()
+
+	local := &FileIndex{Files: map[string]FileEntry{
+		"p.txt": {
+			Size: 1, MtimeNS: 200, SHA256: testHash("local"),
+			Version: VectorClock{"SELF": 1, "PEER": 1},
+		},
+	}}
+	remote := &FileIndex{Files: map[string]FileEntry{
+		"p.txt": {
+			Deleted: true, MtimeNS: 200, Sequence: 2,
+			Version: VectorClock{"SELF": 1, "PEER": 2},
+		},
+	}}
+	// Cross-write: local bumped SELF to 1; peer bumped PEER to 2 and
+	// marked deleted. Neither dominates because local's {SELF:1,PEER:1}
+	// is ≤ remote's {SELF:1,PEER:2} — actually remote dominates. Rewrite
+	// to genuinely concurrent:
+	local.Files["p.txt"] = FileEntry{
+		Size: 1, MtimeNS: 200, SHA256: testHash("local"),
+		Version: VectorClock{"SELF": 2, "PEER": 1},
+	}
+	// local {SELF:2,PEER:1} vs remote {SELF:1,PEER:2} → concurrent.
+	actions := local.diff(remote, 1 /*lastSeen>0 bypasses H8*/, 0, nil, "send-receive")
+	if len(actions) != 0 {
+		t.Fatalf("concurrent write/delete must keep local, got %+v", actions)
+	}
+}
+
+// TestDiff_RemoteTombstoneDominatesLocalWrite pins that a dominating
+// remote tombstone drives an ActionDelete when both have non-empty
+// clocks and the first-sync guard is bypassed.
+func TestDiff_RemoteTombstoneDominatesLocalWrite(t *testing.T) {
+	t.Parallel()
+
+	local := &FileIndex{Files: map[string]FileEntry{
+		"p.txt": {
+			Size: 1, MtimeNS: 100, SHA256: testHash("local"),
+			Version: VectorClock{"PEER": 1},
+		},
+	}}
+	remote := &FileIndex{Files: map[string]FileEntry{
+		"p.txt": {
+			Deleted: true, MtimeNS: 200, Sequence: 2,
+			Version: VectorClock{"PEER": 2},
+		},
+	}}
+	actions := local.diff(remote, 1 /*bypass H8*/, 0, nil, "send-receive")
+	if len(actions) != 1 || actions[0].Action != ActionDelete {
+		t.Fatalf("dominating tombstone did not drive Delete: %+v", actions)
+	}
+	if actions[0].RemoteVersion["PEER"] != 2 {
+		t.Errorf("RemoteVersion lost: %v", actions[0].RemoteVersion)
+	}
+}
+
 func actionPathMap(actions []DiffEntry) map[string]DiffEntry {
 	out := make(map[string]DiffEntry, len(actions))
 	for _, a := range actions {
