@@ -243,6 +243,29 @@ func (s *server) handleMultiPageIndex(w http.ResponseWriter, req *pb.IndexExchan
 	pe.mu.Lock()
 	defer pe.mu.Unlock()
 
+	// A prior multi-page upload for this (device, folder) can survive
+	// past its sender — the sender crashed, the network wedged, or the
+	// peer restarted and began a new exchange. Without a stale check,
+	// the replacement exchange inherits the old pe.totalPages and
+	// pe.files, so the completion predicate below never trips and the
+	// peer's sync stalls until evictStalePending fires (~5 min). Treat
+	// any totalPages or sequence mismatch as a fresh upload: reset the
+	// accumulator so the new exchange makes progress from page 1.
+	if pe.totalPages != totalPages || pe.sequence != req.GetSequence() {
+		slog.Debug("resetting stale pending index exchange",
+			"folder", folderID, "peer", req.GetDeviceId(),
+			"old_total_pages", pe.totalPages, "new_total_pages", totalPages,
+			"old_sequence", pe.sequence, "new_sequence", req.GetSequence(),
+			"prior_received", len(pe.received))
+		pe.totalPages = totalPages
+		pe.sequence = req.GetSequence()
+		pe.since = req.GetSince()
+		pe.files = nil
+		pe.received = make(map[int32]bool)
+		pe.responsePages = nil
+		pe.createdAt = time.Now()
+	}
+
 	// N11: cap total accumulated files to prevent OOM from a peer
 	// sending maxTotalPages × indexPageSize entries.
 	const maxTotalFiles = 500_000

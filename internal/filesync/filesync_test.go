@@ -7262,6 +7262,133 @@ func TestMultiPageIndex_TotalFileCap(t *testing.T) {
 	}
 }
 
+// TestMultiPageIndex_ResetsStalePending pins the fix for a silent
+// stall: if a peer aborts a multi-page upload mid-stream (process
+// crash, network wedge, restart) and then begins a fresh exchange,
+// the server previously kept the stale pendingExchange around — with
+// pe.totalPages still pointing at the old run — and the new run
+// never reached its completion predicate. The exchange hung until
+// evictStalePending fired ~5 minutes later, during which the peer's
+// view of the server was frozen. The fix resets the accumulator
+// whenever pe.totalPages or pe.sequence disagrees with the incoming
+// request.
+func TestMultiPageIndex_ResetsStalePending(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test",
+		dataDir:  t.TempDir(),
+	}
+	n.folders["test"] = &folderState{
+		cfg:      testFolderCfg(dir, "127.0.0.1"),
+		index:    newFileIndex(),
+		peers:    make(map[string]PeerState),
+		inFlight: make(map[string]bool),
+	}
+
+	srv := httptest.NewServer((&server{node: n}).handler())
+	defer srv.Close()
+
+	// Seed a stale exchange: page 0 of a 5-page run at sequence=1.
+	// The sender then vanishes without delivering the remaining pages.
+	stalePage := &pb.IndexExchange{
+		DeviceId:        "peer1",
+		FolderId:        "test",
+		Sequence:        1,
+		Files:           []*pb.FileInfo{{Path: "stale.txt", Sequence: 1}},
+		Page:            0,
+		TotalPages:      5,
+		ProtocolVersion: protocolVersion,
+	}
+	data, _ := proto.Marshal(stalePage)
+	resp, err := http.Post(srv.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stale seed page: want 200, got %d", resp.StatusCode)
+	}
+
+	// Fresh exchange from the same peer at a later sequence, with a
+	// different totalPages. Without the staleness reset the server
+	// would still think it needs 5 pages and the final page below
+	// would ack instead of completing.
+	freshSeq := int64(2)
+	page0 := &pb.IndexExchange{
+		DeviceId:        "peer1",
+		FolderId:        "test",
+		Sequence:        freshSeq,
+		Files:           []*pb.FileInfo{{Path: "fresh0.txt", Sequence: 1}},
+		Page:            0,
+		TotalPages:      2,
+		ProtocolVersion: protocolVersion,
+	}
+	data, _ = proto.Marshal(page0)
+	resp, err = http.Post(srv.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fresh page 0: want 200, got %d", resp.StatusCode)
+	}
+
+	page1 := &pb.IndexExchange{
+		DeviceId:        "peer1",
+		FolderId:        "test",
+		Sequence:        freshSeq,
+		Files:           []*pb.FileInfo{{Path: "fresh1.txt", Sequence: 1}},
+		Page:            1,
+		TotalPages:      2,
+		ProtocolVersion: protocolVersion,
+	}
+	data, _ = proto.Marshal(page1)
+	resp, err = http.Post(srv.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fresh page 1 (final): want 200, got %d", resp.StatusCode)
+	}
+
+	// Final page must return a populated response body (the built
+	// index exchange from the server side), not an empty ack. That is
+	// the observable signal of completion — the ack path returns 200
+	// with an empty body, the completion path writes a zstd-encoded
+	// IndexExchange.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) == 0 {
+		t.Fatal("fresh final page returned empty body — stale pending was not reset")
+	}
+	if ce := resp.Header.Get("Content-Encoding"); ce != "zstd" {
+		t.Errorf("Content-Encoding=%q, want zstd (completion path)", ce)
+	}
+
+	// Stale files must not have leaked into the completed response.
+	decompressed, err := zstdutil.Decode(body, 16*1024*1024)
+	if err != nil {
+		t.Fatalf("decompress response: %v", err)
+	}
+	var respPB pb.IndexExchange
+	if err := proto.Unmarshal(decompressed, &respPB); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	for _, f := range respPB.GetFiles() {
+		if f.GetPath() == "stale.txt" {
+			t.Error("stale exchange file leaked into fresh response")
+		}
+	}
+}
+
 // --- G1: mtime preservation tests ---
 
 func TestDownloadFile_PreservesMtime(t *testing.T) {
