@@ -157,6 +157,48 @@ func TestFileEntry_VersionYAMLRoundTrip(t *testing.T) {
 	}
 }
 
+// TestFileEntry_VersionYAMLDropsZerosOnLoad pins that a YAML file
+// carrying a zero-valued clock entry (forged, legacy, or corrupted)
+// is normalized to canonical form on load. Without this, code that
+// relies on "missing key == zero" invariance (compareClocks, len()
+// checks, merge()) would see inconsistent state.
+func TestFileEntry_VersionYAMLDropsZerosOnLoad(t *testing.T) {
+	t.Parallel()
+
+	forged := []byte(`size: 1
+sha256: "` + testHash("x").String() + `"
+version:
+  A: 0
+  B: 3
+`)
+	var got FileEntry
+	if err := yaml.Unmarshal(forged, &got); err != nil {
+		t.Fatalf("unmarshal forged: %v", err)
+	}
+	if _, has := got.Version["A"]; has {
+		t.Fatalf("unmarshal kept zero entry: %v", got.Version)
+	}
+	if got.Version["B"] != 3 {
+		t.Fatalf("unmarshal dropped non-zero entry: %v", got.Version)
+	}
+
+	// All-zero input must collapse to nil so len(Version)==0 remains a
+	// reliable "empty clock" test.
+	allZero := []byte(`size: 1
+sha256: "` + testHash("x").String() + `"
+version:
+  A: 0
+  B: 0
+`)
+	var empty FileEntry
+	if err := yaml.Unmarshal(allZero, &empty); err != nil {
+		t.Fatalf("unmarshal all-zero: %v", err)
+	}
+	if len(empty.Version) != 0 {
+		t.Fatalf("all-zero clock did not collapse to nil: %v", empty.Version)
+	}
+}
+
 func TestFileInfo_VersionWireRoundTrip(t *testing.T) {
 	t.Parallel()
 

@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
+	"gopkg.in/yaml.v3"
 )
 
 // VectorClock is a per-file vector clock used for C6 conflict detection.
@@ -133,6 +134,34 @@ func (v VectorClock) clone() VectorClock {
 		out[k] = val
 	}
 	return out
+}
+
+// UnmarshalYAML decodes into a VectorClock while dropping zero entries
+// so forged or legacy YAML with `A: 0` still yields a canonical clock.
+// This preserves the in-memory invariant that a clock never carries
+// zero-valued components: bump/merge/toProto all assume it, and
+// compareClocks relies on "missing key == zero" equivalence. R9.
+func (v *VectorClock) UnmarshalYAML(node *yaml.Node) error {
+	raw := make(map[string]uint64)
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	if len(raw) == 0 {
+		*v = nil
+		return nil
+	}
+	out := make(VectorClock, len(raw))
+	for k, val := range raw {
+		if val > 0 {
+			out[k] = val
+		}
+	}
+	if len(out) == 0 {
+		*v = nil
+		return nil
+	}
+	*v = out
+	return nil
 }
 
 // merge returns the per-component max of v and other, union of keys.
