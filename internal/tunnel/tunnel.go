@@ -59,6 +59,15 @@ const (
 	limiterPressureAfter = 2 * time.Minute
 	// limiterMaxEntries is the maximum number of per-IP limiters before aggressive eviction.
 	limiterMaxEntries = 10000
+
+	// maxTCPIPForwards caps concurrent server-side remote forwards per SSH
+	// connection. Each forward consumes a kernel listener socket plus an
+	// accept-loop goroutine; without a cap an authenticated peer could
+	// exhaust file descriptors or the goroutine ceiling by flooding
+	// tcpip-forward global requests. The channel-count guard elsewhere
+	// (maxChannelsPerConn) does not apply — tcpip-forward is a global
+	// request, not a channel.
+	maxTCPIPForwards = 64
 )
 
 // authFailureEntry tracks cumulative SSH auth rejections and last activity for an IP.
@@ -1368,6 +1377,15 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 	// Hold mu across listen+insert so cancel-tcpip-forward cannot miss
 	// a listener that has been created but not yet registered.
 	mu.Lock()
+	if len(listeners) >= maxTCPIPForwards {
+		mu.Unlock()
+		log.Warn("tcpip-forward rejected: connection forward cap reached",
+			"limit", maxTCPIPForwards, "addr", addr)
+		if req.WantReply {
+			_ = req.Reply(false, nil)
+		}
+		return
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		mu.Unlock()
