@@ -6640,6 +6640,53 @@ func TestDeltaFileSize_Validation(t *testing.T) {
 	}
 }
 
+// Receiver must cap peer-supplied DeltaBlock count to what could fit
+// in the declared FileSize at fastCDCMin granularity. Without this,
+// a peer can force an arbitrary-sized chunks slice even with a sane
+// FileSize.
+func TestDownloadFileDelta_CapsPeerBlocks(t *testing.T) {
+	t.Parallel()
+
+	// Declare a small file but send a flood of blocks.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pbBlocks := make([]*pb.DeltaBlock, 10_000)
+		for i := range pbBlocks {
+			pbBlocks[i] = &pb.DeltaBlock{
+				Offset: int64(i),
+				Length: 1,
+				Hash:   make([]byte, 32),
+			}
+		}
+		resp := &pb.DeltaResponse{
+			FileSize: 1024, // tiny file — max legitimate blocks ≈ 1
+			Blocks:   pbBlocks,
+		}
+		data, _ := proto.Marshal(resp)
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		_, _ = w.Write(data)
+	}))
+	defer srv.Close()
+
+	destDir := t.TempDir()
+	writeFile(t, destDir, "target.txt", "old content")
+
+	_, err := downloadFileDelta(t.Context(),
+		srv.Client(),
+		srv.Listener.Addr().String(),
+		"test",
+		"target.txt",
+		Hash256{},
+		openTestRoot(t, destDir),
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected error for oversized block list, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds max") {
+		t.Errorf("expected 'exceeds max' in error, got: %v", err)
+	}
+}
+
 // N5: handleDelta caps peer block signatures to the file's maximum
 // possible FastCDC chunk count. A peer can't force unbounded work by
 // sending millions of bogus signatures for a small file.

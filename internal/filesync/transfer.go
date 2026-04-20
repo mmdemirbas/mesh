@@ -547,6 +547,13 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 	// either inline data OR a known hash the receiver can resolve from
 	// its local copy.
 	pbBlocks := deltaResp.GetBlocks()
+	// N5: cap block count to what FastCDC could legitimately produce for
+	// a file of remoteFileSize (min chunk size is fastCDCMin). A peer
+	// can't force us to allocate an arbitrary-sized chunks slice.
+	maxPeerBlocks := (remoteFileSize / int64(fastCDCMin)) + 1
+	if int64(len(pbBlocks)) > maxPeerBlocks {
+		return "", fmt.Errorf("delta response has %d blocks, exceeds max %d for file size %d", len(pbBlocks), maxPeerBlocks, remoteFileSize)
+	}
 	chunks := make([]senderChunk, len(pbBlocks))
 	for i, b := range pbBlocks {
 		if b.GetLength() <= 0 || int(b.GetLength()) > fastCDCMax {
