@@ -1,154 +1,95 @@
 package filesync
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
 )
 
-const (
-	// defaultBlockSize is 128 KB — balances granularity vs. overhead.
-	// Smaller blocks catch more fine-grained changes but increase the
-	// number of hashes exchanged. 128 KB is a common choice in rsync-like tools.
-	defaultBlockSize = 128 * 1024
-)
-
-// computeBlockSignatures reads a file and returns SHA-256 hashes of each
-// sequential fixed-size block. The last block may be smaller than blockSize.
-func computeBlockSignatures(path string, blockSize int64) ([][]byte, error) {
+// signFile runs FastCDC over path and returns the chunk signatures the
+// receiver sends to the sender as BlockSignatures.blocks. See
+// docs/filesync/DESIGN-v1.md §2.
+func signFile(path string) ([]Block, error) {
 	f, err := os.Open(path) //nolint:gosec // G304: path validated by caller
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	return readBlockSigs(f, blockSize)
+	return ChunkFile(f)
 }
 
-// computeBlockSignaturesRoot is the os.Root-safe variant of computeBlockSignatures.
-func computeBlockSignaturesRoot(root *os.Root, relPath string, blockSize int64) ([][]byte, error) {
+// signFileRoot is the os.Root-safe variant of signFile.
+func signFileRoot(root *os.Root, relPath string) ([]Block, error) {
 	f, err := root.Open(relPath)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	return readBlockSigs(f, blockSize)
+	return ChunkFile(f)
 }
 
-func readBlockSigs(f *os.File, blockSize int64) ([][]byte, error) {
-	var hashes [][]byte
-	buf := make([]byte, blockSize)
-	for {
-		n, err := io.ReadFull(f, buf)
-		if n > 0 {
-			h := sha256.Sum256(buf[:n])
-			hashes = append(hashes, h[:])
-		}
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("read block: %w", err)
-		}
-	}
-	return hashes, nil
-}
-
-// computeDeltaBlocks reads a file and returns only the blocks whose SHA-256
-// does not match the corresponding entry in localHashes. Blocks beyond the
-// length of localHashes (file grew) are always included.
-func computeDeltaBlocks(path string, blockSize int64, localHashes [][]byte) ([]deltaBlock, error) {
+// computeDelta chunks path with FastCDC and returns the sender's
+// complete chunk list. Chunks whose hash appears in peerHashes are
+// returned with empty Data — the receiver reassembles them from its
+// own local copy. New chunks carry Data inline.
+func computeDelta(path string, peerHashes map[Hash256]struct{}) ([]senderChunk, error) {
 	f, err := os.Open(path) //nolint:gosec // G304: path validated by caller
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	return readDeltaBlocks(f, blockSize, localHashes)
+	return readSenderChunks(f, peerHashes)
 }
 
-// computeDeltaBlocksRoot is the os.Root-safe variant of computeDeltaBlocks.
-func computeDeltaBlocksRoot(root *os.Root, relPath string, blockSize int64, localHashes [][]byte) ([]deltaBlock, error) {
+// computeDeltaRoot is the os.Root-safe variant of computeDelta.
+func computeDeltaRoot(root *os.Root, relPath string, peerHashes map[Hash256]struct{}) ([]senderChunk, error) {
 	f, err := root.Open(relPath)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	return readDeltaBlocks(f, blockSize, localHashes)
+	return readSenderChunks(f, peerHashes)
 }
 
-func readDeltaBlocks(f *os.File, blockSize int64, localHashes [][]byte) ([]deltaBlock, error) {
-	var blocks []deltaBlock
-	buf := make([]byte, blockSize)
-	idx := 0
+// senderChunk is the sender-side view of one FastCDC chunk. It maps
+// 1:1 to the wire's DeltaBlock but keeps the bytes on the Go side so
+// callers can decide whether to include data.
+type senderChunk struct {
+	Offset int64
+	Length int
+	Hash   Hash256
+	Data   []byte // nil when peer already has Hash
+}
+
+func readSenderChunks(r io.Reader, peerHashes map[Hash256]struct{}) ([]senderChunk, error) {
+	chunker := newDefaultChunker(r)
+	var out []senderChunk
 	for {
-		n, err := io.ReadFull(f, buf)
-		if n > 0 {
-			h := sha256.Sum256(buf[:n])
-			// Include this block if it's new or differs from the local version.
-			include := idx >= len(localHashes) || !hashEqual(h[:], localHashes[idx])
-			if include {
-				data := make([]byte, n)
-				copy(data, buf[:n])
-				blocks = append(blocks, deltaBlock{index: int64(idx), data: data})
-			}
-		}
-		idx++
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
+		ch, err := chunker.Next()
+		if err == io.EOF {
+			return out, nil
 		}
 		if err != nil {
-			return nil, fmt.Errorf("read block: %w", err)
+			return nil, fmt.Errorf("fastcdc: %w", err)
 		}
+		h := sha256.Sum256(ch.Data)
+		hash := hash256FromBytes(h[:])
+		sc := senderChunk{Offset: ch.Offset, Length: ch.Length, Hash: hash}
+		if _, ok := peerHashes[hash]; !ok {
+			sc.Data = make([]byte, ch.Length)
+			copy(sc.Data, ch.Data)
+		}
+		out = append(out, sc)
 	}
-	return blocks, nil
 }
 
-type deltaBlock struct {
-	index int64
-	data  []byte
-}
-
-// applyDelta reconstructs a file by copying unchanged blocks from the old file
-// and overwriting changed blocks from the delta. Returns the path to a temp file.
-// F5: peerID is appended to the temp name to prevent concurrent peers from
-// clobbering each other's delta temp files for the same path.
-func applyDelta(oldPath, destPath, peerID string, blockSize, remoteFileSize int64, blocks []deltaBlock) (string, error) {
-	tmpPath := destPath + ".mesh-delta-tmp-" + peerID
-
-	out, err := os.Create(tmpPath) //nolint:gosec // G304: destPath validated by caller
-	if err != nil {
-		return "", fmt.Errorf("create delta temp: %w", err)
-	}
-
-	old, err := os.Open(oldPath) //nolint:gosec // G304: oldPath validated by caller
-	if err != nil {
-		_ = out.Close()
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("open old file: %w", err)
-	}
-
-	if err := assembleDelta(out, old, blockSize, remoteFileSize, blocks); err != nil {
-		_ = out.Close()
-		_ = old.Close()
-		_ = os.Remove(tmpPath)
-		return "", err
-	}
-	_ = old.Close()
-
-	// Close before returning so caller can rename on Windows.
-	if err := out.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("close delta temp: %w", err)
-	}
-
-	return tmpPath, nil
-}
-
-// applyDeltaRoot is the os.Root-safe variant of applyDelta.
-// Returns the relative temp path within root.
-// F5: peerID prevents concurrent peers from clobbering the same temp file.
-func applyDeltaRoot(root *os.Root, relPath, peerID string, blockSize, remoteFileSize int64, blocks []deltaBlock) (string, error) {
+// applyDeltaRoot reconstructs the remote file at relPath + ".mesh-delta-tmp-<peerID>"
+// by walking chunks in offset order. Each chunk either carries inline
+// data or a hash the receiver must resolve against its own local file
+// (the existing relPath, which supplies the unchanged bytes). Returns the
+// temp relative path.
+func applyDeltaRoot(root *os.Root, relPath, peerID string, remoteFileSize int64, chunks []senderChunk) (string, error) {
 	tmpRelPath := relPath + ".mesh-delta-tmp-" + peerID
 
 	out, err := root.Create(tmpRelPath)
@@ -163,7 +104,7 @@ func applyDeltaRoot(root *os.Root, relPath, peerID string, blockSize, remoteFile
 		return "", fmt.Errorf("open old file: %w", err)
 	}
 
-	if err := assembleDelta(out, old, blockSize, remoteFileSize, blocks); err != nil {
+	if err := assembleDelta(out, old, remoteFileSize, chunks); err != nil {
 		_ = out.Close()
 		_ = old.Close()
 		_ = root.Remove(tmpRelPath)
@@ -175,52 +116,71 @@ func applyDeltaRoot(root *os.Root, relPath, peerID string, blockSize, remoteFile
 		_ = root.Remove(tmpRelPath)
 		return "", fmt.Errorf("close delta temp: %w", err)
 	}
-
 	return tmpRelPath, nil
 }
 
-// assembleDelta writes the reconstructed file to out by copying unchanged
-// blocks from old and overwriting changed blocks from the delta slice.
-func assembleDelta(out, old *os.File, blockSize, remoteFileSize int64, blocks []deltaBlock) error {
-	changed := make(map[int64][]byte, len(blocks))
-	for _, b := range blocks {
-		changed[b.index] = b.data
+// assembleDelta writes the reconstructed file to out. Chunks must be
+// sorted by offset and tile [0, remoteFileSize) exactly. Inline data
+// is written verbatim; hash-only chunks are resolved by scanning the
+// old file for a matching chunk and copying those bytes.
+func assembleDelta(out, old *os.File, remoteFileSize int64, chunks []senderChunk) error {
+	// Build a map: hash → (offset, length) from a single FastCDC pass
+	// over the old file. We hash once; unchanged chunks look up here.
+	oldChunks, err := ChunkFile(old)
+	if err != nil {
+		return fmt.Errorf("chunk old file: %w", err)
 	}
-
-	buf := make([]byte, blockSize)
-	totalBlocks := (remoteFileSize + blockSize - 1) / blockSize
-	// F6: track the old file's logical read position to skip unnecessary
-	// seeks when blocks are read sequentially.
-	oldPos := int64(0)
-	for i := range totalBlocks {
-		if data, ok := changed[i]; ok {
-			if _, err := out.Write(data); err != nil {
-				return fmt.Errorf("write delta block %d: %w", i, err)
-			}
-			// old file wasn't read — position unchanged, but next
-			// unchanged block needs a seek because we skipped one.
-		} else {
-			want := i * blockSize
-			if oldPos != want {
-				if _, err := old.Seek(want, io.SeekStart); err != nil {
-					return fmt.Errorf("seek old block %d: %w", i, err)
-				}
-			}
-			n, err := io.ReadFull(old, buf)
-			if n > 0 {
-				if _, err := out.Write(buf[:n]); err != nil {
-					return fmt.Errorf("write old block %d: %w", i, err)
-				}
-			}
-			if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-				return fmt.Errorf("read old block %d: %w", i, err)
-			}
-			oldPos = want + int64(n)
+	lookup := make(map[Hash256]Block, len(oldChunks))
+	for _, b := range oldChunks {
+		// First occurrence wins — duplicate content in the old file is
+		// harmless to share across multiple remote chunks.
+		if _, ok := lookup[b.Hash]; !ok {
+			lookup[b.Hash] = b
 		}
 	}
 
-	if err := out.Truncate(remoteFileSize); err != nil {
-		return fmt.Errorf("truncate: %w", err)
+	// Verify chunks tile [0, remoteFileSize) in offset order.
+	var want int64
+	for i, c := range chunks {
+		if c.Offset != want {
+			return fmt.Errorf("delta chunk %d offset=%d want %d (non-contiguous)", i, c.Offset, want)
+		}
+		if c.Length <= 0 {
+			return fmt.Errorf("delta chunk %d non-positive length %d", i, c.Length)
+		}
+		want += int64(c.Length)
+	}
+	if want != remoteFileSize {
+		return fmt.Errorf("delta chunks cover %d bytes, file_size=%d", want, remoteFileSize)
+	}
+
+	buf := make([]byte, fastCDCMax)
+	for i, c := range chunks {
+		if c.Data != nil {
+			if len(c.Data) != c.Length {
+				return fmt.Errorf("delta chunk %d data len=%d want length=%d", i, len(c.Data), c.Length)
+			}
+			if _, err := out.Write(c.Data); err != nil {
+				return fmt.Errorf("write delta chunk %d: %w", i, err)
+			}
+			continue
+		}
+		local, ok := lookup[c.Hash]
+		if !ok {
+			return fmt.Errorf("delta chunk %d hash not in old file and no data", i)
+		}
+		if local.Length != c.Length {
+			return fmt.Errorf("delta chunk %d length=%d local length=%d", i, c.Length, local.Length)
+		}
+		if _, err := old.Seek(local.Offset, io.SeekStart); err != nil {
+			return fmt.Errorf("seek old chunk %d: %w", i, err)
+		}
+		if _, err := io.ReadFull(old, buf[:local.Length]); err != nil {
+			return fmt.Errorf("read old chunk %d: %w", i, err)
+		}
+		if _, err := out.Write(buf[:local.Length]); err != nil {
+			return fmt.Errorf("write old chunk %d: %w", i, err)
+		}
 	}
 	return nil
 }
@@ -238,9 +198,4 @@ func hashFileRoot(root *os.Root, relPath string) (Hash256, error) {
 		return Hash256{}, err
 	}
 	return hash256FromBytes(h.Sum(nil)), nil
-}
-
-// hashEqual compares two byte slices for equality.
-func hashEqual(a, b []byte) bool {
-	return bytes.Equal(a, b)
 }

@@ -367,14 +367,17 @@ func (x *BundleRequest) GetPaths() []string {
 }
 
 // BlockSignatures is sent by the receiver to request a block-level delta.
-// Each entry is the SHA-256 hash of a fixed-size block of the local file.
+// Each Block is a FastCDC chunk of the receiver's local file (see
+// docs/filesync/DESIGN-v1.md §2). The sender chunks its own copy with
+// the same deterministic parameters and returns the full chunk layout
+// of its file; for each chunk whose hash the receiver already has,
+// the data field stays empty.
 type BlockSignatures struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	FolderId      string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
 	Path          string                 `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
-	BlockSize     int64                  `protobuf:"varint,3,opt,name=block_size,json=blockSize,proto3" json:"block_size,omitempty"`      // Block size in bytes (e.g., 131072 = 128 KB)
-	FileSize      int64                  `protobuf:"varint,4,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"`         // Total local file size
-	BlockHashes   [][]byte               `protobuf:"bytes,5,rep,name=block_hashes,json=blockHashes,proto3" json:"block_hashes,omitempty"` // SHA-256 of each sequential block
+	FileSize      int64                  `protobuf:"varint,3,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"` // Total local file size
+	Blocks        []*Block               `protobuf:"bytes,4,rep,name=blocks,proto3" json:"blocks,omitempty"`                      // FastCDC chunks of the local file
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -423,13 +426,6 @@ func (x *BlockSignatures) GetPath() string {
 	return ""
 }
 
-func (x *BlockSignatures) GetBlockSize() int64 {
-	if x != nil {
-		return x.BlockSize
-	}
-	return 0
-}
-
 func (x *BlockSignatures) GetFileSize() int64 {
 	if x != nil {
 		return x.FileSize
@@ -437,27 +433,90 @@ func (x *BlockSignatures) GetFileSize() int64 {
 	return 0
 }
 
-func (x *BlockSignatures) GetBlockHashes() [][]byte {
+func (x *BlockSignatures) GetBlocks() []*Block {
 	if x != nil {
-		return x.BlockHashes
+		return x.Blocks
 	}
 	return nil
 }
 
-// DeltaResponse contains only the blocks that differ between the local
-// and remote versions of a file.
+// Block identifies one FastCDC chunk. offset+length locate the bytes in
+// the file that produced the chunk; hash is SHA-256 of the chunk bytes.
+type Block struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Offset        int64                  `protobuf:"varint,1,opt,name=offset,proto3" json:"offset,omitempty"`
+	Length        int32                  `protobuf:"varint,2,opt,name=length,proto3" json:"length,omitempty"`
+	Hash          []byte                 `protobuf:"bytes,3,opt,name=hash,proto3" json:"hash,omitempty"` // SHA-256, 32 bytes
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Block) Reset() {
+	*x = Block{}
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Block) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Block) ProtoMessage() {}
+
+func (x *Block) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Block.ProtoReflect.Descriptor instead.
+func (*Block) Descriptor() ([]byte, []int) {
+	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *Block) GetOffset() int64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *Block) GetLength() int32 {
+	if x != nil {
+		return x.Length
+	}
+	return 0
+}
+
+func (x *Block) GetHash() []byte {
+	if x != nil {
+		return x.Hash
+	}
+	return nil
+}
+
+// DeltaResponse carries the sender's complete chunk layout. Chunks
+// whose hash exists in the receiver's signatures are returned without
+// data — the receiver reassembles them by looking up the hash in its
+// own local chunks. Chunks new to the receiver carry data inline.
 type DeltaResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	FileSize      int64                  `protobuf:"varint,1,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"`      // Total remote file size
-	FileSha256    []byte                 `protobuf:"bytes,2,opt,name=file_sha256,json=fileSha256,proto3" json:"file_sha256,omitempty"` // Deprecated (L7): receiver verifies hash independently. Kept for wire compat.
-	Blocks        []*DeltaBlock          `protobuf:"bytes,3,rep,name=blocks,proto3" json:"blocks,omitempty"`
+	FileSize      int64                  `protobuf:"varint,1,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"` // Total remote file size
+	Blocks        []*DeltaBlock          `protobuf:"bytes,2,rep,name=blocks,proto3" json:"blocks,omitempty"`                      // Sender's full chunk list, in offset order
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DeltaResponse) Reset() {
 	*x = DeltaResponse{}
-	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[5]
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -469,7 +528,7 @@ func (x *DeltaResponse) String() string {
 func (*DeltaResponse) ProtoMessage() {}
 
 func (x *DeltaResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[5]
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -482,7 +541,7 @@ func (x *DeltaResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeltaResponse.ProtoReflect.Descriptor instead.
 func (*DeltaResponse) Descriptor() ([]byte, []int) {
-	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{5}
+	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *DeltaResponse) GetFileSize() int64 {
@@ -492,13 +551,6 @@ func (x *DeltaResponse) GetFileSize() int64 {
 	return 0
 }
 
-func (x *DeltaResponse) GetFileSha256() []byte {
-	if x != nil {
-		return x.FileSha256
-	}
-	return nil
-}
-
 func (x *DeltaResponse) GetBlocks() []*DeltaBlock {
 	if x != nil {
 		return x.Blocks
@@ -506,18 +558,21 @@ func (x *DeltaResponse) GetBlocks() []*DeltaBlock {
 	return nil
 }
 
-// DeltaBlock carries a single changed block.
+// DeltaBlock identifies one sender-side chunk. data is populated iff
+// the receiver does not already have this hash.
 type DeltaBlock struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Index         int64                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"` // Block index (0-based)
-	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`    // Block content
+	Offset        int64                  `protobuf:"varint,1,opt,name=offset,proto3" json:"offset,omitempty"` // Offset in the remote file
+	Length        int32                  `protobuf:"varint,2,opt,name=length,proto3" json:"length,omitempty"` // Chunk length in bytes
+	Hash          []byte                 `protobuf:"bytes,3,opt,name=hash,proto3" json:"hash,omitempty"`      // SHA-256 of chunk content, 32 bytes
+	Data          []byte                 `protobuf:"bytes,4,opt,name=data,proto3" json:"data,omitempty"`      // Chunk bytes, empty if receiver has hash locally
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DeltaBlock) Reset() {
 	*x = DeltaBlock{}
-	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[6]
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -529,7 +584,7 @@ func (x *DeltaBlock) String() string {
 func (*DeltaBlock) ProtoMessage() {}
 
 func (x *DeltaBlock) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[6]
+	mi := &file_internal_filesync_proto_filesync_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -542,14 +597,28 @@ func (x *DeltaBlock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeltaBlock.ProtoReflect.Descriptor instead.
 func (*DeltaBlock) Descriptor() ([]byte, []int) {
-	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{6}
+	return file_internal_filesync_proto_filesync_proto_rawDescGZIP(), []int{7}
 }
 
-func (x *DeltaBlock) GetIndex() int64 {
+func (x *DeltaBlock) GetOffset() int64 {
 	if x != nil {
-		return x.Index
+		return x.Offset
 	}
 	return 0
+}
+
+func (x *DeltaBlock) GetLength() int32 {
+	if x != nil {
+		return x.Length
+	}
+	return 0
+}
+
+func (x *DeltaBlock) GetHash() []byte {
+	if x != nil {
+		return x.Hash
+	}
+	return nil
 }
 
 func (x *DeltaBlock) GetData() []byte {
@@ -592,23 +661,25 @@ const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\x04R\x05value\"B\n" +
 	"\rBundleRequest\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12\x14\n" +
-	"\x05paths\x18\x02 \x03(\tR\x05paths\"\xa1\x01\n" +
+	"\x05paths\x18\x02 \x03(\tR\x05paths\"\x88\x01\n" +
 	"\x0fBlockSignatures\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12\x12\n" +
-	"\x04path\x18\x02 \x01(\tR\x04path\x12\x1d\n" +
-	"\n" +
-	"block_size\x18\x03 \x01(\x03R\tblockSize\x12\x1b\n" +
-	"\tfile_size\x18\x04 \x01(\x03R\bfileSize\x12!\n" +
-	"\fblock_hashes\x18\x05 \x03(\fR\vblockHashes\"{\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12\x1b\n" +
+	"\tfile_size\x18\x03 \x01(\x03R\bfileSize\x12'\n" +
+	"\x06blocks\x18\x04 \x03(\v2\x0f.filesync.BlockR\x06blocks\"K\n" +
+	"\x05Block\x12\x16\n" +
+	"\x06offset\x18\x01 \x01(\x03R\x06offset\x12\x16\n" +
+	"\x06length\x18\x02 \x01(\x05R\x06length\x12\x12\n" +
+	"\x04hash\x18\x03 \x01(\fR\x04hash\"Z\n" +
 	"\rDeltaResponse\x12\x1b\n" +
-	"\tfile_size\x18\x01 \x01(\x03R\bfileSize\x12\x1f\n" +
-	"\vfile_sha256\x18\x02 \x01(\fR\n" +
-	"fileSha256\x12,\n" +
-	"\x06blocks\x18\x03 \x03(\v2\x14.filesync.DeltaBlockR\x06blocks\"6\n" +
+	"\tfile_size\x18\x01 \x01(\x03R\bfileSize\x12,\n" +
+	"\x06blocks\x18\x02 \x03(\v2\x14.filesync.DeltaBlockR\x06blocks\"d\n" +
 	"\n" +
-	"DeltaBlock\x12\x14\n" +
-	"\x05index\x18\x01 \x01(\x03R\x05index\x12\x12\n" +
-	"\x04data\x18\x02 \x01(\fR\x04dataB4Z2github.com/mmdemirbas/mesh/internal/filesync/protob\x06proto3"
+	"DeltaBlock\x12\x16\n" +
+	"\x06offset\x18\x01 \x01(\x03R\x06offset\x12\x16\n" +
+	"\x06length\x18\x02 \x01(\x05R\x06length\x12\x12\n" +
+	"\x04hash\x18\x03 \x01(\fR\x04hash\x12\x12\n" +
+	"\x04data\x18\x04 \x01(\fR\x04dataB4Z2github.com/mmdemirbas/mesh/internal/filesync/protob\x06proto3"
 
 var (
 	file_internal_filesync_proto_filesync_proto_rawDescOnce sync.Once
@@ -622,25 +693,27 @@ func file_internal_filesync_proto_filesync_proto_rawDescGZIP() []byte {
 	return file_internal_filesync_proto_filesync_proto_rawDescData
 }
 
-var file_internal_filesync_proto_filesync_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_internal_filesync_proto_filesync_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_internal_filesync_proto_filesync_proto_goTypes = []any{
 	(*IndexExchange)(nil),   // 0: filesync.IndexExchange
 	(*FileInfo)(nil),        // 1: filesync.FileInfo
 	(*Counter)(nil),         // 2: filesync.Counter
 	(*BundleRequest)(nil),   // 3: filesync.BundleRequest
 	(*BlockSignatures)(nil), // 4: filesync.BlockSignatures
-	(*DeltaResponse)(nil),   // 5: filesync.DeltaResponse
-	(*DeltaBlock)(nil),      // 6: filesync.DeltaBlock
+	(*Block)(nil),           // 5: filesync.Block
+	(*DeltaResponse)(nil),   // 6: filesync.DeltaResponse
+	(*DeltaBlock)(nil),      // 7: filesync.DeltaBlock
 }
 var file_internal_filesync_proto_filesync_proto_depIdxs = []int32{
 	1, // 0: filesync.IndexExchange.files:type_name -> filesync.FileInfo
 	2, // 1: filesync.FileInfo.version:type_name -> filesync.Counter
-	6, // 2: filesync.DeltaResponse.blocks:type_name -> filesync.DeltaBlock
-	3, // [3:3] is the sub-list for method output_type
-	3, // [3:3] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	5, // 2: filesync.BlockSignatures.blocks:type_name -> filesync.Block
+	7, // 3: filesync.DeltaResponse.blocks:type_name -> filesync.DeltaBlock
+	4, // [4:4] is the sub-list for method output_type
+	4, // [4:4] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_internal_filesync_proto_filesync_proto_init() }
@@ -654,7 +727,7 @@ func file_internal_filesync_proto_filesync_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_filesync_proto_filesync_proto_rawDesc), len(file_internal_filesync_proto_filesync_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

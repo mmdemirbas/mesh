@@ -220,12 +220,19 @@ message DeltaResponse {
 message DeltaBlock {
   int64 offset = 1;
   int32 length = 2;
-  bytes data   = 3;
+  bytes hash   = 3;            // SHA-256 of chunk content
+  bytes data   = 4;            // empty iff the receiver already has this hash
 }
 ```
 
-Receiver matches by `(offset, length, hash)`, not by array index.
-A 1-byte insert at the head shifts one boundary, not all of them.
+`DeltaResponse.blocks` is the sender's complete chunk list in
+offset order. For each entry, `data` is populated only when the
+chunk's hash is absent from the receiver's signatures; otherwise
+the receiver looks up the hash in its own local blocks and copies
+the bytes from there. This handles arbitrary content shifts: a
+1-byte insert at the head shifts one boundary, not all of them,
+and downstream chunks still match by hash regardless of their new
+offset.
 
 ### Streaming
 

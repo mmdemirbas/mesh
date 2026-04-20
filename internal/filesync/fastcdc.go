@@ -13,9 +13,9 @@ import (
 // All peers must run identical parameters — determinism of boundaries
 // depends on this.
 const (
-	fastCDCMin = 32 * 1024   // 32 KiB
-	fastCDCAvg = 128 * 1024  // 128 KiB
-	fastCDCMax = 512 * 1024  // 512 KiB
+	fastCDCMin = 32 * 1024  // 32 KiB
+	fastCDCAvg = 128 * 1024 // 128 KiB
+	fastCDCMax = 512 * 1024 // 512 KiB
 )
 
 // gearTable holds 256 deterministic 64-bit constants used by the Gear

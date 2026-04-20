@@ -55,25 +55,40 @@ message BundleRequest {
 }
 
 // BlockSignatures is sent by the receiver to request a block-level delta.
-// Each entry is the SHA-256 hash of a fixed-size block of the local file.
+// Each Block is a FastCDC chunk of the receiver's local file (see
+// docs/filesync/DESIGN-v1.md §2). The sender chunks its own copy with
+// the same deterministic parameters and returns the full chunk layout
+// of its file; for each chunk whose hash the receiver already has,
+// the data field stays empty.
 message BlockSignatures {
-  string folder_id  = 1;
-  string path       = 2;
-  int64  block_size = 3;           // Block size in bytes (e.g., 131072 = 128 KB)
-  int64  file_size  = 4;           // Total local file size
-  repeated bytes block_hashes = 5; // SHA-256 of each sequential block
+  string folder_id = 1;
+  string path      = 2;
+  int64  file_size = 3;            // Total local file size
+  repeated Block blocks = 4;       // FastCDC chunks of the local file
 }
 
-// DeltaResponse contains only the blocks that differ between the local
-// and remote versions of a file.
+// Block identifies one FastCDC chunk. offset+length locate the bytes in
+// the file that produced the chunk; hash is SHA-256 of the chunk bytes.
+message Block {
+  int64 offset = 1;
+  int32 length = 2;
+  bytes hash   = 3;                // SHA-256, 32 bytes
+}
+
+// DeltaResponse carries the sender's complete chunk layout. Chunks
+// whose hash exists in the receiver's signatures are returned without
+// data — the receiver reassembles them by looking up the hash in its
+// own local chunks. Chunks new to the receiver carry data inline.
 message DeltaResponse {
-  int64  file_size    = 1;         // Total remote file size
-  bytes  file_sha256  = 2;         // Deprecated (L7): receiver verifies hash independently. Kept for wire compat.
-  repeated DeltaBlock blocks = 3;
+  int64 file_size = 1;             // Total remote file size
+  repeated DeltaBlock blocks = 2;  // Sender's full chunk list, in offset order
 }
 
-// DeltaBlock carries a single changed block.
+// DeltaBlock identifies one sender-side chunk. data is populated iff
+// the receiver does not already have this hash.
 message DeltaBlock {
-  int64 index = 1;                 // Block index (0-based)
-  bytes data  = 2;                 // Block content
+  int64 offset = 1;                // Offset in the remote file
+  int32 length = 2;                // Chunk length in bytes
+  bytes hash   = 3;                // SHA-256 of chunk content, 32 bytes
+  bytes data   = 4;                // Chunk bytes, empty if receiver has hash locally
 }

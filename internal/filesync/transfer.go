@@ -175,30 +175,46 @@ func tryFetchBlockSignatures(ctx context.Context, client *http.Client, peerAddr,
 	if sigs.GetFileSize() < 0 || sigs.GetFileSize() > maxSyncFileSize {
 		return nil, false
 	}
-	if sigs.GetBlockSize() <= 0 {
-		return nil, false
+	// Validate the chunk layout tiles [0, file_size) with non-zero,
+	// bounded lengths and each carries a full SHA-256 hash.
+	var covered int64
+	for _, b := range sigs.GetBlocks() {
+		if b.GetOffset() != covered {
+			return nil, false
+		}
+		if b.GetLength() <= 0 || int(b.GetLength()) > fastCDCMax {
+			return nil, false
+		}
+		if len(b.GetHash()) != 32 {
+			return nil, false
+		}
+		covered += int64(b.GetLength())
 	}
-	expectedBlocks := (sigs.GetFileSize() + sigs.GetBlockSize() - 1) / sigs.GetBlockSize()
-	if int64(len(sigs.GetBlockHashes())) != expectedBlocks {
+	if covered != sigs.GetFileSize() {
 		return nil, false
 	}
 	return &sigs, true
 }
 
 // downloadWithBlockVerify streams relPath from the peer, verifying each
-// complete block against sigs.BlockHashes as it arrives. On block mismatch,
-// it truncates the temp file back to the last verified boundary and reissues
-// the request with &offset=. Bounded by maxBlockRetries.
+// FastCDC chunk against sigs.Blocks as it arrives. On chunk mismatch,
+// it truncates the temp file back to the last verified boundary and
+// reissues the request with &offset=. Bounded by maxBlockRetries.
 func downloadWithBlockVerify(ctx context.Context, client *http.Client, peerAddr, folderID, relPath string, sigs *pb.BlockSignatures, root *os.Root, limiter *rate.Limiter, tmpRelPath string) error {
-	blockSize := sigs.GetBlockSize()
 	totalSize := sigs.GetFileSize()
-	expectedHashes := sigs.GetBlockHashes()
+	expectedBlocks := sigs.GetBlocks()
 
-	// Resume from the last verified block boundary (any partial block is
+	// Resume at the last verified chunk boundary (any partial chunk is
 	// discarded — we don't know if it was truncated mid-write).
 	var verifiedOffset int64
 	if info, statErr := root.Stat(tmpRelPath); statErr == nil && info.Size() > 0 {
-		verifiedOffset = (info.Size() / blockSize) * blockSize
+		for _, b := range expectedBlocks {
+			end := b.GetOffset() + int64(b.GetLength())
+			if end > info.Size() {
+				break
+			}
+			verifiedOffset = end
+		}
 		if verifiedOffset > totalSize {
 			verifiedOffset = totalSize
 		}
@@ -217,7 +233,17 @@ func downloadWithBlockVerify(ctx context.Context, client *http.Client, peerAddr,
 		return fmt.Errorf("seek temp: %w", err)
 	}
 
-	buf := make([]byte, blockSize)
+	// Locate the chunk index to resume from.
+	nextBlock := func(offset int64) int {
+		for i, b := range expectedBlocks {
+			if b.GetOffset() == offset {
+				return i
+			}
+		}
+		return len(expectedBlocks)
+	}
+
+	buf := make([]byte, fastCDCMax)
 	attempts := 0
 
 	for verifiedOffset < totalSize {
@@ -253,23 +279,22 @@ func downloadWithBlockVerify(ctx context.Context, client *http.Client, peerAddr,
 		reader := newRateLimitedReader(ctx, io.LimitReader(resp.Body, maxSyncFileSize), limiter)
 		restart := false
 
-		for verifiedOffset < totalSize {
-			blockIndex := verifiedOffset / blockSize
-			want := min(blockSize, totalSize-verifiedOffset)
+		for i := nextBlock(verifiedOffset); i < len(expectedBlocks) && verifiedOffset < totalSize; i++ {
+			b := expectedBlocks[i]
+			want := int64(b.GetLength())
 			n, readErr := io.ReadFull(reader, buf[:want])
 			if int64(n) != want {
-				// Short read — treat as transient, retry from verifiedOffset.
 				slog.Warn("C3: short read during block verify",
 					"folder", folderID, "path", relPath, "peer", peerAddr,
-					"block", blockIndex, "want", want, "got", n, "err", readErr)
+					"block", i, "want", want, "got", n, "err", readErr)
 				restart = true
 				break
 			}
 			h := sha256.Sum256(buf[:n])
-			if !bytes.Equal(h[:], expectedHashes[blockIndex]) {
+			if !bytes.Equal(h[:], b.GetHash()) {
 				slog.Warn("C3: block hash mismatch, will retry",
 					"folder", folderID, "path", relPath, "peer", peerAddr,
-					"block", blockIndex)
+					"block", i)
 				restart = true
 				break
 			}
@@ -450,25 +475,29 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
 	}
 
-	// Compute block signatures of local file.
-	blockSize := int64(defaultBlockSize)
-	localHashes, err := computeBlockSignaturesRoot(root, relPath, blockSize)
+	// Chunk the local file with FastCDC — its hashes tell the peer
+	// which chunks we already have.
+	localBlocks, err := signFileRoot(root, relPath)
 	if err != nil {
 		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
 	}
-
 	localInfo, err := root.Stat(relPath)
 	if err != nil {
 		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
 	}
-
-	// Send block signatures to peer.
+	pbLocal := make([]*pb.Block, len(localBlocks))
+	for i, b := range localBlocks {
+		pbLocal[i] = &pb.Block{
+			Offset: b.Offset,
+			Length: int32(b.Length),
+			Hash:   append([]byte(nil), b.Hash[:]...),
+		}
+	}
 	sigReq := &pb.BlockSignatures{
-		FolderId:    folderID,
-		Path:        relPath,
-		BlockSize:   blockSize,
-		FileSize:    localInfo.Size(),
-		BlockHashes: localHashes,
+		FolderId: folderID,
+		Path:     relPath,
+		FileSize: localInfo.Size(),
+		Blocks:   pbLocal,
 	}
 	reqData, err := proto.Marshal(sigReq)
 	if err != nil {
@@ -514,14 +543,34 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 		return "", fmt.Errorf("delta file size out of range for %s: %d", relPath, remoteFileSize)
 	}
 
-	// Convert proto blocks to internal format.
-	blocks := make([]deltaBlock, len(deltaResp.GetBlocks()))
-	for i, b := range deltaResp.GetBlocks() {
-		blocks[i] = deltaBlock{index: b.GetIndex(), data: b.GetData()}
+	// Convert proto blocks to sender-side chunks. Each entry must carry
+	// either inline data OR a known hash the receiver can resolve from
+	// its local copy.
+	pbBlocks := deltaResp.GetBlocks()
+	chunks := make([]senderChunk, len(pbBlocks))
+	for i, b := range pbBlocks {
+		if b.GetLength() <= 0 || int(b.GetLength()) > fastCDCMax {
+			return "", fmt.Errorf("delta chunk %d invalid length %d", i, b.GetLength())
+		}
+		if len(b.GetHash()) != 32 {
+			return "", fmt.Errorf("delta chunk %d missing hash", i)
+		}
+		c := senderChunk{
+			Offset: b.GetOffset(),
+			Length: int(b.GetLength()),
+			Hash:   hash256FromBytes(b.GetHash()),
+		}
+		if data := b.GetData(); len(data) > 0 {
+			if len(data) != c.Length {
+				return "", fmt.Errorf("delta chunk %d data len=%d want %d", i, len(data), c.Length)
+			}
+			c.Data = data
+		}
+		chunks[i] = c
 	}
 
 	// Apply delta to reconstruct the file.
-	tmpRelPath, err := applyDeltaRoot(root, relPath, peerSuffix(peerAddr), blockSize, remoteFileSize, blocks)
+	tmpRelPath, err := applyDeltaRoot(root, relPath, peerSuffix(peerAddr), remoteFileSize, chunks)
 	if err != nil {
 		return "", fmt.Errorf("apply delta: %w", err)
 	}

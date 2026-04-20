@@ -596,25 +596,6 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	blockSize := req.GetBlockSize()
-	if blockSize <= 0 {
-		blockSize = defaultBlockSize
-	}
-	// B18: cap to prevent a malicious peer from requesting 1-byte blocks,
-	// which would compute one SHA-256 per byte (OOM + CPU exhaustion).
-	const minBlockSize = 1024        // 1 KB
-	const maxBlockSizeCap = 16 << 20 // 16 MB
-	if blockSize < minBlockSize {
-		blockSize = minBlockSize
-	}
-	if blockSize > maxBlockSizeCap {
-		blockSize = maxBlockSizeCap
-	}
-
-	// N5: cap the number of peer-supplied block hashes to what the local
-	// file actually needs. Without this, a peer can claim a tiny blockSize
-	// and send millions of hashes, forcing the server to read the entire
-	// file as 1 KB blocks.
 	fi, err := folder.root.Stat(deltaRelPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -624,14 +605,29 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stat: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	maxBlocks := (fi.Size() + blockSize - 1) / blockSize
-	peerHashes := req.GetBlockHashes()
-	if int64(len(peerHashes)) > maxBlocks {
-		peerHashes = peerHashes[:maxBlocks]
+
+	// N5: cap the number of peer-supplied block signatures to what the
+	// local file could possibly produce under FastCDC (bounded by min
+	// chunk size). Without this, a peer could flood us with signatures.
+	maxBlocks := (fi.Size() + int64(fastCDCMin) - 1) / int64(fastCDCMin)
+	if maxBlocks < 1 {
+		maxBlocks = 1
+	}
+	peerBlocks := req.GetBlocks()
+	if int64(len(peerBlocks)) > maxBlocks {
+		peerBlocks = peerBlocks[:maxBlocks]
+	}
+	peerHashes := make(map[Hash256]struct{}, len(peerBlocks))
+	for _, b := range peerBlocks {
+		h := b.GetHash()
+		if len(h) != 32 {
+			continue
+		}
+		peerHashes[hash256FromBytes(h)] = struct{}{}
 	}
 
-	// Compute delta between our file and the peer's block hashes.
-	delta, err := computeDeltaBlocksRoot(folder.root, deltaRelPath, blockSize, peerHashes)
+	// Compute delta between our file and the peer's chunk hashes.
+	delta, err := computeDeltaRoot(folder.root, deltaRelPath, peerHashes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -643,15 +639,17 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 
 	// Build response.
 	pbBlocks := make([]*pb.DeltaBlock, len(delta))
-	for i, b := range delta {
-		pbBlocks[i] = &pb.DeltaBlock{Index: b.index, Data: b.data}
+	for i, c := range delta {
+		pbBlocks[i] = &pb.DeltaBlock{
+			Offset: c.Offset,
+			Length: int32(c.Length),
+			Hash:   append([]byte(nil), c.Hash[:]...),
+			Data:   c.Data,
+		}
 	}
 	resp := &pb.DeltaResponse{
 		FileSize: fi.Size(),
 		Blocks:   pbBlocks,
-		// L7: FileSha256 removed — receiver verifies hash independently
-		// after applying the delta. Field 2 kept reserved in proto for
-		// backward compatibility.
 	}
 
 	data, err := proto.Marshal(resp)
@@ -686,7 +684,6 @@ func (s *server) handleBlockSigs(w http.ResponseWriter, r *http.Request) {
 
 	folderID := r.URL.Query().Get("folder")
 	relPath := r.URL.Query().Get("path")
-	blockSizeStr := r.URL.Query().Get("block_size")
 
 	folder := s.node.findFolder(folderID)
 	if folder == nil {
@@ -707,25 +704,6 @@ func (s *server) handleBlockSigs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	blockSize := int64(defaultBlockSize)
-	if blockSizeStr != "" {
-		parsed, err := strconv.ParseInt(blockSizeStr, 10, 64)
-		if err != nil || parsed <= 0 {
-			http.Error(w, "invalid block_size", http.StatusBadRequest)
-			return
-		}
-		blockSize = parsed
-	}
-	// Same clamp as handleDelta (B18): prevent tiny-block CPU/OOM attack.
-	const minBlockSize = 1024
-	const maxBlockSizeCap = 16 << 20
-	if blockSize < minBlockSize {
-		blockSize = minBlockSize
-	}
-	if blockSize > maxBlockSizeCap {
-		blockSize = maxBlockSizeCap
-	}
-
 	fi, err := folder.root.Stat(relPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -736,7 +714,7 @@ func (s *server) handleBlockSigs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hashes, err := computeBlockSignaturesRoot(folder.root, relPath, blockSize)
+	sigBlocks, err := signFileRoot(folder.root, relPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -746,12 +724,19 @@ func (s *server) handleBlockSigs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	pbBlocks := make([]*pb.Block, len(sigBlocks))
+	for i, b := range sigBlocks {
+		pbBlocks[i] = &pb.Block{
+			Offset: b.Offset,
+			Length: int32(b.Length),
+			Hash:   append([]byte(nil), b.Hash[:]...),
+		}
+	}
 	resp := &pb.BlockSignatures{
-		FolderId:    folderID,
-		Path:        relPath,
-		BlockSize:   blockSize,
-		FileSize:    fi.Size(),
-		BlockHashes: hashes,
+		FolderId: folderID,
+		Path:     relPath,
+		FileSize: fi.Size(),
+		Blocks:   pbBlocks,
 	}
 	data, err := proto.Marshal(resp)
 	if err != nil {

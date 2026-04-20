@@ -3327,121 +3327,203 @@ func TestDownloadFile_ShortHash(t *testing.T) {
 	}
 }
 
-// --- Block-level delta tests ---
+// --- Block-level delta tests (FastCDC / offset-addressed chunks) ---
 
-func TestComputeBlockSignatures(t *testing.T) {
+// fastCDCTestData builds a deterministic but unpredictable byte stream
+// so FastCDC finds multiple natural boundaries. Low-entropy inputs are
+// not representative — the gear hash is designed to cut on random-
+// looking content.
+func fastCDCTestData(seed int64, n int) []byte {
+	b := make([]byte, n)
+	// Simple xorshift64* keeps the output cheap and deterministic.
+	state := uint64(seed)*2862933555777941757 + 3037000493
+	for i := range b {
+		state ^= state << 13
+		state ^= state >> 7
+		state ^= state << 17
+		b[i] = byte(state)
+	}
+	return b
+}
+
+func TestSignFile_ProducesCoveringChunks(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	// Create a file with 2.5 blocks worth of data (block size = 4 bytes for testing).
-	writeFile(t, dir, "data.bin", "AAAABBBBcc")
+	data := fastCDCTestData(1, fastCDCAvg*3+1000)
+	if err := os.WriteFile(filepath.Join(dir, "data.bin"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
-	hashes, err := computeBlockSignatures(filepath.Join(dir, "data.bin"), 4)
+	blocks, err := signFile(filepath.Join(dir, "data.bin"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hashes) != 3 {
-		t.Fatalf("expected 3 blocks, got %d", len(hashes))
+	if len(blocks) < 2 {
+		t.Fatalf("expected at least 2 chunks, got %d", len(blocks))
 	}
-	// First two blocks are different (AAAA vs BBBB).
-	if hashEqual(hashes[0], hashes[1]) {
-		t.Error("first two blocks should differ")
+	var covered int64
+	for i, b := range blocks {
+		if b.Offset != covered {
+			t.Fatalf("block %d offset=%d want %d", i, b.Offset, covered)
+		}
+		covered += int64(b.Length)
+	}
+	if covered != int64(len(data)) {
+		t.Fatalf("blocks cover %d bytes, want %d", covered, len(data))
 	}
 }
 
-func TestComputeDeltaBlocks(t *testing.T) {
+func TestSignFile_RootAndPathAgree(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	// Old file: "AAAABBBBcc"
-	writeFile(t, dir, "old.bin", "AAAABBBBcc")
-	// New file: "AAAAXXXXcc" — middle block changed.
-	writeFile(t, dir, "new.bin", "AAAAXXXXcc")
-
-	oldHashes, _ := computeBlockSignatures(filepath.Join(dir, "old.bin"), 4)
-	delta, err := computeDeltaBlocks(filepath.Join(dir, "new.bin"), 4, oldHashes)
-	if err != nil {
+	data := fastCDCTestData(2, fastCDCAvg*2+500)
+	if err := os.WriteFile(filepath.Join(dir, "data.bin"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Only block 1 (XXXX) should be in the delta.
-	if len(delta) != 1 {
-		t.Fatalf("expected 1 delta block, got %d", len(delta))
-	}
-	if delta[0].index != 1 {
-		t.Errorf("delta block index = %d, want 1", delta[0].index)
-	}
-	if string(delta[0].data) != "XXXX" {
-		t.Errorf("delta block data = %q, want 'XXXX'", delta[0].data)
-	}
-}
-
-func TestComputeBlockSignaturesRoot(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	writeFile(t, dir, "data.bin", "AAAABBBBcc")
 	root := openTestRoot(t, dir)
 
-	hashes, err := computeBlockSignaturesRoot(root, "data.bin", 4)
+	pathBlocks, err := signFile(filepath.Join(dir, "data.bin"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hashes) != 3 {
-		t.Fatalf("expected 3 blocks, got %d", len(hashes))
+	rootBlocks, err := signFileRoot(root, "data.bin")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if hashEqual(hashes[0], hashes[1]) {
-		t.Error("first two blocks should differ")
+	if len(pathBlocks) != len(rootBlocks) {
+		t.Fatalf("chunk count differs path=%d root=%d", len(pathBlocks), len(rootBlocks))
 	}
-
-	// Path-based and Root-based must produce identical results.
-	pathHashes, _ := computeBlockSignatures(filepath.Join(dir, "data.bin"), 4)
-	for i := range hashes {
-		if !hashEqual(hashes[i], pathHashes[i]) {
-			t.Errorf("block %d: root hash differs from path hash", i)
+	for i := range pathBlocks {
+		if pathBlocks[i] != rootBlocks[i] {
+			t.Fatalf("chunk %d differs between path and root variants", i)
 		}
 	}
 }
 
-func TestComputeDeltaBlocksRoot(t *testing.T) {
+func TestComputeDelta_SkipsHashesPeerAlreadyHas(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	writeFile(t, dir, "old.bin", "AAAABBBBcc")
-	writeFile(t, dir, "new.bin", "AAAAXXXXcc")
-	root := openTestRoot(t, dir)
+	data := fastCDCTestData(3, fastCDCAvg*3)
+	if err := os.WriteFile(filepath.Join(dir, "data.bin"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
-	oldHashes, _ := computeBlockSignaturesRoot(root, "old.bin", 4)
-	delta, err := computeDeltaBlocksRoot(root, "new.bin", 4, oldHashes)
+	// Sign the same file; feed every hash back as "peer already has
+	// these". The delta must contain every chunk with Data=nil.
+	sigs, err := signFile(filepath.Join(dir, "data.bin"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(delta) != 1 {
-		t.Fatalf("expected 1 delta block, got %d", len(delta))
+	peerHashes := make(map[Hash256]struct{}, len(sigs))
+	for _, b := range sigs {
+		peerHashes[b.Hash] = struct{}{}
 	}
-	if delta[0].index != 1 {
-		t.Errorf("delta block index = %d, want 1", delta[0].index)
+	delta, err := computeDelta(filepath.Join(dir, "data.bin"), peerHashes)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if string(delta[0].data) != "XXXX" {
-		t.Errorf("delta block data = %q, want 'XXXX'", delta[0].data)
+	if len(delta) != len(sigs) {
+		t.Fatalf("delta chunk count=%d want %d", len(delta), len(sigs))
+	}
+	for i, c := range delta {
+		if c.Data != nil {
+			t.Errorf("chunk %d carries data despite hash in peerHashes", i)
+		}
 	}
 }
 
-func TestApplyDeltaRoot(t *testing.T) {
+func TestComputeDelta_SendsDataForUnknownHashes(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	writeFile(t, dir, "old.bin", "AAAABBBBcc")
-	root := openTestRoot(t, dir)
-
-	blocks := []deltaBlock{{index: 1, data: []byte("XXXX")}}
-	tmpRelPath, err := applyDeltaRoot(root, "old.bin", "testpeer", 4, 10, blocks)
+	data := fastCDCTestData(4, fastCDCAvg*2)
+	if err := os.WriteFile(filepath.Join(dir, "data.bin"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	delta, err := computeDelta(filepath.Join(dir, "data.bin"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(delta) == 0 {
+		t.Fatalf("expected at least one chunk")
+	}
+	for i, c := range delta {
+		if len(c.Data) != c.Length {
+			t.Fatalf("chunk %d data len=%d want %d", i, len(c.Data), c.Length)
+		}
+	}
+}
+
+func TestApplyDelta_ReconstructsFromLocalLookup(t *testing.T) {
+	t.Parallel()
+	// Old == New: every chunk must be resolvable by hash lookup into
+	// the local file, with no inline data required.
+	dir := t.TempDir()
+	data := fastCDCTestData(5, fastCDCAvg*3+777)
+	if err := os.WriteFile(filepath.Join(dir, "old.bin"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := openTestRoot(t, dir)
+
+	sigs, err := signFileRoot(root, "old.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Build delta from the same file with every hash "known" on peer.
+	peerHashes := map[Hash256]struct{}{}
+	for _, b := range sigs {
+		peerHashes[b.Hash] = struct{}{}
+	}
+	delta, err := computeDeltaRoot(root, "old.bin", peerHashes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpRelPath, err := applyDeltaRoot(root, "old.bin", "testpeer", int64(len(data)), delta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Remove(tmpRelPath) })
 
 	got, err := os.ReadFile(filepath.Join(dir, tmpRelPath))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "AAAAXXXXcc" {
-		t.Errorf("delta result = %q, want 'AAAAXXXXcc'", got)
+	if !bytes.Equal(got, data) {
+		t.Fatalf("reconstructed %d bytes, want %d; mismatch", len(got), len(data))
 	}
-	_ = root.Remove(tmpRelPath)
+}
+
+func TestApplyDelta_ReconstructsFromInlineData(t *testing.T) {
+	t.Parallel()
+	// Old empty → every remote chunk must carry inline data because
+	// the receiver has nothing local to copy from.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "old.bin"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newData := fastCDCTestData(6, fastCDCAvg*3)
+	newPath := filepath.Join(dir, "new.bin")
+	if err := os.WriteFile(newPath, newData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	delta, err := computeDelta(newPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := openTestRoot(t, dir)
+	tmpRelPath, err := applyDeltaRoot(root, "old.bin", "testpeer", int64(len(newData)), delta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Remove(tmpRelPath) })
+
+	got, err := os.ReadFile(filepath.Join(dir, tmpRelPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, newData) {
+		t.Fatalf("reconstruction mismatch: got %d bytes want %d", len(got), len(newData))
+	}
 }
 
 func TestHashFileRoot(t *testing.T) {
@@ -3575,98 +3657,22 @@ func TestHashFileIncremental_TruncateRegrow(t *testing.T) {
 	}
 }
 
-func TestApplyDelta(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	writeFile(t, dir, "old.bin", "AAAABBBBcc")
-
-	// Delta: replace block 1 with "XXXX".
-	blocks := []deltaBlock{{index: 1, data: []byte("XXXX")}}
-	tmpPath, err := applyDelta(
-		filepath.Join(dir, "old.bin"),
-		filepath.Join(dir, "result.bin"),
-		"testpeer", 4, 10, blocks,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := os.ReadFile(tmpPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "AAAAXXXXcc" {
-		t.Errorf("delta result = %q, want 'AAAAXXXXcc'", got)
-	}
-	_ = os.Remove(tmpPath)
-}
-
-// TestApplyDelta_TruncatesOldTailBeyondRemoteSize pins the Truncate step in
-// assembleDelta. Existing tests size the assembled output to exactly
-// remoteFileSize, so Truncate is a no-op and its removal slips past mutation
-// testing. Here the old file is larger than the new remote size, no blocks are
-// changed, and the reconstructed file must be trimmed to the remote size.
-func TestApplyDelta_TruncatesOldTailBeyondRemoteSize(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	// Old file: 12 bytes, three full 4-byte blocks.
-	writeFile(t, dir, "old.bin", "AAAABBBBcccc")
-
-	// No block changes; remoteFileSize is smaller than the old file, so the
-	// delta-assembly loop writes 12 bytes and Truncate must clip to 10.
-	tmpPath, err := applyDelta(
-		filepath.Join(dir, "old.bin"),
-		filepath.Join(dir, "result.bin"),
-		"testpeer", 4, 10, nil,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := os.ReadFile(tmpPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "AAAABBBBcc" {
-		t.Errorf("delta result = %q, want 'AAAABBBBcc' (truncate to remoteFileSize)", got)
-	}
-	_ = os.Remove(tmpPath)
-}
-
-// TestApplyDeltaRoot_TruncatesOldTailBeyondRemoteSize mirrors the above for
-// the os.Root variant so both call paths pin the Truncate invariant.
-func TestApplyDeltaRoot_TruncatesOldTailBeyondRemoteSize(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	writeFile(t, dir, "old.bin", "AAAABBBBcccc")
-	root := openTestRoot(t, dir)
-
-	tmpRelPath, err := applyDeltaRoot(root, "old.bin", "testpeer", 4, 10, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile(filepath.Join(dir, tmpRelPath))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "AAAABBBBcc" {
-		t.Errorf("delta result = %q, want 'AAAABBBBcc' (truncate to remoteFileSize)", got)
-	}
-	_ = root.Remove(tmpRelPath)
-}
-
 func TestDeltaEndpoint_ReducesTransfer(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	// Use 1024-byte blocks (B18 minimum) with 3 blocks total.
-	const bs = 1024
-	blockA := strings.Repeat("A", bs)
-	blockX := strings.Repeat("X", bs) // changed block on server
-	blockC := strings.Repeat("c", bs)
-	blockB := strings.Repeat("B", bs) // old block on client
-
-	writeFile(t, dir, "data.bin", blockA+blockX+blockC)
+	// Three distinct prefixes joined into one file. FastCDC will pick
+	// boundaries by content, not by section length — the test asserts
+	// that when the receiver already has the surrounding content, the
+	// middle region's data is the only inline payload.
+	prefix := fastCDCTestData(1, fastCDCAvg*2)
+	middle := fastCDCTestData(2, fastCDCAvg*2)
+	suffix := fastCDCTestData(3, fastCDCAvg*2)
+	serverData := append(append([]byte{}, prefix...), middle...)
+	serverData = append(serverData, suffix...)
+	if err := os.WriteFile(filepath.Join(dir, "data.bin"), serverData, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	n := &Node{
 		cfg:      testCfg(dir, "127.0.0.1"),
@@ -3682,17 +3688,32 @@ func TestDeltaEndpoint_ReducesTransfer(t *testing.T) {
 	ts := httptest.NewServer(srv.handler())
 	defer ts.Close()
 
-	// Client has old version with different middle block.
+	// Client's file differs only in the middle region — prefix+suffix
+	// chunks match by hash, so their Data must be empty in the delta.
 	clientDir := t.TempDir()
-	writeFile(t, clientDir, "data.bin", blockA+blockB+blockC)
-	localHashes, _ := computeBlockSignatures(filepath.Join(clientDir, "data.bin"), bs)
-
+	otherMiddle := fastCDCTestData(9, fastCDCAvg*2)
+	clientData := append(append([]byte{}, prefix...), otherMiddle...)
+	clientData = append(clientData, suffix...)
+	if err := os.WriteFile(filepath.Join(clientDir, "data.bin"), clientData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	localBlocks, err := signFile(filepath.Join(clientDir, "data.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pbLocal := make([]*pb.Block, len(localBlocks))
+	for i, b := range localBlocks {
+		pbLocal[i] = &pb.Block{
+			Offset: b.Offset,
+			Length: int32(b.Length),
+			Hash:   append([]byte(nil), b.Hash[:]...),
+		}
+	}
 	req := &pb.BlockSignatures{
-		FolderId:    "test",
-		Path:        "data.bin",
-		BlockSize:   bs,
-		FileSize:    3 * bs,
-		BlockHashes: localHashes,
+		FolderId: "test",
+		Path:     "data.bin",
+		FileSize: int64(len(clientData)),
+		Blocks:   pbLocal,
 	}
 	reqData, _ := proto.Marshal(req)
 
@@ -3701,7 +3722,6 @@ func TestDeltaEndpoint_ReducesTransfer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -3712,61 +3732,14 @@ func TestDeltaEndpoint_ReducesTransfer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Should only get 1 changed block (the middle one).
-	if len(deltaResp.GetBlocks()) != 1 {
-		t.Fatalf("expected 1 delta block, got %d", len(deltaResp.GetBlocks()))
+	// Total inline data must be less than the full file — at least the
+	// prefix or suffix should be resolvable by hash lookup.
+	var inlineBytes int
+	for _, b := range deltaResp.GetBlocks() {
+		inlineBytes += len(b.GetData())
 	}
-	if string(deltaResp.GetBlocks()[0].GetData()) != blockX {
-		t.Errorf("delta data length = %d, want %d", len(deltaResp.GetBlocks()[0].GetData()), bs)
-	}
-}
-
-// B18: verify that extreme BlockSize values are clamped to [1KB, 16MB].
-func TestDeltaEndpoint_BlockSizeClamped(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	writeFile(t, dir, "data.bin", "AAAA")
-
-	n := &Node{
-		cfg:      testCfg(dir, "127.0.0.1"),
-		folders:  make(map[string]*folderState),
-		deviceID: "test-device",
-	}
-	n.folders["test"] = &folderState{
-		cfg:  testFolderCfg(dir, "127.0.0.1"),
-		root: openTestRoot(t, dir),
-	}
-
-	srv := &server{node: n}
-	ts := httptest.NewServer(srv.handler())
-	defer ts.Close()
-
-	for _, tc := range []struct {
-		name      string
-		blockSize int64
-	}{
-		{"one byte", 1},
-		{"below min", 512},
-		{"above max", 32 << 20},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			req := &pb.BlockSignatures{
-				FolderId:    "test",
-				Path:        "data.bin",
-				BlockSize:   tc.blockSize,
-				FileSize:    4,
-				BlockHashes: nil,
-			}
-			reqData, _ := proto.Marshal(req)
-			resp, err := http.Post(ts.URL+"/delta", "application/x-protobuf", bytes.NewReader(reqData))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() { _ = resp.Body.Close() }()
-			if resp.StatusCode != http.StatusOK {
-				t.Fatalf("expected 200, got %d", resp.StatusCode)
-			}
-		})
+	if inlineBytes >= len(serverData) {
+		t.Fatalf("delta carried %d bytes inline, want < %d (no hash matches)", inlineBytes, len(serverData))
 	}
 }
 
@@ -4963,7 +4936,7 @@ func TestHandleDelta_RejectsReceiveOnly(t *testing.T) {
 	ts := httptest.NewServer(srv.handler())
 	defer ts.Close()
 
-	req := &pb.BlockSignatures{FolderId: "test", Path: "data.bin", BlockSize: 4}
+	req := &pb.BlockSignatures{FolderId: "test", Path: "data.bin"}
 	reqData, _ := proto.Marshal(req)
 	resp, err := http.Post(ts.URL+"/delta", "application/x-protobuf", bytes.NewReader(reqData))
 	if err != nil {
@@ -4999,7 +4972,7 @@ func TestHandleDelta_RejectsDisabled(t *testing.T) {
 	ts := httptest.NewServer(srv.handler())
 	defer ts.Close()
 
-	req := &pb.BlockSignatures{FolderId: "test", Path: "data.bin", BlockSize: 4}
+	req := &pb.BlockSignatures{FolderId: "test", Path: "data.bin"}
 	reqData, _ := proto.Marshal(req)
 	resp, err := http.Post(ts.URL+"/delta", "application/x-protobuf", bytes.NewReader(reqData))
 	if err != nil {
@@ -6039,7 +6012,7 @@ func BenchmarkIgnoreMatcherConstructionLinear(b *testing.B) {
 
 func BenchmarkBlockSignatures(b *testing.B) {
 	dir := b.TempDir()
-	// 1 MB file = 8 blocks at 128 KB.
+	// 1 MB file → ~8 FastCDC chunks at the default 128 KB average.
 	path := filepath.Join(dir, "bench.dat")
 	data := make([]byte, 1024*1024)
 	for i := range data {
@@ -6049,7 +6022,7 @@ func BenchmarkBlockSignatures(b *testing.B) {
 	b.SetBytes(int64(len(data)))
 	b.ResetTimer()
 	for b.Loop() {
-		_, _ = computeBlockSignatures(path, defaultBlockSize)
+		_, _ = signFile(path)
 	}
 }
 
@@ -6662,37 +6635,53 @@ func TestDeltaFileSize_Validation(t *testing.T) {
 	}
 }
 
-// N5: handleDelta caps peer block hashes to file's actual block count.
-func TestComputeDeltaBlocks_ExcessHashes(t *testing.T) {
+// N5: handleDelta caps peer block signatures to the file's maximum
+// possible FastCDC chunk count. A peer can't force unbounded work by
+// sending millions of bogus signatures for a small file.
+func TestHandleDelta_CapsPeerBlocks(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "small.dat")
-	// 256 bytes → 1 block at 128KB blockSize.
-	if err := os.WriteFile(path, make([]byte, 256), 0600); err != nil {
+	// Small file (<< fastCDCMin) — upper bound of chunks is 1.
+	if err := os.WriteFile(filepath.Join(dir, "small.dat"), make([]byte, 256), 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	// Send 100 hashes for a 1-block file. Server should only compare
-	// against the file's actual block count, not all 100.
-	fakeHashes := make([][]byte, 100)
-	for i := range fakeHashes {
-		fakeHashes[i] = make([]byte, 32)
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
 	}
-
-	fi, _ := os.Stat(path)
-	blockSize := int64(defaultBlockSize)
-	maxBlocks := (fi.Size() + blockSize - 1) / blockSize
-	if int64(len(fakeHashes)) > maxBlocks {
-		fakeHashes = fakeHashes[:maxBlocks]
+	n.folders["test"] = &folderState{
+		cfg:  testFolderCfg(dir, "127.0.0.1"),
+		root: openTestRoot(t, dir),
 	}
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	blocks, err := computeDeltaBlocks(path, blockSize, fakeHashes)
+	// Send 100_000 zero-hashes. Server should truncate to maxBlocks
+	// and still respond successfully with the file's single chunk.
+	pbBlocks := make([]*pb.Block, 100_000)
+	for i := range pbBlocks {
+		pbBlocks[i] = &pb.Block{Offset: int64(i), Length: 1, Hash: make([]byte, 32)}
+	}
+	req := &pb.BlockSignatures{FolderId: "test", Path: "small.dat", Blocks: pbBlocks}
+	reqData, _ := proto.Marshal(req)
+	resp, err := http.Post(ts.URL+"/delta", "application/x-protobuf", bytes.NewReader(reqData))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// File has 1 block, fake hash is all zeros → should differ.
-	if len(blocks) != 1 {
-		t.Errorf("expected 1 delta block, got %d", len(blocks))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	var deltaResp pb.DeltaResponse
+	if err := proto.Unmarshal(body, &deltaResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(deltaResp.GetBlocks()) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(deltaResp.GetBlocks()))
 	}
 }
 

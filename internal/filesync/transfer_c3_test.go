@@ -93,7 +93,7 @@ func TestC3HappyPathPerBlockVerify(t *testing.T) {
 	t.Parallel()
 	// 3 full 128 KB blocks + a small partial tail exercises both the full
 	// and short-block read branches.
-	content := randomBytes(t, defaultBlockSize*3+7331)
+	content := randomBytes(t, fastCDCAvg*3+7331)
 	expected := Hash256(sha256.Sum256(content))
 
 	peerAddr, client, _ := c3Setup(t, "data.bin", content)
@@ -119,7 +119,7 @@ func TestC3HappyPathPerBlockVerify(t *testing.T) {
 // last verified boundary, reissue /file?offset=, and complete successfully.
 func TestC3BlockCorruptionRecoverable(t *testing.T) {
 	t.Parallel()
-	content := randomBytes(t, defaultBlockSize*3)
+	content := randomBytes(t, fastCDCAvg*3)
 	expected := Hash256(sha256.Sum256(content))
 
 	peerAddr, _, srv := c3Setup(t, "data.bin", content)
@@ -130,11 +130,11 @@ func TestC3BlockCorruptionRecoverable(t *testing.T) {
 			return body
 		}
 		hit := fileHits.Add(1)
-		if hit == 1 && len(body) > defaultBlockSize+100 {
-			// Flip one byte in the second block (index defaultBlockSize+50).
+		if hit == 1 && len(body) > fastCDCAvg+100 {
+			// Flip one byte in the second block (index fastCDCAvg+50).
 			corrupted := make([]byte, len(body))
 			copy(corrupted, body)
-			corrupted[defaultBlockSize+50] ^= 0xFF
+			corrupted[fastCDCAvg+50] ^= 0xFF
 			return corrupted
 		}
 		return body
@@ -165,7 +165,7 @@ func TestC3BlockCorruptionRecoverable(t *testing.T) {
 // the caller's retryTracker can quarantine the (path, peer) pair.
 func TestC3RepeatedCorruptionQuarantines(t *testing.T) {
 	t.Parallel()
-	content := randomBytes(t, defaultBlockSize*2)
+	content := randomBytes(t, fastCDCAvg*2)
 	expected := Hash256(sha256.Sum256(content))
 
 	peerAddr, _, srv := c3Setup(t, "data.bin", content)
@@ -211,7 +211,7 @@ func TestC3RepeatedCorruptionQuarantines(t *testing.T) {
 // receiver must silently fall back to whole-file verify and succeed.
 func TestC3FallsBackWhenBlockSigsMissing(t *testing.T) {
 	t.Parallel()
-	content := randomBytes(t, defaultBlockSize+500)
+	content := randomBytes(t, fastCDCAvg+500)
 	expected := Hash256(sha256.Sum256(content))
 
 	srcDir := t.TempDir()
@@ -284,7 +284,7 @@ func TestC3SingleBlockFile(t *testing.T) {
 // divergence from the expected index hash.
 func TestC3WholeFileHashMismatchRejected(t *testing.T) {
 	t.Parallel()
-	content := randomBytes(t, defaultBlockSize+200)
+	content := randomBytes(t, fastCDCAvg+200)
 	wrongExpected := testHash("not-the-real-hash")
 
 	peerAddr, client, _ := c3Setup(t, "data.bin", content)
@@ -305,13 +305,13 @@ func TestC3WholeFileHashMismatchRejected(t *testing.T) {
 	}
 }
 
-// TestC3BlockSigsEndpoint: direct integration test of the new HTTP surface.
-// Verifies block_hashes length matches ceil(file_size / block_size), each
-// hash is a valid SHA-256, and the sum of block hashes reconstructs the
-// whole-file hash when re-hashed from disk.
+// TestC3BlockSigsEndpoint: direct integration test of the /blocksigs HTTP
+// surface. Verifies the response carries the sender's full FastCDC chunk
+// layout (offset, length, hash), tiles [0, file_size), and each hash is the
+// SHA-256 of the named byte range.
 func TestC3BlockSigsEndpoint(t *testing.T) {
 	t.Parallel()
-	content := randomBytes(t, defaultBlockSize*2+1024)
+	content := randomBytes(t, fastCDCAvg*2+1024)
 	srcDir := t.TempDir()
 	writeFile(t, srcDir, "data.bin", string(content))
 
@@ -344,21 +344,26 @@ func TestC3BlockSigsEndpoint(t *testing.T) {
 	if sigs.GetFileSize() != int64(len(content)) {
 		t.Fatalf("file_size = %d, want %d", sigs.GetFileSize(), len(content))
 	}
-	if sigs.GetBlockSize() != defaultBlockSize {
-		t.Fatalf("block_size = %d, want %d", sigs.GetBlockSize(), defaultBlockSize)
+	blocks := sigs.GetBlocks()
+	if len(blocks) == 0 {
+		t.Fatalf("expected at least one block")
 	}
-	expectedBlocks := (int64(len(content)) + defaultBlockSize - 1) / defaultBlockSize
-	if int64(len(sigs.GetBlockHashes())) != expectedBlocks {
-		t.Fatalf("block count = %d, want %d", len(sigs.GetBlockHashes()), expectedBlocks)
-	}
-	// Verify each block hash: rehash the same slice and compare.
-	for i, h := range sigs.GetBlockHashes() {
-		start := int64(i) * defaultBlockSize
-		end := min(start+defaultBlockSize, int64(len(content)))
-		want := sha256.Sum256(content[start:end])
-		if !bytes.Equal(h, want[:]) {
+	var covered int64
+	for i, b := range blocks {
+		if b.GetOffset() != covered {
+			t.Fatalf("block %d offset=%d want %d", i, b.GetOffset(), covered)
+		}
+		if b.GetLength() <= 0 || int(b.GetLength()) > fastCDCMax {
+			t.Fatalf("block %d length=%d out of bounds", i, b.GetLength())
+		}
+		want := sha256.Sum256(content[b.GetOffset() : b.GetOffset()+int64(b.GetLength())])
+		if !bytes.Equal(b.GetHash(), want[:]) {
 			t.Fatalf("block %d hash mismatch", i)
 		}
+		covered += int64(b.GetLength())
+	}
+	if covered != int64(len(content)) {
+		t.Fatalf("blocks cover %d bytes, want %d", covered, len(content))
 	}
 }
 
