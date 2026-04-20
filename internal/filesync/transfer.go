@@ -686,8 +686,11 @@ func downloadBundle(ctx context.Context, client *http.Client, peerAddr, folderID
 		return nil, entries
 	}
 
-	// Read tar+zstd response.
-	var reader io.Reader = resp.Body
+	// Read tar+zstd response. Cap the compressed body at maxBundleTotal
+	// (128 MB) so a malicious peer cannot force unbounded memory/disk
+	// consumption via an oversized response. The server enforces the
+	// same cap on the sending side.
+	var reader io.Reader = io.LimitReader(resp.Body, maxBundleTotal)
 	if limiter != nil {
 		reader = newRateLimitedReader(ctx, reader, limiter)
 	}

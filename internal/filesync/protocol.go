@@ -959,9 +959,12 @@ func postIndex(ctx context.Context, client *http.Client, peerAddr string, data [
 		return nil, fmt.Errorf("read response from %s: %w", peerAddr, err)
 	}
 
-	// Empty body is a valid ack for intermediate pages.
+	// postIndex callers (sendSingleIndex, sendPaginatedIndex final page,
+	// fetchResponsePages) all expect a populated IndexExchange. An empty
+	// body here is a peer bug or adversarial response — never mistake it
+	// for an ack. Intermediate-page acks go through postIndexAck instead.
 	if len(respBody) == 0 {
-		return &pb.IndexExchange{}, nil
+		return nil, fmt.Errorf("peer %s returned empty index response", peerAddr)
 	}
 
 	if resp.Header.Get("Content-Encoding") == "zstd" {

@@ -3341,6 +3341,82 @@ func TestDownloadBundle_HashMismatch(t *testing.T) {
 	}
 }
 
+// S-hardening: a malicious peer that streams a tar response larger than
+// maxBundleTotal must not cause unbounded reads / memory growth in the
+// client. downloadBundle caps the compressed response at maxBundleTotal.
+func TestDownloadBundle_CapsResponseBody(t *testing.T) {
+	t.Parallel()
+
+	// Server streams garbage bytes indefinitely — never a valid zstd
+	// frame. The client must give up after reading at most
+	// maxBundleTotal bytes, not hang or OOM.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.Header().Set("Content-Encoding", "zstd")
+		w.WriteHeader(http.StatusOK)
+		// Stream junk bytes far exceeding maxBundleTotal.
+		junk := make([]byte, 1<<20) // 1 MB chunks
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := w.Write(junk); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	clientDir := t.TempDir()
+	entries := []bundleEntry{
+		{Path: "x.txt", ExpectedHash: Hash256{}, RemoteSize: 10},
+	}
+	ok, retry := downloadBundle(t.Context(),
+		srv.Client(),
+		srv.Listener.Addr().String(),
+		"test",
+		entries,
+		openTestRoot(t, clientDir),
+		nil,
+	)
+	if len(ok) != 0 {
+		t.Errorf("expected no successful entries from garbage response, got %v", ok)
+	}
+	if len(retry) != len(entries) {
+		t.Errorf("expected all entries returned for retry, got %d of %d", len(retry), len(entries))
+	}
+}
+
+// postIndex must reject an empty response body. All postIndex callers
+// (sendSingleIndex, sendPaginatedIndex final page, fetchResponsePages)
+// expect a populated IndexExchange; silently returning a zero value
+// would be read by diff() as "remote has no files" and could produce
+// spurious tombstones. Intermediate-page acks go through postIndexAck.
+func TestPostIndex_RejectsEmptyBody(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// Empty body intentionally.
+	}))
+	defer srv.Close()
+
+	// Build a minimal valid request payload.
+	reqIdx := &pb.IndexExchange{
+		FolderId: "test",
+	}
+	data, err := proto.Marshal(reqIdx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = postIndex(t.Context(), srv.Client(), srv.Listener.Addr().String(), data)
+	if err == nil {
+		t.Fatal("expected error on empty index response, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty index response") {
+		t.Errorf("expected 'empty index response' in error, got: %v", err)
+	}
+}
+
 // B17: verify that NFD paths (macOS HFS+ decomposition) are normalized to
 // NFC during scan, preventing cross-platform duplicates.
 func TestScanNormalizesNFD(t *testing.T) {
