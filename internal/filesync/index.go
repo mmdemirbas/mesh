@@ -1612,6 +1612,11 @@ type RenamePlan struct {
 	// local index after the rename lands so subsequent diffs see the
 	// remote's write history. Nil when the peer has no clock.
 	RemoteVersion VectorClock
+	// C6 / R4: peer's vector clock on the OldPath tombstone. Merged
+	// into the local OldPath tombstone clock after the rename lands,
+	// so the tombstone reflects the peer's delete and subsequent
+	// diffs do not keep re-emitting ActionDelete for the old path.
+	RemoteDelVersion VectorClock
 }
 
 // planRenames finds download/delete action pairs that can be resolved
@@ -1633,8 +1638,9 @@ func planRenames(actions []DiffEntry, local *FileIndex) ([]RenamePlan, map[strin
 	}
 
 	type delCandidate struct {
-		path string
-		seq  int64
+		path    string
+		seq     int64
+		version VectorClock
 	}
 	delsByHash := make(map[Hash256][]delCandidate)
 	for _, a := range actions {
@@ -1646,7 +1652,7 @@ func planRenames(actions []DiffEntry, local *FileIndex) ([]RenamePlan, map[strin
 			continue
 		}
 		delsByHash[lEntry.SHA256] = append(delsByHash[lEntry.SHA256], delCandidate{
-			path: a.Path, seq: a.RemoteSequence,
+			path: a.Path, seq: a.RemoteSequence, version: a.RemoteVersion,
 		})
 	}
 	if len(delsByHash) == 0 {
@@ -1669,15 +1675,16 @@ func planRenames(actions []DiffEntry, local *FileIndex) ([]RenamePlan, map[strin
 		pick := queue[0]
 		delsByHash[a.RemoteHash] = queue[1:]
 		plans = append(plans, RenamePlan{
-			OldPath:       pick.path,
-			NewPath:       a.Path,
-			RemoteHash:    a.RemoteHash,
-			RemoteSize:    a.RemoteSize,
-			RemoteMtime:   a.RemoteMtime,
-			RemoteMode:    a.RemoteMode,
-			NewSequence:   a.RemoteSequence,
-			DelSequence:   pick.seq,
-			RemoteVersion: a.RemoteVersion,
+			OldPath:          pick.path,
+			NewPath:          a.Path,
+			RemoteHash:       a.RemoteHash,
+			RemoteSize:       a.RemoteSize,
+			RemoteMtime:      a.RemoteMtime,
+			RemoteMode:       a.RemoteMode,
+			NewSequence:      a.RemoteSequence,
+			DelSequence:      pick.seq,
+			RemoteVersion:    a.RemoteVersion,
+			RemoteDelVersion: pick.version,
 		})
 		skip[a.Path] = true
 		skip[pick.path] = true

@@ -1842,6 +1842,18 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					oldEntry.Deleted = true
 					oldEntry.MtimeNS = time.Now().UnixNano()
 					oldEntry.Sequence = fs.index.Sequence
+					// C6 / R4: merge the peer's tombstone clock into the
+					// local tombstone so it reflects their delete. Without
+					// this, the local tombstone keeps the live file's old
+					// clock and remains dominated by the peer's tombstone
+					// forever, re-emitting ActionDelete on every diff.
+					// Fall back to a self-bump when the peer had no clock
+					// so the tombstone at least carries a non-empty vector.
+					if len(rp.RemoteDelVersion) > 0 {
+						oldEntry.Version = oldEntry.Version.merge(rp.RemoteDelVersion)
+					} else if fs.index.selfID != "" {
+						oldEntry.Version = oldEntry.Version.bump(fs.index.selfID)
+					}
 					fs.index.setEntry(rp.OldPath, oldEntry)
 				}
 				// Write the new-path entry with remote metadata.

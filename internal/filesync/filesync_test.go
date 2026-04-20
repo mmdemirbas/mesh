@@ -2174,6 +2174,39 @@ func TestPlanRenamesSourceMissing(t *testing.T) {
 	}
 }
 
+// R4: planRenames must propagate the peer's ActionDelete clock as
+// RemoteDelVersion so the caller can merge it into the local OldPath
+// tombstone. Without this, the local tombstone would keep its stale
+// pre-rename clock and remain dominated by the peer's tombstone,
+// re-emitting ActionDelete on every diff.
+func TestPlanRenames_CarriesRemoteDelVersion(t *testing.T) {
+	t.Parallel()
+	h := testHash("shared-content")
+
+	local := newFileIndex()
+	local.Files["old.md"] = FileEntry{SHA256: h, Size: 100, Sequence: 1}
+
+	delClock := VectorClock{"PEER": 5}
+	newClock := VectorClock{"PEER": 5}
+
+	actions := []DiffEntry{
+		{Path: "old.md", Action: ActionDelete, RemoteSequence: 10, RemoteVersion: delClock},
+		{Path: "new.md", Action: ActionDownload, RemoteHash: h, RemoteSize: 100, RemoteSequence: 11, RemoteVersion: newClock},
+	}
+
+	plans, _ := planRenames(actions, local)
+	if len(plans) != 1 {
+		t.Fatalf("want 1 plan, got %d", len(plans))
+	}
+	p := plans[0]
+	if p.RemoteDelVersion["PEER"] != 5 {
+		t.Fatalf("RemoteDelVersion[PEER]=%d, want 5 (got %v)", p.RemoteDelVersion["PEER"], p.RemoteDelVersion)
+	}
+	if p.RemoteVersion["PEER"] != 5 {
+		t.Fatalf("RemoteVersion[PEER]=%d, want 5 (got %v)", p.RemoteVersion["PEER"], p.RemoteVersion)
+	}
+}
+
 // R1: an empty action slice and a nil index are both no-ops.
 func TestPlanRenamesNoOpInputs(t *testing.T) {
 	t.Parallel()
