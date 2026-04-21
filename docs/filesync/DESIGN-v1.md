@@ -13,7 +13,14 @@
 > deferred.** v1 stays on SHA-256. See `HASH-ALGORITHM.md` for the
 > benchmark data and the reopen criteria.
 >
-> Status: **draft** · 2026-04-19. No code change until reviewed.
+> Status: **in progress** · last updated 2026-04-22.
+> §0 Identity, §1 C6, §2 D1, and §3 D6 have landed. §4 D4 is the
+> remaining v1 item. See the *Implementation status* table below for
+> per-section commits. The banner flips to **implemented** once D4
+> lands and the bundle-level tests are green.
+>
+> C7 (end-to-end transfer integrity trailer) is deliberately out of
+> scope for v1. See `PLAN.md` §C7 for the reopen triggers.
 
 ---
 
@@ -67,6 +74,29 @@ D4 last is deliberate: its schema is a function of the other
 three. Landing D4 earlier would force a rewrite as each later
 item lands. Hash stays SHA-256 throughout — if D2 is ever picked
 up it becomes its own protocol bump, not a v1 dialect.
+
+---
+
+## Implementation status
+
+| Section | Status | Verification |
+|---------|--------|--------------|
+| §0 Device ID + `protocol_version=1` | ✅ | `deviceid.go` (generation, Crockford base32, on-disk file); `protocol.go` `handleIndex` rejects mismatched `protocol_version`; `buildIndexExchange` stamps `protocolVersion`. Tests: `TestDeviceID*`, `TestHandleIndex_RejectsProtocolVersionMismatch`, `TestBuildIndexExchange_StampsProtocolVersion`. |
+| §1 C6 per-file vector clocks | ✅ | `vclock.go` (`VectorClock`, `compareClocks`, `Bump`, proto round-trip); `index.go` diff classifier; `filesync.go` local-bump on write, adopt-on-receive, tombstone-clock propagation through rename plan. Tests: `vclock_test.go` (classifier, dominated, concurrent, tombstone cases), `TestFileEntry_VersionYAMLRoundTrip`, `TestFileInfo_VersionWireRoundTrip`. |
+| §2 D1 FastCDC | ✅ | `fastcdc.go` in-tree chunker (`fastCDCMin/Avg/Max = 32/128/512 KiB`); `transfer.go` delta path keyed by block hash; DeltaBlock count capped. Tests: `fastcdc_test.go`, block-verify tests under `transfer_c3_test.go`. |
+| §3 D6 zstd everywhere | ✅ | `internal/zstdutil` (pooled encode/decode, decode-size cap); index exchange and bundle stream on `Content-Encoding: zstd`; DeltaBlock compresses per-block with incompressible skip via `compress_probe.go`. Tests: `compress_probe_test.go`, bundle stream caps. |
+| §4 D4 SQLite-backed index | ⏳ | not started. |
+
+Review Checklist progress (full text at the bottom of this document):
+
+- [x] Device-ID scheme.
+- [x] `protocol_version=1` everywhere, no handshake.
+- [x] Hash stays SHA-256; D2 deferred per `HASH-ALGORITHM.md`.
+- [x] FastCDC parameters (32/128/512 KiB).
+- [x] zstd level 3, magic-byte probe list, no config knob.
+- [ ] SQLite schema and WAL + NORMAL durability choice.
+- [ ] `modernc.org/sqlite` dependency approval.
+- [x] Commit order so far (ID/version → C6 → D1 → D6); D4 still to land.
 
 ---
 
@@ -187,11 +217,14 @@ identical parameters — determinism of boundaries depends on this.
 
 ### Library
 
-`github.com/jotfs/fastcdc-go`. Pure Go, single dependency, small
-surface. If review surfaces a maintenance concern, the fallback
-is a ~200-line in-tree implementation built on the published
-Gear-hash table; filesync does not need features beyond boundary
-emission.
+**In-tree implementation** in `internal/filesync/fastcdc.go`. The
+published Gear-hash table plus ~200 lines of boundary-emission
+logic is all filesync needs; an external dependency for a fixed
+algorithm with a fixed parameter set does not pay rent. The
+original plan named `github.com/jotfs/fastcdc-go`; the in-tree
+version shipped instead to keep the dependency graph unchanged.
+If the algorithm ever needs replacing, the surface to swap is a
+single file.
 
 ### Wire shape
 
@@ -386,15 +419,18 @@ maintain because there is no legacy peer to talk to.
 
 ## Review checklist
 
-Before Phase 1 starts, the reviewer signs off on:
+Phase 1 sign-off, re-confirmed against shipped code:
 
-- [ ] Device-ID scheme (random 6 bytes, Crockford base32, 10
+- [x] Device-ID scheme (random 6 bytes, Crockford base32, 10
       chars, `XXXXX-XXXXX` display).
-- [ ] `protocol_version=1` on every message, no handshake, no
+- [x] `protocol_version=1` on every message, no handshake, no
       capability list.
-- [ ] Hash stays SHA-256; D2 deferred per `HASH-ALGORITHM.md`.
-- [ ] FastCDC parameters and library choice.
-- [ ] zstd level 3, magic-byte probe list, no config knob.
+- [x] Hash stays SHA-256; D2 deferred per `HASH-ALGORITHM.md`.
+- [x] FastCDC parameters (32/128/512 KiB) and library choice
+      (in-tree; see §2).
+- [x] zstd level 3, magic-byte probe list, no config knob.
 - [ ] SQLite schema and WAL + NORMAL durability choice.
-- [ ] `modernc.org/sqlite` dependency approval.
-- [ ] Commit order (ID/version → C6 → D1 → D6 → D4).
+- [x] `modernc.org/sqlite` dependency approval (approved
+      2026-04-22; adds under D4).
+- [x] Commit order so far (ID/version → C6 → D1 → D6); D4
+      still to land.
