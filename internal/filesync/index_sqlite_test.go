@@ -149,3 +149,191 @@ func TestOpenFolderDB_EmptyDeviceIDRejected(t *testing.T) {
 		t.Fatalf("empty device id: want error, got nil")
 	}
 }
+
+// TestSaveLoadIndex_RoundTrip pins that every FileEntry field survives a
+// save/load cycle through SQLite: basic metadata, SHA-256, vector clock,
+// inode, prev_path, and PH incremental-hashing state.
+func TestSaveLoadIndex_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openFolderDB(dir, "ABCDE12345")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	idx := newFileIndex()
+	idx.Sequence = 42
+	idx.Epoch = "deadbeefcafef00d"
+	idx.DeviceID = 0x10203040
+	idx.Files["docs/readme.md"] = FileEntry{
+		Size:     1234,
+		MtimeNS:  1_700_000_000_000_000_000,
+		SHA256:   hash256FromBytes(bytes32('a')),
+		Deleted:  false,
+		Sequence: 10,
+		Mode:     0o644,
+		Inode:    987654,
+		Version:  VectorClock{"ABCDE12345": 7, "PEER00002X": 3},
+	}
+	idx.Files["archive/old.log"] = FileEntry{
+		Size:        0,
+		MtimeNS:     1_700_000_001_000_000_000,
+		SHA256:      hash256FromBytes(bytes32('b')),
+		Deleted:     true,
+		Sequence:    11,
+		Mode:        0o600,
+		PrevPath:    "archive/older.log",
+		HashState:   []byte{0x01, 0x02, 0x03},
+		HashedBytes: 4096,
+		PrefixCheck: []byte{0xff, 0xee},
+	}
+	idx.recomputeCache()
+
+	if err := saveIndex(db, "shared", idx); err != nil {
+		t.Fatalf("saveIndex: %v", err)
+	}
+
+	got, err := loadIndexDB(db, "shared")
+	if err != nil {
+		t.Fatalf("loadIndexDB: %v", err)
+	}
+
+	if got.Sequence != idx.Sequence {
+		t.Errorf("Sequence=%d want %d", got.Sequence, idx.Sequence)
+	}
+	if got.Epoch != idx.Epoch {
+		t.Errorf("Epoch=%q want %q", got.Epoch, idx.Epoch)
+	}
+	if got.DeviceID != idx.DeviceID {
+		t.Errorf("DeviceID=%#x want %#x", got.DeviceID, idx.DeviceID)
+	}
+	if len(got.Files) != len(idx.Files) {
+		t.Fatalf("Files len=%d want %d", len(got.Files), len(idx.Files))
+	}
+	for path, want := range idx.Files {
+		have, ok := got.Files[path]
+		if !ok {
+			t.Errorf("%s missing after reload", path)
+			continue
+		}
+		if have.Size != want.Size || have.MtimeNS != want.MtimeNS ||
+			have.SHA256 != want.SHA256 || have.Deleted != want.Deleted ||
+			have.Sequence != want.Sequence || have.Mode != want.Mode ||
+			have.Inode != want.Inode || have.PrevPath != want.PrevPath ||
+			have.HashedBytes != want.HashedBytes {
+			t.Errorf("%s: scalar mismatch\nhave=%+v\nwant=%+v", path, have, want)
+		}
+		if !bytesEqual(have.HashState, want.HashState) {
+			t.Errorf("%s HashState mismatch", path)
+		}
+		if !bytesEqual(have.PrefixCheck, want.PrefixCheck) {
+			t.Errorf("%s PrefixCheck mismatch", path)
+		}
+		if !clocksEqual(have.Version, want.Version) {
+			t.Errorf("%s Version=%v want %v", path, have.Version, want.Version)
+		}
+	}
+
+	// Active count/size recomputed from the reloaded rows; archive/old.log
+	// is deleted so only docs/readme.md contributes.
+	wantCount, wantSize := 1, int64(1234)
+	if got.cachedCount != wantCount || got.cachedSize != wantSize {
+		t.Errorf("cache=(%d,%d) want (%d,%d)",
+			got.cachedCount, got.cachedSize, wantCount, wantSize)
+	}
+}
+
+// TestSaveIndex_ReplacesPriorRows pins that a second save drops file rows
+// that disappeared between snapshots instead of leaving ghost entries.
+func TestSaveIndex_ReplacesPriorRows(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openFolderDB(dir, "ABCDE12345")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	first := newFileIndex()
+	first.Files["a.txt"] = FileEntry{Size: 1, SHA256: hash256FromBytes(bytes32('a'))}
+	first.Files["b.txt"] = FileEntry{Size: 2, SHA256: hash256FromBytes(bytes32('b'))}
+	if err := saveIndex(db, "shared", first); err != nil {
+		t.Fatalf("first saveIndex: %v", err)
+	}
+
+	second := newFileIndex()
+	second.Files["a.txt"] = FileEntry{Size: 11, SHA256: hash256FromBytes(bytes32('a'))}
+	if err := saveIndex(db, "shared", second); err != nil {
+		t.Fatalf("second saveIndex: %v", err)
+	}
+
+	reloaded, err := loadIndexDB(db, "shared")
+	if err != nil {
+		t.Fatalf("loadIndexDB: %v", err)
+	}
+	if _, present := reloaded.Files["b.txt"]; present {
+		t.Fatalf("b.txt not purged after second save: %+v", reloaded.Files)
+	}
+	if got := reloaded.Files["a.txt"].Size; got != 11 {
+		t.Fatalf("a.txt Size=%d want 11", got)
+	}
+}
+
+// TestEncodeVectorClock_DeterministicOrder pins that two semantically
+// equal VectorClocks serialize to byte-identical blobs regardless of map
+// iteration order — required so index saves don't drift on a no-op scan.
+func TestEncodeVectorClock_DeterministicOrder(t *testing.T) {
+	a := VectorClock{"ABCDE12345": 7, "PEER00002X": 3, "QRSTU67890": 1}
+	b := VectorClock{"PEER00002X": 3, "QRSTU67890": 1, "ABCDE12345": 7}
+	if !bytesEqual(encodeVectorClock(a), encodeVectorClock(b)) {
+		t.Fatalf("encodeVectorClock not deterministic:\n a=%x\n b=%x",
+			encodeVectorClock(a), encodeVectorClock(b))
+	}
+}
+
+// TestDecodeVectorClock_RejectsMalformed pins that a truncated blob
+// decodes as nil rather than panicking or returning garbage.
+func TestDecodeVectorClock_RejectsMalformed(t *testing.T) {
+	cases := map[string][]byte{
+		"empty":        nil,
+		"short":        {0},
+		"header only":  {0, 1},
+		"wrong length": append(append([]byte{0, 1}, []byte("ABCDE12345")...), 0, 0, 0, 0),
+	}
+	for name, blob := range cases {
+		if got := decodeVectorClock(blob); got != nil {
+			t.Errorf("%s: got %v, want nil", name, got)
+		}
+	}
+}
+
+func bytes32(b byte) []byte {
+	out := make([]byte, 32)
+	for i := range out {
+		out[i] = b
+	}
+	return out
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func clocksEqual(a, b VectorClock) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}

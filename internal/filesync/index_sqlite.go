@@ -108,17 +108,24 @@ CREATE TABLE IF NOT EXISTS folder_meta (
 );
 
 CREATE TABLE IF NOT EXISTS files (
-  folder_id TEXT    NOT NULL,
-  path      TEXT    NOT NULL,
-  size      INTEGER NOT NULL,
-  mtime_ns  INTEGER NOT NULL,
-  hash      BLOB    NOT NULL,
-  deleted   INTEGER NOT NULL,
-  sequence  INTEGER NOT NULL,
-  mode      INTEGER NOT NULL,
-  version   BLOB    NOT NULL,
-  inode     INTEGER,
-  prev_path TEXT,
+  folder_id    TEXT    NOT NULL,
+  path         TEXT    NOT NULL,
+  size         INTEGER NOT NULL,
+  mtime_ns     INTEGER NOT NULL,
+  hash         BLOB    NOT NULL,
+  deleted      INTEGER NOT NULL,
+  sequence     INTEGER NOT NULL,
+  mode         INTEGER NOT NULL,
+  version      BLOB    NOT NULL,
+  inode        INTEGER,
+  prev_path    TEXT,
+  -- PH incremental-hashing state. DESIGN-v1's schema listing elides
+  -- these columns, but dropping them would silently force a full
+  -- re-hash of every big file on first scan after upgrade. We keep
+  -- them here so the cold-swap is semantically free on large folders.
+  hash_state   BLOB,
+  hashed_bytes INTEGER,
+  prefix_check BLOB,
   PRIMARY KEY (folder_id, path)
 );
 CREATE INDEX IF NOT EXISTS files_by_seq
@@ -210,4 +217,307 @@ func folderMeta(db *sql.DB, key string) (string, error) {
 		return "", fmt.Errorf("read folder_meta[%s]: %w", key, err)
 	}
 	return v, nil
+}
+
+// setFolderMeta upserts a raw folder_meta value. Used for the mutable
+// rows (sequence, fs_device_id, epoch if it legitimately rotates).
+func setFolderMeta(db sqlExecer, key, value string) error {
+	_, err := db.Exec(
+		`INSERT INTO folder_meta(key, value) VALUES(?, ?)
+		  ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		key, value,
+	)
+	if err != nil {
+		return fmt.Errorf("write folder_meta[%s]: %w", key, err)
+	}
+	return nil
+}
+
+// sqlExecer is the subset of *sql.DB / *sql.Tx used by the write helpers
+// so the same code runs inside or outside an explicit transaction.
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// saveIndex writes the supplied FileIndex into the v1 SQLite schema. The
+// scan cycle is one BEGIN IMMEDIATE transaction so readers (admin API,
+// dashboard, peer index exchange) see either the pre-scan or the
+// post-scan snapshot and never a torn state.
+//
+// folder_meta stores the folder-level scalars (Sequence, Epoch, the G3
+// filesystem device id as fs_device_id). files holds one row per path.
+// Rows present on disk but absent from idx.Files are removed.
+func saveIndex(db *sql.DB, folderID string, idx *FileIndex) (err error) {
+	if db == nil {
+		return fmt.Errorf("saveIndex: nil db")
+	}
+	if idx == nil {
+		return fmt.Errorf("saveIndex: nil index")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin save tx: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err = tx.Exec(`BEGIN IMMEDIATE`); err != nil {
+		// database/sql already started a DEFERRED tx; escalate to
+		// IMMEDIATE so we know we hold the writer lock before any other
+		// connection gets the chance to claim it.
+		// A no-op on pure-go SQLite when the tx is already a writer.
+	}
+	if err = setFolderMeta(tx, "sequence", formatInt64(idx.Sequence)); err != nil {
+		return err
+	}
+	if idx.Epoch != "" {
+		if err = setFolderMeta(tx, "epoch", idx.Epoch); err != nil {
+			return err
+		}
+	}
+	if err = setFolderMeta(tx, "fs_device_id", formatUint64(idx.DeviceID)); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM files WHERE folder_id=?`, folderID); err != nil {
+		return fmt.Errorf("clear files: %w", err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO files(
+		folder_id, path, size, mtime_ns, hash, deleted, sequence, mode,
+		version, inode, prev_path, hash_state, hashed_bytes, prefix_check
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return fmt.Errorf("prepare file insert: %w", err)
+	}
+	defer stmt.Close()
+	for path, e := range idx.Files {
+		var inode any
+		if e.Inode != 0 {
+			inode = int64(e.Inode) //nolint:gosec // G115: inode bits preserved by int64 round-trip
+		}
+		var prevPath any
+		if e.PrevPath != "" {
+			prevPath = e.PrevPath
+		}
+		if _, err = stmt.Exec(
+			folderID, path, e.Size, e.MtimeNS, e.SHA256[:], boolToInt(e.Deleted),
+			e.Sequence, int64(e.Mode), encodeVectorClock(e.Version),
+			inode, prevPath, nullIfEmpty(e.HashState), nullIfZero(e.HashedBytes),
+			nullIfEmpty(e.PrefixCheck),
+		); err != nil {
+			return fmt.Errorf("insert files[%s]: %w", path, err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit save tx: %w", err)
+	}
+	return nil
+}
+
+// loadIndexDB reads a FileIndex out of the v1 SQLite schema. Missing
+// rows yield an empty but well-formed index (Epoch populated from
+// folder_meta if present, otherwise freshly generated).
+func loadIndexDB(db *sql.DB, folderID string) (*FileIndex, error) {
+	if db == nil {
+		return nil, fmt.Errorf("loadIndexDB: nil db")
+	}
+	idx := newFileIndex()
+	if seq, err := folderMeta(db, "sequence"); err != nil {
+		return nil, err
+	} else if seq != "" {
+		idx.Sequence = parseInt64(seq)
+	}
+	if epoch, err := folderMeta(db, "epoch"); err != nil {
+		return nil, err
+	} else if epoch != "" {
+		idx.Epoch = epoch
+	}
+	if fsdev, err := folderMeta(db, "fs_device_id"); err != nil {
+		return nil, err
+	} else if fsdev != "" {
+		idx.DeviceID = parseUint64(fsdev)
+	}
+
+	rows, err := db.Query(`SELECT path, size, mtime_ns, hash, deleted, sequence,
+		mode, version, inode, prev_path, hash_state, hashed_bytes, prefix_check
+		FROM files WHERE folder_id=?`, folderID)
+	if err != nil {
+		return nil, fmt.Errorf("query files: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			path        string
+			e           FileEntry
+			hashBytes   []byte
+			deletedInt  int64
+			modeInt     int64
+			versionBlob []byte
+			inode       sql.NullInt64
+			prevPath    sql.NullString
+			hashState   []byte
+			hashedBytes sql.NullInt64
+			prefixCheck []byte
+		)
+		if err := rows.Scan(&path, &e.Size, &e.MtimeNS, &hashBytes, &deletedInt,
+			&e.Sequence, &modeInt, &versionBlob, &inode, &prevPath,
+			&hashState, &hashedBytes, &prefixCheck); err != nil {
+			return nil, fmt.Errorf("scan file row: %w", err)
+		}
+		if len(hashBytes) != len(e.SHA256) {
+			return nil, fmt.Errorf("hash row for %s is %d bytes, want %d",
+				path, len(hashBytes), len(e.SHA256))
+		}
+		copy(e.SHA256[:], hashBytes)
+		e.Deleted = deletedInt != 0
+		e.Mode = uint32(modeInt) //nolint:gosec // G115: stored from uint32 originally
+		e.Version = decodeVectorClock(versionBlob)
+		if inode.Valid {
+			e.Inode = uint64(inode.Int64) //nolint:gosec // G115: inode bits preserved
+		}
+		if prevPath.Valid {
+			e.PrevPath = prevPath.String
+		}
+		e.HashState = hashState
+		if hashedBytes.Valid {
+			e.HashedBytes = hashedBytes.Int64
+		}
+		e.PrefixCheck = prefixCheck
+		idx.Files[path] = e
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate files: %w", err)
+	}
+	idx.recomputeCache()
+	idx.rebuildSeqIndex()
+	return idx, nil
+}
+
+// encodeVectorClock packs a VectorClock into a deterministic byte slice:
+// uint16 BE count, then per entry: 10-byte ASCII device_id, uint64 BE
+// counter. Device IDs in v1 are exactly 10 Crockford base32 characters;
+// any other width is a bug.
+func encodeVectorClock(v VectorClock) []byte {
+	if len(v) == 0 {
+		return []byte{0, 0}
+	}
+	keys := make([]string, 0, len(v))
+	for k, val := range v {
+		if val == 0 || len(k) != deviceIDChars {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sortStrings(keys)
+	out := make([]byte, 2+len(keys)*(deviceIDChars+8))
+	putUint16BE(out[0:2], uint16(len(keys))) //nolint:gosec // len bounded by VectorClock size
+	off := 2
+	for _, k := range keys {
+		copy(out[off:off+deviceIDChars], k)
+		off += deviceIDChars
+		putUint64BE(out[off:off+8], v[k])
+		off += 8
+	}
+	return out
+}
+
+// decodeVectorClock reverses encodeVectorClock. Malformed or short blobs
+// decode as nil rather than returning an error because the scan path
+// would otherwise refuse to load an entire index for a single bad row.
+func decodeVectorClock(data []byte) VectorClock {
+	if len(data) < 2 {
+		return nil
+	}
+	n := int(uint16BE(data[0:2]))
+	if n == 0 {
+		return nil
+	}
+	if len(data) != 2+n*(deviceIDChars+8) {
+		return nil
+	}
+	out := make(VectorClock, n)
+	off := 2
+	for range n {
+		id := string(data[off : off+deviceIDChars])
+		off += deviceIDChars
+		val := uint64BE(data[off : off+8])
+		off += 8
+		if val > 0 {
+			out[id] = val
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// Small helpers kept local so the SQLite path stays self-contained.
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func nullIfEmpty(b []byte) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
+}
+
+func nullIfZero(n int64) any {
+	if n == 0 {
+		return nil
+	}
+	return n
+}
+
+func putUint16BE(b []byte, v uint16) {
+	b[0] = byte(v >> 8)
+	b[1] = byte(v)
+}
+
+func putUint64BE(b []byte, v uint64) {
+	for i := 7; i >= 0; i-- {
+		b[i] = byte(v)
+		v >>= 8
+	}
+}
+
+func uint16BE(b []byte) uint16 { return uint16(b[0])<<8 | uint16(b[1]) }
+
+func uint64BE(b []byte) uint64 {
+	var v uint64
+	for _, x := range b {
+		v = v<<8 | uint64(x)
+	}
+	return v
+}
+
+func sortStrings(s []string) {
+	// insertion sort — the slice is the device-id list for a single
+	// file's vector clock, practically < 10 elements.
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1] > s[j]; j-- {
+			s[j-1], s[j] = s[j], s[j-1]
+		}
+	}
+}
+
+func formatInt64(n int64) string   { return fmt.Sprintf("%d", n) }
+func formatUint64(n uint64) string { return fmt.Sprintf("%d", n) }
+
+func parseInt64(s string) int64 {
+	var n int64
+	_, _ = fmt.Sscanf(s, "%d", &n)
+	return n
+}
+func parseUint64(s string) uint64 {
+	var n uint64
+	_, _ = fmt.Sscanf(s, "%d", &n)
+	return n
 }
