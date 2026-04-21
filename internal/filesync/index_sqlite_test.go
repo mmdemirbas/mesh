@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestOpenFolderDB_CreatesSchemaAndPragmas pins that the first open of a
@@ -336,4 +337,162 @@ func clocksEqual(a, b VectorClock) bool {
 		}
 	}
 	return true
+}
+
+// TestSaveLoadPeerStates_RoundTrip pins that every PeerState field
+// survives a save/load cycle: sequences, LastSync, epochs, soft-delete
+// state, and the per-path BaseHashes map that C2 relies on.
+func TestSaveLoadPeerStates_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openFolderDB(dir, "ABCDE12345")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	lastSync := time.Date(2026, 4, 20, 12, 34, 56, 789, time.UTC)
+	removedAt := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	peers := map[string]PeerState{
+		"peer-alpha": {
+			LastSeenSequence: 101,
+			LastSentSequence: 99,
+			LastSync:         lastSync,
+			LastEpoch:        "epochaaa00000001",
+			PendingEpoch:     "epochbbbb0000002",
+			BaseHashes: map[string]Hash256{
+				"docs/a.md":    hash256FromBytes(bytes32('x')),
+				"notes/b.txt":  hash256FromBytes(bytes32('y')),
+				"index/c.json": hash256FromBytes(bytes32('z')),
+			},
+		},
+		"peer-bravo": {
+			LastSeenSequence: 7,
+			LastSentSequence: 7,
+			Removed:          true,
+			RemovedAt:        removedAt,
+		},
+	}
+
+	if err := savePeerStatesDB(db, "shared", peers); err != nil {
+		t.Fatalf("savePeerStatesDB: %v", err)
+	}
+	got, err := loadPeerStatesDB(db, "shared")
+	if err != nil {
+		t.Fatalf("loadPeerStatesDB: %v", err)
+	}
+
+	if len(got) != len(peers) {
+		t.Fatalf("len=%d want %d", len(got), len(peers))
+	}
+
+	alpha := got["peer-alpha"]
+	want := peers["peer-alpha"]
+	if alpha.LastSeenSequence != want.LastSeenSequence ||
+		alpha.LastSentSequence != want.LastSentSequence ||
+		!alpha.LastSync.Equal(want.LastSync) ||
+		alpha.LastEpoch != want.LastEpoch ||
+		alpha.PendingEpoch != want.PendingEpoch {
+		t.Errorf("alpha scalars mismatch:\nhave=%+v\nwant=%+v", alpha, want)
+	}
+	if len(alpha.BaseHashes) != len(want.BaseHashes) {
+		t.Fatalf("alpha.BaseHashes len=%d want %d",
+			len(alpha.BaseHashes), len(want.BaseHashes))
+	}
+	for path, hash := range want.BaseHashes {
+		if alpha.BaseHashes[path] != hash {
+			t.Errorf("alpha.BaseHashes[%s]=%x want %x",
+				path, alpha.BaseHashes[path], hash)
+		}
+	}
+
+	bravo := got["peer-bravo"]
+	if !bravo.Removed {
+		t.Errorf("bravo.Removed=false want true")
+	}
+	if !bravo.RemovedAt.Equal(removedAt) {
+		t.Errorf("bravo.RemovedAt=%v want %v", bravo.RemovedAt, removedAt)
+	}
+	if bravo.BaseHashes != nil {
+		t.Errorf("bravo.BaseHashes=%v want nil", bravo.BaseHashes)
+	}
+}
+
+// TestSavePeerStates_ReplacesPriorRows pins that a second save drops
+// peers and per-path hashes that disappeared between snapshots, so the
+// table does not accumulate ghost state across config changes.
+func TestSavePeerStates_ReplacesPriorRows(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openFolderDB(dir, "ABCDE12345")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	first := map[string]PeerState{
+		"peer-a": {
+			LastSeenSequence: 1,
+			BaseHashes: map[string]Hash256{
+				"keep.txt": hash256FromBytes(bytes32('k')),
+				"drop.txt": hash256FromBytes(bytes32('d')),
+			},
+		},
+		"peer-b": {LastSeenSequence: 2},
+	}
+	if err := savePeerStatesDB(db, "shared", first); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+
+	second := map[string]PeerState{
+		"peer-a": {
+			LastSeenSequence: 10,
+			BaseHashes: map[string]Hash256{
+				"keep.txt": hash256FromBytes(bytes32('k')),
+			},
+		},
+	}
+	if err := savePeerStatesDB(db, "shared", second); err != nil {
+		t.Fatalf("second save: %v", err)
+	}
+
+	got, err := loadPeerStatesDB(db, "shared")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if _, present := got["peer-b"]; present {
+		t.Fatalf("peer-b not purged after second save")
+	}
+	a, ok := got["peer-a"]
+	if !ok {
+		t.Fatalf("peer-a missing after second save")
+	}
+	if a.LastSeenSequence != 10 {
+		t.Errorf("peer-a.LastSeenSequence=%d want 10", a.LastSeenSequence)
+	}
+	if _, present := a.BaseHashes["drop.txt"]; present {
+		t.Fatalf("peer-a.BaseHashes[drop.txt] not purged: %v", a.BaseHashes)
+	}
+	if a.BaseHashes["keep.txt"] != hash256FromBytes(bytes32('k')) {
+		t.Errorf("peer-a.BaseHashes[keep.txt] wrong: %x",
+			a.BaseHashes["keep.txt"])
+	}
+}
+
+// TestLoadPeerStates_Empty pins that a fresh database yields an empty
+// map rather than an error — callers treat "no prior state" as normal
+// for first-run behavior.
+func TestLoadPeerStates_Empty(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openFolderDB(dir, "ABCDE12345")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	got, err := loadPeerStatesDB(db, "shared")
+	if err != nil {
+		t.Fatalf("loadPeerStatesDB: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("fresh db returned %d peer states: %v", len(got), got)
+	}
 }

@@ -151,7 +151,28 @@ CREATE TABLE IF NOT EXISTS peer_state (
   last_ancestor_hash BLOB,
   last_error         TEXT,
   backoff_until_ns   INTEGER,
+  -- Extensions beyond DESIGN-v1 §4. They cover shipped correctness
+  -- behavior (H2b epoch handshake, M3 peer removal grace window,
+  -- last-sync observability) that would regress if we stored only the
+  -- five columns the design listed. The banner-flip commit documents
+  -- this departure alongside the PH columns on files.
+  last_sync_ns       INTEGER NOT NULL DEFAULT 0,
+  last_epoch         TEXT,
+  pending_epoch      TEXT,
+  removed            INTEGER NOT NULL DEFAULT 0,
+  removed_at_ns      INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (folder_id, peer_id)
+);
+
+-- C2 per-path ancestor hashes. DESIGN-v1 §4 specified only a single
+-- last_ancestor_hash per peer row; in-memory PeerState.BaseHashes is a
+-- per-path map and collapsing it would regress the C2 classifier.
+CREATE TABLE IF NOT EXISTS peer_base_hashes (
+  folder_id TEXT NOT NULL,
+  peer_id   TEXT NOT NULL,
+  path      TEXT NOT NULL,
+  hash      BLOB NOT NULL,
+  PRIMARY KEY (folder_id, peer_id, path)
 );
 `
 	if _, err := db.Exec(schema); err != nil {
@@ -392,6 +413,176 @@ func loadIndexDB(db *sql.DB, folderID string) (*FileIndex, error) {
 	idx.recomputeCache()
 	idx.rebuildSeqIndex()
 	return idx, nil
+}
+
+// savePeerStatesDB writes the full per-peer map into the v1 SQLite
+// schema. Runs in one transaction so a mid-write crash leaves either the
+// pre-update or post-update row set, never a hybrid.
+func savePeerStatesDB(db *sql.DB, folderID string, peers map[string]PeerState) (err error) {
+	if db == nil {
+		return fmt.Errorf("savePeerStatesDB: nil db")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin peer save tx: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err = tx.Exec(`DELETE FROM peer_state       WHERE folder_id=?`, folderID); err != nil {
+		return fmt.Errorf("clear peer_state: %w", err)
+	}
+	if _, err = tx.Exec(`DELETE FROM peer_base_hashes WHERE folder_id=?`, folderID); err != nil {
+		return fmt.Errorf("clear peer_base_hashes: %w", err)
+	}
+
+	stmt, err := tx.Prepare(`INSERT INTO peer_state(
+		folder_id, peer_id, last_seen_seq, last_sent_seq,
+		last_ancestor_hash, last_error, backoff_until_ns,
+		last_sync_ns, last_epoch, pending_epoch, removed, removed_at_ns
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return fmt.Errorf("prepare peer insert: %w", err)
+	}
+	defer stmt.Close()
+	hashStmt, err := tx.Prepare(
+		`INSERT INTO peer_base_hashes(folder_id, peer_id, path, hash) VALUES(?,?,?,?)`,
+	)
+	if err != nil {
+		return fmt.Errorf("prepare base-hash insert: %w", err)
+	}
+	defer hashStmt.Close()
+
+	for peer, ps := range peers {
+		if _, err = stmt.Exec(
+			folderID, peer,
+			ps.LastSeenSequence, ps.LastSentSequence,
+			nil, nil, nil, // last_ancestor_hash/last_error/backoff_until_ns — not
+			// yet used in v1 (retry bookkeeping lives on the in-memory tracker);
+			// columns kept for forward use per DESIGN-v1.
+			ps.LastSync.UnixNano(),
+			nullIfEmptyString(ps.LastEpoch),
+			nullIfEmptyString(ps.PendingEpoch),
+			boolToInt(ps.Removed),
+			removedAtNanos(ps.RemovedAt),
+		); err != nil {
+			return fmt.Errorf("insert peer_state[%s]: %w", peer, err)
+		}
+		for path, h := range ps.BaseHashes {
+			if _, err = hashStmt.Exec(folderID, peer, path, h[:]); err != nil {
+				return fmt.Errorf("insert peer_base_hashes[%s/%s]: %w", peer, path, err)
+			}
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit peer save tx: %w", err)
+	}
+	return nil
+}
+
+// loadPeerStatesDB reads the per-peer map out of the v1 SQLite schema.
+// Absent rows yield an empty map; this matches the legacy YAML loader so
+// callers do not need to special-case the first run.
+func loadPeerStatesDB(db *sql.DB, folderID string) (map[string]PeerState, error) {
+	if db == nil {
+		return nil, fmt.Errorf("loadPeerStatesDB: nil db")
+	}
+	out := make(map[string]PeerState)
+
+	rows, err := db.Query(`SELECT peer_id, last_seen_seq, last_sent_seq,
+		last_sync_ns, last_epoch, pending_epoch, removed, removed_at_ns
+		FROM peer_state WHERE folder_id=?`, folderID)
+	if err != nil {
+		return nil, fmt.Errorf("query peer_state: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			peer         string
+			ps           PeerState
+			lastSyncNs   int64
+			lastEpoch    sql.NullString
+			pendingEpoch sql.NullString
+			removedInt   int64
+			removedAtNs  int64
+		)
+		if err := rows.Scan(&peer, &ps.LastSeenSequence, &ps.LastSentSequence,
+			&lastSyncNs, &lastEpoch, &pendingEpoch, &removedInt, &removedAtNs,
+		); err != nil {
+			return nil, fmt.Errorf("scan peer_state: %w", err)
+		}
+		if lastSyncNs != 0 {
+			ps.LastSync = time.Unix(0, lastSyncNs).UTC()
+		}
+		if lastEpoch.Valid {
+			ps.LastEpoch = lastEpoch.String
+		}
+		if pendingEpoch.Valid {
+			ps.PendingEpoch = pendingEpoch.String
+		}
+		ps.Removed = removedInt != 0
+		if removedAtNs != 0 {
+			ps.RemovedAt = time.Unix(0, removedAtNs).UTC()
+		}
+		out[peer] = ps
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate peer_state: %w", err)
+	}
+
+	hashRows, err := db.Query(
+		`SELECT peer_id, path, hash FROM peer_base_hashes WHERE folder_id=?`, folderID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query peer_base_hashes: %w", err)
+	}
+	defer hashRows.Close()
+	for hashRows.Next() {
+		var (
+			peer string
+			path string
+			hash []byte
+		)
+		if err := hashRows.Scan(&peer, &path, &hash); err != nil {
+			return nil, fmt.Errorf("scan peer_base_hashes: %w", err)
+		}
+		if len(hash) != 32 {
+			return nil, fmt.Errorf("peer_base_hashes[%s/%s] hash is %d bytes, want 32",
+				peer, path, len(hash))
+		}
+		ps, ok := out[peer]
+		if !ok {
+			// Orphan row: peer dropped between inserts. Tolerate by
+			// materializing a zero-valued PeerState so the hash is not
+			// lost silently.
+			ps = PeerState{}
+		}
+		if ps.BaseHashes == nil {
+			ps.BaseHashes = make(map[string]Hash256)
+		}
+		ps.BaseHashes[path] = hash256FromBytes(hash)
+		out[peer] = ps
+	}
+	if err := hashRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate peer_base_hashes: %w", err)
+	}
+	return out, nil
+}
+
+func nullIfEmptyString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func removedAtNanos(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixNano()
 }
 
 // encodeVectorClock packs a VectorClock into a deterministic byte slice:
