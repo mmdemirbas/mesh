@@ -1,0 +1,18 @@
+peer3:
+  log_level: info
+  admin_addr: "127.0.0.1:7777"
+  filesync:
+    - bind: "0.0.0.0:7756"
+      scan_interval: "2s"
+      max_concurrent: 4
+      peers:
+        peer1:
+          addresses: ["PEER1_IP:7756"]
+        peer2:
+          addresses: ["PEER2_IP:7756"]
+      defaults:
+        peers: ["peer1", "peer2"]
+        direction: send-receive
+      folders:
+        shared:
+          path: /root/sync
