@@ -4,7 +4,23 @@
 > `DESIGN-v1.md` §4 (the schema sketch) and the actual code changes.
 > No code lands until this document is reviewed.
 >
-> Status: **draft** · last updated 2026-04-22.
+> Status: **draft, iteration 2** · last updated 2026-04-22.
+>
+> Iteration 2 folded seven gaps found on adversarial self-review:
+> (1) concurrent scan + download write race causing silent
+> overwrite of the newer value; (2) un-durable `BaseHashes` letting
+> the C2 classifier fall back to C1 mtime with data-loss risk;
+> (3) download commit failure leaving the local file overwritten
+> without a recoverable row; (4) the in-memory `FileIndex` between
+> scans created split-brain risk — resolved by adopting **β
+> architecture**: SQLite is the sole source of truth and
+> `FileIndex` exists only during a scan; (5) `PRAGMA integrity_check`
+> on startup too slow for large folders — split into quick_check
+> sync / integrity_check async; (6) shutdown deadline not
+> propagated into in-flight transactions; (7) fixed-schedule
+> backups wasteful on quiet folders and thin on busy ones —
+> replaced with commit-count + max-age schedule. Harness grew to
+> cover each gap (H11–H15).
 >
 > Scope: everything that today reads or writes a file under
 > `~/.mesh/filesync/<folder-id>/` and the behaviors built on top of
@@ -66,7 +82,7 @@ Dispositions:
 | # | Behavior | Code site | Disposition | Notes |
 |---|----------|-----------|-------------|-------|
 | R1 | Pick higher-sequence of primary/backup on load (H2a) | `loadIndex` | `drop` | No backup file exists. The DB is atomic. A failed transaction is invisible to the next reader. |
-| R2 | Warn-and-continue on corrupted gob primary | `tryLoadGobIndex` | `redesign` → **fail loud, per-folder** | Current path silently loses data on corruption. SQLite `PRAGMA integrity_check` at open. On failure: disable the affected folder, surface it in the dashboard with a red status, log at `ERROR`, and increment a `mesh_filesync_folder_integrity_failed_total` metric. **Do not exit the process.** `mesh` has other components (SSH, proxy, clipsync, gateway) that must keep running; filesync is a subcomponent. |
+| R2 | Warn-and-continue on corrupted gob primary | `tryLoadGobIndex` | `redesign` → **two-phase integrity check, fail loud per-folder** | Current path silently loses data on corruption. v1: `PRAGMA quick_check` runs synchronously at folder open (~ms for grossly corrupted pages); if it fails, the folder enters R8 `FolderDisabled` immediately. Full `PRAGMA integrity_check` (~10 MB/s, up to tens of seconds on large DBs) then runs asynchronously on a goroutine; failure there also transitions the folder to disabled, with the folder having been live in the meantime. Operator can request a blocking full check via admin endpoint. Do not exit the process — `mesh` has SSH / proxy / clipsync / gateway that must keep running. |
 | R3 | Rebuild empty index if both files unreadable | `loadIndex` default branch | `redesign` → **per-folder disable** | In the SQLite world, an unreadable DB is an operator problem; do not auto-wipe. The affected folder enters a `FolderDisabled` state with the failing reason attached. Other folders on the same node keep syncing; unrelated components are untouched. |
 | R4 | Epoch regeneration on load when empty (H2b) | `loadIndex` | `drop` | Epoch is written once at `folder_meta` seed. No empty-on-load case. |
 | R5 | Peer-state reset when index was recreated (B15) | Folder startup in `Run` | `drop` | Motivated by "silent gob fallback gave us an empty index, so peer `LastSentSequence` is now wrong." Failure mode goes away when we fail loud on open (R2, R3). |
@@ -152,14 +168,53 @@ should be materially faster because it touches three rows, not 168k.
 | I5 | C6 per-file `VectorClock` | `FileEntry.Version`, `encodeVectorClock` | `keep` | Already round-trips through step c. |
 | I6 | C2 per-peer `BaseHashes` per-path map | `PeerState.BaseHashes` | `keep` | Already round-trips through peer-state helpers. |
 
+### 2.8 Architecture invariants (β)
+
+Adopted in iteration 2. Every cutover commit enforces these four
+rules; tests assert them. No exceptions.
+
+**INV-1 — SQLite is the sole source of truth.** Every piece of
+state a peer can observe lives in SQLite. In-memory structures are
+working copies that exist only while code holds them, and they are
+never consulted by peer-facing code paths.
+
+- `buildIndexExchange` → `SELECT ... FROM files WHERE ... sequence > ?`.
+- Delta / bundle / blocksigs handlers → SQLite queries.
+- `/api/filesync/folders`, `/api/filesync/conflicts` → SQLite, with
+  a folderState-level summary cache for the dashboard hot path.
+- Dashboard active-count / active-size → folderState cached counters
+  (INV-4), not a FileIndex field.
+
+**INV-2 — `FileIndex` is scan-local.** The in-memory `FileIndex`
+is constructed at scan start (`SELECT` the rows for the folder;
+~100 ms for 168k rows) and discarded after the scan's commit. Between
+scans there is no `FileIndex` — it does not exist, cannot be read,
+cannot drift. `setEntry` and `cloneInto` become internal to the
+scan path. Non-scan mutation paths (download, rename, delete)
+operate directly on SQLite via sync-persist.
+
+**INV-3 — Every write is sequence-conditioned.** Every `INSERT OR
+REPLACE` runs with `WHERE excluded.sequence > files.sequence` (or
+equivalent for other tables). A concurrent download with a newer
+sequence cannot be overwritten by a scan that cloned before the
+download committed. Closes Gap 1 (concurrent scan + download write
+race, data loss).
+
+**INV-4 — Commit precedes observability, always.**
+
+- *Downloads*: three-step atomic pattern. `rename original → .bak` → `rename temp → original` → commit SQLite row → on success `unlink .bak`; on commit failure `rename .bak → original`, `unlink temp`, surface via metric. Closes Gap 3.
+- *Scan*: build pending in memory → `BEGIN IMMEDIATE` → sequence-conditioned UPSERT of dirty rows → `COMMIT` → on success swap pending to live for the remainder of the current call (which is all that uses it — discarded next). Commit failure discards pending; live (which doesn't exist between scans per INV-2 anyway) is untouched; next scan re-detects.
+- *Peer sync updates (BaseHashes, LastSentSequence, LastSeenSequence)*: part of the sync-outcome transaction. No BaseHash is trusted by a subsequent `diff()` unless its write was durable. Closes Gap 2.
+- *Classifier semantics*: absence of a BaseHash entry for a (peer, path) pair means "unknown ancestor → conflict path," never "fall back to C1 mtime comparison." The C1 heuristic is only used when we have positive knowledge of no prior sync with this peer (first-sync case).
+
 ### 2.7 Lifecycle hooks
 
 | # | Behavior | Code site | Disposition | Notes |
 |---|----------|-----------|-------------|-------|
-| L1 | `persistAll(force=true)` at shutdown | `Node.persistAll` | `keep` | Still runs one final transaction per folder. |
-| L2 | `fs.root.Close()` on shutdown | `Run` shutdown tail | `keep` | Add `fs.db.Close()` beside it. |
-| L3 | `persistFolder(force=true)` after scan | `runScan` tail | `keep` | Becomes a scheduled `BEGIN`/`COMMIT`. |
-| L4 | Admin backup currently copies gob bytes | n/a (planned) | `redesign` → `VACUUM INTO` | Per `DESIGN-v1.md` §4. Lands as its own commit after cutover. |
+| L1 | `persistAll(force=true)` at shutdown | `Node.persistAll` | `redesign` | A shutdown context with a deadline propagates into in-flight transactions via `db.BeginTx(ctx, ...)`. A scan-reset transaction that would exceed the deadline rolls back and defers to the next run; persist-on-shutdown prefers the last durable state over a partial write. |
+| L2 | `fs.root.Close()` on shutdown | `Run` shutdown tail | `keep` | Add `fs.db.Close()` beside it, after `wg.Wait` so no goroutine holds rows. |
+| L3 | `persistFolder(force=true)` after scan | `runScan` tail | `redesign` | Scan path owns its own commit (see §2.8 invariants). This hook reduces to "flush any pending dirty-set that hasn't committed for non-scan reasons." |
+| L4 | Admin backup currently copies gob bytes | n/a (planned) | `redesign` → `VACUUM INTO`, commit-count schedule | Triggered on every Nth successful commit (default N=100) with a max-age safety net (≥ 1 backup per 24 h). Retain 24 backups. Quiet folders produce few backups; busy folders produce many. Each `VACUUM INTO` runs on a dedicated goroutine so it never blocks the writer. |
 
 ---
 
@@ -297,6 +352,13 @@ they survive a future storage change.
 | P2 per-path persist | `TestPersist_WritesOnlyDirtyRows` — scan changes 3 of 1000; assert only 3 INSERT/REPLACE statements run. |
 | R6 no `.prev` files | `TestPersist_LeavesNoSidecarFiles` — only `index.sqlite`, `-wal`, `-shm` exist after a persist cycle. |
 | L2 clean shutdown | `TestShutdown_ClosesDB` — after `Run` returns, open the DB from a separate handle and confirm it opens cleanly (no residual locks). |
+| INV-3 sequence-guarded write | `TestConcurrentScanDownload_NewerWins` — spawn a download that commits `path=P, seq=105` mid-scan whose pending has `P, seq=102`; assert post-scan SQLite has `seq=105` and pending's stale value is dropped. (H11) |
+| INV-4 BaseHash durability | `TestCrashBeforeBaseHashCommit_ClassifiesAsConflict` — inject commit failure after in-memory BaseHash update; restart; drive another sync; assert path is classified conflict, not "only they modified." (H12) |
+| INV-4 download atomic rollback | `TestDownloadCommitFails_RestoresOriginal` — inject `SQLITE_FULL` after temp→final rename; assert .bak is restored, temp unlinked, metric incremented, no row written. (H13) |
+| β reload correctness | `TestScanReloadFromSQLite_StateConsistent` — post-scan, drop in-memory state, reload via SQLite; assert dashboard, peer exchange, next scan all see identical state. (H14) |
+| Two-phase integrity | `TestIntegrityCheck_QuickSyncFullAsync` — corrupt DB after folder open; assert quick_check passed, folder goes live, background integrity_check fails, folder transitions to disabled without taking the node down. (H15) |
+| Shutdown deadline | `TestShutdown_DeadlinePreemptsScanCommit` — start a scan-reset tx (large row count); signal shutdown with 1 s deadline; assert the tx rolls back cleanly, DB is at the last durable state, shutdown completes before deadline × 2. |
+| Backup schedule | `TestBackup_CommitCountAndMaxAge` — drive 200 commits; assert two backups written; let 24 h of frozen-clock pass; assert the max-age sweeper wrote one more. |
 
 ### 4.2 Per-§3-category risk tests
 
@@ -348,25 +410,33 @@ exemplar.
 
 ## 5. Resolved design calls
 
-All five open questions settled 2026-04-22. Captured here so later
+All six design calls settled 2026-04-22. Captured here so later
 commits can cite them without re-arguing the case.
 
-1. **Reader handle.** **Single `*sql.DB` per folder.** A second
+1. **In-memory state between scans — α or β?** **β.** SQLite is
+   the sole source of truth; `FileIndex` is scan-local and does
+   not exist between scans. This eliminates an entire class of
+   split-brain and stale-read bugs by construction rather than by
+   discipline. Added per-scan-start cost: ~100 ms `SELECT` on a
+   168k-file folder, dwarfed by the filesystem walk and the hash
+   phase. See §2.8 INV-1, INV-2.
+
+2. **Reader handle.** **Single `*sql.DB` per folder.** A second
    read-only handle is not opened unless `BenchmarkConcurrentReaderDuringScan`
    shows contention on the local 168k-file workload. Reopen the
    question only on a measured regression, not on speculation.
-2. **One DB per folder vs shared.** **Per folder**, per DESIGN-v1
+3. **One DB per folder vs shared.** **Per folder**, per DESIGN-v1
    §4. Keeps the blast radius of a corruption to one folder;
    matches the R8 `FolderDisabled` failure isolation; allows
    independent `VACUUM INTO` scheduling.
-3. **`persistMu`.** **Drop.** SQLite's writer lock already
+4. **`persistMu`.** **Drop.** SQLite's writer lock already
    serializes transactions; an extra Go-side mutex adds a rung to
    the hierarchy for no gain. Any non-DB side effect that relied
    on `persistMu` ordering (none identified, but audit at cutover
    time) migrates to explicit sequencing.
-4. **`synchronous`.** **`FULL`.** See §3.3 W5 and DESIGN-v1
+5. **`synchronous`.** **`FULL`.** See §3.3 W5 and DESIGN-v1
    §Durability — data-corruption risk is not acceptable.
-5. **Fault-injection driver.** **Add the wrapper.** A thin
+6. **Fault-injection driver.** **Add the wrapper.** A thin
    `driver.Driver` that wraps `modernc.org/sqlite` and injects
    errors on demand lives in `internal/filesync` under
    `_test.go` files only, so the production binary is unchanged.
@@ -378,47 +448,102 @@ commits can cite them without re-arguing the case.
 
 ## 6. Commit sequence derived from the audit
 
-Numbered against the tasks already in flight. Each commit closes a
-named set of audit rows and names those rows in its message. No
-commit lands without its tests.
+Each commit closes a named set of audit rows and names those rows
+in its message. No commit lands without its tests. Commits are
+ordered so each one leaves the tree green and the architecture
+consistent — never a "land now, fix later" intermediate state.
 
 1. **This doc.** (No code.)
-2. **Persist hot path — per-path dirty-set.** Changes `folderState`
-   to carry `dirtyPaths` / `deletedPaths` / `peersDirtyIds`.
-   Instrument `setEntry` and the other mutation sites so the sets
-   stay honest. No SQLite wiring yet — feeds both the current gob
-   writer (which ignores them) and the future SQLite writer.
-   Closes: P2 design prerequisite. Tests: behavioral assertions
-   on dirty-set contents across common scan patterns.
-3. **Cutover — writers.** `persistFolder` writes through SQLite
-   using `INSERT OR REPLACE` on dirty rows, `DELETE` on deleted
-   rows, one transaction per call. Gob writes remain active
-   (mirror) so rollback is cheap until commit 5.
-   Closes: F1, F2, F3, F5, F6, R1, R4, R5, R6, C1.
-4. **Cutover — readers + query plans.** Dashboard and index
-   exchange handlers read from SQLite. Q1, Q2 indexed queries
-   land; `seqIndex` is retired. `EXPLAIN QUERY PLAN` tests pin
-   the hot queries.
-   Closes: Q1, Q2, Q4, C4, N4.
-5. **Retire gob/YAML + legacy refusal + integrity check.** Delete
-   `loadIndex`, `save`, `loadPeerStates`, `savePeerStates`,
-   `tryLoad*`, `gobMarshalIndex`, etc. Add the typed
-   `filesync_legacy_index_refused` error at open and the
-   `PRAGMA integrity_check` assertion.
-   Closes: R2, R3, R7 (verify it still runs).
-6. **`VACUUM INTO` backup.** Admin endpoint emits the snapshot
-   path; backup file gets `0600`. Closes: L4, Y3.
-7. **Benchmarks landing.** The §4.4 benchmarks with pinned
-   baselines. Separate commit so regressions are easy to bisect.
-8. **Schema-evolution migration stub.** `migrate(db, from, to)`
-   no-op for v1→v1, test asserts it is called on open. Closes: V1.
-9. **DESIGN-v1 banner flip to "implemented".** Final commit.
-   Verification table cites every code site and test name. Closes
-   all outstanding checklist boxes.
+2. **FileIndex encapsulation + dirty-set.** `Files` map goes
+   private. `Set`, `Get`, `Range`, `Delete`, `DirtyPaths`,
+   `ClearDirty` become the only API. Dirty-set populated by
+   `Set` / `Delete` as a side effect, not via diff. Legacy
+   `setEntry` call sites migrate via `gopls rename`. H1 invariant
+   re-compute and H2 property test land here.
+   Closes: P2 design prerequisite for the SQLite writer.
+3. **Two-phase integrity check + FolderDisabled scaffold.**
+   `PRAGMA quick_check` runs synchronously at folder open;
+   `PRAGMA integrity_check` runs on a goroutine afterward. A new
+   folder status field + `/api/filesync/folders` exposure + metric.
+   No caller yet uses this path, but the mechanism is in place for
+   commits 4+ to transition a folder into it on any persistence
+   failure class. H15 lands here.
+   Closes: R2 (quick_check path), R3, F3, F5 wiring target.
+4. **Peer-facing reads go to SQLite (INV-1).** `buildIndexExchange`,
+   delta / bundle / blocksigs handlers, `/api/filesync/folders`,
+   `/api/filesync/conflicts` all query SQLite. Dashboard gains
+   `folderState.summary` cache (INV-4). In-memory `FileIndex`
+   stops being peer-visible. `seqIndex` retired; `files_by_seq`
+   and `files_by_inode` indexes serve the range / inode queries.
+   `EXPLAIN QUERY PLAN` tests pin every hot query.
+   Closes: Q1, Q2, Q4, C4, N4, INV-1.
+5. **Sync-persist on download / rename / delete paths (INV-4).**
+   Three-step atomic pattern with `.bak` intermediate for
+   downloads; rename / delete mirror the shape. 100 ms batch
+   window coalesces concurrent downloads into a single commit.
+   BaseHashes and LastSentSequence / LastSeenSequence fold into
+   the same tx. Classifier tightens: absent BaseHash means
+   "conflict," never "C1 fallback." H6, H12, H13 land here.
+   Closes: INV-4 for non-scan paths, Gap 2, Gap 3.
+6. **β — FileIndex is scan-local; sequence-guarded writes
+   (INV-2, INV-3).** Scan loads its working copy at start via
+   `SELECT`; between scans, nothing is in memory. Scan commits
+   before swap; swap is a no-op beyond test observability
+   because nothing lives between scans. Every UPSERT carries
+   `WHERE excluded.sequence > files.sequence`. `activeCountAndSize`
+   moves to `folderState` and is maintained on every commit,
+   not on FileIndex. H7, H11, H14 land here.
+   Closes: INV-2, INV-3, P2 (per-path cost target), Gap 1, Gap 4.
+7. **Retire gob/YAML + legacy refusal.** Delete `loadIndex`,
+   `save`, `loadPeerStates`, `savePeerStates`, `tryLoad*`,
+   `gobMarshalIndex`, `yamlToGobPath`, `prevPath`, `writeFileSync`,
+   all test helpers that exercised those paths. Add the typed
+   `filesync_legacy_index_refused` error on open when any legacy
+   sidecar file is present.
+   Closes: F3, F4, F5 (gob path), R1, R4, R5, R6, C1 (`persistMu`).
+8. **Shutdown deadline propagates into transactions.** New
+   `shutdownCtx` with a bounded deadline; `db.BeginTx(ctx, ...)`
+   picks it up; over-long transactions roll back and defer.
+   Closes: Gap 6.
+9. **`VACUUM INTO` backups — commit-count + max-age.** Triggered
+   on every Nth successful commit (default 100) or whenever the
+   last backup is older than 24 h, whichever first. Retain 24.
+   Backup file gets `0600`. Runs on a dedicated goroutine so it
+   never blocks the writer. H9 lands here.
+   Closes: L4, Y3, Gap 7.
+10. **CRC32 on VectorClock blob.** Trailing CRC on the packed form.
+    Decode verifies; corrupt blob rejects with a typed error and
+    transitions the folder through FolderDisabled. H10 lands here.
+11. **Fault-injection driver + full harness sweep.** The wrapping
+    `driver.Driver` lands under `_test.go`. Re-run all H-series
+    tests with the wrapper enabled to exercise injection paths
+    that couldn't be tested without it (SQLITE_FULL mid-commit,
+    SQLITE_IOERR_FSYNC during COMMIT, etc.).
+12. **Benchmarks with pinned baselines.** From the §4.4 ledger.
+    Separate commit so later regressions bisect cleanly.
+13. **Schema-evolution migration stub.** `migrate(db, from, to)`
+    no-op for v1→v1; invoked unconditionally at open; test asserts
+    it fires. Closes: V1.
+14. **DESIGN-v1 banner flip to "implemented".** Verification table
+    cites every code site and test name. Closes all outstanding
+    checklist boxes.
 
-Commits 3 and 4 together are the cutover pair. Commit 5 retires the
-mirror write from commit 3 — that is the point where the gob path
-stops running at all.
+Cutover milestones:
+
+- Commits 2–4 leave the existing gob path intact but re-route
+  peer reads to SQLite. Still green at every step.
+- Commit 5 makes every non-scan mutation durable before it is
+  observable. Downloads become bullet-proof first — they are the
+  most data-loss-sensitive mutation.
+- Commit 6 is the structural finish: β is complete; no state
+  survives in memory between scans; sequence discipline is
+  type-enforced via the Set gate + conditional UPSERT.
+- Commit 7 is where the gob path stops running. After commit 6
+  there is no code path that reads or writes gob; commit 7
+  deletes the source.
+
+Every commit in this sequence either strengthens an invariant or
+removes superseded code; none adds ballast.
 
 ---
 
@@ -442,7 +567,9 @@ Before any code from this audit lands:
 - [ ] §3 risk table has no "unassessed" cells.
 - [ ] §4 test strategy names a test per kept / redesigned behavior
       and per risk category.
-- [x] §5 design calls resolved (reader handle deferred, per-folder
-      DB, drop `persistMu`, `synchronous=FULL`, add fault-injection
-      driver).
+- [x] §5 design calls resolved (β architecture, reader handle
+      deferred, per-folder DB, drop `persistMu`, `synchronous=FULL`,
+      add fault-injection driver).
+- [x] Iteration-2 gaps (Gap 1–7) closed with INV-1…INV-4 plus
+      H11–H15.
 - [ ] §6 commit sequence reviewed; each commit's scope is bounded.
