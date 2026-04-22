@@ -37,9 +37,11 @@ func TestOpenFolderDB_CreatesSchemaAndPragmas(t *testing.T) {
 	if err := db.QueryRow("PRAGMA synchronous;").Scan(&sync); err != nil {
 		t.Fatalf("pragma synchronous: %v", err)
 	}
-	// SQLite reports synchronous=NORMAL as integer 1.
-	if sync != 1 {
-		t.Fatalf("synchronous=%d want 1 (NORMAL)", sync)
+	// SQLite reports synchronous=FULL as integer 2. W5 in
+	// PERSISTENCE-AUDIT.md: NORMAL is rejected because it allows the
+	// last committed tx to roll back on power loss.
+	if sync != 2 {
+		t.Fatalf("synchronous=%d want 2 (FULL)", sync)
 	}
 
 	wantTables := []string{"folder_meta", "files", "blocks", "peer_state"}

@@ -66,11 +66,15 @@ func openFolderDB(dir, deviceID string) (*sql.DB, error) {
 	return db, nil
 }
 
-// applyFolderDBPragmas sets the durability and concurrency knobs that the
-// v1 design pins:
+// applyFolderDBPragmas sets the durability and concurrency knobs:
 //   - journal_mode=WAL for readers that do not block writers.
-//   - synchronous=NORMAL — crash-safe under WAL; FULL is overhead without
-//     a concrete benefit for our workload.
+//   - synchronous=FULL — one extra fsync per commit buys full power-loss
+//     protection of the last committed transaction. The weaker NORMAL
+//     (which DESIGN-v1 §4 originally chose) allows the last committed
+//     tx to roll back on power loss, and a sync tool whose value
+//     proposition is not losing user files cannot accept that.
+//     The extra fsync is amortized by the P17a dirty-flag short-circuit
+//     on clean folders and by the per-path dirty-set on busy ones.
 //   - foreign_keys=ON so referential integrity between peer_state and
 //     folder_meta can be added later without a schema rewrite.
 func applyFolderDBPragmas(db *sql.DB) error {
@@ -84,7 +88,7 @@ func applyFolderDBPragmas(db *sql.DB) error {
 		return fmt.Errorf("pragma journal_mode=WAL returned %q, want \"wal\"", mode)
 	}
 	stmts := []string{
-		"PRAGMA synchronous=NORMAL;",
+		"PRAGMA synchronous=FULL;",
 		"PRAGMA foreign_keys=ON;",
 		// Mildly larger cache amortizes repeated hot-path reads without
 		// materially raising resident memory.

@@ -94,7 +94,8 @@ Review Checklist progress (full text at the bottom of this document):
 - [x] Hash stays SHA-256; D2 deferred per `HASH-ALGORITHM.md`.
 - [x] FastCDC parameters (32/128/512 KiB).
 - [x] zstd level 3, magic-byte probe list, no config knob.
-- [ ] SQLite schema and WAL + NORMAL durability choice.
+- [ ] SQLite schema and WAL + FULL durability choice (revised from
+      the draft's NORMAL; see §Durability).
 - [ ] `modernc.org/sqlite` dependency approval.
 - [x] Commit order so far (ID/version → C6 → D1 → D6); D4 still to land.
 
@@ -365,12 +366,32 @@ CREATE TABLE peer_state (
 ### Durability
 
 - `PRAGMA journal_mode=WAL`.
-- `PRAGMA synchronous=NORMAL`. Crash-safe under WAL; `FULL` is
-  overhead without a concrete benefit for our workload.
+- `PRAGMA synchronous=FULL`. One extra fsync per commit in exchange
+  for full power-loss protection of the last committed transaction.
+  The weaker `NORMAL` setting — which the first draft of this
+  document proposed — permits the last committed tx to roll back on
+  power loss, which a sync tool whose value proposition is not
+  losing user files cannot accept. The extra fsync is amortized by
+  the P17a dirty-flag short-circuit on clean folders and by the
+  per-path dirty-set on busy ones. See `PERSISTENCE-AUDIT.md` §3.3
+  W5.
 - Scan cycle: one `BEGIN IMMEDIATE; ... COMMIT;` transaction.
   Readers see the pre-scan snapshot until the commit.
 - Peer-facing reads use SQLite's WAL snapshot isolation; no
   explicit transaction management in the read path.
+
+### Failure isolation
+
+A folder whose SQLite database fails to open, fails `PRAGMA
+integrity_check`, or sits on a read-only filesystem enters a
+per-folder **disabled** state. The dashboard renders that folder
+in a red status row with the reason attached; `/api/filesync/folders`
+reports `status: "disabled"`; a `mesh_filesync_folder_disabled{reason=...}`
+metric goes to 1. Other folders on the same node keep syncing; other
+mesh components (SSH, proxy, clipsync, gateway) are untouched. The
+process does not exit — filesync is a subcomponent, and a disabled
+folder must not take the rest of the binary down with it. See
+`PERSISTENCE-AUDIT.md` §2.2 R8.
 
 ### Admin backup
 
@@ -429,7 +450,8 @@ Phase 1 sign-off, re-confirmed against shipped code:
 - [x] FastCDC parameters (32/128/512 KiB) and library choice
       (in-tree; see §2).
 - [x] zstd level 3, magic-byte probe list, no config knob.
-- [ ] SQLite schema and WAL + NORMAL durability choice.
+- [ ] SQLite schema and WAL + FULL durability choice (revised from
+      the draft's NORMAL; see §Durability).
 - [x] `modernc.org/sqlite` dependency approval (approved
       2026-04-22; adds under D4).
 - [x] Commit order so far (ID/version → C6 → D1 → D6); D4

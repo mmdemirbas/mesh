@@ -66,12 +66,13 @@ Dispositions:
 | # | Behavior | Code site | Disposition | Notes |
 |---|----------|-----------|-------------|-------|
 | R1 | Pick higher-sequence of primary/backup on load (H2a) | `loadIndex` | `drop` | No backup file exists. The DB is atomic. A failed transaction is invisible to the next reader. |
-| R2 | Warn-and-continue on corrupted gob primary | `tryLoadGobIndex` | `redesign` → **fail loud** | Current path silently loses data on corruption. SQLite `PRAGMA integrity_check` at open; any failure aborts startup with an operator-facing error. Logs alone are not a contract. |
-| R3 | Rebuild empty index if both files unreadable | `loadIndex` default branch | `redesign` | In the SQLite world, an unreadable DB is an operator problem. Do not auto-wipe. The binary reports the path and exits. |
+| R2 | Warn-and-continue on corrupted gob primary | `tryLoadGobIndex` | `redesign` → **fail loud, per-folder** | Current path silently loses data on corruption. SQLite `PRAGMA integrity_check` at open. On failure: disable the affected folder, surface it in the dashboard with a red status, log at `ERROR`, and increment a `mesh_filesync_folder_integrity_failed_total` metric. **Do not exit the process.** `mesh` has other components (SSH, proxy, clipsync, gateway) that must keep running; filesync is a subcomponent. |
+| R3 | Rebuild empty index if both files unreadable | `loadIndex` default branch | `redesign` → **per-folder disable** | In the SQLite world, an unreadable DB is an operator problem; do not auto-wipe. The affected folder enters a `FolderDisabled` state with the failing reason attached. Other folders on the same node keep syncing; unrelated components are untouched. |
 | R4 | Epoch regeneration on load when empty (H2b) | `loadIndex` | `drop` | Epoch is written once at `folder_meta` seed. No empty-on-load case. |
 | R5 | Peer-state reset when index was recreated (B15) | Folder startup in `Run` | `drop` | Motivated by "silent gob fallback gave us an empty index, so peer `LastSentSequence` is now wrong." Failure mode goes away when we fail loud on open (R2, R3). |
 | R6 | `prevPath` helper | `prevPath` | `drop` | No `.prev` files. |
 | R7 | Abandoned download temp-file sweep | `cleanTempFiles` | `keep` | Orthogonal to index storage; runs before folder init. |
+| R8 | Per-folder `FolderDisabled` state (new) | new `folderState` field + dashboard / metric surface | `redesign` → **new** | Failure classes R2, R3, F3, F5 all need a way to park a folder without blowing up the process. Introduce a folder-level disabled flag carrying a human-readable reason; the dashboard renders a red row, `/api/filesync/folders` reports `status: "disabled"` with the reason, and `mesh_filesync_folder_disabled{reason=...}` goes to 1. Folder stays disabled until the operator fixes the underlying issue and restarts the node. Every other folder and every other mesh component (SSH, proxy, clipsync, gateway) is untouched. |
 
 ### 2.3 Concurrency and locking
 
@@ -198,7 +199,7 @@ explicitly rather than discover it later.
 | W2 | WAL grows unbounded when no checkpoint runs | `PRAGMA wal_checkpoint(TRUNCATE)` after each scan cycle; test that WAL size stays bounded over many cycles. |
 | W3 | Checkpoint blocks readers briefly | Not a correctness risk; acceptable perf. Measure under load. |
 | W4 | WAL on a filesystem that does not support it (older NFS, some Windows SMB mounts) silently degrades | `PRAGMA journal_mode=WAL` returns the actual mode; we already assert `"wal"` in `applyFolderDBPragmas`. Keep that assertion. |
-| W5 | `synchronous=NORMAL` is weaker than `FULL` — power loss mid-commit can roll back the last committed tx | DESIGN-v1 choice. Documented trade-off. Not a new risk, but revisit on request. |
+| W5 | `synchronous=NORMAL` is weaker than `FULL` — power loss mid-commit can roll back the last committed tx | **Reject `NORMAL`. Use `FULL`.** Data-corruption risk is not acceptable for a sync tool whose entire value proposition is not losing user files. The perf cost of `FULL` is one extra fsync per commit, which the dirty-flag short-circuit (C3) already makes rare. DESIGN-v1 §4's `NORMAL` choice is overridden; the banner-flip commit documents the departure. |
 
 ### 3.4 Data-type and encoding risks
 
@@ -239,7 +240,7 @@ explicitly rather than discover it later.
 |---|------|-----------------|
 | F1 | DB file on a network filesystem (NFS, SMB) | Documented as unsupported. Same stance as Syncthing. |
 | F2 | Symlinked data directory | `os.MkdirAll` + `sql.Open` both follow symlinks. No special handling needed. |
-| F3 | Read-only filesystem | `sql.Open` succeeds; first write fails. Surface a clear error at open time. |
+| F3 | Read-only filesystem | `sql.Open` succeeds; first write fails. Surface a folder-level error at open, enter the same `FolderDisabled` state used for R2 / R3; other folders and other mesh components keep running. |
 | F4 | File permissions of the DB file | We `MkdirAll` at `0700`; modernc default is `0644`. Needs explicit `Chmod 0600` after open or a DSN flag. |
 | F5 | Disk-full mid-commit | SQLite returns `SQLITE_FULL`; transaction rolls back. Surface as a folder-level error in the dashboard. |
 | F6 | Case-insensitive filesystem (macOS default, Windows) | Same as S5. No change. |
@@ -285,7 +286,9 @@ they survive a future storage change.
 |--------|------|
 | F1 atomicity | `TestPersist_CrashMidCommitRollsBack` — fault injection wrapper aborts the tx; reopen; assert pre-commit state. |
 | F4 legacy refusal | `TestOpen_RefusesLegacyGobFile` — touch `index.gob`; open returns the typed legacy error. |
-| R2 fail-loud on corruption | `TestOpen_FailsIntegrityCheck` — corrupt the file after close; reopen returns error. |
+| R2 fail-loud on corruption | `TestOpen_FailsIntegrityCheck` — corrupt the file after close; reopen returns error and the folder enters `FolderDisabled`. |
+| R8 per-folder disable | `TestFolderDisabled_IsolatesFailure` — force R2 on folder A; assert folder B keeps syncing, SSH tunnels stay up, dashboard shows A as disabled with reason, metric is 1. |
+| W5 synchronous=FULL | `TestOpen_SynchronousIsFULL` — read `PRAGMA synchronous` after open; assert the integer value is 2. |
 | C3 dirty-flag short-circuit | `TestPersist_SkipsWhenClean` — run persist twice without mutation; assert the second call issues no `BEGIN` (count via driver hook). |
 | C4 reader during writer | `TestReaders_SeeSnapshotDuringWriteTx` — goroutine A holds an IMMEDIATE tx; goroutine B runs the dashboard handler; B sees pre-tx state. |
 | Q1 indexed delta | `TestDeltaExchange_UsesSeqIndex` — `EXPLAIN QUERY PLAN` asserts the plan names `files_by_seq`. |
@@ -360,9 +363,11 @@ guessing:
 3. **Retain `persistMu` as a belt-and-braces serializer?** It
    costs nothing. Arguments either way; I lean `drop` to keep the
    mutex hierarchy simple, but willing to `keep` if you prefer.
-4. **`synchronous=NORMAL` vs `FULL`?** DESIGN-v1 chose `NORMAL`.
-   W5 flags the trade-off. Revisit per local-deployment
-   requirements?
+4. ~~`synchronous=NORMAL` vs `FULL`?~~ **Resolved: `FULL`.** Data
+   corruption is not acceptable; see §3.3 W5. The DESIGN-v1 §4
+   `NORMAL` choice is overridden and the banner-flip commit notes
+   the departure alongside the PH columns and the `peer_state`
+   extensions.
 5. **Injection of a fault-injection driver for the test suite.**
    Adding a wrapping `driver.Driver` is straightforward but
    introduces a new test-only surface. Alternative: skip fault
