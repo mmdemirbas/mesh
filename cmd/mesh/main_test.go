@@ -639,50 +639,34 @@ func TestRenderStatus_WithListeners(t *testing.T) {
 func TestRenderStatus_WithGateway(t *testing.T) {
 	cfg := &config.Config{
 		Gateway: []gateway.GatewayCfg{
-			{Name: "claude-audit", Bind: "127.0.0.1:3459", Upstream: "https://api.anthropic.com", ClientAPI: gateway.APIAnthropic, UpstreamAPI: gateway.APIAnthropic},
-			{Name: "oneapi-bridge", Bind: "127.0.0.1:3457", Upstream: "https://oneapi.example.com/v1/chat/completions", ClientAPI: gateway.APIAnthropic, UpstreamAPI: gateway.APIOpenAI},
+			{
+				Name: "claude-audit",
+				Client: []gateway.ClientCfg{
+					{Bind: "127.0.0.1:3459", API: gateway.APIAnthropic},
+				},
+				Upstream: []gateway.UpstreamCfg{
+					{Name: "default", Target: "https://api.anthropic.com", API: gateway.APIAnthropic},
+				},
+			},
+			{
+				Name: "oneapi-bridge",
+				Client: []gateway.ClientCfg{
+					{Bind: "127.0.0.1:3457", API: gateway.APIAnthropic},
+				},
+				Upstream: []gateway.UpstreamCfg{
+					{Name: "default", Target: "https://oneapi.example.com/v1/chat/completions", API: gateway.APIOpenAI},
+				},
+			},
 		},
 	}
 	activeState := map[string]state.Component{
-		"gateway:claude-audit":  {Type: "gateway", ID: "claude-audit", Status: state.Listening, BoundAddr: "127.0.0.1:3459"},
-		"gateway:oneapi-bridge": {Type: "gateway", ID: "oneapi-bridge", Status: state.Failed, Message: "listen 127.0.0.1:3457: address already in use"},
+		"gateway:claude-audit/127.0.0.1:3459":  {Type: "gateway", ID: "claude-audit/127.0.0.1:3459", Status: state.Listening, BoundAddr: "127.0.0.1:3459"},
+		"gateway:oneapi-bridge/127.0.0.1:3457": {Type: "gateway", ID: "oneapi-bridge/127.0.0.1:3457", Status: state.Failed, Message: "listen 127.0.0.1:3457: address already in use"},
 	}
 	output, _ := renderStatus(cfg, activeState, nil, "testnode")
-	for _, want := range []string{"gateway", "claude-audit", "3459", "oneapi-bridge", "3457", "a2a", "a2o", "listening", "failed"} {
+	for _, want := range []string{"gateway", "claude-audit", "3459", "oneapi-bridge", "3457", "rules", "upstreams", "listening", "failed"} {
 		if !strings.Contains(output, want) {
 			t.Errorf("output missing %q\n--- output ---\n%s", want, output)
-		}
-	}
-	if !strings.Contains(output, "https://api.anthropic.com") {
-		t.Errorf("output missing upstream URL\n--- output ---\n%s", output)
-	}
-	// Verify column alignment: direction tags and bind addresses must start at the same column.
-	var dirCols, bindCols []int
-	for _, line := range strings.Split(output, "\n") {
-		plain := stripANSI(line)
-		for _, dir := range []string{" a2a ", " a2o ", " o2a ", " o2o "} {
-			if idx := strings.Index(plain, dir); idx >= 0 {
-				dirCols = append(dirCols, idx)
-				// Bind address follows direction: "a2o 127.0.0.1:..."
-				addrStart := idx + len(dir)
-				bindCols = append(bindCols, addrStart)
-			}
-		}
-	}
-	if len(dirCols) >= 2 {
-		for i := 1; i < len(dirCols); i++ {
-			if dirCols[i] != dirCols[0] {
-				t.Errorf("gateway direction columns misaligned: %v\n--- output ---\n%s", dirCols, output)
-				break
-			}
-		}
-	}
-	if len(bindCols) >= 2 {
-		for i := 1; i < len(bindCols); i++ {
-			if bindCols[i] != bindCols[0] {
-				t.Errorf("gateway bind address columns misaligned: %v\n--- output ---\n%s", bindCols, output)
-				break
-			}
 		}
 	}
 }
@@ -690,11 +674,19 @@ func TestRenderStatus_WithGateway(t *testing.T) {
 func TestRenderStatus_GatewayEmptyAPIKey(t *testing.T) {
 	cfg := &config.Config{
 		Gateway: []gateway.GatewayCfg{
-			{Name: "test-gw", Bind: "127.0.0.1:3457", Upstream: "http://upstream:4000/v1/chat/completions", ClientAPI: gateway.APIAnthropic, UpstreamAPI: gateway.APIOpenAI},
+			{
+				Name: "test-gw",
+				Client: []gateway.ClientCfg{
+					{Bind: "127.0.0.1:3457", API: gateway.APIAnthropic},
+				},
+				Upstream: []gateway.UpstreamCfg{
+					{Name: "default", Target: "http://upstream:4000/v1/chat/completions", API: gateway.APIOpenAI},
+				},
+			},
 		},
 	}
 	activeState := map[string]state.Component{
-		"gateway:test-gw": {Type: "gateway", ID: "test-gw", Status: state.Listening, BoundAddr: "127.0.0.1:3457", Message: "MY_API_KEY is empty"},
+		"gateway:test-gw/127.0.0.1:3457": {Type: "gateway", ID: "test-gw/127.0.0.1:3457", Status: state.Listening, BoundAddr: "127.0.0.1:3457", Message: "MY_API_KEY is empty"},
 	}
 	output, _ := renderStatus(cfg, activeState, nil, "testnode")
 	if !strings.Contains(output, "MY_API_KEY is empty") {
@@ -2713,15 +2705,23 @@ func TestRenderStatus_FilesyncStatusPaddingWithMetrics(t *testing.T) {
 			{Bind: "0.0.0.0:7755"},
 		},
 		Gateway: []gateway.GatewayCfg{
-			{Name: "claude-audit", Bind: "127.0.0.1:8082", Upstream: "https://api.anthropic.com", ClientAPI: "anthropic", UpstreamAPI: "openai"},
+			{
+				Name: "claude-audit",
+				Client: []gateway.ClientCfg{
+					{Bind: "127.0.0.1:8082", API: "anthropic"},
+				},
+				Upstream: []gateway.UpstreamCfg{
+					{Name: "default", Target: "https://api.anthropic.com", API: "openai"},
+				},
+			},
 		},
 	}
 	activeState := map[string]state.Component{
-		"filesync:0.0.0.0:7756": {Type: "filesync", ID: "0.0.0.0:7756", Status: state.Listening},
-		"proxy:127.0.0.1:1080":  {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
-		"proxy:127.0.0.1:1081":  {Type: "proxy", ID: "127.0.0.1:1081", Status: state.Listening},
-		"clipsync:0.0.0.0:7755": {Type: "clipsync", ID: "0.0.0.0:7755", Status: state.Listening},
-		"gateway:claude-audit":  {Type: "gateway", ID: "claude-audit", Status: state.Listening},
+		"filesync:0.0.0.0:7756":               {Type: "filesync", ID: "0.0.0.0:7756", Status: state.Listening},
+		"proxy:127.0.0.1:1080":                {Type: "proxy", ID: "127.0.0.1:1080", Status: state.Listening},
+		"proxy:127.0.0.1:1081":                {Type: "proxy", ID: "127.0.0.1:1081", Status: state.Listening},
+		"clipsync:0.0.0.0:7755":               {Type: "clipsync", ID: "0.0.0.0:7755", Status: state.Listening},
+		"gateway:claude-audit/127.0.0.1:8082": {Type: "gateway", ID: "claude-audit/127.0.0.1:8082", Status: state.Listening},
 	}
 	for _, f := range cfg.Filesync[0].ResolvedFolders {
 		activeState["filesync-folder:"+f.ID] = state.Component{Type: "filesync-folder", ID: f.ID, Status: state.Starting}
@@ -2734,10 +2734,10 @@ func TestRenderStatus_FilesyncStatusPaddingWithMetrics(t *testing.T) {
 	gwM := &state.Metrics{}
 	gwM.StartTime.Store(time.Now().Add(-30 * time.Second).UnixNano())
 	metricsMap := map[string]*state.Metrics{
-		"filesync:0.0.0.0:7756": fsM,
-		"proxy:127.0.0.1:1080":  proxyM,
-		"proxy:127.0.0.1:1081":  proxyM,
-		"gateway:claude-audit":  gwM,
+		"filesync:0.0.0.0:7756":               fsM,
+		"proxy:127.0.0.1:1080":                proxyM,
+		"proxy:127.0.0.1:1081":                proxyM,
+		"gateway:claude-audit/127.0.0.1:8082": gwM,
 	}
 
 	output, _ := renderStatus(cfg, activeState, metricsMap, "server")

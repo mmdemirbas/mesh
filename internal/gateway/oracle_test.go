@@ -117,7 +117,7 @@ func TestOracle_A2O_Request(t *testing.T) {
 	if err := json.Unmarshal(input, &req); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &GatewayCfg{ModelMap: map[string]string{"claude-sonnet-4-6": "gpt-4o"}}
+	cfg := &UpstreamCfg{ModelMap: map[string]string{"claude-sonnet-4-6": "gpt-4o"}}
 	out, err := translateAnthropicRequest(&req, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +151,7 @@ func TestOracle_A2O_Request_Streaming(t *testing.T) {
 	if err := json.Unmarshal(input, &req); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &GatewayCfg{ModelMap: map[string]string{"claude-sonnet-4-6": "gpt-4o"}}
+	cfg := &UpstreamCfg{ModelMap: map[string]string{"claude-sonnet-4-6": "gpt-4o"}}
 	out, err := translateAnthropicRequest(&req, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -257,7 +257,7 @@ func TestOracle_O2A_Request(t *testing.T) {
 	if err := json.Unmarshal(input, &req); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &GatewayCfg{ModelMap: map[string]string{"gpt-4o": "claude-sonnet-4-6"}}
+	cfg := &UpstreamCfg{ModelMap: map[string]string{"gpt-4o": "claude-sonnet-4-6"}}
 	out, err := translateOpenAIRequest(&req, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -364,7 +364,7 @@ func TestOracle_A2O_Request_ToolResult(t *testing.T) {
 	if err := json.Unmarshal(input, &req); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &GatewayCfg{ModelMap: map[string]string{"claude-sonnet-4-6": "gpt-4o"}}
+	cfg := &UpstreamCfg{ModelMap: map[string]string{"claude-sonnet-4-6": "gpt-4o"}}
 	out, err := translateAnthropicRequest(&req, cfg)
 	if err != nil {
 		t.Fatal(err)

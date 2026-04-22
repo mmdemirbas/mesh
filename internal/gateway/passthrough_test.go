@@ -27,12 +27,17 @@ func startPassthroughGateway(t *testing.T, upstreamURL string, opts func(*Gatewa
 	t.Helper()
 	dir := t.TempDir()
 	cfg := GatewayCfg{
-		Name:        "gw-" + strings.ReplaceAll(t.Name(), "/", "_"),
-		Bind:        "127.0.0.1:0",
-		Upstream:    upstreamURL,
-		ClientAPI:   APIAnthropic,
-		UpstreamAPI: APIAnthropic,
-		Log:         LogCfg{Level: LogLevelFull, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
+		Name: "gw-" + strings.ReplaceAll(t.Name(), "/", "_"),
+		Client: []ClientCfg{
+			{Bind: "127.0.0.1:0", API: APIAnthropic},
+		},
+		Upstream: []UpstreamCfg{
+			{Name: "default", Target: upstreamURL, API: APIAnthropic},
+		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"*"}, UpstreamName: "default"},
+		},
+		Log: LogCfg{Level: LogLevelFull, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
 	}
 	if opts != nil {
 		opts(&cfg)
@@ -41,7 +46,7 @@ func startPassthroughGateway(t *testing.T, upstreamURL string, opts func(*Gatewa
 		t.Fatalf("validate: %v", err)
 	}
 
-	// Start() listens on cfg.Bind — use a pre-reserved loopback port to make
+	// Start() listens on cfg.Client[0].Bind — use a pre-reserved loopback port to make
 	// the URL known ahead of time.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -49,7 +54,7 @@ func startPassthroughGateway(t *testing.T, upstreamURL string, opts func(*Gatewa
 	}
 	addr := ln.Addr().String()
 	_ = ln.Close()
-	cfg.Bind = addr
+	cfg.Client[0].Bind = addr
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -162,7 +167,7 @@ func TestPassthrough_PreservesClientAuthWhenAPIKeyEnvUnset(t *testing.T) {
 	defer upstream.Close()
 
 	base := startPassthroughGateway(t, upstream.URL, func(c *GatewayCfg) {
-		c.APIKeyEnv = "" // passthrough preserves client auth
+		c.Upstream[0].APIKeyEnv = "" // passthrough preserves client auth
 	})
 
 	req, _ := http.NewRequest("POST", base+"/v1/messages", strings.NewReader(`{"model":"claude-opus-4-6"}`))
@@ -196,9 +201,7 @@ func TestPassthrough_OverwritesAuthWhenAPIKeyEnvSet(t *testing.T) {
 	defer upstream.Close()
 
 	base := startPassthroughGateway(t, upstream.URL, func(c *GatewayCfg) {
-		c.APIKeyEnv = envVar
-		c.ClientAPI = APIAnthropic
-		c.UpstreamAPI = APIAnthropic
+		c.Upstream[0].APIKeyEnv = envVar
 	})
 
 	req, _ := http.NewRequest("POST", base+"/v1/messages", strings.NewReader(`{"model":"claude-opus-4-6"}`))

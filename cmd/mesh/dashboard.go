@@ -968,26 +968,35 @@ func renderStatus(cfg *config.Config, activeState map[string]state.Component, me
 			if n := len(gw.Name); n > maxGwName {
 				maxGwName = n
 			}
-			bind := gw.Bind
-			if _, _, comp := getComponentInfo("gateway", gw.Name); comp.BoundAddr != "" {
-				bind = comp.BoundAddr
-			}
-			if n := len(bind); n > maxGwBind {
-				maxGwBind = n
+			for _, cl := range gw.Client {
+				bind := cl.Bind
+				compKey := gw.Name + "/" + cl.Bind
+				if _, _, comp := getComponentInfo("gateway", compKey); comp.BoundAddr != "" {
+					bind = comp.BoundAddr
+				}
+				if n := len(bind); n > maxGwBind {
+					maxGwBind = n
+				}
 			}
 		}
 		for _, gw := range cfg.Gateway {
-			indicator, st, comp := getComponentInfo("gateway", gw.Name)
-			bind := gw.Bind
-			if comp.BoundAddr != "" {
-				bind = comp.BoundAddr
-			}
-			namePad := strings.Repeat(" ", maxGwName-len(gw.Name))
-			bindPad := strings.Repeat(" ", maxGwBind-len(bind))
-			left := cBold + cCyan + gw.Name + cReset + namePad + " " + cGray + gw.Direction().String() + cReset + " " + colorAddr(bind) + bindPad
-			addRow("", indicator, left, arrowRight, cGray+gw.Upstream+cReset, st, "", readMetrics(metricsMap["gateway:"+gw.Name]))
-			if comp.Status == state.Listening && comp.Message != "" {
-				addRow("   ", "⚠️", cYellow+comp.Message+cReset, "", "", "", "", metricsSnapshot{})
+			for _, cl := range gw.Client {
+				compKey := gw.Name + "/" + cl.Bind
+				indicator, st, comp := getComponentInfo("gateway", compKey)
+				bind := cl.Bind
+				if comp.BoundAddr != "" {
+					bind = comp.BoundAddr
+				}
+				namePad := strings.Repeat(" ", maxGwName-len(gw.Name))
+				bindPad := strings.Repeat(" ", maxGwBind-len(bind))
+				left := cBold + cCyan + gw.Name + cReset + namePad + " " + cGray + cl.API + cReset + " " + colorAddr(bind) + bindPad
+
+				right := fmt.Sprintf("%d rules → %d upstreams", len(gw.Routing), len(gw.Upstream))
+
+				addRow("", indicator, left, arrowRight, cGray+right+cReset, st, "", readMetrics(metricsMap["gateway:"+compKey]))
+				if comp.Status == state.Listening && comp.Message != "" {
+					addRow("   ", "⚠️", cYellow+comp.Message+cReset, "", "", "", "", metricsSnapshot{})
+				}
 			}
 		}
 		addHeader("")

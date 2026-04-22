@@ -44,57 +44,37 @@ type peekRequest struct {
 // overwrites the client's Authorization/x-api-key with the configured key.
 // When apiKey is empty, client auth headers are preserved verbatim — this is
 // required for OAuth-authenticated clients such as Claude Code.
-func handlePassthrough(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *http.Client, apiKey string, recorder *Recorder, log *slog.Logger) {
+func handlePassthrough(w http.ResponseWriter, r *http.Request, gwName, clientAPI string, upstream *ResolvedUpstream, dir Direction, metrics *state.Metrics, log *slog.Logger) {
 	start := time.Now()
-	metrics := state.Global.GetMetrics("gateway", cfg.Name)
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
 	if err != nil {
-		writePassthroughError(w, cfg.ClientAPI, 413, "request body too large")
+		writePassthroughError(w, clientAPI, 413, "request body too large")
 		return
 	}
-	metrics.BytesRx.Add(int64(len(body)))
 
 	var peek peekRequest
 	_ = json.Unmarshal(body, &peek)
-	sessionID, turnIndex := extractSessionInfo(r.Header, body)
 
-	reqID := recorder.Request(RequestMeta{
-		Gateway:   cfg.Name,
-		Direction: cfg.Direction().String(),
-		Model:     peek.Model,
-		Stream:    peek.Stream,
-		Method:    r.Method,
-		Path:      r.URL.Path,
-		Headers:   r.Header,
-		SessionID: sessionID,
-		TurnIndex: turnIndex,
-		StartTime: start,
-	}, body)
-
-	upURL, err := buildUpstreamURL(cfg.Upstream, r.URL)
+	upURL, err := buildUpstreamURL(upstream.Cfg.Target, r.URL)
 	if err != nil {
-		writePassthroughError(w, cfg.ClientAPI, 500, "invalid upstream url")
-		recorder.Response(reqID, ResponseMeta{Status: 500, Outcome: OutcomeError, StartTime: start, EndTime: time.Now()}, nil)
+		writePassthroughError(w, clientAPI, 500, "invalid upstream url")
 		return
 	}
 
 	ureq, err := http.NewRequestWithContext(r.Context(), r.Method, upURL, bytes.NewReader(body))
 	if err != nil {
-		writePassthroughError(w, cfg.ClientAPI, 500, "cannot create upstream request")
-		recorder.Response(reqID, ResponseMeta{Status: 500, Outcome: OutcomeError, StartTime: start, EndTime: time.Now()}, nil)
+		writePassthroughError(w, clientAPI, 500, "cannot create upstream request")
 		return
 	}
-	copyPassthroughRequestHeaders(ureq.Header, r.Header, cfg, apiKey)
+	copyPassthroughRequestHeaders(ureq.Header, r.Header, upstream.Cfg.API, upstream.APIKey)
 
-	uresp, err := client.Do(ureq)
+	uresp, err := upstream.Client.Do(ureq)
 	if err != nil {
 		if r.Context().Err() != nil {
-			recorder.Response(reqID, ResponseMeta{Status: 499, Outcome: OutcomeClientCancelled, StartTime: start, EndTime: time.Now()}, nil)
 			return
 		}
-		writePassthroughError(w, cfg.ClientAPI, 502, err.Error())
-		recorder.Response(reqID, ResponseMeta{Status: 502, Outcome: OutcomeError, StartTime: start, EndTime: time.Now()}, nil)
+		writePassthroughError(w, clientAPI, 502, err.Error())
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
 		return
 	}
@@ -103,42 +83,18 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, c
 	copyPassthroughResponseHeaders(w.Header(), uresp.Header)
 
 	if isSSEResponse(uresp) {
-		streamPassthroughResponse(w, r, uresp, cfg, reqID, recorder, metrics, start, log)
+		streamPassthroughResponse(w, r, uresp, metrics, start, log)
 		return
 	}
 
 	w.WriteHeader(uresp.StatusCode)
 	respBody, err := io.ReadAll(io.LimitReader(uresp.Body, maxUpstreamResponseSize))
 	if err != nil {
-		recorder.Response(reqID, ResponseMeta{Status: uresp.StatusCode, Outcome: OutcomeError, StartTime: start, EndTime: time.Now(), Headers: uresp.Header}, respBody)
 		log.Warn("Upstream body read failed", "error", err)
 		return
 	}
 	n, _ := w.Write(respBody)
 	metrics.BytesTx.Add(int64(n))
-
-	outcome := OutcomeOK
-	if uresp.StatusCode >= 400 {
-		outcome = OutcomeError
-	}
-	auditBody := decodeForAudit(respBody, uresp.Header.Get("Content-Encoding"), log)
-	usage := parseUsage(auditBody, cfg.UpstreamAPI)
-	if usage != nil {
-		metrics.TokensIn.Add(int64(usage.InputTokens))
-		metrics.TokensOut.Add(int64(usage.OutputTokens))
-		metrics.TokensCacheRd.Add(int64(usage.CacheReadInputTokens))
-		metrics.TokensCacheWr.Add(int64(usage.CacheCreationInputTokens))
-		metrics.TokensReason.Add(int64(usage.ReasoningTokens))
-	}
-
-	recorder.Response(reqID, ResponseMeta{
-		Status:    uresp.StatusCode,
-		Outcome:   outcome,
-		Usage:     usage,
-		StartTime: start,
-		EndTime:   time.Now(),
-		Headers:   uresp.Header,
-	}, auditBody)
 
 	log.Info("Passthrough completed",
 		"model", peek.Model,
@@ -149,10 +105,8 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, c
 }
 
 // streamPassthroughResponse forwards an SSE upstream response to the client
-// byte-for-byte, flushing after every read. It tees a capped copy of the body
-// to the audit recorder for post-mortem inspection. Event-level reassembly
-// (reconstructed text, parsed Usage) is added in the streaming audit phase.
-func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *http.Response, cfg GatewayCfg, reqID RequestID, recorder *Recorder, metrics *state.Metrics, start time.Time, log *slog.Logger) {
+// byte-for-byte, flushing after every read.
+func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *http.Response, metrics *state.Metrics, start time.Time, log *slog.Logger) {
 	// Ensure no buffering-in-front-of-client middleware kicks in.
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Del("Content-Length")
@@ -160,17 +114,13 @@ func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *ht
 
 	flusher, _ := w.(http.Flusher)
 
-	var buf bytes.Buffer
-	capped := false
 	tmp := make([]byte, 32*1024)
 	var totalBytes int64
-	outcome := OutcomeOK
 
 	for {
 		n, err := uresp.Body.Read(tmp)
 		if n > 0 {
 			if _, werr := w.Write(tmp[:n]); werr != nil {
-				outcome = OutcomeClientCancelled
 				log.Debug("Client write failed mid-stream", "error", werr)
 				break
 			}
@@ -178,65 +128,20 @@ func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *ht
 				flusher.Flush()
 			}
 			totalBytes += int64(n)
-			if !capped {
-				remaining := int64(maxAuditBodyBytes) - int64(buf.Len())
-				if remaining > 0 {
-					take := int64(n)
-					if take > remaining {
-						take = remaining
-						capped = true
-					}
-					buf.Write(tmp[:take])
-				} else {
-					capped = true
-				}
-			}
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			if r.Context().Err() != nil {
-				outcome = OutcomeClientCancelled
-			} else {
-				outcome = OutcomeError
-			}
 			log.Debug("Upstream read stopped", "error", err)
 			break
 		}
 	}
-	if capped && outcome == OutcomeOK {
-		outcome = OutcomeTruncated
-	}
 	metrics.BytesTx.Add(totalBytes)
-
-	auditBody := decodeForAudit(buf.Bytes(), uresp.Header.Get("Content-Encoding"), log)
-	summary := reassembleSSE(auditBody, cfg.UpstreamAPI)
-	var usage *Usage
-	if summary != nil {
-		usage = summary.Usage
-	}
-	if usage != nil {
-		metrics.TokensIn.Add(int64(usage.InputTokens))
-		metrics.TokensOut.Add(int64(usage.OutputTokens))
-		metrics.TokensCacheRd.Add(int64(usage.CacheReadInputTokens))
-		metrics.TokensCacheWr.Add(int64(usage.CacheCreationInputTokens))
-		metrics.TokensReason.Add(int64(usage.ReasoningTokens))
-	}
-	recorder.Response(reqID, ResponseMeta{
-		Status:    uresp.StatusCode,
-		Outcome:   outcome,
-		Usage:     usage,
-		Summary:   summary,
-		StartTime: start,
-		EndTime:   time.Now(),
-		Headers:   uresp.Header,
-	}, auditBody)
 
 	log.Info("Passthrough stream completed",
 		"status", uresp.StatusCode,
 		"bytes", totalBytes,
-		"outcome", outcome,
 		"elapsed", time.Since(start),
 	)
 }
@@ -262,7 +167,7 @@ func buildUpstreamURL(upstream string, reqURL *url.URL) (string, error) {
 	return u.String(), nil
 }
 
-func copyPassthroughRequestHeaders(dst, src http.Header, cfg GatewayCfg, apiKey string) {
+func copyPassthroughRequestHeaders(dst, src http.Header, upstreamAPI, apiKey string) {
 	for k, v := range src {
 		if _, hop := hopByHopHeaders[strings.ToLower(k)]; hop {
 			continue
@@ -275,7 +180,7 @@ func copyPassthroughRequestHeaders(dst, src http.Header, cfg GatewayCfg, apiKey 
 	if apiKey != "" {
 		dst.Del("Authorization")
 		dst.Del("X-Api-Key")
-		switch cfg.UpstreamAPI {
+		switch upstreamAPI {
 		case APIAnthropic:
 			dst.Set("X-Api-Key", apiKey)
 			if dst.Get("Anthropic-Version") == "" {

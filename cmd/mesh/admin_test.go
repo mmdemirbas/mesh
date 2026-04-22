@@ -180,14 +180,16 @@ func TestAdminMetricsEndpoint(t *testing.T) {
 func TestAdminGatewayAuditEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	cfg := gateway.GatewayCfg{
-		Name:        "audit-endpoint-test",
-		Bind:        "127.0.0.1:0",
-		Upstream:    "https://api.anthropic.com",
-		ClientAPI:   gateway.APIAnthropic,
-		UpstreamAPI: gateway.APIAnthropic,
-		Log:         gateway.LogCfg{Level: gateway.LogLevelFull, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
+		Name: "audit-endpoint-test",
+		Client: []gateway.ClientCfg{
+			{Bind: "127.0.0.1:0", API: gateway.APIAnthropic},
+		},
+		Upstream: []gateway.UpstreamCfg{
+			{Name: "default", Target: "https://api.anthropic.com", API: gateway.APIAnthropic},
+		},
+		Log: gateway.LogCfg{Level: gateway.LogLevelFull, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
 	}
-	rec, err := gateway.NewRecorder(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	rec, err := gateway.NewRecorder(cfg.Name, cfg.Log, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil || rec == nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}
@@ -268,14 +270,16 @@ func TestAdminGatewayAuditEndpoint(t *testing.T) {
 func TestAdminGatewayAuditFilters(t *testing.T) {
 	dir := t.TempDir()
 	cfg := gateway.GatewayCfg{
-		Name:        "audit-filter-test",
-		Bind:        "127.0.0.1:0",
-		Upstream:    "https://api.anthropic.com",
-		ClientAPI:   gateway.APIAnthropic,
-		UpstreamAPI: gateway.APIAnthropic,
-		Log:         gateway.LogCfg{Level: gateway.LogLevelFull, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
+		Name: "audit-filter-test",
+		Client: []gateway.ClientCfg{
+			{Bind: "127.0.0.1:0", API: gateway.APIAnthropic},
+		},
+		Upstream: []gateway.UpstreamCfg{
+			{Name: "default", Target: "https://api.anthropic.com", API: gateway.APIAnthropic},
+		},
+		Log: gateway.LogCfg{Level: gateway.LogLevelFull, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
 	}
-	rec, err := gateway.NewRecorder(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	rec, err := gateway.NewRecorder(cfg.Name, cfg.Log, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil || rec == nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}
@@ -378,14 +382,16 @@ func TestAdminGatewayAuditFilters(t *testing.T) {
 func TestAdminGatewayAuditPair(t *testing.T) {
 	dir := t.TempDir()
 	cfg := gateway.GatewayCfg{
-		Name:        "audit-pair-test",
-		Bind:        "127.0.0.1:0",
-		Upstream:    "https://api.anthropic.com",
-		ClientAPI:   gateway.APIAnthropic,
-		UpstreamAPI: gateway.APIAnthropic,
-		Log:         gateway.LogCfg{Level: gateway.LogLevelFull, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
+		Name: "audit-pair-test",
+		Client: []gateway.ClientCfg{
+			{Bind: "127.0.0.1:0", API: gateway.APIAnthropic},
+		},
+		Upstream: []gateway.UpstreamCfg{
+			{Name: "default", Target: "https://api.anthropic.com", API: gateway.APIAnthropic},
+		},
+		Log: gateway.LogCfg{Level: gateway.LogLevelFull, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
 	}
-	rec, err := gateway.NewRecorder(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	rec, err := gateway.NewRecorder(cfg.Name, cfg.Log, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil || rec == nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}

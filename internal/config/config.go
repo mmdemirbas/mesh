@@ -881,8 +881,10 @@ func (c *Config) checkDuplicateBinds() error {
 		}
 	}
 	for i, gw := range c.Gateway {
-		if err := check(gw.Bind, fmt.Sprintf("gateway[%d]", i)); err != nil {
-			return err
+		for j, bind := range gw.ClientBinds() {
+			if err := check(bind, fmt.Sprintf("gateway[%d].client[%d]", i, j)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

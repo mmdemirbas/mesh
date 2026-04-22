@@ -55,12 +55,18 @@ func TestGateway_A2O_NonStreaming(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := GatewayCfg{
-		Name:        "test-a2o",
-		Bind:        "127.0.0.1:0", // will use listener
-		ClientAPI:   APIAnthropic,
-		UpstreamAPI: APIOpenAI,
-		Upstream:    upstream.URL,
-		ModelMap:    map[string]string{"claude-sonnet-4-6": "glm-4.7"},
+		Name: "test-a2o",
+		Client: []ClientCfg{
+			{Bind: "127.0.0.1:0", API: APIAnthropic},
+		},
+		Upstream: []UpstreamCfg{
+			{
+				Name:     "default",
+				API:      APIOpenAI,
+				Target:   upstream.URL,
+				ModelMap: map[string]string{"claude-sonnet-4-6": "glm-4.7"},
+			},
+		},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -71,7 +77,7 @@ func TestGateway_A2O_NonStreaming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Bind = ln.Addr().String()
+	cfg.Client[0].Bind = ln.Addr().String()
 	ln.Close() // gateway.Start will re-listen
 
 	errCh := make(chan error, 1)
@@ -80,7 +86,7 @@ func TestGateway_A2O_NonStreaming(t *testing.T) {
 	}()
 
 	// Wait for gateway to start.
-	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+	waitForHTTP(t, "http://"+cfg.Client[0].Bind+"/health", 2*time.Second)
 
 	// Send Anthropic request.
 	reqBody := `{
@@ -88,7 +94,7 @@ func TestGateway_A2O_NonStreaming(t *testing.T) {
 		"max_tokens": 1024,
 		"messages": [{"role": "user", "content": "Hello"}]
 	}`
-	resp, err := http.Post("http://"+cfg.Bind+"/v1/messages", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post("http://"+cfg.Client[0].Bind+"/v1/messages", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,13 +163,19 @@ func TestGateway_O2A_NonStreaming(t *testing.T) {
 	t.Setenv("TEST_ANTH_KEY", "test-key")
 
 	cfg := GatewayCfg{
-		Name:        "test-o2a",
-		Bind:        "127.0.0.1:0",
-		ClientAPI:   APIOpenAI,
-		UpstreamAPI: APIAnthropic,
-		Upstream:    upstream.URL,
-		APIKeyEnv:   "TEST_ANTH_KEY",
-		ModelMap:    map[string]string{"gpt-4o": "claude-sonnet-4-6"},
+		Name: "test-o2a",
+		Client: []ClientCfg{
+			{Bind: "127.0.0.1:0", API: APIOpenAI},
+		},
+		Upstream: []UpstreamCfg{
+			{
+				Name:      "default",
+				API:       APIAnthropic,
+				Target:    upstream.URL,
+				APIKeyEnv: "TEST_ANTH_KEY",
+				ModelMap:  map[string]string{"gpt-4o": "claude-sonnet-4-6"},
+			},
+		},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -173,21 +185,21 @@ func TestGateway_O2A_NonStreaming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Bind = ln.Addr().String()
+	cfg.Client[0].Bind = ln.Addr().String()
 	ln.Close()
 
 	go func() {
 		Start(ctx, cfg, slog.Default()) //nolint:errcheck
 	}()
 
-	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+	waitForHTTP(t, "http://"+cfg.Client[0].Bind+"/health", 2*time.Second)
 
 	reqBody := `{
 		"model": "gpt-4o",
 		"max_tokens": 1024,
 		"messages": [{"role": "user", "content": "Hello"}]
 	}`
-	resp, err := http.Post("http://"+cfg.Bind+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post("http://"+cfg.Client[0].Bind+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +238,15 @@ func TestGateway_O2A_NonStreaming(t *testing.T) {
 
 func TestGateway_Health(t *testing.T) {
 	t.Parallel()
-	cfg := GatewayCfg{Name: "test-health", Bind: "127.0.0.1:0", ClientAPI: APIAnthropic, UpstreamAPI: APIOpenAI, Upstream: "http://localhost:9999"}
+	cfg := GatewayCfg{
+		Name: "test-health",
+		Client: []ClientCfg{
+			{Bind: "127.0.0.1:0", API: APIAnthropic},
+		},
+		Upstream: []UpstreamCfg{
+			{Name: "default", API: APIOpenAI, Target: "http://localhost:9999"},
+		},
+	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -235,16 +255,16 @@ func TestGateway_Health(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Bind = ln.Addr().String()
+	cfg.Client[0].Bind = ln.Addr().String()
 	ln.Close()
 
 	go func() {
 		Start(ctx, cfg, slog.Default()) //nolint:errcheck
 	}()
 
-	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+	waitForHTTP(t, "http://"+cfg.Client[0].Bind+"/health", 2*time.Second)
 
-	resp, err := http.Get("http://" + cfg.Bind + "/health")
+	resp, err := http.Get("http://" + cfg.Client[0].Bind + "/health")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +284,15 @@ func TestGateway_UpstreamError(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfg := GatewayCfg{Name: "test-error", Bind: "127.0.0.1:0", ClientAPI: APIAnthropic, UpstreamAPI: APIOpenAI, Upstream: upstream.URL}
+	cfg := GatewayCfg{
+		Name: "test-error",
+		Client: []ClientCfg{
+			{Bind: "127.0.0.1:0", API: APIAnthropic},
+		},
+		Upstream: []UpstreamCfg{
+			{Name: "default", API: APIOpenAI, Target: upstream.URL},
+		},
+	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -273,17 +301,17 @@ func TestGateway_UpstreamError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Bind = ln.Addr().String()
+	cfg.Client[0].Bind = ln.Addr().String()
 	ln.Close()
 
 	go func() {
 		Start(ctx, cfg, slog.Default()) //nolint:errcheck
 	}()
 
-	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+	waitForHTTP(t, "http://"+cfg.Client[0].Bind+"/health", 2*time.Second)
 
 	reqBody := `{"model":"claude-sonnet-4-6","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}`
-	resp, err := http.Post("http://"+cfg.Bind+"/v1/messages", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post("http://"+cfg.Client[0].Bind+"/v1/messages", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,11 +335,13 @@ func TestGateway_O2A_UpstreamError_529(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := GatewayCfg{
-		Name:        "test-529",
-		Bind:        "127.0.0.1:0",
-		ClientAPI:   APIOpenAI,
-		UpstreamAPI: APIAnthropic,
-		Upstream:    upstream.URL,
+		Name: "test-529",
+		Client: []ClientCfg{
+			{Bind: "127.0.0.1:0", API: APIOpenAI},
+		},
+		Upstream: []UpstreamCfg{
+			{Name: "default", API: APIAnthropic, Target: upstream.URL},
+		},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -321,17 +351,17 @@ func TestGateway_O2A_UpstreamError_529(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Bind = ln.Addr().String()
+	cfg.Client[0].Bind = ln.Addr().String()
 	ln.Close()
 
 	go func() {
 		Start(ctx, cfg, slog.Default()) //nolint:errcheck
 	}()
 
-	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+	waitForHTTP(t, "http://"+cfg.Client[0].Bind+"/health", 2*time.Second)
 
 	reqBody := `{"model":"gpt-4o","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}`
-	resp, err := http.Post("http://"+cfg.Bind+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post("http://"+cfg.Client[0].Bind+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +382,15 @@ func TestGateway_UpstreamError_ResponseFormat(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfg := GatewayCfg{Name: "test-err-format", Bind: "127.0.0.1:0", ClientAPI: APIAnthropic, UpstreamAPI: APIOpenAI, Upstream: upstream.URL}
+	cfg := GatewayCfg{
+		Name: "test-err-format",
+		Client: []ClientCfg{
+			{Bind: "127.0.0.1:0", API: APIAnthropic},
+		},
+		Upstream: []UpstreamCfg{
+			{Name: "default", API: APIOpenAI, Target: upstream.URL},
+		},
+	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -361,17 +399,17 @@ func TestGateway_UpstreamError_ResponseFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Bind = ln.Addr().String()
+	cfg.Client[0].Bind = ln.Addr().String()
 	ln.Close()
 
 	go func() {
 		Start(ctx, cfg, slog.Default()) //nolint:errcheck
 	}()
 
-	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+	waitForHTTP(t, "http://"+cfg.Client[0].Bind+"/health", 2*time.Second)
 
 	reqBody := `{"model":"claude-sonnet-4-6","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}`
-	resp, err := http.Post("http://"+cfg.Bind+"/v1/messages", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post("http://"+cfg.Client[0].Bind+"/v1/messages", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +436,15 @@ func TestGateway_UpstreamError_ResponseFormat(t *testing.T) {
 
 func TestGateway_A2O_InvalidJSON(t *testing.T) {
 	t.Parallel()
-	cfg := GatewayCfg{Name: "test-bad-json", Bind: "127.0.0.1:0", ClientAPI: APIAnthropic, UpstreamAPI: APIOpenAI, Upstream: "http://localhost:9999"}
+	cfg := GatewayCfg{
+		Name: "test-bad-json",
+		Client: []ClientCfg{
+			{Bind: "127.0.0.1:0", API: APIAnthropic},
+		},
+		Upstream: []UpstreamCfg{
+			{Name: "default", API: APIOpenAI, Target: "http://localhost:9999"},
+		},
+	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -407,13 +453,13 @@ func TestGateway_A2O_InvalidJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Bind = ln.Addr().String()
+	cfg.Client[0].Bind = ln.Addr().String()
 	ln.Close()
 
 	go func() { Start(ctx, cfg, slog.Default()) }() //nolint:errcheck
-	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+	waitForHTTP(t, "http://"+cfg.Client[0].Bind+"/health", 2*time.Second)
 
-	resp, err := http.Post("http://"+cfg.Bind+"/v1/messages", "application/json", strings.NewReader(`{bad json`))
+	resp, err := http.Post("http://"+cfg.Client[0].Bind+"/v1/messages", "application/json", strings.NewReader(`{bad json`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,11 +475,13 @@ func TestGateway_A2O_InvalidJSON(t *testing.T) {
 func TestGateway_O2A_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	cfg := GatewayCfg{
-		Name:        "test-bad-json-o2a",
-		Bind:        "127.0.0.1:0",
-		ClientAPI:   APIOpenAI,
-		UpstreamAPI: APIAnthropic,
-		Upstream:    "http://localhost:9999",
+		Name: "test-bad-json-o2a",
+		Client: []ClientCfg{
+			{Bind: "127.0.0.1:0", API: APIOpenAI},
+		},
+		Upstream: []UpstreamCfg{
+			{Name: "default", API: APIAnthropic, Target: "http://localhost:9999"},
+		},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -443,13 +491,13 @@ func TestGateway_O2A_InvalidJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Bind = ln.Addr().String()
+	cfg.Client[0].Bind = ln.Addr().String()
 	ln.Close()
 
 	go func() { Start(ctx, cfg, slog.Default()) }() //nolint:errcheck
-	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+	waitForHTTP(t, "http://"+cfg.Client[0].Bind+"/health", 2*time.Second)
 
-	resp, err := http.Post("http://"+cfg.Bind+"/v1/chat/completions", "application/json", strings.NewReader(`not json`))
+	resp, err := http.Post("http://"+cfg.Client[0].Bind+"/v1/chat/completions", "application/json", strings.NewReader(`not json`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +513,15 @@ func TestGateway_O2A_InvalidJSON(t *testing.T) {
 func TestGateway_A2O_UpstreamConnectionFailure(t *testing.T) {
 	t.Parallel()
 	// Upstream on a port that refuses connections.
-	cfg := GatewayCfg{Name: "test-conn-fail", Bind: "127.0.0.1:0", ClientAPI: APIAnthropic, UpstreamAPI: APIOpenAI, Upstream: "http://127.0.0.1:1"}
+	cfg := GatewayCfg{
+		Name: "test-conn-fail",
+		Client: []ClientCfg{
+			{Bind: "127.0.0.1:0", API: APIAnthropic},
+		},
+		Upstream: []UpstreamCfg{
+			{Name: "default", API: APIOpenAI, Target: "http://127.0.0.1:1"},
+		},
+	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -474,14 +530,14 @@ func TestGateway_A2O_UpstreamConnectionFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Bind = ln.Addr().String()
+	cfg.Client[0].Bind = ln.Addr().String()
 	ln.Close()
 
 	go func() { Start(ctx, cfg, slog.Default()) }() //nolint:errcheck
-	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+	waitForHTTP(t, "http://"+cfg.Client[0].Bind+"/health", 2*time.Second)
 
 	reqBody := `{"model":"claude-sonnet-4-6","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}`
-	resp, err := http.Post("http://"+cfg.Bind+"/v1/messages", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post("http://"+cfg.Client[0].Bind+"/v1/messages", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +559,15 @@ func TestGateway_A2O_StreamUpstreamError(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfg := GatewayCfg{Name: "test-stream-err", Bind: "127.0.0.1:0", ClientAPI: APIAnthropic, UpstreamAPI: APIOpenAI, Upstream: upstream.URL}
+	cfg := GatewayCfg{
+		Name: "test-stream-err",
+		Client: []ClientCfg{
+			{Bind: "127.0.0.1:0", API: APIAnthropic},
+		},
+		Upstream: []UpstreamCfg{
+			{Name: "default", API: APIOpenAI, Target: upstream.URL},
+		},
+	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -512,14 +576,14 @@ func TestGateway_A2O_StreamUpstreamError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Bind = ln.Addr().String()
+	cfg.Client[0].Bind = ln.Addr().String()
 	ln.Close()
 
 	go func() { Start(ctx, cfg, slog.Default()) }() //nolint:errcheck
-	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+	waitForHTTP(t, "http://"+cfg.Client[0].Bind+"/health", 2*time.Second)
 
 	reqBody := `{"model":"claude-sonnet-4-6","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"Hi"}]}`
-	resp, err := http.Post("http://"+cfg.Bind+"/v1/messages", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post("http://"+cfg.Client[0].Bind+"/v1/messages", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,11 +605,13 @@ func TestGateway_O2A_StreamUpstreamError(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := GatewayCfg{
-		Name:        "test-stream-err-o2a",
-		Bind:        "127.0.0.1:0",
-		ClientAPI:   APIOpenAI,
-		UpstreamAPI: APIAnthropic,
-		Upstream:    upstream.URL,
+		Name: "test-stream-err-o2a",
+		Client: []ClientCfg{
+			{Bind: "127.0.0.1:0", API: APIOpenAI},
+		},
+		Upstream: []UpstreamCfg{
+			{Name: "default", API: APIAnthropic, Target: upstream.URL},
+		},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -555,14 +621,14 @@ func TestGateway_O2A_StreamUpstreamError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Bind = ln.Addr().String()
+	cfg.Client[0].Bind = ln.Addr().String()
 	ln.Close()
 
 	go func() { Start(ctx, cfg, slog.Default()) }() //nolint:errcheck
-	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+	waitForHTTP(t, "http://"+cfg.Client[0].Bind+"/health", 2*time.Second)
 
 	reqBody := `{"model":"gpt-4o","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"Hi"}]}`
-	resp, err := http.Post("http://"+cfg.Bind+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post("http://"+cfg.Client[0].Bind+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}

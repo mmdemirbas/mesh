@@ -8,7 +8,7 @@ import (
 
 func TestTranslateAnthropicRequest_GlobModelMap(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{ModelMap: map[string]string{
+	cfg := &UpstreamCfg{ModelMap: map[string]string{
 		"claude-opus-4-6": "gpt-4-turbo", // exact
 		"claude-*":        "gpt-4o",      // glob
 		"*":               "gpt-4o-mini", // catch-all
@@ -39,7 +39,7 @@ func TestTranslateAnthropicRequest_GlobModelMap(t *testing.T) {
 
 func TestTranslateAnthropicRequest_SimpleText(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{ModelMap: map[string]string{"claude-sonnet-4-6": "gpt-4o"}}
+	cfg := &UpstreamCfg{ModelMap: map[string]string{"claude-sonnet-4-6": "gpt-4o"}}
 	req := &MessagesRequest{
 		Model:     "claude-sonnet-4-6",
 		MaxTokens: 1024,
@@ -69,7 +69,7 @@ func TestTranslateAnthropicRequest_SimpleText(t *testing.T) {
 
 func TestTranslateAnthropicRequest_SystemString(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &MessagesRequest{
 		Model:     "claude-sonnet-4-6",
 		MaxTokens: 100,
@@ -98,7 +98,7 @@ func TestTranslateAnthropicRequest_SystemString(t *testing.T) {
 
 func TestTranslateAnthropicRequest_SystemArray(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &MessagesRequest{
 		Model:     "claude-sonnet-4-6",
 		MaxTokens: 100,
@@ -121,7 +121,7 @@ func TestTranslateAnthropicRequest_SystemArray(t *testing.T) {
 
 func TestTranslateAnthropicRequest_DefaultMaxTokens(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{DefaultMaxTokens: 16384}
+	cfg := &UpstreamCfg{DefaultMaxTokens: 16384}
 	req := &MessagesRequest{
 		Model: "claude-sonnet-4-6",
 		Messages: []AnthropicMsg{
@@ -140,7 +140,7 @@ func TestTranslateAnthropicRequest_DefaultMaxTokens(t *testing.T) {
 
 func TestTranslateAnthropicRequest_ImageBase64(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	content := `[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR..."}}]`
 	req := &MessagesRequest{
 		Model:     "claude-sonnet-4-6",
@@ -171,7 +171,7 @@ func TestTranslateAnthropicRequest_ImageBase64(t *testing.T) {
 
 func TestTranslateAnthropicRequest_ToolUse(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	content := `[{"type":"tool_use","id":"call_1","name":"read_file","input":{"path":"/tmp/x"}}]`
 	req := &MessagesRequest{
 		Model:     "claude-sonnet-4-6",
@@ -204,7 +204,7 @@ func TestTranslateAnthropicRequest_ToolUse(t *testing.T) {
 
 func TestTranslateAnthropicRequest_ToolResult(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	content := `[{"type":"tool_result","tool_use_id":"call_1","content":"file contents here"}]`
 	req := &MessagesRequest{
 		Model:     "claude-sonnet-4-6",
@@ -233,7 +233,7 @@ func TestTranslateAnthropicRequest_ToolResult(t *testing.T) {
 
 func TestTranslateAnthropicRequest_ToolResultError(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	content := `[{"type":"tool_result","tool_use_id":"call_1","content":"not found","is_error":true}]`
 	req := &MessagesRequest{
 		Model:     "claude-sonnet-4-6",
@@ -257,7 +257,7 @@ func TestTranslateAnthropicRequest_ToolResultError(t *testing.T) {
 
 func TestTranslateAnthropicRequest_Tools(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &MessagesRequest{
 		Model:     "claude-sonnet-4-6",
 		MaxTokens: 100,
@@ -318,7 +318,7 @@ func TestTranslateAnthropicRequest_ToolChoiceAll(t *testing.T) {
 
 func TestTranslateAnthropicRequest_Stream(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &MessagesRequest{
 		Model:     "claude-sonnet-4-6",
 		MaxTokens: 100,
@@ -340,7 +340,7 @@ func TestTranslateAnthropicRequest_Stream(t *testing.T) {
 
 func TestTranslateAnthropicRequest_ThinkingWrapped(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	content := `[{"type":"thinking","thinking":"I think..."},{"type":"text","text":"Hello"}]`
 	req := &MessagesRequest{
 		Model:     "claude-sonnet-4-6",
@@ -363,7 +363,7 @@ func TestTranslateAnthropicRequest_ThinkingWrapped(t *testing.T) {
 
 func TestTranslateAnthropicRequest_MetadataUserID(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &MessagesRequest{
 		Model:     "claude-sonnet-4-6",
 		MaxTokens: 100,
@@ -538,7 +538,7 @@ func TestTranslateOpenAIResponse_IDPrefix(t *testing.T) {
 
 func TestTranslateAnthropicRequest_EmptyToolInput(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	content := `[{"type":"tool_use","id":"call_1","name":"get_time","input":null}]`
 	req := &MessagesRequest{
 		Model:     "claude-sonnet-4-6",
@@ -561,7 +561,7 @@ func TestTranslateAnthropicRequest_EmptyToolInput(t *testing.T) {
 
 func TestTranslateAnthropicRequest_ImageURLSource(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	content := `[{"type":"image","source":{"type":"url","url":"https://example.com/image.png"}}]`
 	req := &MessagesRequest{
 		Model:     "claude-sonnet-4-6",
@@ -586,7 +586,7 @@ func TestTranslateAnthropicRequest_ImageURLSource(t *testing.T) {
 
 func TestTranslateAnthropicRequest_ToolResultWithImage(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	content := `[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"screenshot taken"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"abc123"}}]}]`
 	req := &MessagesRequest{
 		Model:     "claude-sonnet-4-6",
@@ -613,7 +613,7 @@ func TestTranslateAnthropicRequest_ToolResultWithImage(t *testing.T) {
 
 func TestTranslateAnthropicRequest_EmptyMessages(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &MessagesRequest{
 		Model:     "claude-sonnet-4-6",
 		MaxTokens: 100,

@@ -10,20 +10,49 @@ import (
 	"time"
 )
 
-// GatewayCfg configures a single LLM API gateway instance.
+// GatewayCfg configures a compound LLM API gateway with multiple clients,
+// routing rules, and upstream targets.
 type GatewayCfg struct {
 	// Friendly name for this gateway instance.
 	Name string `yaml:"name"`
+	// Optional request/response audit log.
+	Log LogCfg `yaml:"log,omitempty"`
+	// Local listeners for incoming requests.
+	Client []ClientCfg `yaml:"client"`
+	// Model-based routing rules. Evaluated in order; first match wins.
+	Routing []RoutingRule `yaml:"routing"`
+	// Upstream targets.
+	Upstream []UpstreamCfg `yaml:"upstream"`
+}
+
+// ClientCfg defines a local listener for incoming requests.
+type ClientCfg struct {
 	// Local listening address (e.g., "127.0.0.1:3457").
 	Bind string `yaml:"bind"`
+	// API language this listener accepts: "anthropic" or "openai".
+	API string `yaml:"api"`
+}
+
+// RoutingRule maps client model patterns to an upstream name.
+// Rules are evaluated in order; first match wins.
+type RoutingRule struct {
+	// Name of the upstream to route matching requests to.
+	UpstreamName string `yaml:"upstream_name"`
+	// Glob patterns for client model names. "*" matches all models.
+	// Uses path.Match semantics (* matches any sequence, ? matches one char, [...] brackets).
+	ClientModel []string `yaml:"client_model"`
+}
+
+// UpstreamCfg defines a single upstream target.
+type UpstreamCfg struct {
+	// Unique name for this upstream.
+	Name string `yaml:"name"`
 	// Upstream endpoint URL. Translation handlers require the API-specific
 	// path (/v1/chat/completions or /v1/messages); passthrough handlers use
 	// the base URL and preserve the client's request path.
-	Upstream string `yaml:"upstream"`
+	Target string `yaml:"target"`
 	// API language the upstream server speaks: "anthropic" or "openai".
-	UpstreamAPI string `yaml:"upstream_api"`
-	// API language this gateway accepts from clients: "anthropic" or "openai".
-	ClientAPI string `yaml:"client_api"`
+	API string `yaml:"api"`
 	// Name of the environment variable holding the upstream API key.
 	// When unset, the gateway preserves the client's auth headers verbatim
 	// (required for OAuth-authenticated clients such as Claude Code).
@@ -32,13 +61,11 @@ type GatewayCfg struct {
 	Proxy string `yaml:"proxy,omitempty"`
 	// Upstream request timeout (e.g., "600s"). Default: "600s".
 	Timeout string `yaml:"timeout,omitempty"`
-	// Model name remapping: client model name -> upstream model name.
-	ModelMap map[string]string `yaml:"model_map,omitempty"`
 	// Default max_tokens when the client omits it. Default: 32768.
 	// Only applied in translation mode; passthrough does not mutate requests.
 	DefaultMaxTokens int `yaml:"default_max_tokens,omitempty"`
-	// Optional request/response audit log.
-	Log LogCfg `yaml:"log,omitempty"`
+	// Model name remapping: client model name -> upstream model name.
+	ModelMap map[string]string `yaml:"model_map,omitempty"`
 }
 
 // LogCfg configures per-gateway audit logging. The zero value disables logging
@@ -102,23 +129,23 @@ func (d Direction) String() string {
 	return "unknown"
 }
 
-// Direction returns the derived direction. Callers must Validate first.
-func (c *GatewayCfg) Direction() Direction {
+// ResolveDirection returns the direction for a given (clientAPI, upstreamAPI) pair.
+func ResolveDirection(clientAPI, upstreamAPI string) Direction {
 	switch {
-	case c.ClientAPI == APIAnthropic && c.UpstreamAPI == APIOpenAI:
+	case clientAPI == APIAnthropic && upstreamAPI == APIOpenAI:
 		return DirA2O
-	case c.ClientAPI == APIOpenAI && c.UpstreamAPI == APIAnthropic:
+	case clientAPI == APIOpenAI && upstreamAPI == APIAnthropic:
 		return DirO2A
-	case c.ClientAPI == APIAnthropic && c.UpstreamAPI == APIAnthropic:
+	case clientAPI == APIAnthropic && upstreamAPI == APIAnthropic:
 		return DirA2A
 	default:
 		return DirO2O
 	}
 }
 
-// IsPassthrough reports whether client and upstream APIs match.
-func (c *GatewayCfg) IsPassthrough() bool {
-	return c.ClientAPI == c.UpstreamAPI
+// IsPassthrough reports whether the direction is same-API passthrough.
+func (d Direction) IsPassthrough() bool {
+	return d == DirA2A || d == DirO2O
 }
 
 // Validate checks that the gateway configuration is well-formed.
@@ -126,47 +153,102 @@ func (c *GatewayCfg) Validate() error {
 	if c.Name == "" {
 		return fmt.Errorf("name is required")
 	}
-	if c.Bind == "" {
-		return fmt.Errorf("bind is required")
+
+	// --- Clients ---
+	if len(c.Client) == 0 {
+		return fmt.Errorf("at least one client is required")
 	}
-	if !isValidAPI(c.ClientAPI) {
-		return fmt.Errorf("client_api must be %q or %q, got %q", APIAnthropic, APIOpenAI, c.ClientAPI)
-	}
-	if !isValidAPI(c.UpstreamAPI) {
-		return fmt.Errorf("upstream_api must be %q or %q, got %q", APIAnthropic, APIOpenAI, c.UpstreamAPI)
-	}
-	if c.Upstream == "" {
-		return fmt.Errorf("upstream is required")
-	}
-	if c.Timeout != "" {
-		if _, err := time.ParseDuration(c.Timeout); err != nil {
-			return fmt.Errorf("invalid timeout %q: %w", c.Timeout, err)
+	for i, cl := range c.Client {
+		if cl.Bind == "" {
+			return fmt.Errorf("client[%d]: bind is required", i)
+		}
+		if !isValidAPI(cl.API) {
+			return fmt.Errorf("client[%d]: api must be %q or %q, got %q", i, APIAnthropic, APIOpenAI, cl.API)
+		}
+		host, _, err := net.SplitHostPort(cl.Bind)
+		if err != nil {
+			return fmt.Errorf("client[%d]: invalid bind address %q: %w", i, cl.Bind, err)
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf("client[%d]: bind address %q must be an explicit loopback IP (127.0.0.1 or ::1)", i, cl.Bind)
 		}
 	}
 
-	host, _, err := net.SplitHostPort(c.Bind)
-	if err != nil {
-		return fmt.Errorf("invalid bind address %q: %w", c.Bind, err)
+	// --- Upstreams ---
+	if len(c.Upstream) == 0 {
+		return fmt.Errorf("at least one upstream is required")
 	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("bind address %q must be an explicit loopback IP (127.0.0.1 or ::1)", c.Bind)
-	}
+	upstreamNames := make(map[string]int, len(c.Upstream))
+	for i, u := range c.Upstream {
+		if u.Name == "" {
+			return fmt.Errorf("upstream[%d]: name is required", i)
+		}
+		if prev, ok := upstreamNames[u.Name]; ok {
+			return fmt.Errorf("duplicate upstream name %q: upstream[%d] and upstream[%d]", u.Name, prev, i)
+		}
+		upstreamNames[u.Name] = i
 
-	if c.DefaultMaxTokens < 0 {
-		return fmt.Errorf("default_max_tokens must be non-negative")
-	}
-	for pattern := range c.ModelMap {
-		if strings.ContainsAny(pattern, "*?[") && pattern != "*" {
-			if _, err := path.Match(pattern, ""); err != nil {
-				return fmt.Errorf("model_map: invalid glob pattern %q: %w", pattern, err)
+		if u.Target == "" {
+			return fmt.Errorf("upstream[%d] %q: target is required", i, u.Name)
+		}
+		if !isValidAPI(u.API) {
+			return fmt.Errorf("upstream[%d] %q: api must be %q or %q, got %q", i, u.Name, APIAnthropic, APIOpenAI, u.API)
+		}
+		if u.Timeout != "" {
+			if _, err := time.ParseDuration(u.Timeout); err != nil {
+				return fmt.Errorf("upstream[%d] %q: invalid timeout %q: %w", i, u.Name, u.Timeout, err)
+			}
+		}
+		if u.DefaultMaxTokens < 0 {
+			return fmt.Errorf("upstream[%d] %q: default_max_tokens must be non-negative", i, u.Name)
+		}
+		for pattern := range u.ModelMap {
+			if strings.ContainsAny(pattern, "*?[") && pattern != "*" {
+				if _, err := path.Match(pattern, ""); err != nil {
+					return fmt.Errorf("upstream[%d] %q: model_map: invalid glob pattern %q: %w", i, u.Name, pattern, err)
+				}
 			}
 		}
 	}
+
+	// --- Routing ---
+	if len(c.Routing) == 0 {
+		return fmt.Errorf("at least one routing rule is required")
+	}
+	for i, r := range c.Routing {
+		if r.UpstreamName == "" {
+			return fmt.Errorf("routing[%d]: upstream_name is required", i)
+		}
+		if _, ok := upstreamNames[r.UpstreamName]; !ok {
+			return fmt.Errorf("routing[%d]: upstream_name %q does not match any upstream", i, r.UpstreamName)
+		}
+		if len(r.ClientModel) == 0 {
+			return fmt.Errorf("routing[%d]: at least one client_model pattern is required", i)
+		}
+		for _, pattern := range r.ClientModel {
+			if strings.ContainsAny(pattern, "*?[") && pattern != "*" {
+				if _, err := path.Match(pattern, ""); err != nil {
+					return fmt.Errorf("routing[%d]: invalid glob pattern %q: %w", i, pattern, err)
+				}
+			}
+		}
+	}
+
+	// --- Log ---
 	if err := c.Log.validate(); err != nil {
 		return fmt.Errorf("log: %w", err)
 	}
 	return nil
+}
+
+// ClientBinds returns all bind addresses from the client list.
+func (c *GatewayCfg) ClientBinds() []string {
+	binds := make([]string, len(c.Client))
+	for i, cl := range c.Client {
+		binds[i] = cl.Bind
+	}
+	return binds
 }
 
 func isValidAPI(v string) bool {
@@ -258,18 +340,18 @@ func (l *LogCfg) ResolvedMaxAge() time.Duration {
 }
 
 // TimeoutDuration returns the parsed timeout or the default (600s).
-func (c *GatewayCfg) TimeoutDuration() time.Duration {
-	if c.Timeout != "" {
-		d, _ := time.ParseDuration(c.Timeout)
+func (u *UpstreamCfg) TimeoutDuration() time.Duration {
+	if u.Timeout != "" {
+		d, _ := time.ParseDuration(u.Timeout)
 		return d
 	}
 	return 600 * time.Second
 }
 
 // MaxTokens returns the configured default or 32768.
-func (c *GatewayCfg) MaxTokens() int {
-	if c.DefaultMaxTokens > 0 {
-		return c.DefaultMaxTokens
+func (u *UpstreamCfg) MaxTokens() int {
+	if u.DefaultMaxTokens > 0 {
+		return u.DefaultMaxTokens
 	}
 	return 32768
 }
@@ -277,9 +359,9 @@ func (c *GatewayCfg) MaxTokens() int {
 // MapModel applies the model_map to a client-provided model name.
 // Matching order: exact literal → glob patterns (longest first) → "*" catch-all → passthrough.
 // Glob patterns use path.Match semantics (* matches any sequence, ? matches one char, [...] brackets).
-func (c *GatewayCfg) MapModel(model string) string {
+func (u *UpstreamCfg) MapModel(model string) string {
 	// Exact literal match (O(1)).
-	if mapped, ok := c.ModelMap[model]; ok {
+	if mapped, ok := u.ModelMap[model]; ok {
 		if !strings.ContainsAny(model, "*?[") {
 			return mapped
 		}
@@ -292,7 +374,7 @@ func (c *GatewayCfg) MapModel(model string) string {
 	var globs []entry
 	var catchAll string
 	var hasCatchAll bool
-	for k, v := range c.ModelMap {
+	for k, v := range u.ModelMap {
 		if k == "*" {
 			catchAll, hasCatchAll = v, true
 		} else if strings.ContainsAny(k, "*?[") {

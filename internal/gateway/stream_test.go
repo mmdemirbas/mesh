@@ -708,12 +708,13 @@ func runA2OStreamTest(t *testing.T, upstreamURL, model string, modelMap map[stri
 	t.Helper()
 
 	cfg := GatewayCfg{
-		Name:        "test-a2o-stream",
-		Bind:        "127.0.0.1:0",
-		ClientAPI:   APIAnthropic,
-		UpstreamAPI: APIOpenAI,
-		Upstream:    upstreamURL,
-		ModelMap:    modelMap,
+		Name: "test-a2o-stream",
+		Client: []ClientCfg{
+			{Bind: "127.0.0.1:0", API: APIAnthropic},
+		},
+		Upstream: []UpstreamCfg{
+			{Name: "default", Target: upstreamURL, API: APIOpenAI, ModelMap: modelMap},
+		},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -723,17 +724,17 @@ func runA2OStreamTest(t *testing.T, upstreamURL, model string, modelMap map[stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Bind = ln.Addr().String()
+	cfg.Client[0].Bind = ln.Addr().String()
 	ln.Close()
 
 	go func() {
 		Start(ctx, cfg, slog.Default()) //nolint:errcheck
 	}()
 
-	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+	waitForHTTP(t, "http://"+cfg.Client[0].Bind+"/health", 2*time.Second)
 
 	reqBody := fmt.Sprintf(`{"model":%q,"max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"Hi"}]}`, model)
-	resp, err := http.Post("http://"+cfg.Bind+"/v1/messages", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post("http://"+cfg.Client[0].Bind+"/v1/messages", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -750,12 +751,13 @@ func runO2AStreamTest(t *testing.T, upstreamURL, model string, modelMap map[stri
 	t.Helper()
 
 	cfg := GatewayCfg{
-		Name:        "test-o2a-stream",
-		Bind:        "127.0.0.1:0",
-		ClientAPI:   APIOpenAI,
-		UpstreamAPI: APIAnthropic,
-		Upstream:    upstreamURL,
-		ModelMap:    modelMap,
+		Name: "test-o2a-stream",
+		Client: []ClientCfg{
+			{Bind: "127.0.0.1:0", API: APIOpenAI},
+		},
+		Upstream: []UpstreamCfg{
+			{Name: "default", Target: upstreamURL, API: APIAnthropic, ModelMap: modelMap},
+		},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -765,21 +767,21 @@ func runO2AStreamTest(t *testing.T, upstreamURL, model string, modelMap map[stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Bind = ln.Addr().String()
+	cfg.Client[0].Bind = ln.Addr().String()
 	ln.Close()
 
 	go func() {
 		Start(ctx, cfg, slog.Default()) //nolint:errcheck
 	}()
 
-	waitForHTTP(t, "http://"+cfg.Bind+"/health", 2*time.Second)
+	waitForHTTP(t, "http://"+cfg.Client[0].Bind+"/health", 2*time.Second)
 
 	streamOpts := ""
 	if includeUsage {
 		streamOpts = `,"stream_options":{"include_usage":true}`
 	}
 	reqBody := fmt.Sprintf(`{"model":%q,"max_tokens":1024,"stream":true%s,"messages":[{"role":"user","content":"Hi"}]}`, model, streamOpts)
-	resp, err := http.Post("http://"+cfg.Bind+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post("http://"+cfg.Client[0].Bind+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}

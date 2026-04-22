@@ -25,7 +25,7 @@ func generateMsgID() string {
 // handleA2OStream handles Direction A streaming: client expects Anthropic SSE,
 // upstream returns OpenAI SSE. Reads OpenAI SSE chunks from upstream and
 // translates each to Anthropic SSE events.
-func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatCompletionRequest, cfg *GatewayCfg, client *http.Client, apiKey, clientModel string, metrics *state.Metrics, log *slog.Logger) {
+func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatCompletionRequest, upstream *ResolvedUpstream, clientModel string, metrics *state.Metrics, log *slog.Logger) {
 	start := time.Now()
 
 	oaiBody, _ := json.Marshal(oaiReq)
@@ -35,17 +35,17 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 		au.ReqBody = oaiBody
 	}
 
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), "POST", cfg.Upstream, bytes.NewReader(oaiBody))
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), "POST", upstream.Cfg.Target, bytes.NewReader(oaiBody))
 	if err != nil {
 		writeAnthropicError(w, 500, "cannot create upstream request")
 		return
 	}
 	upstreamReq.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		upstreamReq.Header.Set("Authorization", "Bearer "+apiKey)
+	if upstream.APIKey != "" {
+		upstreamReq.Header.Set("Authorization", "Bearer "+upstream.APIKey)
 	}
 
-	upstreamResp, err := client.Do(upstreamReq)
+	upstreamResp, err := upstream.Client.Do(upstreamReq)
 	if err != nil {
 		writeAnthropicError(w, 502, "upstream request failed")
 		log.Error("Upstream stream request failed", "error", err)
@@ -55,7 +55,7 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 
 	if upstreamResp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(upstreamResp.Body, 4096))
-		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, cfg.Direction())
+		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, DirA2O)
 		writeAnthropicError(w, status, "upstream error")
 		log.Warn("Upstream stream error", "status", upstreamResp.StatusCode, "body", string(errBody))
 		return

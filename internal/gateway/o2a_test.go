@@ -8,7 +8,7 @@ import (
 
 func TestTranslateOpenAIRequest_GlobModelMap(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{ModelMap: map[string]string{
+	cfg := &UpstreamCfg{ModelMap: map[string]string{
 		"gpt-4o": "claude-opus-4-6",   // exact
 		"gpt-4*": "claude-sonnet-4-6", // glob
 		"*":      "claude-haiku-4-5",  // catch-all
@@ -40,7 +40,7 @@ func TestTranslateOpenAIRequest_GlobModelMap(t *testing.T) {
 
 func TestTranslateOpenAIRequest_SimpleText(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{ModelMap: map[string]string{"gpt-4o": "claude-sonnet-4-6"}}
+	cfg := &UpstreamCfg{ModelMap: map[string]string{"gpt-4o": "claude-sonnet-4-6"}}
 	maxTok := 1024
 	req := &ChatCompletionRequest{
 		Model:     "gpt-4o",
@@ -67,7 +67,7 @@ func TestTranslateOpenAIRequest_SimpleText(t *testing.T) {
 
 func TestTranslateOpenAIRequest_SystemExtraction(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &ChatCompletionRequest{
 		Model: "gpt-4o",
 		Messages: []OpenAIMsg{
@@ -94,7 +94,7 @@ func TestTranslateOpenAIRequest_SystemExtraction(t *testing.T) {
 
 func TestTranslateOpenAIRequest_DefaultMaxTokens(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{DefaultMaxTokens: 16384}
+	cfg := &UpstreamCfg{DefaultMaxTokens: 16384}
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
 		Messages: []OpenAIMsg{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
@@ -111,7 +111,7 @@ func TestTranslateOpenAIRequest_DefaultMaxTokens(t *testing.T) {
 
 func TestTranslateOpenAIRequest_TemperatureClamping(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	temp := 1.5
 	req := &ChatCompletionRequest{
 		Model:       "gpt-4o",
@@ -130,7 +130,7 @@ func TestTranslateOpenAIRequest_TemperatureClamping(t *testing.T) {
 
 func TestTranslateOpenAIRequest_TemperaturePassthrough(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	temp := 0.7
 	req := &ChatCompletionRequest{
 		Model:       "gpt-4o",
@@ -149,7 +149,7 @@ func TestTranslateOpenAIRequest_TemperaturePassthrough(t *testing.T) {
 
 func TestTranslateOpenAIRequest_ConsecutiveSameRole(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &ChatCompletionRequest{
 		Model: "gpt-4o",
 		Messages: []OpenAIMsg{
@@ -175,7 +175,7 @@ func TestTranslateOpenAIRequest_ConsecutiveSameRole(t *testing.T) {
 
 func TestTranslateOpenAIRequest_ToolMessages(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &ChatCompletionRequest{
 		Model: "gpt-4o",
 		Messages: []OpenAIMsg{
@@ -210,7 +210,7 @@ func TestTranslateOpenAIRequest_ToolMessages(t *testing.T) {
 
 func TestTranslateOpenAIRequest_ImageURL(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	content := `[{"type":"text","text":"What is this?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,abc123"}}]`
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
@@ -265,7 +265,7 @@ func TestTranslateOpenAIRequest_ToolChoiceAll(t *testing.T) {
 
 func TestTranslateOpenAIRequest_StopString(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
 		Stop:     json.RawMessage(`"END"`),
@@ -283,7 +283,7 @@ func TestTranslateOpenAIRequest_StopString(t *testing.T) {
 
 func TestTranslateOpenAIRequest_StopArray(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
 		Stop:     json.RawMessage(`["END","STOP"]`),
@@ -301,7 +301,7 @@ func TestTranslateOpenAIRequest_StopArray(t *testing.T) {
 
 func TestTranslateOpenAIRequest_Tools(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
 		Messages: []OpenAIMsg{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
@@ -331,7 +331,7 @@ func TestTranslateOpenAIRequest_Tools(t *testing.T) {
 
 func TestTranslateOpenAIRequest_User(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
 		User:     "user-123",
@@ -491,7 +491,7 @@ func TestTranslateAnthropicResponse_ThinkingWrapped(t *testing.T) {
 
 func TestTranslateOpenAIRequest_DeveloperRole(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &ChatCompletionRequest{
 		Model: "gpt-4o",
 		Messages: []OpenAIMsg{
@@ -514,7 +514,7 @@ func TestTranslateOpenAIRequest_DeveloperRole(t *testing.T) {
 
 func TestTranslateOpenAIRequest_ImageURL_PlainURL(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	content := `[{"type":"image_url","image_url":{"url":"https://example.com/photo.jpg"}}]`
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
@@ -541,7 +541,7 @@ func TestTranslateOpenAIRequest_ImageURL_PlainURL(t *testing.T) {
 
 func TestTranslateOpenAIRequest_ConsecutiveAssistantMerge(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &ChatCompletionRequest{
 		Model: "gpt-4o",
 		Messages: []OpenAIMsg{
@@ -568,7 +568,7 @@ func TestTranslateOpenAIRequest_ConsecutiveAssistantMerge(t *testing.T) {
 
 func TestTranslateOpenAIRequest_EmptyMessages(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
 		Messages: []OpenAIMsg{},
@@ -585,7 +585,7 @@ func TestTranslateOpenAIRequest_EmptyMessages(t *testing.T) {
 
 func TestTranslateOpenAIRequest_NGreaterThan1Rejected(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	n := 3
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
@@ -600,7 +600,7 @@ func TestTranslateOpenAIRequest_NGreaterThan1Rejected(t *testing.T) {
 
 func TestTranslateOpenAIRequest_N1Accepted(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 	n := 1
 	req := &ChatCompletionRequest{
 		Model:    "gpt-4o",
@@ -615,7 +615,7 @@ func TestTranslateOpenAIRequest_N1Accepted(t *testing.T) {
 
 func TestTranslateOpenAIRequest_ResponseFormat(t *testing.T) {
 	t.Parallel()
-	cfg := &GatewayCfg{}
+	cfg := &UpstreamCfg{}
 
 	build := func(rf string, withSys bool) *ChatCompletionRequest {
 		req := &ChatCompletionRequest{Model: "gpt-4o", Messages: []OpenAIMsg{{Role: "user", Content: json.RawMessage(`"hi"`)}}}

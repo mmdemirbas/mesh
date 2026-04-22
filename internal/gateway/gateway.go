@@ -9,8 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
-	"os"
+	"sync"
 	"time"
 
 	"github.com/mmdemirbas/mesh/internal/state"
@@ -25,46 +24,62 @@ const (
 	maxSSELineSize = 4 * 1024 * 1024
 )
 
-// Start launches a gateway HTTP server that translates between Anthropic and
-// OpenAI API formats. It blocks until ctx is cancelled.
+// Start launches a compound gateway HTTP server. It creates one HTTP server
+// per client bind, all sharing the same router and audit recorder.
+// It blocks until ctx is cancelled.
 func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 	log = log.With("gateway", cfg.Name)
 
-	apiKey := ""
-	apiKeyEmpty := false
-	if cfg.APIKeyEnv != "" {
-		apiKey = os.Getenv(cfg.APIKeyEnv)
-		if apiKey == "" {
-			apiKeyEmpty = true
-			log.Warn("API key env var is empty", "var", cfg.APIKeyEnv)
+	router, err := NewRouter(&cfg)
+	if err != nil {
+		return fmt.Errorf("build router: %w", err)
+	}
+
+	// Warn about empty API key env vars.
+	var emptyKeyWarnings []string
+	for _, u := range cfg.Upstream {
+		if u.APIKeyEnv != "" {
+			ru := router.Upstream(u.Name)
+			if ru != nil && ru.APIKey == "" {
+				emptyKeyWarnings = append(emptyKeyWarnings, u.APIKeyEnv)
+				log.Warn("API key env var is empty", "upstream", u.Name, "var", u.APIKeyEnv)
+			}
 		}
 	}
 
-	transport := &http.Transport{
-		MaxIdleConns:        100,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
-	}
-
-	// Optional proxy for upstream (HTTP, HTTPS, SOCKS5).
-	if cfg.Proxy != "" {
-		proxyURL, err := url.Parse(cfg.Proxy)
-		if err != nil {
-			return fmt.Errorf("invalid proxy URL %q: %w", cfg.Proxy, err)
-		}
-		transport.Proxy = http.ProxyURL(proxyURL)
-	}
-
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   cfg.TimeoutDuration(),
-	}
-
-	recorder, err := NewRecorder(cfg, log)
+	recorder, err := NewRecorder(cfg.Name, cfg.Log, log)
 	if err != nil {
 		return fmt.Errorf("audit log init: %w", err)
 	}
 	defer func() { _ = recorder.Close() }()
+
+	var wg sync.WaitGroup
+	var firstErr error
+	var errMu sync.Mutex
+
+	for _, cl := range cfg.Client {
+		cl := cl
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := startClientListener(ctx, cfg, cl, router, recorder, emptyKeyWarnings, log); err != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				errMu.Unlock()
+			}
+		}()
+	}
+
+	wg.Wait()
+	return firstErr
+}
+
+// startClientListener starts an HTTP server for a single client bind address.
+func startClientListener(ctx context.Context, cfg GatewayCfg, cl ClientCfg, router *Router, recorder *Recorder, emptyKeyWarnings []string, log *slog.Logger) error {
+	compKey := cfg.Name + "/" + cl.Bind
+	log = log.With("bind", cl.Bind, "api", cl.API)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
@@ -72,52 +87,41 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	dir := cfg.Direction()
-	switch dir {
-	case DirA2O:
-		mux.HandleFunc("POST /v1/messages", wrapAuditing(cfg, recorder, APIAnthropic, func(w http.ResponseWriter, r *http.Request) {
-			handleA2O(w, r, cfg, client, apiKey, log)
-		}))
-	case DirO2A:
-		mux.HandleFunc("POST /v1/chat/completions", wrapAuditing(cfg, recorder, APIOpenAI, func(w http.ResponseWriter, r *http.Request) {
-			handleO2A(w, r, cfg, client, apiKey, log)
-		}))
-	case DirA2A, DirO2O:
-		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			handlePassthrough(w, r, cfg, client, apiKey, recorder, log)
-		})
+	// Build a routing handler that peeks the model name from the body,
+	// resolves the upstream, determines the direction, and dispatches.
+	routingHandler := buildRoutingHandler(cfg, cl, router, recorder, log)
+
+	// Register the appropriate paths based on client API.
+	switch cl.API {
+	case APIAnthropic:
+		mux.HandleFunc("POST /v1/messages", routingHandler)
+	case APIOpenAI:
+		mux.HandleFunc("POST /v1/chat/completions", routingHandler)
 	}
 
-	ln, err := net.Listen("tcp", cfg.Bind)
+	ln, err := net.Listen("tcp", cl.Bind)
 	if err != nil {
-		state.Global.Update("gateway", cfg.Name, state.Failed, err.Error())
-		return fmt.Errorf("listen %s: %w", cfg.Bind, err)
+		state.Global.Update("gateway", compKey, state.Failed, err.Error())
+		return fmt.Errorf("listen %s: %w", cl.Bind, err)
 	}
 	defer func() { _ = ln.Close() }()
 
 	listenMsg := ""
-	if apiKeyEmpty {
-		listenMsg = cfg.APIKeyEnv + " is empty"
+	if len(emptyKeyWarnings) > 0 {
+		listenMsg = emptyKeyWarnings[0] + " is empty"
 	}
-	state.Global.Update("gateway", cfg.Name, state.Listening, listenMsg)
-	state.Global.UpdateBind("gateway", cfg.Name, ln.Addr().String())
-	metrics := state.Global.GetMetrics("gateway", cfg.Name)
+	state.Global.Update("gateway", compKey, state.Listening, listenMsg)
+	state.Global.UpdateBind("gateway", compKey, ln.Addr().String())
+	metrics := state.Global.GetMetrics("gateway", compKey)
 	metrics.StartTime.Store(time.Now().UnixNano())
 
-	log.Info("Gateway started", "bind", ln.Addr(), "direction", dir, "client_api", cfg.ClientAPI, "upstream_api", cfg.UpstreamAPI, "upstream", cfg.Upstream)
+	log.Info("Gateway client started", "bind", ln.Addr(), "client_api", cl.API)
 
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
-		// ReadTimeout caps the time a slow client can spend uploading the
-		// 32 MB request body — without it a slowloris-style client can hold
-		// a goroutine indefinitely after the headers complete.
-		ReadTimeout: 2 * time.Minute,
-		// WriteTimeout deliberately omitted: SSE streaming responses can run
-		// for the duration of the upstream LLM call (minutes for long
-		// generations) and the per-stream context cancels on client
-		// disconnect.
-		IdleTimeout: 60 * time.Second,
+		ReadTimeout:       2 * time.Minute,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {
@@ -128,20 +132,85 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 	}()
 
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-		state.Global.Update("gateway", cfg.Name, state.Failed, err.Error())
+		state.Global.Update("gateway", compKey, state.Failed, err.Error())
 		return err
 	}
 
-	state.Global.Delete("gateway", cfg.Name)
-	state.Global.DeleteMetrics("gateway", cfg.Name)
+	state.Global.Delete("gateway", compKey)
+	state.Global.DeleteMetrics("gateway", compKey)
 	return nil
 }
 
+// buildRoutingHandler creates an HTTP handler that peeks the model from the
+// request body, routes to the appropriate upstream, and dispatches to the
+// correct translation/passthrough handler based on direction.
+func buildRoutingHandler(cfg GatewayCfg, cl ClientCfg, router *Router, recorder *Recorder, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		compKey := cfg.Name + "/" + cl.Bind
+		metrics := state.Global.GetMetrics("gateway", compKey)
+
+		// Read and buffer the body so we can peek the model name, then replay.
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
+		if err != nil {
+			writeClientError(cl.API, w, 413, "request body too large")
+			return
+		}
+		metrics.BytesRx.Add(int64(len(body)))
+
+		// Peek model from body.
+		var peek struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(body, &peek)
+
+		upstream := router.Route(peek.Model)
+		if upstream == nil {
+			upstream = router.DefaultUpstream()
+		}
+		if upstream == nil {
+			writeClientError(cl.API, w, 404, "no upstream found for model: "+peek.Model)
+			return
+		}
+
+		// Replay the body for the inner handler.
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+
+		dir := ResolveDirection(cl.API, upstream.Cfg.API)
+
+		// Audit wrapping (if recorder is non-nil).
+		innerHandler := func(w http.ResponseWriter, r *http.Request) {
+			dispatchRequest(w, r, cfg, cl, upstream, dir, metrics, log)
+		}
+
+		wrappedHandler := wrapAuditing(cfg.Name, &upstream.Cfg, cl.API, recorder, http.HandlerFunc(innerHandler))
+		wrappedHandler.ServeHTTP(w, r)
+	}
+}
+
+// dispatchRequest sends the request to the correct handler based on direction.
+func dispatchRequest(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, cl ClientCfg, upstream *ResolvedUpstream, dir Direction, metrics *state.Metrics, log *slog.Logger) {
+	switch dir {
+	case DirA2O:
+		handleA2O(w, r, cfg.Name, upstream, metrics, log)
+	case DirO2A:
+		handleO2A(w, r, cfg.Name, upstream, metrics, log)
+	case DirA2A, DirO2O:
+		handlePassthrough(w, r, cfg.Name, cl.API, upstream, dir, metrics, log)
+	}
+}
+
+// writeClientError writes an error in the client's expected API format.
+func writeClientError(clientAPI string, w http.ResponseWriter, status int, msg string) {
+	if clientAPI == APIAnthropic {
+		writeAnthropicError(w, status, msg)
+	} else {
+		writeOpenAIError(w, status, msg)
+	}
+}
+
 // doUpstreamRequest sends body to upstreamURL via POST, applying Content-Type and
-// any extra headers, and returns the response body. The caller owns the response
-// status code; doUpstreamRequest only returns an error on transport failure or
-// a body read failure. extraHeaders is applied after Content-Type so callers can
-// override it if needed (though in practice they do not).
+// any extra headers, and returns the response body.
 func doUpstreamRequest(ctx context.Context, client *http.Client, upstreamURL string, body []byte, extraHeaders map[string]string, log *slog.Logger) (statusCode int, respBody []byte, err error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", upstreamURL, bytes.NewReader(body))
 	if err != nil {
@@ -166,9 +235,8 @@ func doUpstreamRequest(ctx context.Context, client *http.Client, upstreamURL str
 	return resp.StatusCode, respBody, nil
 }
 
-// handleA2O handles Direction A: client sends Anthropic, gateway forwards as OpenAI.
-func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *http.Client, apiKey string, log *slog.Logger) {
-	metrics := state.Global.GetMetrics("gateway", cfg.Name)
+// handleA2O handles client=Anthropic, upstream=OpenAI translation.
+func handleA2O(w http.ResponseWriter, r *http.Request, gwName string, upstream *ResolvedUpstream, metrics *state.Metrics, log *slog.Logger) {
 	start := time.Now()
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
@@ -176,7 +244,6 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 		writeAnthropicError(w, 413, "request body too large")
 		return
 	}
-	metrics.BytesRx.Add(int64(len(body)))
 
 	var req MessagesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -186,14 +253,14 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 
 	clientModel := req.Model
 
-	oaiReq, err := translateAnthropicRequest(&req, &cfg)
+	oaiReq, err := translateAnthropicRequest(&req, &upstream.Cfg)
 	if err != nil {
 		writeAnthropicError(w, 400, "translation error: "+err.Error())
 		return
 	}
 
 	if req.Stream {
-		handleA2OStream(w, r, oaiReq, &cfg, client, apiKey, clientModel, metrics, log)
+		handleA2OStream(w, r, oaiReq, upstream, clientModel, metrics, log)
 		return
 	}
 
@@ -205,11 +272,11 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 	}
 
 	headers := map[string]string{}
-	if apiKey != "" {
-		headers["Authorization"] = "Bearer " + apiKey
+	if upstream.APIKey != "" {
+		headers["Authorization"] = "Bearer " + upstream.APIKey
 	}
 
-	statusCode, respBody, err := doUpstreamRequest(r.Context(), client, cfg.Upstream, oaiBody, headers, log)
+	statusCode, respBody, err := doUpstreamRequest(r.Context(), upstream.Client, upstream.Cfg.Target, oaiBody, headers, log)
 	if err != nil {
 		writeAnthropicError(w, 502, err.Error())
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
@@ -222,7 +289,7 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 	}
 
 	if statusCode != http.StatusOK {
-		status := translateUpstreamErrorStatus(statusCode, cfg.Direction())
+		status := translateUpstreamErrorStatus(statusCode, DirA2O)
 		writeAnthropicError(w, status, "upstream error")
 		log.Warn("Upstream error", "status", statusCode, "body", truncateBody(respBody, 512), "elapsed", time.Since(start))
 		return
@@ -259,9 +326,8 @@ func handleA2O(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 	)
 }
 
-// handleO2A handles Direction B: client sends OpenAI, gateway forwards as Anthropic.
-func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *http.Client, apiKey string, log *slog.Logger) {
-	metrics := state.Global.GetMetrics("gateway", cfg.Name)
+// handleO2A handles client=OpenAI, upstream=Anthropic translation.
+func handleO2A(w http.ResponseWriter, r *http.Request, gwName string, upstream *ResolvedUpstream, metrics *state.Metrics, log *slog.Logger) {
 	start := time.Now()
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
@@ -269,7 +335,6 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 		writeOpenAIError(w, 413, "request body too large")
 		return
 	}
-	metrics.BytesRx.Add(int64(len(body)))
 
 	var req ChatCompletionRequest
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -279,14 +344,14 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 
 	clientModel := req.Model
 
-	anthReq, err := translateOpenAIRequest(&req, &cfg)
+	anthReq, err := translateOpenAIRequest(&req, &upstream.Cfg)
 	if err != nil {
 		writeOpenAIError(w, 400, "translation error: "+err.Error())
 		return
 	}
 
 	if req.Stream {
-		handleO2AStream(w, r, anthReq, &cfg, client, apiKey, clientModel, &req, metrics, log)
+		handleO2AStream(w, r, anthReq, upstream, clientModel, &req, metrics, log)
 		return
 	}
 
@@ -298,12 +363,12 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 	}
 
 	headers := map[string]string{}
-	if apiKey != "" {
-		headers["x-api-key"] = apiKey
+	if upstream.APIKey != "" {
+		headers["x-api-key"] = upstream.APIKey
 		headers["anthropic-version"] = "2023-06-01"
 	}
 
-	statusCode, respBody, err := doUpstreamRequest(r.Context(), client, cfg.Upstream, anthBody, headers, log)
+	statusCode, respBody, err := doUpstreamRequest(r.Context(), upstream.Client, upstream.Cfg.Target, anthBody, headers, log)
 	if err != nil {
 		writeOpenAIError(w, 502, err.Error())
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
@@ -316,7 +381,7 @@ func handleO2A(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, client *h
 	}
 
 	if statusCode != http.StatusOK {
-		status := translateUpstreamErrorStatus(statusCode, cfg.Direction())
+		status := translateUpstreamErrorStatus(statusCode, DirO2A)
 		writeOpenAIError(w, status, "upstream error")
 		log.Warn("Upstream error", "status", statusCode, "body", truncateBody(respBody, 512), "elapsed", time.Since(start))
 		return

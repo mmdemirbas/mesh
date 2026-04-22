@@ -21,14 +21,16 @@ import (
 func writeStatsFixture(t *testing.T, dir, name string) string {
 	t.Helper()
 	cfg := gateway.GatewayCfg{
-		Name:        name,
-		Bind:        "127.0.0.1:0",
-		Upstream:    "https://api.anthropic.com",
-		ClientAPI:   gateway.APIAnthropic,
-		UpstreamAPI: gateway.APIAnthropic,
-		Log:         gateway.LogCfg{Level: gateway.LogLevelMetadata, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
+		Name: name,
+		Client: []gateway.ClientCfg{
+			{Bind: "127.0.0.1:0", API: gateway.APIAnthropic},
+		},
+		Upstream: []gateway.UpstreamCfg{
+			{Name: "default", Target: "https://api.anthropic.com", API: gateway.APIAnthropic},
+		},
+		Log: gateway.LogCfg{Level: gateway.LogLevelMetadata, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
 	}
-	rec, err := gateway.NewRecorder(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	rec, err := gateway.NewRecorder(cfg.Name, cfg.Log, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil || rec == nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}
@@ -253,12 +255,14 @@ func TestAuditStatsByPathAndHour(t *testing.T) {
 	// The fixture uses Path "/v1/messages" — add a differing pair so by_path
 	// has two rows.
 	cfg := gateway.GatewayCfg{
-		Name:        "stats-path",
-		Bind:        "127.0.0.1:0",
-		Upstream:    "https://api.anthropic.com",
-		ClientAPI:   gateway.APIAnthropic,
-		UpstreamAPI: gateway.APIAnthropic,
-		Log:         gateway.LogCfg{Level: gateway.LogLevelMetadata, Dir: t.TempDir(), MaxFileSize: "10MB", MaxAge: "720h"},
+		Name: "stats-path",
+		Client: []gateway.ClientCfg{
+			{Bind: "127.0.0.1:0", API: gateway.APIAnthropic},
+		},
+		Upstream: []gateway.UpstreamCfg{
+			{Name: "default", Target: "https://api.anthropic.com", API: gateway.APIAnthropic},
+		},
+		Log: gateway.LogCfg{Level: gateway.LogLevelMetadata, Dir: t.TempDir(), MaxFileSize: "10MB", MaxAge: "720h"},
 	}
 	_ = cfg
 	// Already-written fixture has path="/v1/messages" on every pair, so
@@ -327,14 +331,16 @@ func TestAuditStatsTopRequests(t *testing.T) {
 func TestAuditStatsPreambleBlocks(t *testing.T) {
 	dir := t.TempDir()
 	cfg := gateway.GatewayCfg{
-		Name:        "stats-preamble",
-		Bind:        "127.0.0.1:0",
-		Upstream:    "https://api.anthropic.com",
-		ClientAPI:   gateway.APIAnthropic,
-		UpstreamAPI: gateway.APIAnthropic,
-		Log:         gateway.LogCfg{Level: gateway.LogLevelFull, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
+		Name: "stats-preamble",
+		Client: []gateway.ClientCfg{
+			{Bind: "127.0.0.1:0", API: gateway.APIAnthropic},
+		},
+		Upstream: []gateway.UpstreamCfg{
+			{Name: "default", Target: "https://api.anthropic.com", API: gateway.APIAnthropic},
+		},
+		Log: gateway.LogCfg{Level: gateway.LogLevelFull, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
 	}
-	rec, err := gateway.NewRecorder(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	rec, err := gateway.NewRecorder(cfg.Name, cfg.Log, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil || rec == nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}

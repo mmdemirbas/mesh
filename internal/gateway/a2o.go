@@ -9,7 +9,7 @@ import (
 // translateAnthropicRequest converts an Anthropic MessagesRequest to an OpenAI
 // ChatCompletionRequest. The original client model name is returned so the
 // response can echo it back unchanged.
-func translateAnthropicRequest(req *MessagesRequest, cfg *GatewayCfg) (*ChatCompletionRequest, error) {
+func translateAnthropicRequest(req *MessagesRequest, cfg *UpstreamCfg) (*ChatCompletionRequest, error) {
 	out := &ChatCompletionRequest{
 		Model:  cfg.MapModel(req.Model),
 		Stream: req.Stream,

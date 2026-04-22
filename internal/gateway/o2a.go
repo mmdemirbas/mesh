@@ -11,7 +11,7 @@ import (
 // translateOpenAIRequest converts an OpenAI ChatCompletionRequest to an
 // Anthropic MessagesRequest. Returns the original client model so the
 // response can echo it back.
-func translateOpenAIRequest(req *ChatCompletionRequest, cfg *GatewayCfg) (*MessagesRequest, error) {
+func translateOpenAIRequest(req *ChatCompletionRequest, cfg *UpstreamCfg) (*MessagesRequest, error) {
 	out := &MessagesRequest{
 		Model:  cfg.MapModel(req.Model),
 		Stream: req.Stream,

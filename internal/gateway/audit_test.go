@@ -29,7 +29,7 @@ func newTestRecorder(t *testing.T, level string) *Recorder {
 			MaxAge:      "720h",
 		},
 	}
-	rec, err := NewRecorder(cfg, silentLogger())
+	rec, err := NewRecorder(cfg.Name, cfg.Log, silentLogger())
 	if err != nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestRecorder_RunIDDiffersAcrossInstances(t *testing.T) {
 func TestRecorder_OffReturnsNil(t *testing.T) {
 	t.Parallel()
 	cfg := GatewayCfg{Name: "gw", Log: LogCfg{Level: LogLevelOff}}
-	rec, err := NewRecorder(cfg, silentLogger())
+	rec, err := NewRecorder(cfg.Name, cfg.Log, silentLogger())
 	if err != nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestRecorder_SizeBasedRollover(t *testing.T) {
 		Name: "gw-roll",
 		Log:  LogCfg{Level: LogLevelFull, Dir: dir, MaxFileSize: "2K", MaxAge: "720h"},
 	}
-	rec, err := NewRecorder(cfg, silentLogger())
+	rec, err := NewRecorder(cfg.Name, cfg.Log, silentLogger())
 	if err != nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestRecorder_CleansUpFilesOlderThanMaxAge(t *testing.T) {
 	_ = os.Chtimes(filepath.Join(gwDir, "2025-01-01.jsonl"), old, old)
 	_ = os.Chtimes(filepath.Join(gwDir, "fresh.jsonl"), fresh, fresh)
 
-	rec, err := NewRecorder(cfg, silentLogger())
+	rec, err := NewRecorder(cfg.Name, cfg.Log, silentLogger())
 	if err != nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}

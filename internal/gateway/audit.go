@@ -130,30 +130,30 @@ type Recorder struct {
 // NewRecorder constructs an audit recorder from a gateway's Log config. When
 // the resolved level is "off" the function returns (nil, nil) so callers can
 // assign the result directly — nil methods are safe.
-func NewRecorder(cfg GatewayCfg, log *slog.Logger) (*Recorder, error) {
-	level := cfg.Log.ResolvedLevel()
+func NewRecorder(gwName string, logCfg LogCfg, log *slog.Logger) (*Recorder, error) {
+	level := logCfg.ResolvedLevel()
 	if level == LogLevelOff {
 		return nil, nil
 	}
-	dir := expandHome(cfg.Log.ResolvedDir())
-	gwDir := filepath.Join(dir, cfg.Name)
+	dir := expandHome(logCfg.ResolvedDir())
+	gwDir := filepath.Join(dir, gwName)
 	if err := os.MkdirAll(gwDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create audit dir: %w", err)
 	}
 	r := &Recorder{
-		gateway:     cfg.Name,
+		gateway:     gwName,
 		dir:         gwDir,
 		level:       level,
-		maxSize:     cfg.Log.ResolvedMaxFileSize(),
-		maxAge:      cfg.Log.ResolvedMaxAge(),
-		log:         log.With("audit", cfg.Name),
+		maxSize:     logCfg.ResolvedMaxFileSize(),
+		maxAge:      logCfg.ResolvedMaxAge(),
+		log:         log.With("audit", gwName),
 		runID:       newRunID(),
 		stopCleanup: make(chan struct{}),
 		cleanupDone: make(chan struct{}),
 	}
 	r.cleanupOldFiles()
 	go r.cleanupLoop()
-	registerAuditDir(cfg.Name, gwDir)
+	registerAuditDir(gwName, gwDir)
 	return r, nil
 }
 
@@ -491,6 +491,15 @@ func (a *auditingWriter) Flush() {
 	}
 }
 
+// recorderKey is a context key for carrying the recorder through to passthrough.
+type recorderKey struct{}
+
+// getRecorderFromContext retrieves the Recorder from the request context.
+func getRecorderFromContext(r *http.Request) *Recorder {
+	v, _ := r.Context().Value(recorderKey{}).(*Recorder)
+	return v
+}
+
 // wrapAuditing emits request/response audit rows around an existing handler.
 // It peeks model/stream from the client request body, replays the body into
 // r.Body so the inner handler can parse it, tees the client-facing response
@@ -499,8 +508,11 @@ func (a *auditingWriter) Flush() {
 // emits in the client's format).
 //
 // When recorder is nil the wrapper is a no-op — callers never need to branch.
-func wrapAuditing(cfg GatewayCfg, recorder *Recorder, clientAPI string, inner http.HandlerFunc) http.HandlerFunc {
+func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, recorder *Recorder, inner http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Stash recorder in context so passthrough handler can access it.
+		r = r.WithContext(context.WithValue(r.Context(), recorderKey{}, recorder))
+
 		if recorder == nil {
 			inner(w, r)
 			return
@@ -524,10 +536,11 @@ func wrapAuditing(cfg GatewayCfg, recorder *Recorder, clientAPI string, inner ht
 		_ = json.Unmarshal(body, &peek)
 		sessionID, turnIndex := extractSessionInfo(r.Header, body)
 
-		mapped := cfg.MapModel(peek.Model)
+		dir := ResolveDirection(clientAPI, upstreamCfg.API)
+		mapped := upstreamCfg.MapModel(peek.Model)
 		reqID := recorder.Request(RequestMeta{
-			Gateway:     cfg.Name,
-			Direction:   cfg.Direction().String(),
+			Gateway:     gwName,
+			Direction:   dir.String(),
 			Model:       peek.Model,
 			MappedModel: mapped,
 			Stream:      peek.Stream,
@@ -554,10 +567,15 @@ func wrapAuditing(cfg GatewayCfg, recorder *Recorder, clientAPI string, inner ht
 		if status >= 400 {
 			outcome = OutcomeError
 		}
+		if r.Context().Err() != nil {
+			outcome = OutcomeClientCancelled
+		} else if aw.capped && outcome == OutcomeOK {
+			outcome = OutcomeTruncated
+		}
 
 		var summary *SSESummary
 		var usage *Usage
-		auditBody := aw.buf.Bytes()
+		auditBody := decodeForAudit(aw.buf.Bytes(), aw.Header().Get("Content-Encoding"), nil)
 		ct := aw.Header().Get("Content-Type")
 		if strings.HasPrefix(strings.ToLower(ct), "text/event-stream") {
 			summary = reassembleSSE(auditBody, clientAPI)
@@ -568,7 +586,7 @@ func wrapAuditing(cfg GatewayCfg, recorder *Recorder, clientAPI string, inner ht
 			usage = parseUsage(auditBody, clientAPI)
 		}
 		if usage != nil {
-			metrics := state.Global.GetMetrics("gateway", cfg.Name)
+			metrics := state.Global.GetMetrics("gateway", gwName)
 			metrics.TokensIn.Add(int64(usage.InputTokens))
 			metrics.TokensOut.Add(int64(usage.OutputTokens))
 			metrics.TokensCacheRd.Add(int64(usage.CacheReadInputTokens))

@@ -28,12 +28,17 @@ func startTranslationGateway(t *testing.T, clientAPI, upstreamAPI, upstreamURL s
 	_ = ln.Close()
 
 	cfg := GatewayCfg{
-		Name:        gwName,
-		Bind:        addr,
-		Upstream:    upstreamURL,
-		ClientAPI:   clientAPI,
-		UpstreamAPI: upstreamAPI,
-		Log:         LogCfg{Level: LogLevelFull, Dir: logDir, MaxFileSize: "10MB", MaxAge: "720h"},
+		Name: gwName,
+		Client: []ClientCfg{
+			{Bind: addr, API: clientAPI},
+		},
+		Upstream: []UpstreamCfg{
+			{Name: "default", Target: upstreamURL, API: upstreamAPI},
+		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"*"}, UpstreamName: "default"},
+		},
+		Log: LogCfg{Level: LogLevelFull, Dir: logDir, MaxFileSize: "10MB", MaxAge: "720h"},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)

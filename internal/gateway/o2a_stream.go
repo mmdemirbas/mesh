@@ -16,7 +16,7 @@ import (
 // handleO2AStream handles Direction B streaming: client expects OpenAI SSE,
 // upstream returns Anthropic SSE. Reads Anthropic SSE events from upstream and
 // translates each to OpenAI SSE chunks.
-func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRequest, cfg *GatewayCfg, client *http.Client, apiKey, clientModel string, oaiReq *ChatCompletionRequest, metrics *state.Metrics, log *slog.Logger) {
+func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRequest, upstream *ResolvedUpstream, clientModel string, oaiReq *ChatCompletionRequest, metrics *state.Metrics, log *slog.Logger) {
 	start := time.Now()
 
 	anthBody, _ := json.Marshal(anthReq)
@@ -26,18 +26,18 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 		au.ReqBody = anthBody
 	}
 
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), "POST", cfg.Upstream, bytes.NewReader(anthBody))
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), "POST", upstream.Cfg.Target, bytes.NewReader(anthBody))
 	if err != nil {
 		writeOpenAIError(w, 500, "cannot create upstream request")
 		return
 	}
 	upstreamReq.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		upstreamReq.Header.Set("x-api-key", apiKey)
+	if upstream.APIKey != "" {
+		upstreamReq.Header.Set("x-api-key", upstream.APIKey)
 		upstreamReq.Header.Set("anthropic-version", "2023-06-01")
 	}
 
-	upstreamResp, err := client.Do(upstreamReq)
+	upstreamResp, err := upstream.Client.Do(upstreamReq)
 	if err != nil {
 		writeOpenAIError(w, 502, "upstream request failed")
 		log.Error("Upstream stream request failed", "error", err)
@@ -47,7 +47,7 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 
 	if upstreamResp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(upstreamResp.Body, 4096))
-		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, cfg.Direction())
+		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, DirO2A)
 		writeOpenAIError(w, status, "upstream error")
 		log.Warn("Upstream stream error", "status", upstreamResp.StatusCode, "body", string(errBody))
 		return
