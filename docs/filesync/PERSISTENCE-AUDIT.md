@@ -346,33 +346,33 @@ exemplar.
 
 ---
 
-## 5. Open questions
+## 5. Resolved design calls
 
-Things I would rather get your call on before coding, instead of
-guessing:
+All five open questions settled 2026-04-22. Captured here so later
+commits can cite them without re-arguing the case.
 
-1. **Separate reader handle?** `SetMaxOpenConns(1)` serializes
-   readers behind the writer. For the admin dashboard that is
-   usually fine. The hot path is the peer index-exchange handler
-   that might serve many peers. Option: open a second `*sql.DB`
-   in read-only mode for peer-facing reads. Proposal: **defer
-   unless a benchmark shows contention.**
-2. **One DB per folder vs one DB shared by the node?** DESIGN-v1
-   says one per folder. Keeps blast radius small and allows
-   per-folder `VACUUM` scheduling. Sticking with that.
-3. **Retain `persistMu` as a belt-and-braces serializer?** It
-   costs nothing. Arguments either way; I lean `drop` to keep the
-   mutex hierarchy simple, but willing to `keep` if you prefer.
-4. ~~`synchronous=NORMAL` vs `FULL`?~~ **Resolved: `FULL`.** Data
-   corruption is not acceptable; see §3.3 W5. The DESIGN-v1 §4
-   `NORMAL` choice is overridden and the banner-flip commit notes
-   the departure alongside the PH columns and the `peer_state`
-   extensions.
-5. **Injection of a fault-injection driver for the test suite.**
-   Adding a wrapping `driver.Driver` is straightforward but
-   introduces a new test-only surface. Alternative: skip fault
-   injection, accept weaker coverage for T2 / F5. Proposal:
-   **add the wrapper; one-time cost.**
+1. **Reader handle.** **Single `*sql.DB` per folder.** A second
+   read-only handle is not opened unless `BenchmarkConcurrentReaderDuringScan`
+   shows contention on the local 168k-file workload. Reopen the
+   question only on a measured regression, not on speculation.
+2. **One DB per folder vs shared.** **Per folder**, per DESIGN-v1
+   §4. Keeps the blast radius of a corruption to one folder;
+   matches the R8 `FolderDisabled` failure isolation; allows
+   independent `VACUUM INTO` scheduling.
+3. **`persistMu`.** **Drop.** SQLite's writer lock already
+   serializes transactions; an extra Go-side mutex adds a rung to
+   the hierarchy for no gain. Any non-DB side effect that relied
+   on `persistMu` ordering (none identified, but audit at cutover
+   time) migrates to explicit sequencing.
+4. **`synchronous`.** **`FULL`.** See §3.3 W5 and DESIGN-v1
+   §Durability — data-corruption risk is not acceptable.
+5. **Fault-injection driver.** **Add the wrapper.** A thin
+   `driver.Driver` that wraps `modernc.org/sqlite` and injects
+   errors on demand lives in `internal/filesync` under
+   `_test.go` files only, so the production binary is unchanged.
+   Covers T2 (commit-after-error), F5 (disk full), and gives
+   future tests a hook for any new crash-resilience case. The
+   one-time cost is worth the coverage floor it establishes.
 
 ---
 
@@ -442,6 +442,7 @@ Before any code from this audit lands:
 - [ ] §3 risk table has no "unassessed" cells.
 - [ ] §4 test strategy names a test per kept / redesigned behavior
       and per risk category.
-- [ ] §5 open questions answered or explicitly deferred with a
-      trigger.
+- [x] §5 design calls resolved (reader handle deferred, per-folder
+      DB, drop `persistMu`, `synchronous=FULL`, add fault-injection
+      driver).
 - [ ] §6 commit sequence reviewed; each commit's scope is bounded.
