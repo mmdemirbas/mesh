@@ -207,6 +207,152 @@ func TestTranslationAudit_O2A_NonStreamingUpstreamErrorDetails(t *testing.T) {
 	}
 }
 
+func TestTranslationAudit_A2O_SummarizationPreservesOriginalAuditBody(t *testing.T) {
+	t.Parallel()
+
+	var upstreamBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody, _ = io.ReadAll(r.Body)
+		resp := ChatCompletionResponse{
+			ID: "chatcmpl-sum", Model: "glm-4.7",
+			Choices: []OpenAIChoice{{
+				Message:      OpenAIMsg{Role: "assistant", Content: json.RawMessage(`"summarized ok"`)},
+				FinishReason: "stop",
+			}},
+			Usage: &OpenAIUsage{PromptTokens: 42, CompletionTokens: 7, TotalTokens: 49},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	summarizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := ChatCompletionResponse{
+			ID: "chatcmpl-summary", Model: "gemini-2.0-flash",
+			Choices: []OpenAIChoice{{
+				Message:      OpenAIMsg{Role: "assistant", Content: json.RawMessage(`"Condensed history for the active coding task."`)},
+				FinishReason: "stop",
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer summarizer.Close()
+
+	logDir := t.TempDir()
+	gwName := "gw-" + strings.ReplaceAll(t.Name(), "/", "_")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	cfg := GatewayCfg{
+		Name:   gwName,
+		Client: []ClientCfg{{Bind: addr, API: APIAnthropic}},
+		Upstream: []UpstreamCfg{
+			{Name: "panshi", Target: upstream.URL, API: APIOpenAI, ContextWindow: 100, Summarizer: "sum", ModelMap: map[string]string{"*": "glm-4.7"}},
+			{Name: "sum", Target: summarizer.URL, API: APIOpenAI, ModelMap: map[string]string{"*": "gemini-2.0-flash"}},
+		},
+		Routing: []RoutingRule{{ClientModel: []string{"*"}, UpstreamName: "panshi"}},
+		Log:     LogCfg{Level: LogLevelFull, Dir: logDir, MaxFileSize: "10MB", MaxAge: "720h"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_ = Start(ctx, cfg, silentLogger())
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+		}
+	})
+
+	base := "http://" + addr
+	deadline := time.Now().Add(3 * time.Second)
+	started := false
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(base + "/health")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == 200 {
+				started = true
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !started {
+		t.Fatal("gateway did not start in time")
+	}
+
+	large := strings.Repeat("A", 1200)
+	body := `{"model":"hw-minimax","messages":[{"role":"user","content":"` + large + `"},{"role":"assistant","content":"older reply"},{"role":"user","content":"recent-1"},{"role":"assistant","content":"recent-2"},{"role":"user","content":"recent-3"},{"role":"assistant","content":"recent-4"},{"role":"user","content":"recent-5"}],"max_tokens":64}`
+	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, body=%s", resp.StatusCode, got)
+	}
+
+	var anth MessagesResponse
+	if err := json.Unmarshal(got, &anth); err != nil {
+		t.Fatalf("parse client response: %v; body=%s", err, got)
+	}
+
+	dir := filepath.Join(logDir, gwName)
+	rows := waitForRows(t, func() []map[string]any { return readRows(t, dir) }, 2, 2*time.Second)
+	if len(rows) != 2 {
+		t.Fatalf("audit rows = %d, want 2; rows=%+v", len(rows), rows)
+	}
+	reqRow, respRow := rows[0], rows[1]
+	reqJSON, err := json.Marshal(reqRow["body"])
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+	if !strings.Contains(string(reqJSON), large) {
+		t.Fatalf("request audit body does not contain original oversized prompt")
+	}
+
+	upReqJSON, err := json.Marshal(respRow["upstream_req"])
+	if err != nil {
+		t.Fatalf("marshal upstream_req: %v", err)
+	}
+	if respRow["summarized"] != true {
+		t.Fatalf("summarized = %v, want true", respRow["summarized"])
+	}
+	if got := respRow["context_window_tokens"]; got != float64(100) {
+		t.Fatalf("context_window_tokens = %v, want 100", got)
+	}
+	orig, ok := respRow["original_input_tokens_estimate"].(float64)
+	if !ok || orig <= 100 {
+		t.Fatalf("original_input_tokens_estimate = %v, want > 100", respRow["original_input_tokens_estimate"])
+	}
+	eff, ok := respRow["effective_input_tokens_estimate"].(float64)
+	if !ok || eff > 100 {
+		t.Fatalf("effective_input_tokens_estimate = %v, want <= 100", respRow["effective_input_tokens_estimate"])
+	}
+	if !strings.Contains(string(upReqJSON), "Conversation summary") {
+		t.Fatalf("upstream_req does not contain summarized conversation: %s", upReqJSON)
+	}
+	if strings.Contains(string(upReqJSON), large) {
+		t.Fatalf("upstream_req still contains original oversized prompt")
+	}
+	if !strings.Contains(string(upstreamBody), "Conversation summary") {
+		t.Fatalf("upstream body was not summarized: %s", upstreamBody)
+	}
+}
 
 func TestTranslationAudit_A2O_StreamingReassembly(t *testing.T) {
 	t.Parallel()

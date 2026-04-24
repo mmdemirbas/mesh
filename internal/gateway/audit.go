@@ -69,15 +69,19 @@ type RequestMeta struct {
 
 // ResponseMeta is the structured context written to an audit response row.
 type ResponseMeta struct {
-	Status       int
-	Outcome      string
-	Usage        *Usage
-	Summary      *SSESummary // optional reassembled SSE summary (streamed responses)
-	StartTime    time.Time
-	EndTime      time.Time
-	Headers      map[string][]string
-	UpstreamReq  []byte // translated request body sent upstream (set by handler)
-	UpstreamResp []byte // raw upstream response body (non-streaming; set by handler)
+	Status                       int
+	Outcome                      string
+	Usage                        *Usage
+	Summary                      *SSESummary // optional reassembled SSE summary (streamed responses)
+	Summarized                   bool
+	ContextWindowTokens          int
+	OriginalInputTokensEstimate  int
+	EffectiveInputTokensEstimate int
+	StartTime                    time.Time
+	EndTime                      time.Time
+	Headers                      map[string][]string
+	UpstreamReq                  []byte // translated request body sent upstream (set by handler)
+	UpstreamResp                 []byte // raw upstream response body (non-streaming; set by handler)
 }
 
 // Usage is the token accounting captured per response. Any field may be zero
@@ -246,6 +250,18 @@ func (r *Recorder) Response(id RequestID, meta ResponseMeta, body []byte) {
 	}
 	if meta.Usage != nil {
 		row["usage"] = meta.Usage
+	}
+	if meta.Summarized {
+		row["summarized"] = true
+	}
+	if meta.ContextWindowTokens > 0 {
+		row["context_window_tokens"] = meta.ContextWindowTokens
+	}
+	if meta.OriginalInputTokensEstimate > 0 {
+		row["original_input_tokens_estimate"] = meta.OriginalInputTokensEstimate
+	}
+	if meta.EffectiveInputTokensEstimate > 0 {
+		row["effective_input_tokens_estimate"] = meta.EffectiveInputTokensEstimate
 	}
 	// Summary is cheap and highly useful — include it at metadata level too.
 	if meta.Summary != nil {
@@ -429,8 +445,12 @@ func rawOrString(body []byte) any {
 // wrapAuditing. The handler populates the fields; the wrapper reads them
 // after the handler returns.
 type AuditUpstream struct {
-	ReqBody  []byte // translated request sent to upstream
-	RespBody []byte // raw upstream response (non-streaming only)
+	ReqBody                      []byte // translated request sent to upstream
+	RespBody                     []byte // raw upstream response (non-streaming only)
+	Summarized                   bool
+	ContextWindowTokens          int
+	OriginalInputTokensEstimate  int
+	EffectiveInputTokensEstimate int
 }
 
 type auditUpstreamKey struct{}
@@ -595,15 +615,19 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 		}
 
 		recorder.Response(reqID, ResponseMeta{
-			Status:       status,
-			Outcome:      outcome,
-			Usage:        usage,
-			Summary:      summary,
-			StartTime:    start,
-			EndTime:      time.Now(),
-			Headers:      aw.Header(),
-			UpstreamReq:  upstream.ReqBody,
-			UpstreamResp: upstream.RespBody,
+			Status:                       status,
+			Outcome:                      outcome,
+			Usage:                        usage,
+			Summary:                      summary,
+			Summarized:                   upstream.Summarized,
+			ContextWindowTokens:          upstream.ContextWindowTokens,
+			OriginalInputTokensEstimate:  upstream.OriginalInputTokensEstimate,
+			EffectiveInputTokensEstimate: upstream.EffectiveInputTokensEstimate,
+			StartTime:                    start,
+			EndTime:                      time.Now(),
+			Headers:                      aw.Header(),
+			UpstreamReq:                  upstream.ReqBody,
+			UpstreamResp:                 upstream.RespBody,
 		}, auditBody)
 	}
 }

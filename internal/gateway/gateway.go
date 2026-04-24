@@ -179,7 +179,38 @@ func buildRoutingHandler(cfg GatewayCfg, cl ClientCfg, router *Router, recorder 
 		dir := ResolveDirection(cl.API, upstream.Cfg.API)
 
 		// Audit wrapping (if recorder is non-nil).
+		// The inner handler runs after wrapAuditing has captured the original
+		// body, so summarization here does not affect what the audit log records.
 		innerHandler := func(w http.ResponseWriter, r *http.Request) {
+			// Context window check — only for Anthropic client API where we
+			// can parse and reconstruct the message array.
+			if cl.API == APIAnthropic && upstream.Cfg.HasContextLimit() {
+				innerBody, _ := io.ReadAll(r.Body)
+				newBody, result, info, err := checkAndSummarize(r.Context(), innerBody, upstream, router, log)
+				if au := getAuditUpstream(r); au != nil {
+					au.ContextWindowTokens = upstream.Cfg.ContextWindow
+					au.OriginalInputTokensEstimate = info.OriginalTokens
+					au.EffectiveInputTokensEstimate = info.EffectiveTokens
+					au.Summarized = info.Summarized
+				}
+				switch result {
+				case contextExceeded:
+					writeClientError(cl.API, w, 413, err.Error())
+					return
+				case contextError:
+					writeClientError(cl.API, w, 502, err.Error())
+					return
+				case contextSummarized:
+					log.Info("Request summarized for upstream",
+						"original_tokens", info.OriginalTokens,
+						"effective_tokens", info.EffectiveTokens,
+						"new_size", len(newBody),
+						"context_window", upstream.Cfg.ContextWindow)
+					innerBody = newBody
+				}
+				r.Body = io.NopCloser(bytes.NewReader(innerBody))
+				r.ContentLength = int64(len(innerBody))
+			}
 			dispatchRequest(w, r, cfg, cl, upstream, dir, metrics, log)
 		}
 

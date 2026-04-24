@@ -64,6 +64,15 @@ type UpstreamCfg struct {
 	// Default max_tokens when the client omits it. Default: 32768.
 	// Only applied in translation mode; passthrough does not mutate requests.
 	DefaultMaxTokens int `yaml:"default_max_tokens,omitempty"`
+	// Maximum input context window in tokens. When set, the gateway estimates
+	// incoming request token count and rejects or summarizes requests that
+	// would exceed this limit. Zero means unlimited (default).
+	ContextWindow int `yaml:"context_window,omitempty"`
+	// Name of another upstream to use for summarization when a request
+	// exceeds ContextWindow. Must reference an upstream defined in the same
+	// gateway config. When empty and ContextWindow is exceeded, the request
+	// is rejected with a clear error message.
+	Summarizer string `yaml:"summarizer,omitempty"`
 	// Model name remapping: client model name -> upstream model name.
 	ModelMap map[string]string `yaml:"model_map,omitempty"`
 }
@@ -203,11 +212,30 @@ func (c *GatewayCfg) Validate() error {
 		if u.DefaultMaxTokens < 0 {
 			return fmt.Errorf("upstream[%d] %q: default_max_tokens must be non-negative", i, u.Name)
 		}
+		if u.ContextWindow < 0 {
+			return fmt.Errorf("upstream[%d] %q: context_window must be non-negative", i, u.Name)
+		}
+		if u.Summarizer != "" && u.Summarizer == u.Name {
+			return fmt.Errorf("upstream[%d] %q: summarizer must not reference itself", i, u.Name)
+		}
 		for pattern := range u.ModelMap {
 			if strings.ContainsAny(pattern, "*?[") && pattern != "*" {
 				if _, err := path.Match(pattern, ""); err != nil {
 					return fmt.Errorf("upstream[%d] %q: model_map: invalid glob pattern %q: %w", i, u.Name, pattern, err)
 				}
+			}
+		}
+	}
+
+	// Cross-reference: summarizer must point to an existing upstream.
+	for i, u := range c.Upstream {
+		if u.Summarizer != "" {
+			idx, ok := upstreamNames[u.Summarizer]
+			if !ok {
+				return fmt.Errorf("upstream[%d] %q: summarizer %q does not match any upstream", i, u.Name, u.Summarizer)
+			}
+			if c.Upstream[idx].API != APIOpenAI {
+				return fmt.Errorf("upstream[%d] %q: summarizer %q must use api %q", i, u.Name, u.Summarizer, APIOpenAI)
 			}
 		}
 	}
@@ -354,6 +382,11 @@ func (u *UpstreamCfg) MaxTokens() int {
 		return u.DefaultMaxTokens
 	}
 	return 32768
+}
+
+// HasContextLimit reports whether this upstream has a context window constraint.
+func (u *UpstreamCfg) HasContextLimit() bool {
+	return u.ContextWindow > 0
 }
 
 // MapModel applies the model_map to a client-provided model name.

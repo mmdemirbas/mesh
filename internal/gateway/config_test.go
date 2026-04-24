@@ -62,6 +62,20 @@ func TestGatewayCfg_Validate(t *testing.T) {
 		{"invalid_routing_rule", func(c *GatewayCfg) {
 			c.Routing = []RoutingRule{{ClientModel: []string{"claude-["}, UpstreamName: "default"}}
 		}, "invalid glob pattern"},
+		{"negative_context_window", func(c *GatewayCfg) { c.Upstream[0].ContextWindow = -1 }, "context_window must be non-negative"},
+		{"valid_context_window", func(c *GatewayCfg) { c.Upstream[0].ContextWindow = 196000 }, ""},
+		{"summarizer_self_reference", func(c *GatewayCfg) { c.Upstream[0].Summarizer = "default" }, "summarizer must not reference itself"},
+		{"summarizer_unknown", func(c *GatewayCfg) { c.Upstream[0].Summarizer = "nonexistent" }, "summarizer \"nonexistent\" does not match any upstream"},
+		{"valid_summarizer", func(c *GatewayCfg) {
+			c.Upstream = append(c.Upstream, UpstreamCfg{Name: "sum", Target: "https://example.com", API: APIOpenAI})
+			c.Upstream[0].ContextWindow = 196000
+			c.Upstream[0].Summarizer = "sum"
+		}, ""},
+		{"summarizer_must_use_openai", func(c *GatewayCfg) {
+			c.Upstream = append(c.Upstream, UpstreamCfg{Name: "sum", Target: "https://example.com", API: APIAnthropic})
+			c.Upstream[0].ContextWindow = 196000
+			c.Upstream[0].Summarizer = "sum"
+		}, "summarizer \"sum\" must use api \"openai\""},
 	}
 
 	for _, tt := range tests {
