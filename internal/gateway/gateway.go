@@ -290,7 +290,7 @@ func handleA2O(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 
 	if statusCode != http.StatusOK {
 		status := translateUpstreamErrorStatus(statusCode, DirA2O)
-		writeAnthropicError(w, status, "upstream error")
+		writeAnthropicError(w, status, translatedUpstreamErrorMessage(respBody))
 		log.Warn("Upstream error", "status", statusCode, "body", truncateBody(respBody, 512), "elapsed", time.Since(start))
 		return
 	}
@@ -382,7 +382,7 @@ func handleO2A(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 
 	if statusCode != http.StatusOK {
 		status := translateUpstreamErrorStatus(statusCode, DirO2A)
-		writeOpenAIError(w, status, "upstream error")
+		writeOpenAIError(w, status, translatedUpstreamErrorMessage(respBody))
 		log.Warn("Upstream error", "status", statusCode, "body", truncateBody(respBody, 512), "elapsed", time.Since(start))
 		return
 	}

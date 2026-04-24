@@ -55,8 +55,11 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 
 	if upstreamResp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(upstreamResp.Body, 4096))
+		if au := getAuditUpstream(r); au != nil {
+			au.RespBody = errBody
+		}
 		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, DirA2O)
-		writeAnthropicError(w, status, "upstream error")
+		writeAnthropicError(w, status, translatedUpstreamErrorMessage(errBody))
 		log.Warn("Upstream stream error", "status", upstreamResp.StatusCode, "body", string(errBody))
 		return
 	}

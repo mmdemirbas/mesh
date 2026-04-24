@@ -47,8 +47,11 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 
 	if upstreamResp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(upstreamResp.Body, 4096))
+		if au := getAuditUpstream(r); au != nil {
+			au.RespBody = errBody
+		}
 		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, DirO2A)
-		writeOpenAIError(w, status, "upstream error")
+		writeOpenAIError(w, status, translatedUpstreamErrorMessage(errBody))
 		log.Warn("Upstream stream error", "status", upstreamResp.StatusCode, "body", string(errBody))
 		return
 	}

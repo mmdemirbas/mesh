@@ -139,6 +139,75 @@ func TestTranslationAudit_A2O_NonStreaming(t *testing.T) {
 	}
 }
 
+func TestTranslationAudit_A2O_NonStreamingUpstreamErrorDetails(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"detail":"Not Found"}`))
+	}))
+	defer upstream.Close()
+
+	base, gwName, logDir := startTranslationGateway(t, APIAnthropic, APIOpenAI, upstream.URL)
+
+	body := `{"model":"claude-opus-4-6","messages":[{"role":"user","content":"hi"}],"max_tokens":10}`
+	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	var anth AnthropicErrorResponse
+	if err := json.Unmarshal(got, &anth); err != nil {
+		t.Fatalf("parse anthropic error: %v; body=%s", err, got)
+	}
+	if !strings.Contains(anth.Error.Message, "Not Found") {
+		t.Fatalf("client error message = %q, want upstream detail", anth.Error.Message)
+	}
+
+	dir := filepath.Join(logDir, gwName)
+	rows := waitForRows(t, func() []map[string]any { return readRows(t, dir) }, 2, 2*time.Second)
+	respRow := rows[1]
+	if respRow["upstream_resp"] == nil {
+		t.Fatalf("upstream_resp missing from audit row: %+v", respRow)
+	}
+}
+
+func TestTranslationAudit_O2A_NonStreamingUpstreamErrorDetails(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"too fast"}}`))
+	}))
+	defer upstream.Close()
+
+	base, gwName, logDir := startTranslationGateway(t, APIOpenAI, APIAnthropic, upstream.URL)
+
+	body := `{"model":"o-model","messages":[{"role":"user","content":"hi"}],"max_tokens":10}`
+	resp, err := http.Post(base+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	var oai OpenAIErrorResponse
+	if err := json.Unmarshal(got, &oai); err != nil {
+		t.Fatalf("parse openai error: %v; body=%s", err, got)
+	}
+	if !strings.Contains(oai.Error.Message, "too fast") {
+		t.Fatalf("client error message = %q, want upstream detail", oai.Error.Message)
+	}
+
+	dir := filepath.Join(logDir, gwName)
+	rows := waitForRows(t, func() []map[string]any { return readRows(t, dir) }, 2, 2*time.Second)
+	respRow := rows[1]
+	if respRow["upstream_resp"] == nil {
+		t.Fatalf("upstream_resp missing from audit row: %+v", respRow)
+	}
+}
+
+
 func TestTranslationAudit_A2O_StreamingReassembly(t *testing.T) {
 	t.Parallel()
 	// Upstream returns OpenAI SSE chunks — gateway will translate to Anthropic
@@ -188,5 +257,79 @@ func TestTranslationAudit_A2O_StreamingReassembly(t *testing.T) {
 	}
 	if summary["stop_reason"] != "end_turn" {
 		t.Errorf("stop_reason = %v (expected mapped from OpenAI 'stop')", summary["stop_reason"])
+	}
+}
+
+func TestTranslationAudit_A2O_StreamingUpstreamError(t *testing.T) {
+	t.Parallel()
+	// Upstream returns 400 with an error body for a streaming request.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(400)
+		_, _ = w.Write([]byte(`{"error":{"message":"context window exceeded","type":"invalid_request_error"}}`))
+	}))
+	defer upstream.Close()
+
+	base, gwName, logDir := startTranslationGateway(t, APIAnthropic, APIOpenAI, upstream.URL)
+
+	body := `{"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":16}`
+	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	dir := filepath.Join(logDir, gwName)
+	rows := waitForRows(t, func() []map[string]any { return readRows(t, dir) }, 2, 2*time.Second)
+	if len(rows) < 2 {
+		t.Fatalf("audit rows = %d, want >= 2", len(rows))
+	}
+	respRow := rows[1]
+	if respRow["status"].(float64) != 400 {
+		t.Errorf("status = %v, want 400", respRow["status"])
+	}
+	// The upstream error body must be captured in upstream_resp.
+	upResp, ok := respRow["upstream_resp"]
+	if !ok || upResp == nil {
+		t.Fatalf("upstream_resp missing from audit row: %+v", respRow)
+	}
+	upRespMap, ok := upResp.(map[string]any)
+	if !ok {
+		t.Fatalf("upstream_resp not a JSON object: %T %v", upResp, upResp)
+	}
+	errObj, _ := upRespMap["error"].(map[string]any)
+	if errObj == nil || errObj["message"] != "context window exceeded" {
+		t.Errorf("upstream_resp error = %v, want context window exceeded message", upRespMap)
+	}
+}
+
+func TestTranslationAudit_O2A_StreamingUpstreamError(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(429)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"too fast"}}`))
+	}))
+	defer upstream.Close()
+
+	base, gwName, logDir := startTranslationGateway(t, APIOpenAI, APIAnthropic, upstream.URL)
+
+	body := `{"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":16}`
+	resp, err := http.Post(base+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	dir := filepath.Join(logDir, gwName)
+	rows := waitForRows(t, func() []map[string]any { return readRows(t, dir) }, 2, 2*time.Second)
+	if len(rows) < 2 {
+		t.Fatalf("audit rows = %d, want >= 2", len(rows))
+	}
+	respRow := rows[1]
+	// The upstream error body must be captured in upstream_resp.
+	upResp, ok := respRow["upstream_resp"]
+	if !ok || upResp == nil {
+		t.Fatalf("upstream_resp missing from audit row: %+v", respRow)
 	}
 }

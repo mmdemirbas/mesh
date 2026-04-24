@@ -111,3 +111,14 @@ func translateUpstreamErrorStatus(upstreamStatus int, dir Direction) int {
 	}
 	return upstreamStatus
 }
+
+// translatedUpstreamErrorMessage includes the upstream error body in the
+// translated client-facing error when available, while capping the size so the
+// gateway never reflects arbitrarily large payloads.
+func translatedUpstreamErrorMessage(body []byte) string {
+	if len(body) == 0 {
+		return "upstream error"
+	}
+	return "upstream error: " + truncateBody(body, 4096)
+}
+
