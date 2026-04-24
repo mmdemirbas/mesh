@@ -88,7 +88,7 @@ func TestSummarizeMessages_BelowKeepRecent(t *testing.T) {
 			{Role: "assistant", Content: json.RawMessage(`"msg2"`)},
 		},
 	}
-	result, err := summarizeMessages(context.Background(), req, &ResolvedUpstream{}, 6, silentLogger())
+	result, err := summarizeMessages(context.Background(), req, &ResolvedUpstream{}, 6, silentLogger(), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestSummarizeMessages_WithMockSummarizer(t *testing.T) {
 	}
 	req := &MessagesRequest{Messages: msgs}
 
-	result, err := summarizeMessages(context.Background(), req, summarizer, 4, silentLogger())
+	result, err := summarizeMessages(context.Background(), req, summarizer, 4, silentLogger(), nil)
 	if err != nil {
 		t.Fatalf("summarizeMessages: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestSummarizeMessages_DoesNotSplitToolPair(t *testing.T) {
 	}
 	req := &MessagesRequest{Messages: msgs}
 
-	result, err := summarizeMessages(context.Background(), req, summarizer, 2, silentLogger())
+	result, err := summarizeMessages(context.Background(), req, summarizer, 2, silentLogger(), nil)
 	if err != nil {
 		t.Fatalf("summarizeMessages: %v", err)
 	}

@@ -123,15 +123,77 @@ const summarizerSystemPrompt = `You are a conversation summarizer for an AI codi
 
 Be factual and specific. Output only the summary, no preamble.`
 
+// summarizerCall runs the summarizer LLM on a messages prefix and returns
+// the raw summary text. Pure function of (prefix, summarizer target): the
+// output is nondeterministic because of the LLM itself, which is exactly
+// why summarizerDedup wraps this — parallel fan-out of five identical
+// prefixes should share a single upstream call and a single nondeterministic
+// output, not generate five divergent summaries.
+func summarizerCall(
+	ctx context.Context,
+	prefix []AnthropicMsg,
+	summarizer *ResolvedUpstream,
+	log *slog.Logger,
+) (string, error) {
+	dump := serializeMessages(prefix)
+	if len(dump) == 0 {
+		return "", nil
+	}
+	maxTok := 4096
+	oaiReq := ChatCompletionRequest{
+		Model: summarizer.Cfg.MapModel("summarizer"),
+		Messages: []OpenAIMsg{
+			{Role: "system", Content: json.RawMessage(mustMarshalString(summarizerSystemPrompt))},
+			{Role: "user", Content: json.RawMessage(mustMarshalString(dump))},
+		},
+		MaxTokens: &maxTok,
+	}
+	oaiBody, err := json.Marshal(oaiReq)
+	if err != nil {
+		return "", fmt.Errorf("marshal summarizer request: %w", err)
+	}
+	headers := map[string]string{}
+	if summarizer.APIKey != "" {
+		headers["Authorization"] = "Bearer " + summarizer.APIKey
+	}
+	statusCode, respBody, err := doUpstreamRequest(ctx, summarizer.Client, summarizer.Cfg.Target, oaiBody, headers, log)
+	if err != nil {
+		return "", fmt.Errorf("summarizer request failed: %w", err)
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		return "", fmt.Errorf("summarizer returned status %d: %s", statusCode, truncateStr(string(respBody), 500))
+	}
+	var oaiResp ChatCompletionResponse
+	if err := json.Unmarshal(respBody, &oaiResp); err != nil {
+		return "", fmt.Errorf("parse summarizer response: %w", err)
+	}
+	if len(oaiResp.Choices) == 0 {
+		return "", fmt.Errorf("summarizer returned no choices")
+	}
+	var summaryText string
+	_ = json.Unmarshal(oaiResp.Choices[0].Message.Content, &summaryText)
+	if summaryText == "" {
+		summaryText = string(oaiResp.Choices[0].Message.Content)
+	}
+	return summaryText, nil
+}
+
 // summarizeMessages calls the summarizer upstream to condense old messages.
 // It preserves the most recent keepRecent messages verbatim and summarizes
 // everything before them. Returns a replacement message slice.
+//
+// When dedup is non-nil, concurrent calls with the same (summarizer,
+// prefix) inputs share a single upstream invocation via summarizerDedup;
+// see summarize_dedup.go for the full semantics pin. Passing nil runs
+// the summarizer directly — useful in tests and in transitional callers
+// that have not been wired through a Router yet.
 func summarizeMessages(
 	ctx context.Context,
 	req *MessagesRequest,
 	summarizer *ResolvedUpstream,
 	keepRecent int,
 	log *slog.Logger,
+	dedup *summarizerDedup,
 ) ([]AnthropicMsg, error) {
 	if keepRecent <= 0 {
 		keepRecent = defaultKeepRecent
@@ -161,51 +223,25 @@ func summarizeMessages(
 	toSummarize := req.Messages[:cutoff]
 	recent := req.Messages[cutoff:]
 
-	dump := serializeMessages(toSummarize)
-	if len(dump) == 0 {
-		return req.Messages, nil
-	}
-
-	// Build an OpenAI chat completion request for the summarizer.
-	maxTok := 4096
-	oaiReq := ChatCompletionRequest{
-		Model: summarizer.Cfg.MapModel("summarizer"),
-		Messages: []OpenAIMsg{
-			{Role: "system", Content: json.RawMessage(mustMarshalString(summarizerSystemPrompt))},
-			{Role: "user", Content: json.RawMessage(mustMarshalString(dump))},
-		},
-		MaxTokens: &maxTok,
-	}
-	oaiBody, err := json.Marshal(oaiReq)
-	if err != nil {
-		return nil, fmt.Errorf("marshal summarizer request: %w", err)
-	}
-
-	headers := map[string]string{}
-	if summarizer.APIKey != "" {
-		headers["Authorization"] = "Bearer " + summarizer.APIKey
-	}
-
-	statusCode, respBody, err := doUpstreamRequest(ctx, summarizer.Client, summarizer.Cfg.Target, oaiBody, headers, log)
-	if err != nil {
-		return nil, fmt.Errorf("summarizer request failed: %w", err)
-	}
-	if statusCode < 200 || statusCode >= 300 {
-		return nil, fmt.Errorf("summarizer returned status %d: %s", statusCode, truncateStr(string(respBody), 500))
-	}
-
-	var oaiResp ChatCompletionResponse
-	if err := json.Unmarshal(respBody, &oaiResp); err != nil {
-		return nil, fmt.Errorf("parse summarizer response: %w", err)
-	}
-	if len(oaiResp.Choices) == 0 {
-		return nil, fmt.Errorf("summarizer returned no choices")
-	}
-
 	var summaryText string
-	_ = json.Unmarshal(oaiResp.Choices[0].Message.Content, &summaryText)
+	var err error
+	if dedup != nil {
+		prefixJSON, mErr := json.Marshal(toSummarize)
+		if mErr != nil {
+			return nil, fmt.Errorf("marshal prefix for dedup key: %w", mErr)
+		}
+		key := dedupKey(summarizer.Cfg.Name, prefixJSON)
+		summaryText, err = dedup.do(ctx, key, func(ictx context.Context) (string, error) {
+			return summarizerCall(ictx, toSummarize, summarizer, log)
+		})
+	} else {
+		summaryText, err = summarizerCall(ctx, toSummarize, summarizer, log)
+	}
+	if err != nil {
+		return nil, err
+	}
 	if summaryText == "" {
-		summaryText = string(oaiResp.Choices[0].Message.Content)
+		return req.Messages, nil
 	}
 
 	summaryContent := fmt.Sprintf("[Conversation summary — %d messages condensed]\n\n%s\n\n[End of summary. The conversation continues below.]",
@@ -299,7 +335,7 @@ func checkAndSummarize(
 			"summarizer upstream %q not found", upstream.Cfg.Summarizer)
 	}
 
-	newMsgs, err := summarizeMessages(ctx, &req, sumUpstream, defaultKeepRecent, log)
+	newMsgs, err := summarizeMessages(ctx, &req, sumUpstream, defaultKeepRecent, log, router.summarizerDedup)
 	if err != nil {
 		return body, contextError, info, fmt.Errorf("local summarization failed before forwarding upstream: %w", err)
 	}

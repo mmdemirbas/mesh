@@ -24,6 +24,12 @@ type Router struct {
 	// rule exists. One warning per Router instance (= per gateway), so
 	// a mesh with three underspecified gateways logs three warnings.
 	fallbackOnce sync.Once
+
+	// summarizerDedup collapses concurrent summarizer calls with
+	// identical (upstream, prefix) inputs into a single upstream
+	// request. One instance per Router (= per gateway); see
+	// summarize_dedup.go for the semantics pin.
+	summarizerDedup *summarizerDedup
 }
 
 // ResolvedUpstream is a pre-resolved upstream with its HTTP client, API key, etc.
@@ -70,10 +76,11 @@ func NewRouter(cfg *GatewayCfg, log *slog.Logger) (*Router, error) {
 	}
 
 	return &Router{
-		name:      cfg.Name,
-		log:       log,
-		rules:     cfg.Routing,
-		upstreams: upstreams,
+		name:            cfg.Name,
+		log:             log,
+		rules:           cfg.Routing,
+		upstreams:       upstreams,
+		summarizerDedup: newSummarizerDedup(),
 	}, nil
 }
 
