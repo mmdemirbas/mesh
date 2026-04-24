@@ -67,6 +67,9 @@ func TestGateway_A2O_NonStreaming(t *testing.T) {
 				ModelMap: map[string]string{"claude-sonnet-4-6": "glm-4.7"},
 			},
 		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"*"}, UpstreamName: "default"},
+		},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -176,6 +179,9 @@ func TestGateway_O2A_NonStreaming(t *testing.T) {
 				ModelMap:  map[string]string{"gpt-4o": "claude-sonnet-4-6"},
 			},
 		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"*"}, UpstreamName: "default"},
+		},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -246,6 +252,9 @@ func TestGateway_Health(t *testing.T) {
 		Upstream: []UpstreamCfg{
 			{Name: "default", API: APIOpenAI, Target: "http://localhost:9999"},
 		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"*"}, UpstreamName: "default"},
+		},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -291,6 +300,9 @@ func TestGateway_UpstreamError(t *testing.T) {
 		},
 		Upstream: []UpstreamCfg{
 			{Name: "default", API: APIOpenAI, Target: upstream.URL},
+		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"*"}, UpstreamName: "default"},
 		},
 	}
 
@@ -342,6 +354,9 @@ func TestGateway_O2A_UpstreamError_529(t *testing.T) {
 		Upstream: []UpstreamCfg{
 			{Name: "default", API: APIAnthropic, Target: upstream.URL},
 		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"*"}, UpstreamName: "default"},
+		},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -389,6 +404,9 @@ func TestGateway_UpstreamError_ResponseFormat(t *testing.T) {
 		},
 		Upstream: []UpstreamCfg{
 			{Name: "default", API: APIOpenAI, Target: upstream.URL},
+		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"*"}, UpstreamName: "default"},
 		},
 	}
 
@@ -444,6 +462,9 @@ func TestGateway_A2O_InvalidJSON(t *testing.T) {
 		Upstream: []UpstreamCfg{
 			{Name: "default", API: APIOpenAI, Target: "http://localhost:9999"},
 		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"*"}, UpstreamName: "default"},
+		},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -481,6 +502,9 @@ func TestGateway_O2A_InvalidJSON(t *testing.T) {
 		},
 		Upstream: []UpstreamCfg{
 			{Name: "default", API: APIAnthropic, Target: "http://localhost:9999"},
+		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"*"}, UpstreamName: "default"},
 		},
 	}
 
@@ -520,6 +544,9 @@ func TestGateway_A2O_UpstreamConnectionFailure(t *testing.T) {
 		},
 		Upstream: []UpstreamCfg{
 			{Name: "default", API: APIOpenAI, Target: "http://127.0.0.1:1"},
+		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"*"}, UpstreamName: "default"},
 		},
 	}
 
@@ -567,6 +594,9 @@ func TestGateway_A2O_StreamUpstreamError(t *testing.T) {
 		Upstream: []UpstreamCfg{
 			{Name: "default", API: APIOpenAI, Target: upstream.URL},
 		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"*"}, UpstreamName: "default"},
+		},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -611,6 +641,9 @@ func TestGateway_O2A_StreamUpstreamError(t *testing.T) {
 		},
 		Upstream: []UpstreamCfg{
 			{Name: "default", API: APIAnthropic, Target: upstream.URL},
+		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"*"}, UpstreamName: "default"},
 		},
 	}
 

@@ -30,7 +30,7 @@ const (
 func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 	log = log.With("gateway", cfg.Name)
 
-	router, err := NewRouter(&cfg)
+	router, err := NewRouter(&cfg, log)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}

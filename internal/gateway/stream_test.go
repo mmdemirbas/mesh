@@ -715,6 +715,9 @@ func runA2OStreamTest(t *testing.T, upstreamURL, model string, modelMap map[stri
 		Upstream: []UpstreamCfg{
 			{Name: "default", Target: upstreamURL, API: APIOpenAI, ModelMap: modelMap},
 		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"*"}, UpstreamName: "default"},
+		},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -757,6 +760,9 @@ func runO2AStreamTest(t *testing.T, upstreamURL, model string, modelMap map[stri
 		},
 		Upstream: []UpstreamCfg{
 			{Name: "default", Target: upstreamURL, API: APIAnthropic, ModelMap: modelMap},
+		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"*"}, UpstreamName: "default"},
 		},
 	}
 

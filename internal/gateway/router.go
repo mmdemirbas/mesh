@@ -2,18 +2,28 @@ package gateway
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 )
 
 // Router resolves a client model name to the appropriate upstream.
 type Router struct {
+	name      string
+	log       *slog.Logger
 	rules     []RoutingRule
 	upstreams map[string]*ResolvedUpstream
+
+	// fallbackOnce guards the one-shot warning logged the first time
+	// DefaultUpstream falls back to rules[0] because no "*" catch-all
+	// rule exists. One warning per Router instance (= per gateway), so
+	// a mesh with three underspecified gateways logs three warnings.
+	fallbackOnce sync.Once
 }
 
 // ResolvedUpstream is a pre-resolved upstream with its HTTP client, API key, etc.
@@ -26,7 +36,7 @@ type ResolvedUpstream struct {
 // NewRouter builds a Router from the gateway configuration. It creates
 // an HTTP client (with optional proxy) and resolves the API key for each
 // upstream.
-func NewRouter(cfg *GatewayCfg) (*Router, error) {
+func NewRouter(cfg *GatewayCfg, log *slog.Logger) (*Router, error) {
 	upstreams := make(map[string]*ResolvedUpstream, len(cfg.Upstream))
 
 	for _, u := range cfg.Upstream {
@@ -60,6 +70,8 @@ func NewRouter(cfg *GatewayCfg) (*Router, error) {
 	}
 
 	return &Router{
+		name:      cfg.Name,
+		log:       log,
 		rules:     cfg.Routing,
 		upstreams: upstreams,
 	}, nil
@@ -84,8 +96,17 @@ func (r *Router) Upstream(name string) *ResolvedUpstream {
 	return r.upstreams[name]
 }
 
-// DefaultUpstream returns the first upstream that would match a wildcard
-// pattern. Used as a fallback when the request body cannot be parsed.
+// DefaultUpstream returns the fallback upstream used when Route returns
+// nil. Resolution order:
+//  1. The first routing rule containing a "*" catch-all pattern — preferred
+//     because it reflects an explicit author intent.
+//  2. The upstream named by rules[0] — deterministic fallback for configs
+//     that forgot a "*" rule. Emits a one-shot warning (per Router
+//     instance, i.e. per gateway) the first time this branch fires so the
+//     config gap surfaces in logs. Previously this branch walked the
+//     upstreams map, which randomizes iteration order under Go — two
+//     process restarts could route unknown models to different upstreams.
+//  3. nil when there are no rules at all.
 func (r *Router) DefaultUpstream() *ResolvedUpstream {
 	for _, rule := range r.rules {
 		for _, pattern := range rule.ClientModel {
@@ -94,11 +115,20 @@ func (r *Router) DefaultUpstream() *ResolvedUpstream {
 			}
 		}
 	}
-	// No wildcard rule; return the first upstream as ultimate fallback.
-	for _, u := range r.upstreams {
-		return u
+	if len(r.rules) == 0 {
+		return nil
 	}
-	return nil
+	fallback := r.upstreams[r.rules[0].UpstreamName]
+	if fallback != nil && r.log != nil {
+		r.fallbackOnce.Do(func() {
+			r.log.Warn(
+				"routing: gateway has no '*' rule, defaulting to first rule's upstream",
+				"gateway", r.name,
+				"fallback_upstream", r.rules[0].UpstreamName,
+			)
+		})
+	}
+	return fallback
 }
 
 // matchesAnyPattern checks if model matches any of the given patterns.
