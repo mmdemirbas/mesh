@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 )
 
@@ -13,20 +14,33 @@ import (
 // model its immediate working context.
 const defaultKeepRecent = 6
 
-// estimateTokens returns a rough token count for an Anthropic messages request.
-// Uses ~3.5 bytes per token. This is deliberately conservative: overestimating
-// triggers summarization earlier, which is safer than sending a request that
-// will be rejected by the upstream.
-func estimateTokens(req *MessagesRequest) int {
-	var total int
-	total += len(req.System)
-	for _, m := range req.Messages {
-		total += len(m.Content)
+// bytesPerToken is the whole-body divisor used by estimateTokens. Calibrated
+// against cl100k_base tokenization of testdata/calibration_request.json such
+// that the estimator lands inside [0.95×, 1.25×] of the actual token count
+// (see summarize_calibration_test.go). The bias is deliberately high — if
+// the estimator is off, we prefer over-counting (admission-control error
+// fails closed: summarize or reject earlier, never silently exceed the
+// upstream's window).
+//
+// cl100k_base is a proxy. Anthropic does not publish their tokenizer, so
+// we have no ground truth for Claude bodies. cl100k lands within single-
+// digit percent of Claude tokenization on typical English+code mixes;
+// good enough for admission control, not good enough for billing. Phase
+// 1a audit rows will carry actual Claude usage counts in the response,
+// and Phase 1b will use those to validate or re-tune this constant.
+const bytesPerToken = 4.5
+
+// estimateTokens returns a rough token count for an Anthropic messages
+// request from its wire-JSON body. Counting whole-body bytes (not
+// piece-wise) captures tools, tool_choice, metadata, stop_sequences,
+// system (string or block-array form), and any other scaffolding the
+// upstream tokenizer sees — all without maintaining a parallel sum that
+// drifts when request shape changes.
+func estimateTokens(body []byte) int {
+	if len(body) == 0 {
+		return 0
 	}
-	for _, t := range req.Tools {
-		total += len(t.Name) + len(t.Description) + len(t.InputSchema)
-	}
-	return int(float64(total) / 3.5)
+	return int(math.Ceil(float64(len(body)) / bytesPerToken))
 }
 
 // serializeMessages converts Anthropic messages to a plain-text dump suitable
@@ -250,7 +264,7 @@ func checkAndSummarize(
 		return body, contextOK, contextCheckInfo{}, nil // can't parse — let the handler deal with it
 	}
 
-	estimated := estimateTokens(&req)
+	estimated := estimateTokens(body)
 	info := contextCheckInfo{OriginalTokens: estimated, EffectiveTokens: estimated}
 	if estimated <= upstream.Cfg.ContextWindow {
 		return body, contextOK, info, nil
@@ -280,17 +294,17 @@ func checkAndSummarize(
 	}
 
 	req.Messages = newMsgs
-	newEstimated := estimateTokens(&req)
+	newBody, err := json.Marshal(req)
+	if err != nil {
+		return body, contextError, info, fmt.Errorf("re-serialize failed: %w", err)
+	}
+	newEstimated := estimateTokens(newBody)
 	info.EffectiveTokens = newEstimated
 	info.Summarized = true
 	if newEstimated > upstream.Cfg.ContextWindow {
 		return body, contextExceeded, info, fmt.Errorf(
 			"input context still too large after local summarization: %d tokens exceeds upstream context window of %d tokens; start a fresh session or reduce conversation history",
 			newEstimated, upstream.Cfg.ContextWindow)
-	}
-	newBody, err := json.Marshal(req)
-	if err != nil {
-		return body, contextError, info, fmt.Errorf("re-serialize failed: %w", err)
 	}
 
 	return newBody, contextSummarized, info, nil

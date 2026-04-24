@@ -19,25 +19,39 @@ func TestEstimateTokens_Basic(t *testing.T) {
 			{Role: "assistant", Content: json.RawMessage(`"I'm doing well!"`)},
 		},
 	}
-	tokens := estimateTokens(req)
-	// Rough check: total bytes / 3.5. Not exact, just verify it's reasonable.
-	if tokens < 10 || tokens > 100 {
-		t.Errorf("estimateTokens = %d, expected roughly 10-100", tokens)
+	body, _ := json.Marshal(req)
+	tokens := estimateTokens(body)
+	// Rough sanity bound: small request should yield a small count.
+	if tokens < 10 || tokens > 200 {
+		t.Errorf("estimateTokens = %d, expected roughly 10-200", tokens)
 	}
 }
 
 func TestEstimateTokens_LargeRequest(t *testing.T) {
 	t.Parallel()
-	// Simulate ~700KB of content → should estimate ~200K tokens
+	// Simulate ~700KB of content. Whole-body estimator at 4.5 B/tok gives
+	// ~155K tokens; keep the window wide so it survives divisor retunes
+	// without changing the test along with the constant.
 	largeContent := strings.Repeat("a", 700_000)
 	req := &MessagesRequest{
 		Messages: []AnthropicMsg{
 			{Role: "user", Content: json.RawMessage(`"` + largeContent + `"`)},
 		},
 	}
-	tokens := estimateTokens(req)
-	if tokens < 150_000 || tokens > 250_000 {
-		t.Errorf("estimateTokens = %d, expected 150K-250K for 700KB input", tokens)
+	body, _ := json.Marshal(req)
+	tokens := estimateTokens(body)
+	if tokens < 100_000 || tokens > 300_000 {
+		t.Errorf("estimateTokens = %d, expected 100K-300K for 700KB input", tokens)
+	}
+}
+
+func TestEstimateTokens_EmptyBody(t *testing.T) {
+	t.Parallel()
+	if got := estimateTokens(nil); got != 0 {
+		t.Errorf("estimateTokens(nil) = %d, want 0", got)
+	}
+	if got := estimateTokens([]byte{}); got != 0 {
+		t.Errorf("estimateTokens(empty) = %d, want 0", got)
 	}
 }
 

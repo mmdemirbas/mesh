@@ -15,6 +15,7 @@ require (
 	github.com/klauspost/compress v1.18.5
 	github.com/pkg/sftp v1.13.10
 	github.com/testcontainers/testcontainers-go v0.42.0
+	github.com/tiktoken-go/tokenizer v0.7.0
 	golang.org/x/sys v0.42.0
 	golang.org/x/term v0.41.0
 	golang.org/x/text v0.36.0
@@ -35,6 +36,7 @@ require (
 	github.com/cpuguy83/dockercfg v0.3.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
+	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/docker/go-connections v0.6.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect

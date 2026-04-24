@@ -252,7 +252,7 @@ func TestTranslationAudit_A2O_SummarizationPreservesOriginalAuditBody(t *testing
 		Name:   gwName,
 		Client: []ClientCfg{{Bind: addr, API: APIAnthropic}},
 		Upstream: []UpstreamCfg{
-			{Name: "panshi", Target: upstream.URL, API: APIOpenAI, ContextWindow: 100, Summarizer: "sum", ModelMap: map[string]string{"*": "glm-4.7"}},
+			{Name: "panshi", Target: upstream.URL, API: APIOpenAI, ContextWindow: 300, Summarizer: "sum", ModelMap: map[string]string{"*": "glm-4.7"}},
 			{Name: "sum", Target: summarizer.URL, API: APIOpenAI, ModelMap: map[string]string{"*": "gemini-2.0-flash"}},
 		},
 		Routing: []RoutingRule{{ClientModel: []string{"*"}, UpstreamName: "panshi"}},
@@ -332,16 +332,16 @@ func TestTranslationAudit_A2O_SummarizationPreservesOriginalAuditBody(t *testing
 	if respRow["summarized"] != true {
 		t.Fatalf("summarized = %v, want true", respRow["summarized"])
 	}
-	if got := respRow["context_window_tokens"]; got != float64(100) {
-		t.Fatalf("context_window_tokens = %v, want 100", got)
+	if got := respRow["context_window_tokens"]; got != float64(300) {
+		t.Fatalf("context_window_tokens = %v, want 300", got)
 	}
 	orig, ok := respRow["original_input_tokens_estimate"].(float64)
-	if !ok || orig <= 100 {
-		t.Fatalf("original_input_tokens_estimate = %v, want > 100", respRow["original_input_tokens_estimate"])
+	if !ok || orig <= 300 {
+		t.Fatalf("original_input_tokens_estimate = %v, want > 300", respRow["original_input_tokens_estimate"])
 	}
 	eff, ok := respRow["effective_input_tokens_estimate"].(float64)
-	if !ok || eff > 100 {
-		t.Fatalf("effective_input_tokens_estimate = %v, want <= 100", respRow["effective_input_tokens_estimate"])
+	if !ok || eff > 300 {
+		t.Fatalf("effective_input_tokens_estimate = %v, want <= 300", respRow["effective_input_tokens_estimate"])
 	}
 	if !strings.Contains(string(upReqJSON), "Conversation summary") {
 		t.Fatalf("upstream_req does not contain summarized conversation: %s", upReqJSON)
