@@ -28,6 +28,17 @@ const defaultKeepRecent = 6
 // good enough for admission control, not good enough for billing. Phase
 // 1a audit rows will carry actual Claude usage counts in the response,
 // and Phase 1b will use those to validate or re-tune this constant.
+//
+// Calibration bias caveat: testdata/calibration_request.json is
+// lorem-ipsum-heavy; lorem tokenizes unusually well (long Latin words,
+// low vocabulary churn, no structural noise). Real Claude Code bodies
+// are mostly JSON scaffolding + English prose + source code + shell
+// output, which tokenizes worse (shorter tokens, more punctuation,
+// more symbols). The 1.19 ratio we hit on the fixture is likely
+// 1.05–1.10 on real traffic — still inside the floor, but closer to
+// it. Phase 1b revisit: sample real `usage.input_tokens` from Phase
+// 1a audit rows and recheck the ratio. If it drops below ~1.05, tune
+// this constant down (not the envelope).
 const bytesPerToken = 4.5
 
 // estimateTokens returns a rough token count for an Anthropic messages
