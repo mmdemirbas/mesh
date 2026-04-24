@@ -115,7 +115,24 @@ func summarizeMessages(
 		return req.Messages, nil
 	}
 
-	cutoff := len(req.Messages) - keepRecent
+	desiredCutoff := len(req.Messages) - keepRecent
+	cutoff := safeCutoff(req.Messages, desiredCutoff)
+	if cutoff == 0 {
+		// No safe cut exists — every candidate boundary would split a
+		// tool_use from its tool_result. Summarizing would produce a
+		// request Anthropic rejects with 400 "tool_result without
+		// matching tool_use". Skip summarization; caller will retry or
+		// fail with a clear context-exceeded error.
+		log.Warn("summarizer skip: no tool-safe cutoff", "messages", len(req.Messages), "keep_recent", keepRecent)
+		return req.Messages, nil
+	}
+	if cutoff != desiredCutoff {
+		log.Info("summarizer cutoff moved for tool-boundary safety",
+			"desired_cutoff", desiredCutoff,
+			"safe_cutoff", cutoff,
+			"messages_extended", desiredCutoff-cutoff,
+		)
+	}
 	toSummarize := req.Messages[:cutoff]
 	recent := req.Messages[cutoff:]
 
@@ -282,4 +299,85 @@ func checkAndSummarize(
 func mustMarshalString(s string) []byte {
 	b, _ := json.Marshal(s)
 	return b
+}
+
+// extractToolUseIDs returns the IDs of every tool_use content block in m.
+// Returns nil for string-content or non-block-array messages.
+func extractToolUseIDs(m AnthropicMsg) []string {
+	if len(m.Content) == 0 || m.Content[0] != '[' {
+		return nil
+	}
+	var blocks []ContentBlock
+	if err := json.Unmarshal(m.Content, &blocks); err != nil {
+		return nil
+	}
+	var ids []string
+	for _, b := range blocks {
+		if b.Type == "tool_use" && b.ID != "" {
+			ids = append(ids, b.ID)
+		}
+	}
+	return ids
+}
+
+// extractToolResultIDs returns the tool_use IDs referenced by every
+// tool_result content block in m.
+func extractToolResultIDs(m AnthropicMsg) []string {
+	if len(m.Content) == 0 || m.Content[0] != '[' {
+		return nil
+	}
+	var blocks []ContentBlock
+	if err := json.Unmarshal(m.Content, &blocks); err != nil {
+		return nil
+	}
+	var ids []string
+	for _, b := range blocks {
+		if b.Type == "tool_result" && b.ToolUseID != "" {
+			ids = append(ids, b.ToolUseID)
+		}
+	}
+	return ids
+}
+
+// safeCutoff returns the largest cutoff ≤ desired such that no tool_result
+// in messages[cutoff:] references a tool_use in messages[:cutoff]. This
+// prevents summarization from splitting a tool_use/tool_result pair, which
+// Anthropic rejects with "tool_result without matching tool_use".
+//
+// Returns 0 when no safe cut exists — callers must treat this as "do not
+// summarize" rather than "summarize everything".
+//
+// Complexity: O(n²) worst case. n is the conversation length, typically
+// under 100; real cost is negligible.
+func safeCutoff(messages []AnthropicMsg, desired int) int {
+	if desired <= 0 {
+		return 0
+	}
+	if desired >= len(messages) {
+		return len(messages)
+	}
+	for cutoff := desired; cutoff > 0; cutoff-- {
+		prefixIDs := make(map[string]struct{})
+		for _, m := range messages[:cutoff] {
+			for _, id := range extractToolUseIDs(m) {
+				prefixIDs[id] = struct{}{}
+			}
+		}
+		safe := true
+		for _, m := range messages[cutoff:] {
+			for _, id := range extractToolResultIDs(m) {
+				if _, inPrefix := prefixIDs[id]; inPrefix {
+					safe = false
+					break
+				}
+			}
+			if !safe {
+				break
+			}
+		}
+		if safe {
+			return cutoff
+		}
+	}
+	return 0
 }

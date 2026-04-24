@@ -304,3 +304,205 @@ func minInt(a, b int) int {
 	}
 	return b
 }
+
+// TestSafeCutoff_NoToolPairs: with no tool_use/tool_result blocks, the
+// safe cutoff is exactly the desired cutoff.
+func TestSafeCutoff_NoToolPairs(t *testing.T) {
+	t.Parallel()
+	msgs := []AnthropicMsg{
+		{Role: "user", Content: json.RawMessage(`"a"`)},
+		{Role: "assistant", Content: json.RawMessage(`"b"`)},
+		{Role: "user", Content: json.RawMessage(`"c"`)},
+		{Role: "assistant", Content: json.RawMessage(`"d"`)},
+	}
+	if got := safeCutoff(msgs, 2); got != 2 {
+		t.Errorf("safeCutoff = %d, want 2", got)
+	}
+}
+
+// TestSafeCutoff_PairInsidePrefix: tool_use and tool_result both before
+// the cutoff — safe, cutoff unchanged.
+func TestSafeCutoff_PairInsidePrefix(t *testing.T) {
+	t.Parallel()
+	msgs := []AnthropicMsg{
+		{Role: "user", Content: json.RawMessage(`"go"`)},
+		{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"tu1","name":"Read","input":{}}]`)},
+		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"tu1","content":"ok"}]`)},
+		{Role: "assistant", Content: json.RawMessage(`"done"`)},
+		{Role: "user", Content: json.RawMessage(`"more"`)},
+		{Role: "assistant", Content: json.RawMessage(`"ok"`)},
+	}
+	// Desired cutoff = 4 keeps last 2; pair (indices 1-2) fully in prefix.
+	if got := safeCutoff(msgs, 4); got != 4 {
+		t.Errorf("safeCutoff = %d, want 4 (pair fully in prefix is safe)", got)
+	}
+}
+
+// TestSafeCutoff_PairInsideRecent: tool_use and tool_result both after
+// the cutoff — safe, cutoff unchanged.
+func TestSafeCutoff_PairInsideRecent(t *testing.T) {
+	t.Parallel()
+	msgs := []AnthropicMsg{
+		{Role: "user", Content: json.RawMessage(`"a"`)},
+		{Role: "assistant", Content: json.RawMessage(`"b"`)},
+		{Role: "user", Content: json.RawMessage(`"c"`)},
+		{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"tu9","name":"Read","input":{}}]`)},
+		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"tu9","content":"ok"}]`)},
+	}
+	// Desired cutoff = 3 keeps the pair at indices 3-4 together.
+	if got := safeCutoff(msgs, 3); got != 3 {
+		t.Errorf("safeCutoff = %d, want 3 (pair fully in recent is safe)", got)
+	}
+}
+
+// TestSafeCutoff_PairSplitAcrossBoundary: tool_use before cutoff,
+// tool_result after. Unsafe — cutoff must move back to keep the pair
+// together.
+func TestSafeCutoff_PairSplitAcrossBoundary(t *testing.T) {
+	t.Parallel()
+	msgs := []AnthropicMsg{
+		{Role: "user", Content: json.RawMessage(`"a"`)},
+		{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"tuA","name":"Read","input":{}}]`)},
+		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"tuA","content":"x"}]`)},
+		{Role: "assistant", Content: json.RawMessage(`"last"`)},
+	}
+	// Desired cutoff = 2 would split: tool_use at idx 1 in prefix,
+	// tool_result at idx 2 in recent.
+	// Safe cutoff must be 1 (tool_use also moves to recent) or 0.
+	got := safeCutoff(msgs, 2)
+	if got == 2 {
+		t.Fatalf("safeCutoff = 2, expected move-back for tool-safety")
+	}
+	if got != 1 {
+		t.Errorf("safeCutoff = %d, want 1 (tool_use moves to recent)", got)
+	}
+}
+
+// TestSafeCutoff_ChainedPairs: multiple consecutive tool_use/result
+// pairs; cutoff must move back past all of them if any single pair
+// would be split.
+func TestSafeCutoff_ChainedPairs(t *testing.T) {
+	t.Parallel()
+	msgs := []AnthropicMsg{
+		{Role: "user", Content: json.RawMessage(`"a"`)},
+		{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"t1","name":"R","input":{}}]`)},
+		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"t1","content":"x"}]`)},
+		{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"t2","name":"R","input":{}}]`)},
+		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"t2","content":"y"}]`)},
+		{Role: "assistant", Content: json.RawMessage(`"done"`)},
+	}
+	// Desired cutoff = 4 splits t2's pair (tool_use idx 3 in prefix,
+	// tool_result idx 4 in recent). Expected: cutoff 3 (tool_use t2 also
+	// moves to recent; pair t1 at indices 1-2 is fully in prefix — safe).
+	got := safeCutoff(msgs, 4)
+	if got != 3 {
+		t.Errorf("safeCutoff = %d, want 3 (t2 pair joins recent, t1 pair stays in prefix)", got)
+	}
+}
+
+// TestSafeCutoff_ParallelToolUsesSameTurn: a single assistant message
+// with multiple tool_use blocks. All tool_results land in the next user
+// message. Cutoff must not split any of them.
+func TestSafeCutoff_ParallelToolUsesSameTurn(t *testing.T) {
+	t.Parallel()
+	msgs := []AnthropicMsg{
+		{Role: "user", Content: json.RawMessage(`"a"`)},
+		{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"p1","name":"R","input":{}},{"type":"tool_use","id":"p2","name":"R","input":{}}]`)},
+		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"p1","content":"x"},{"type":"tool_result","tool_use_id":"p2","content":"y"}]`)},
+		{Role: "assistant", Content: json.RawMessage(`"done"`)},
+	}
+	// Desired cutoff = 2 splits both p1 and p2. Safe cutoff = 1.
+	got := safeCutoff(msgs, 2)
+	if got != 1 {
+		t.Errorf("safeCutoff = %d, want 1 (both parallel tool_uses must stay with tool_results)", got)
+	}
+}
+
+// TestSafeCutoff_NoSafeCutExists: a pathological case where every
+// prefix-split would break some tool pair. Returns 0.
+func TestSafeCutoff_NoSafeCutExists(t *testing.T) {
+	t.Parallel()
+	// tool_use at msg 0, tool_result at msg 1, tool_use at msg 1 (well,
+	// can't really happen — but construct: tool_use in msg 0, tool_result
+	// in msg 2, and another tool_use in msg 1 with tool_result in msg 3).
+	// Actually the only way to force "no safe cut" is: every prefix length
+	// ≥ 1 has some tool_use whose tool_result is in the suffix. Easiest:
+	// a tool_use in msg 0 with tool_result in the very last message.
+	msgs := []AnthropicMsg{
+		{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"tX","name":"R","input":{}}]`)},
+		{Role: "user", Content: json.RawMessage(`"middle"`)},
+		{Role: "assistant", Content: json.RawMessage(`"more"`)},
+		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"tX","content":"x"}]`)},
+	}
+	// For any cutoff ∈ {1,2,3}: tool_use at idx 0 in prefix, tool_result
+	// at idx 3 in recent. Unsafe. Only cutoff = 0 is safe.
+	if got := safeCutoff(msgs, 3); got != 0 {
+		t.Errorf("safeCutoff = %d, want 0 (no safe cut)", got)
+	}
+}
+
+// TestSummarizeMessages_DoesNotSplitToolPair is the end-to-end regression:
+// when the natural cutoff would split a tool_use/tool_result pair,
+// summarizeMessages must either adjust the cutoff or return unchanged.
+func TestSummarizeMessages_DoesNotSplitToolPair(t *testing.T) {
+	t.Parallel()
+
+	// Mock summarizer that returns a tiny summary.
+	sumServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := ChatCompletionResponse{
+			ID: "sum-pair", Model: "summ-model",
+			Choices: []OpenAIChoice{{
+				Message:      OpenAIMsg{Role: "assistant", Content: json.RawMessage(`"summary"`)},
+				FinishReason: "stop",
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer sumServer.Close()
+
+	summarizer := &ResolvedUpstream{
+		Cfg:    UpstreamCfg{Name: "sum", Target: sumServer.URL, API: APIOpenAI, ModelMap: map[string]string{"*": "summ-model"}},
+		Client: http.DefaultClient,
+	}
+
+	// Conversation:
+	//  0: user "hi"
+	//  1: assistant tool_use t1
+	//  2: user tool_result t1
+	//  3: assistant "ok"
+	//  4: user "now read another"
+	//  5: assistant tool_use t2  ← would be split with keepRecent=2
+	//  6: user tool_result t2    ← recent[0] — orphan if cutoff=5
+	//  7: assistant "done"
+	msgs := []AnthropicMsg{
+		{Role: "user", Content: json.RawMessage(`"hi"`)},
+		{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"t1","name":"R","input":{}}]`)},
+		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"t1","content":"x"}]`)},
+		{Role: "assistant", Content: json.RawMessage(`"ok"`)},
+		{Role: "user", Content: json.RawMessage(`"now read another"`)},
+		{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"t2","name":"R","input":{}}]`)},
+		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"t2","content":"y"}]`)},
+		{Role: "assistant", Content: json.RawMessage(`"done"`)},
+	}
+	req := &MessagesRequest{Messages: msgs}
+
+	result, err := summarizeMessages(context.Background(), req, summarizer, 2, silentLogger())
+	if err != nil {
+		t.Fatalf("summarizeMessages: %v", err)
+	}
+
+	// Walk result and verify every tool_result has a matching tool_use
+	// earlier in the slice.
+	seenUseIDs := make(map[string]bool)
+	for i, m := range result {
+		for _, id := range extractToolUseIDs(m) {
+			seenUseIDs[id] = true
+		}
+		for _, id := range extractToolResultIDs(m) {
+			if !seenUseIDs[id] {
+				t.Fatalf("result[%d] has orphan tool_result for id %q — summarizer split a tool pair", i, id)
+			}
+		}
+	}
+}
