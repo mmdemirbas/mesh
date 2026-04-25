@@ -50,7 +50,7 @@ func TestInodePopulatedDuringScan(t *testing.T) {
 	writeFile(t, dir, "sub/beta.txt", "two")
 
 	idx := newFileIndex()
-	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles)
+	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestInodeStableAcrossRescan(t *testing.T) {
 
 	idx := newFileIndex()
 	for pass := range 2 {
-		_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles)
+		_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles, nil)
 		if err != nil {
 			t.Fatalf("pass %d: %v", pass, err)
 		}
@@ -114,7 +114,7 @@ func TestInodeBackfillAfterMigration(t *testing.T) {
 	writeFile(t, dir, "legacy.txt", "payload")
 
 	idx := newFileIndex()
-	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles)
+	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestInodeBackfillAfterMigration(t *testing.T) {
 
 	// Rescan — either fast-path backfill (Unix) or forced hash-phase
 	// inode extraction (Windows) must produce a non-zero Inode.
-	_, _, _, _, _, err = idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles)
+	_, _, _, _, _, err = idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestScanDetectsRenameSameContent(t *testing.T) {
 	writeFile(t, dir, "old/name.txt", "content stays the same")
 
 	idx := newFileIndex()
-	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
+	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles, nil); err != nil {
 		t.Fatal(err)
 	}
 	idx.recomputeCache()
@@ -182,7 +182,7 @@ func TestScanDetectsRenameSameContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles)
+	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestScanDetectsRenameWithEdit(t *testing.T) {
 	writeFile(t, dir, "source.bin", "original bytes")
 
 	idx := newFileIndex()
-	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
+	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles, nil); err != nil {
 		t.Fatal(err)
 	}
 	idx.recomputeCache()
@@ -247,7 +247,7 @@ func TestScanDetectsRenameWithEdit(t *testing.T) {
 	}
 	f.Close()
 
-	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles)
+	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,14 +278,14 @@ func TestScanRenameHintClearedOnRescan(t *testing.T) {
 	writeFile(t, dir, "a.txt", "payload")
 
 	idx := newFileIndex()
-	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
+	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles, nil); err != nil {
 		t.Fatal(err)
 	}
 	idx.recomputeCache()
 	if err := os.Rename(filepath.Join(dir, "a.txt"), filepath.Join(dir, "b.txt")); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
+	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles, nil); err != nil {
 		t.Fatal(err)
 	}
 	if idx.Files()["b.txt"].PrevPath != "a.txt" {
@@ -295,7 +295,7 @@ func TestScanRenameHintClearedOnRescan(t *testing.T) {
 
 	// Third scan: nothing changed on disk. PrevPath must be cleared
 	// because the hint has already been emitted.
-	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
+	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles, nil); err != nil {
 		t.Fatal(err)
 	}
 	got := idx.Files()["b.txt"].PrevPath
@@ -314,7 +314,7 @@ func TestScanRenameIgnoresUnchangedPaths(t *testing.T) {
 	writeFile(t, dir, "keep.txt", "keep")
 
 	idx := newFileIndex()
-	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
+	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles, nil); err != nil {
 		t.Fatal(err)
 	}
 	idx.recomputeCache()
@@ -323,7 +323,7 @@ func TestScanRenameIgnoresUnchangedPaths(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("keep edited payload"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles)
+	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -767,7 +767,7 @@ func TestScanSkipsRenameHintOnSizeMismatch(t *testing.T) {
 	}
 
 	idx := newFileIndex()
-	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
+	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles, nil); err != nil {
 		t.Fatal(err)
 	}
 	idx.recomputeCache()
@@ -785,7 +785,7 @@ func TestScanSkipsRenameHintOnSizeMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles)
+	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

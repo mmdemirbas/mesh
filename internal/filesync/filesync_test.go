@@ -333,7 +333,7 @@ func TestScanWithStatsPopulatesEvidence(t *testing.T) {
 	idx := newFileIndex()
 
 	// First pass: every tracked file must be hashed (no fast-path hits).
-	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +364,7 @@ func TestScanWithStatsPopulatesEvidence(t *testing.T) {
 
 	// Second pass on unchanged tree: every file must hit the fast path,
 	// no rehashing.
-	_, _, _, stats2, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	_, _, _, stats2, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,6 +376,92 @@ func TestScanWithStatsPopulatesEvidence(t *testing.T) {
 	}
 	if stats2.BytesHashed != 0 {
 		t.Errorf("BytesHashed=%d on unchanged rescan, want 0", stats2.BytesHashed)
+	}
+}
+
+// TestScan_SkipsClaimedPaths pins audit §6 commit 5 / Gap 5' / C6:
+// when an in-flight download holds the claim on a path, the scan
+// must not re-hash that path nor tombstone its index entry. This is
+// the seam that prevents the race where rename(temp → final) lands
+// before the download tx commits — without the skip, a scan in that
+// window would compute a scan-derived (local-bumped) VectorClock and
+// race the download's adopt-remote commit, corrupting peer-visible
+// state.
+//
+// Mental mutation check: removing the `if claimed != nil && claimed(rel)`
+// guard would make this test fail because the scan would re-hash the
+// new bytes and Set the entry with a scan-flavored VectorClock + the
+// fresh mtime, both of which are surfaced as test asserts below.
+func TestScan_SkipsClaimedPaths(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "claimed.txt", "old content seeded by first scan")
+	writeFile(t, dir, "free.txt", "free path also exists")
+
+	ignore := newIgnoreMatcher(nil)
+	idx := newFileIndex()
+
+	// First pass: seed the index. Both files exist on disk.
+	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles, nil); err != nil {
+		t.Fatalf("seed scan: %v", err)
+	}
+	beforeClaimed, ok := idx.Get("claimed.txt")
+	if !ok {
+		t.Fatal("seed scan did not record claimed.txt")
+	}
+
+	// Simulate a download that is mid-stream: the temp file has been
+	// renamed onto disk (so the on-disk bytes differ from the index
+	// row) but the SQLite tx that would update the row has not yet
+	// committed. claimPath/releasePath gate this window in production;
+	// here we tell scanWithStats to treat the path as claimed.
+	writeFile(t, dir, "claimed.txt", "NEW BYTES — would be re-hashed")
+	claimed := func(p string) bool { return p == "claimed.txt" }
+
+	_, _, _, stats, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles, claimed)
+	if err != nil {
+		t.Fatalf("rescan with claim: %v", err)
+	}
+
+	// 1. Claimed path stayed in the index untouched. The new on-disk
+	//    bytes did not bleed into the row; size, mtime, and hash
+	//    survive byte-for-byte from the seed scan.
+	got, ok := idx.Get("claimed.txt")
+	if !ok {
+		t.Fatal("claimed.txt removed from index — scan tombstoned it instead of skipping")
+	}
+	if got.Size != beforeClaimed.Size {
+		t.Errorf("claimed.txt Size mutated: was %d, now %d (scan re-hashed despite claim)",
+			beforeClaimed.Size, got.Size)
+	}
+	if got.MtimeNS != beforeClaimed.MtimeNS {
+		t.Errorf("claimed.txt MtimeNS mutated: was %d, now %d",
+			beforeClaimed.MtimeNS, got.MtimeNS)
+	}
+	if got.SHA256 != beforeClaimed.SHA256 {
+		t.Error("claimed.txt SHA256 mutated — scan computed a fresh hash despite claim")
+	}
+	if got.Deleted {
+		t.Error("claimed.txt tombstoned — scan must skip claimed paths from the deletion pass")
+	}
+
+	// 2. The free (unclaimed) path still travels the fast path.
+	if _, ok := idx.Get("free.txt"); !ok {
+		t.Error("free.txt incorrectly affected by the claim")
+	}
+
+	// 3. ClaimedSkipped reports exactly 1; FilesHashed is 0 (the only
+	//    candidate change was on claimed.txt, and that one was
+	//    skipped — free.txt's stat is unchanged so it hits the fast
+	//    path).
+	if stats.ClaimedSkipped != 1 {
+		t.Errorf("ClaimedSkipped=%d, want 1", stats.ClaimedSkipped)
+	}
+	if stats.FilesHashed != 0 {
+		t.Errorf("FilesHashed=%d, want 0 (claimed path must not be hashed)", stats.FilesHashed)
+	}
+	if stats.Deletions != 0 {
+		t.Errorf("Deletions=%d, want 0 (claimed path must not be tombstoned)", stats.Deletions)
 	}
 }
 
@@ -1261,7 +1347,7 @@ func TestScanTOCTOU_FileModifiedDuringHash(t *testing.T) {
 	// verify the positive case: a stable file is indexed correctly.
 	// The TOCTOU codepath is tested by checking that TocTouSkips is 0
 	// for stable files.
-	changed, _, _, stats, _, scanErr := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	changed, _, _, stats, _, scanErr := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles, nil)
 	if scanErr != nil {
 		t.Fatal(scanErr)
 	}
@@ -1286,7 +1372,7 @@ func TestScanCapExceeded(t *testing.T) {
 		writeFile(t, dir, fmt.Sprintf("file%d.txt", i), fmt.Sprintf("data%d", i))
 	}
 	idx := newFileIndex()
-	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, &ignoreMatcher{}, 3)
+	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, &ignoreMatcher{}, 3, nil)
 	if !errors.Is(err, errIndexCapExceeded) {
 		t.Fatalf("expected errIndexCapExceeded, got %v", err)
 	}
@@ -1303,7 +1389,7 @@ func TestScanCapNotExceeded(t *testing.T) {
 		writeFile(t, dir, fmt.Sprintf("file%d.txt", i), fmt.Sprintf("data%d", i))
 	}
 	idx := newFileIndex()
-	_, count, _, _, _, err := idx.scanWithStats(context.Background(), dir, &ignoreMatcher{}, 10)
+	_, count, _, _, _, err := idx.scanWithStats(context.Background(), dir, &ignoreMatcher{}, 10, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -5414,7 +5500,7 @@ func TestScanCollectsConflicts(t *testing.T) {
 	writeFile(t, dir, "sub/data.sync-conflict-20260101-000000-def456.csv", "conflict2")
 
 	idx := newFileIndex()
-	_, _, _, _, conflicts, err := idx.scanWithStats(context.Background(), dir, &ignoreMatcher{}, defaultMaxIndexFiles)
+	_, _, _, _, conflicts, err := idx.scanWithStats(context.Background(), dir, &ignoreMatcher{}, defaultMaxIndexFiles, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7365,7 +7451,7 @@ func TestMtimePreservation_ScanFastPath(t *testing.T) {
 	ignore := newIgnoreMatcher(nil)
 
 	// First scan — index already has correct entry, should fast-path skip.
-	_, _, _, stats, _, scanErr := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	_, _, _, stats, _, scanErr := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles, nil)
 	if scanErr != nil {
 		t.Fatal(scanErr)
 	}
@@ -7383,7 +7469,7 @@ func TestMtimePreservation_ScanFastPath(t *testing.T) {
 	}
 
 	// Second scan — mtime mismatch forces a re-hash even though content is unchanged.
-	_, _, _, stats2, _, scanErr2 := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	_, _, _, stats2, _, scanErr2 := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles, nil)
 	if scanErr2 != nil {
 		t.Fatal(scanErr2)
 	}
@@ -7405,7 +7491,7 @@ func TestDeviceIDGuard_RecordsOnFirstScan(t *testing.T) {
 	}
 
 	ignore := newIgnoreMatcher(nil)
-	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7424,13 +7510,13 @@ func TestDeviceIDGuard_AcceptsSameDevice(t *testing.T) {
 	ignore := newIgnoreMatcher(nil)
 
 	// First scan records device ID.
-	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Second scan on same filesystem should succeed.
-	_, _, _, _, _, err = idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	_, _, _, _, _, err = idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles, nil)
 	if err != nil {
 		t.Fatal("second scan on same device should succeed:", err)
 	}
@@ -7445,7 +7531,7 @@ func TestDeviceIDGuard_RejectsDifferentDevice(t *testing.T) {
 	ignore := newIgnoreMatcher(nil)
 
 	// First scan records device ID.
-	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7454,7 +7540,7 @@ func TestDeviceIDGuard_RejectsDifferentDevice(t *testing.T) {
 	idx.DeviceID = idx.DeviceID + 999
 
 	// Next scan should fail because device ID mismatches.
-	_, _, _, _, _, err = idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	_, _, _, _, _, err = idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles, nil)
 	if err == nil {
 		t.Fatal("scan should fail when device ID changes")
 	}
@@ -7471,7 +7557,7 @@ func TestDeviceIDGuard_PersistedInIndex(t *testing.T) {
 	idx := newFileIndex()
 	ignore := newIgnoreMatcher(nil)
 
-	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles)
+	_, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, ignore, defaultMaxIndexFiles, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

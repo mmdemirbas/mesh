@@ -428,7 +428,22 @@ type ScanStats struct {
 	Deletions          int // tombstones created in this pass
 	RenamesDetected    int // R1 Phase 2: tombstone/new-entry pairs paired by inode
 	RenameHintsSkipped int // R1 Phase 2: inode-matched pairs rejected by isRenameHintLikely (likely inode reuse)
+	ClaimedSkipped     int // C6 / Gap 5' (audit §6 commit 5): paths skipped this cycle because an in-flight download holds the claim
 }
+
+// scanClaimSkipWired is the structural-ordering invariant promised in
+// PERSISTENCE-AUDIT.md §6 commit 5 / commit 6 prose. It flips to true
+// at the same call site that installs the claimed-path skip in
+// scanWithStats; commit 6's Run startup reads this flag and refuses
+// to open folders if it is still false. The mechanism is intentional:
+// reverting commit 5 alone would silently re-open Gap 5' (a download
+// in flight while a scan re-hashes the same path with local-bumped
+// VectorClock semantics) — the boolean turns the silent regression
+// into a loud startup error. Tests (TestStartup_RefusesWithoutClaimSkip)
+// land with commit 6.
+//
+//lint:ignore U1000 read by commit 6's Run startup; intentional
+var scanClaimSkipWired = true
 
 // isRenameHintLikely returns true when an inode-based rename hint has a
 // realistic chance of being a genuine rename rather than an ext4-style
@@ -628,7 +643,7 @@ func readDirEntries(ctx context.Context, job dirJob, ignore *ignoreMatcher, temp
 // returns whether any files changed, the active (non-deleted) file count,
 // and the number of directories walked (excluding the root and ignored subtrees).
 func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignoreMatcher) (changed bool, activeCount, dirCount int, err error) {
-	changed, activeCount, dirCount, _, _, err = idx.scanWithStats(ctx, folderRoot, ignore, defaultMaxIndexFiles)
+	changed, activeCount, dirCount, _, _, err = idx.scanWithStats(ctx, folderRoot, ignore, defaultMaxIndexFiles, nil)
 	// PL: production callers refresh cachedCount after scan (see filesync.go).
 	// The test-only wrapper mirrors that so PL's short-circuit has an
 	// accurate activeBefore on the next call.
@@ -639,8 +654,16 @@ func (idx *FileIndex) scan(ctx context.Context, folderRoot string, ignore *ignor
 // scanWithStats is scan with detailed per-phase instrumentation. Callers that
 // want evidence (runScan) use this; tests keep the simpler signature.
 //
+// The optional `claimed` callback is consulted for every walked file
+// path; when it returns true the path is treated as transient and
+// skipped this cycle (added to seen so the tombstone pass leaves it
+// alone, not added to pending so it is not hashed, no fast-path Set
+// so the index is not updated with stale on-disk bytes). Pass nil
+// when there is no claim machinery (e.g. tests). Audit §6 commit 5,
+// closes Gap 5' / C6.
+//
 //nolint:gocyclo // scan orchestrates parallel walk + hash pipeline; splitting would hurt locality.
-func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, ignore *ignoreMatcher, maxFiles int) (changed bool, activeCount, dirCount int, stats ScanStats, conflicts []string, err error) {
+func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, ignore *ignoreMatcher, maxFiles int, claimed func(path string) bool) (changed bool, activeCount, dirCount int, stats ScanStats, conflicts []string, err error) {
 	changed = false
 
 	// B10: verify the folder root is accessible before scanning. If the
@@ -810,6 +833,28 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 				capExceeded = true
 				err = errIndexCapExceeded
 				break
+			}
+			// C6 / Gap 5' (audit §6 commit 5). A path currently held
+			// by claimPath is in a transient state where the on-disk
+			// bytes may not match the SQLite row that the download tx
+			// will commit. Re-hashing it here would write a row with
+			// scan-derived (local-bumped) VectorClock semantics
+			// instead of the download's adopt-remote semantics, then
+			// the download's commit would race the scan's swap. Treat
+			// it as deferred this cycle: mark seen so the tombstone
+			// pass leaves it alone, do not fast-path, do not hash;
+			// the next scan after releasePath converges with the row
+			// the download tx wrote. The claimed callback is nil in
+			// the test-only wrapper above (no folderState in scope).
+			if claimed != nil && claimed(wf.rel) {
+				if _, already := seen[wf.rel]; !already {
+					if existing, exists := idx.Get(wf.rel); exists && !existing.Deleted {
+						seenPrevActive++ // PL: still "live"
+					}
+				}
+				seen[wf.rel] = struct{}{}
+				stats.ClaimedSkipped++
+				continue
 			}
 			existing, exists := idx.Get(wf.rel)
 			if _, already := seen[wf.rel]; !already && exists && !existing.Deleted {

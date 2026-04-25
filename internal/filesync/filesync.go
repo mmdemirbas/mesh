@@ -556,6 +556,22 @@ func (fs *folderState) releasePath(path string) {
 	fs.inFlightMu.Unlock()
 }
 
+// isClaimed reports whether path is currently held by an in-flight
+// download. Read-only inspection of the inFlight map; the scanner
+// passes this as the `claimed` callback to scanWithStats so claimed
+// paths are skipped this cycle (audit §6 commit 5, closes Gap 5' /
+// C6). Returns false when fs.inFlight is nil so test fixtures that
+// construct folderState without inFlight do not need to initialize
+// it (the production constructor at Node.Run always does).
+func (fs *folderState) isClaimed(path string) bool {
+	fs.inFlightMu.Lock()
+	defer fs.inFlightMu.Unlock()
+	if fs.inFlight == nil {
+		return false
+	}
+	return fs.inFlight[path]
+}
+
 // applyHintRenames walks the action set for sender-supplied rename hints
 // (R1 Phase 2). When an ActionDownload carries RemotePrevPath and a
 // matching ActionDelete is also present, the pair is a rename-with-edit
@@ -1484,7 +1500,7 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		if maxFiles <= 0 {
 			maxFiles = defaultMaxIndexFiles
 		}
-		changed, count, dirs, stats, conflicts, err := idxCopy.scanWithStats(ctx, fs.cfg.Path, ignore, maxFiles)
+		changed, count, dirs, stats, conflicts, err := idxCopy.scanWithStats(ctx, fs.cfg.Path, ignore, maxFiles, fs.isClaimed)
 		if errors.Is(err, errIndexCapExceeded) {
 			slog.Error("scan aborted: folder exceeds max tracked files",
 				"folder", id, "max_files", maxFiles, "path", fs.cfg.Path)
