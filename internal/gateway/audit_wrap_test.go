@@ -542,6 +542,134 @@ func TestTranslationAudit_TopToolResultLandsInRow(t *testing.T) {
 	}
 }
 
+// TestTranslationAudit_ResponseBytesAndStreamLandInRow drives a full
+// SSE response through Start() and asserts the audit row carries
+// the §4.3 response_bytes partition plus stream.terminated.
+// Verifies the wiring from sse_reassembly → wrapAuditing → row writer
+// end-to-end, not just the unit-test path.
+func TestTranslationAudit_ResponseBytesAndStreamLandInRow(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		f := w.(http.Flusher)
+		// OpenAI-shape SSE; the gateway translates to Anthropic for
+		// the client. We assert on the captured CLIENT-side bytes
+		// (Anthropic) in the audit row.
+		chunks := []string{
+			`{"id":"x","model":"glm-4.7","choices":[{"delta":{"content":"hi"},"finish_reason":null}]}`,
+			`{"id":"x","model":"glm-4.7","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		}
+		for _, c := range chunks {
+			_, _ = w.Write([]byte("data: " + c + "\n\n"))
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		f.Flush()
+	}))
+	defer upstream.Close()
+
+	base, gwName, logDir := startTranslationGateway(t, APIAnthropic, APIOpenAI, upstream.URL)
+
+	body := `{"model":"claude-opus-4-6","max_tokens":10,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	dir := filepath.Join(logDir, gwName)
+	rows := waitForRows(t, func() []map[string]any { return readRows(t, dir) }, 2, 2*time.Second)
+	respRow := rows[1]
+
+	rb, ok := respRow["response_bytes"].(map[string]any)
+	if !ok {
+		t.Fatalf("response_bytes missing from audit row: %+v", respRow)
+	}
+	total, _ := rb["total"].(float64)
+	text, _ := rb["text"].(float64)
+	thinking, _ := rb["thinking"].(float64)
+	toolCalls, _ := rb["tool_calls"].(float64)
+	other, _ := rb["other"].(float64)
+	if total <= 0 {
+		t.Errorf("response_bytes.total = %v, want > 0", total)
+	}
+	if sum := text + thinking + toolCalls + other; int(sum) != int(total) {
+		t.Errorf("response_bytes partition broken: text=%v thinking=%v tool_calls=%v other=%v sum=%v total=%v",
+			text, thinking, toolCalls, other, sum, total)
+	}
+	if text < 2 {
+		t.Errorf("response_bytes.text = %v, want at least 2 ('hi')", text)
+	}
+
+	stream, ok := respRow["stream"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream block missing: %+v", respRow)
+	}
+	if stream["terminated"] != "normal" {
+		t.Errorf("stream.terminated = %v, want normal (gateway emits message_stop)", stream["terminated"])
+	}
+}
+
+// TestTranslationAudit_NonStreamingResponseBytesAndStreamLandInRow
+// pins the parseResponseBytes path: a non-streaming response must
+// also produce response_bytes with partition closure, and
+// stream.terminated must be "normal".
+func TestTranslationAudit_NonStreamingResponseBytesAndStreamLandInRow(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := ChatCompletionResponse{
+			ID: "x", Model: "glm-4.7",
+			Choices: []OpenAIChoice{{
+				Message:      OpenAIMsg{Role: "assistant", Content: json.RawMessage(`"hello"`)},
+				FinishReason: "stop",
+			}},
+			Usage: &OpenAIUsage{PromptTokens: 5, CompletionTokens: 1},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	base, gwName, logDir := startTranslationGateway(t, APIAnthropic, APIOpenAI, upstream.URL)
+
+	body := `{"model":"claude-opus-4-6","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`
+	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	dir := filepath.Join(logDir, gwName)
+	rows := waitForRows(t, func() []map[string]any { return readRows(t, dir) }, 2, 2*time.Second)
+	respRow := rows[1]
+
+	rb, ok := respRow["response_bytes"].(map[string]any)
+	if !ok {
+		t.Fatalf("non-streaming response_bytes missing: %+v", respRow)
+	}
+	total, _ := rb["total"].(float64)
+	text, _ := rb["text"].(float64)
+	thinking, _ := rb["thinking"].(float64)
+	toolCalls, _ := rb["tool_calls"].(float64)
+	other, _ := rb["other"].(float64)
+	if int(text+thinking+toolCalls+other) != int(total) {
+		t.Errorf("non-streaming partition broken: %+v", rb)
+	}
+	if text < 5 {
+		t.Errorf("response_bytes.text = %v, want >= 5 ('hello')", text)
+	}
+
+	stream, ok := respRow["stream"].(map[string]any)
+	if !ok {
+		t.Fatalf("non-streaming stream block missing: %+v", respRow)
+	}
+	if stream["terminated"] != "normal" {
+		t.Errorf("non-streaming stream.terminated = %v, want normal", stream["terminated"])
+	}
+}
+
 // TestTranslationAudit_RepeatReadsLandsInRow drives two consecutive
 // gateway requests through Start() with identical session id and
 // identical Read(/foo) tool_use, verifying the second request's row

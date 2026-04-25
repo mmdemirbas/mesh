@@ -278,11 +278,30 @@ func TestReassembleSSE_OpenAIDetailTokens(t *testing.T) {
 
 func TestReassembleSSE_EmptyBody(t *testing.T) {
 	t.Parallel()
-	if got := reassembleSSE(nil, APIAnthropic); got != nil {
-		t.Errorf("nil body should return nil, got %+v", got)
+	// Contract changed in commit 9a: reassembleSSE returns a
+	// populated SSESummary (Events=0, ResponseBytes.Total=0,
+	// Terminated="upstream") for empty input on known APIs so the
+	// §4.3 partition invariant holds even for the degenerate
+	// "upstream connected, sent nothing, closed" case. Returns nil
+	// only for unknown APIs (programmer error).
+	for _, api := range []string{APIAnthropic, APIOpenAI} {
+		got := reassembleSSE(nil, api)
+		if got == nil {
+			t.Errorf("%s: nil body should yield non-nil summary post-9a", api)
+			continue
+		}
+		if got.Events != 0 {
+			t.Errorf("%s: empty body Events = %d, want 0", api, got.Events)
+		}
+		if got.ResponseBytes == nil || got.ResponseBytes.Total != 0 {
+			t.Errorf("%s: empty body ResponseBytes = %+v, want Total=0", api, got.ResponseBytes)
+		}
+		if got.Terminated != "upstream" {
+			t.Errorf("%s: empty body Terminated = %q, want %q", api, got.Terminated, "upstream")
+		}
 	}
-	if got := reassembleSSE([]byte(""), APIOpenAI); got != nil {
-		t.Errorf("empty body should return nil, got %+v", got)
+	if got := reassembleSSE([]byte(""), "unknown-api"); got != nil {
+		t.Errorf("unknown api should still return nil (programmer error), got %+v", got)
 	}
 }
 

@@ -317,6 +317,84 @@ func parseUsage(body []byte, upstreamAPI string) *Usage {
 	return nil
 }
 
+// parseResponseBytes returns the §4.3 partition for a non-streaming
+// response body. Same I1/I2 invariants as ResponseByteCounts on the
+// streaming path — Other absorbs all JSON scaffolding so Total ==
+// len(body) exactly. Returns nil only when body is empty.
+//
+// Counts payload string lengths (decoded), not JSON-quoted form.
+// JSON brackets, field names, message-id, top-level metadata all
+// land in Other.
+func parseResponseBytes(body []byte, upstreamAPI string) *ResponseByteCounts {
+	if len(body) == 0 {
+		return nil
+	}
+	rb := &ResponseByteCounts{Total: len(body)}
+	if !json.Valid(body) {
+		rb.Other = rb.Total
+		return rb
+	}
+	switch upstreamAPI {
+	case APIAnthropic:
+		var r struct {
+			Content []struct {
+				Type     string          `json:"type"`
+				Text     string          `json:"text"`
+				Thinking string          `json:"thinking"`
+				ID       string          `json:"id"`
+				Name     string          `json:"name"`
+				Input    json.RawMessage `json:"input"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal(body, &r); err == nil {
+			for _, b := range r.Content {
+				switch b.Type {
+				case "text":
+					rb.Text += len(b.Text)
+				case "thinking":
+					rb.Thinking += len(b.Thinking)
+				case "tool_use":
+					// Tool name + id + serialized input args. Same
+					// convention as the streaming side: count the
+					// per-tool identifying payload, not the wrapping
+					// JSON structure.
+					rb.ToolCalls += len(b.ID) + len(b.Name) + len(b.Input)
+				}
+			}
+		}
+	case APIOpenAI:
+		var r struct {
+			Choices []struct {
+				Message struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+					ToolCalls        []struct {
+						ID       string `json:"id"`
+						Function struct {
+							Name      string          `json:"name"`
+							Arguments json.RawMessage `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(body, &r); err == nil {
+			for _, c := range r.Choices {
+				rb.Text += len(c.Message.Content)
+				rb.Thinking += len(c.Message.ReasoningContent)
+				for _, tc := range c.Message.ToolCalls {
+					rb.ToolCalls += len(tc.ID) + len(tc.Function.Name) + len(tc.Function.Arguments)
+				}
+			}
+		}
+	}
+	rb.Other = rb.Total - rb.Text - rb.Thinking - rb.ToolCalls
+	if rb.Other < 0 {
+		rb.Other = 0
+	}
+	return rb
+}
+
 // writePassthroughError emits an error response in the client's expected
 // format. Same-API passthrough still needs a sensible error shape when the
 // gateway itself rejects the request (413 too large, 500 bad URL).

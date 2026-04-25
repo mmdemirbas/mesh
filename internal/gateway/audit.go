@@ -77,13 +77,47 @@ type ResponseMeta struct {
 	ContextWindowTokens          int
 	OriginalInputTokensEstimate  int
 	EffectiveInputTokensEstimate int
-	TopToolResult                *TopToolResultInfo // largest tool_result block in this request, if any
-	RepeatReads                  *RepeatReadsInfo   // re-read activity this turn, if non-trivial
+	TopToolResult                *TopToolResultInfo  // largest tool_result block in this request, if any
+	RepeatReads                  *RepeatReadsInfo    // re-read activity this turn, if non-trivial
+	ResponseBytes                *ResponseByteCounts // §4.3 partition of the decoded response body
+	Stream                       *StreamInfo         // §4.3 stream accounting; emitted on every audited response
 	StartTime                    time.Time
 	EndTime                      time.Time
 	Headers                      map[string][]string
 	UpstreamReq                  []byte // translated request body sent upstream (set by handler)
 	UpstreamResp                 []byte // raw upstream response body (non-streaming; set by handler)
+}
+
+// StreamInfo is the §4.3 stream-accounting block. Always emitted on
+// audited responses (including non-streaming, where Terminated is
+// "normal" and timing fields collapse to first==total).
+//
+// Only Terminated lands in 9a; FirstTokenMs and TotalMs join in 9b.
+type StreamInfo struct {
+	// Terminated ∈ {"normal", "client", "upstream"}. See §4.3 for
+	// the decision tree the reassembler + wrapAuditing apply.
+	Terminated string `json:"terminated"`
+}
+
+// deriveStreamTerminated implements the §4.3 decision tree:
+//
+//   - reassembler said "normal" (terminal marker seen) → keep
+//     "normal" regardless of client cancellation. The reviewer-
+//     flagged race ("client closes after upstream sent
+//     message_stop but before gateway flushes the closing frame")
+//     is irrelevant: the upstream completed cleanly.
+//   - reassembler said "upstream" AND request context cancelled
+//     → "client". The leg was the client's choice, not an
+//     upstream failure.
+//   - everything else → pass through whatever the reassembler said.
+//
+// Pure function so the race semantics are unit-testable without
+// contriving an HTTP client disconnect.
+func deriveStreamTerminated(reassemblerSays string, ctxErr error) string {
+	if reassemblerSays == "upstream" && ctxErr != nil {
+		return "client"
+	}
+	return reassemblerSays
 }
 
 // Usage is the token accounting captured per response. Any field may be zero
@@ -270,6 +304,12 @@ func (r *Recorder) Response(id RequestID, meta ResponseMeta, body []byte) {
 	}
 	if meta.RepeatReads != nil {
 		row["repeat_reads"] = meta.RepeatReads
+	}
+	if meta.ResponseBytes != nil {
+		row["response_bytes"] = meta.ResponseBytes
+	}
+	if meta.Stream != nil {
+		row["stream"] = meta.Stream
 	}
 	// Summary is cheap and highly useful — include it at metadata level too.
 	if meta.Summary != nil {
@@ -619,15 +659,25 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 
 		var summary *SSESummary
 		var usage *Usage
+		var responseBytes *ResponseByteCounts
+		streamInfo := &StreamInfo{Terminated: "normal"}
 		auditBody := decodeForAudit(aw.buf.Bytes(), aw.Header().Get("Content-Encoding"), nil)
 		ct := aw.Header().Get("Content-Type")
-		if strings.HasPrefix(strings.ToLower(ct), "text/event-stream") {
+		isStreaming := strings.HasPrefix(strings.ToLower(ct), "text/event-stream")
+		if isStreaming {
 			summary = reassembleSSE(auditBody, clientAPI)
 			if summary != nil {
 				usage = summary.Usage
+				responseBytes = summary.ResponseBytes
+				streamInfo.Terminated = deriveStreamTerminated(summary.Terminated, r.Context().Err())
 			}
 		} else {
 			usage = parseUsage(auditBody, clientAPI)
+			responseBytes = parseResponseBytes(auditBody, clientAPI)
+			// Non-streaming has no mid-stream termination concept —
+			// either the response landed (normal) or the upstream
+			// erred earlier and we never reached this point. The
+			// audit row's status field disambiguates 4xx/5xx vs 2xx.
 		}
 		if usage != nil {
 			metrics := state.Global.GetMetrics("gateway", gwName)
@@ -649,6 +699,8 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 			EffectiveInputTokensEstimate: upstream.EffectiveInputTokensEstimate,
 			TopToolResult:                upstream.TopToolResult,
 			RepeatReads:                  upstream.RepeatReads,
+			ResponseBytes:                responseBytes,
+			Stream:                       streamInfo,
 			StartTime:                    start,
 			EndTime:                      time.Now(),
 			Headers:                      aw.Header(),
