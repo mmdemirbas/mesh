@@ -26,7 +26,11 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 		au.ReqBody = anthBody
 	}
 
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), "POST", upstream.Cfg.Target, bytes.NewReader(anthBody))
+	ctx := r.Context()
+	if au := getAuditUpstream(r); au != nil {
+		ctx = attachTimingTrace(ctx, au.Timer)
+	}
+	upstreamReq, err := http.NewRequestWithContext(ctx, "POST", upstream.Cfg.Target, bytes.NewReader(anthBody))
 	if err != nil {
 		writeOpenAIError(w, 500, "cannot create upstream request")
 		return

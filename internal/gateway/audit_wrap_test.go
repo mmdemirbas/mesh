@@ -744,9 +744,21 @@ func TestTranslationAudit_RepeatReadsLandsInRow(t *testing.T) {
 // resp row carries a timing_ms object whose six named segments plus
 // other sum to total, and whose total equals stream.total_ms exactly
 // (D1 invariant from DESIGN_B1_timing.local.md).
+//
+// The upstream sleeps for upstreamDelay before responding so the
+// integer-millisecond timing values are measurably non-zero — without
+// the delay, a localhost round-trip completes in well under 1 ms and
+// every segment truncates to 0, which closes the partition trivially
+// but proves nothing about whether instrumentation fired.
 func TestTranslationAudit_TimingMsLandsInRow(t *testing.T) {
 	t.Parallel()
+	const upstreamDelay = 30 * time.Millisecond
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Pace the upstream so upstream_processing is measurable.
+		// Not a synchronization primitive — a deliberate latency so
+		// the timing partition has non-zero named segments at
+		// integer-millisecond resolution.
+		time.Sleep(upstreamDelay)
 		resp := ChatCompletionResponse{
 			ID: "x", Model: "glm-4.7",
 			Choices: []OpenAIChoice{{
@@ -814,5 +826,70 @@ func TestTranslationAudit_TimingMsLandsInRow(t *testing.T) {
 	}
 	if sum != timingTotal {
 		t.Errorf("partition broken: sum(named+other)=%v != total=%v; timing=%+v", sum, timingTotal, timing)
+	}
+
+	// httptrace-plumbing check. With upstreamDelay >> 1 ms,
+	// upstream_processing must be non-zero on the success path. If
+	// the httptrace callbacks were removed entirely, the upstream
+	// time would all collect into other instead. The test fails
+	// loudly in that case rather than silently passing the
+	// partition-closure check above.
+	mt := func(k string) float64 { v, _ := timing[k].(float64); return v }
+	if mt("upstream_processing") <= 0 {
+		t.Errorf("upstream_processing=%v with %v upstream delay — httptrace plumbing missing? timing=%+v", mt("upstream_processing"), upstreamDelay, timing)
+	}
+}
+
+// TestTranslationAudit_TimingMs_ErrorBeforeUpstreamDispatch is the
+// §6 third mandatory test from DESIGN_B1_timing.local.md: when the
+// request errors out before the upstream HTTP exchange (here: 400 on
+// a malformed body), httptrace cannot have fired, so segments 3, 4,
+// and 5 must all be zero. Segments 1, 2, 6 plus other still close
+// the partition. (Segment 6 is non-zero because the 400 error
+// response goes through aw.Write, triggering the firstWriteAt Mark.)
+func TestTranslationAudit_TimingMs_ErrorBeforeUpstreamDispatch(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Should never be reached — request fails at unmarshal.
+		t.Errorf("upstream should not be contacted on a 400 path")
+		w.WriteHeader(500)
+	}))
+	defer upstream.Close()
+
+	base, gwName, logDir := startTranslationGateway(t, APIAnthropic, APIOpenAI, upstream.URL)
+
+	// Malformed JSON — fails inside handleA2O at json.Unmarshal,
+	// before any upstream dispatch.
+	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-opus-4-6","messages":[`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	if resp.StatusCode != 400 {
+		t.Errorf("status=%d, want 400", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	dir := filepath.Join(logDir, gwName)
+	rows := waitForRows(t, func() []map[string]any { return readRows(t, dir) }, 2, 2*time.Second)
+	respRow := rows[1]
+
+	timing, ok := respRow["timing_ms"].(map[string]any)
+	if !ok {
+		t.Fatalf("timing_ms missing on error path: %+v", respRow)
+	}
+	mt := func(k string) float64 { v, _ := timing[k].(float64); return v }
+
+	// Segments 3, 4, 5 must be zero — httptrace never fired.
+	for _, key := range []string{"mesh_to_upstream", "upstream_processing", "mesh_translation_out"} {
+		if v := mt(key); v != 0 {
+			t.Errorf("timing_ms.%s=%v on error-before-dispatch path, want 0", key, v)
+		}
+	}
+
+	// Partition still closes.
+	sum := mt("client_to_mesh") + mt("mesh_translation_in") + mt("mesh_to_upstream") +
+		mt("upstream_processing") + mt("mesh_translation_out") + mt("mesh_to_client") + mt("other")
+	if sum != mt("total") {
+		t.Errorf("partition broken on error path: sum=%v total=%v timing=%+v", sum, mt("total"), timing)
 	}
 }

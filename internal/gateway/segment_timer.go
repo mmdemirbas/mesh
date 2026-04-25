@@ -1,10 +1,50 @@
 package gateway
 
 import (
+	"context"
 	"maps"
+	"net/http/httptrace"
 	"sync"
 	"time"
 )
+
+// attachTimingTrace returns a context with an httptrace.ClientTrace
+// attached that drives the §B1 upstream-phase boundaries on timer.
+// Callbacks fire from net/http internal goroutines (D6); the timer's
+// internal mutex is required for correctness, not defensive.
+//
+// Boundaries (D1, §5.4):
+//   - Cold dial: ConnectStart fires, then GotConn fires later. Both
+//     Mark segMeshToUpstream — the second is idempotent for the
+//     accumulated total (the segmentTimer closes the open span on
+//     the same seg and re-anchors openAt at the new time).
+//   - Pool hit: ConnectStart does not fire. GotConn alone Marks
+//     segMeshToUpstream.
+//   - WroteRequest opens segUpstreamProcessing.
+//   - GotFirstResponseByte opens segMeshTranslationOut.
+//
+// timer may be nil — the trace becomes a no-op and the function
+// returns ctx unchanged.
+func attachTimingTrace(ctx context.Context, timer *segmentTimer) context.Context {
+	if timer == nil {
+		return ctx
+	}
+	trace := &httptrace.ClientTrace{
+		ConnectStart: func(_, _ string) {
+			timer.Mark(segMeshToUpstream, time.Now())
+		},
+		GotConn: func(_ httptrace.GotConnInfo) {
+			timer.Mark(segMeshToUpstream, time.Now())
+		},
+		WroteRequest: func(_ httptrace.WroteRequestInfo) {
+			timer.Mark(segUpstreamProcessing, time.Now())
+		},
+		GotFirstResponseByte: func() {
+			timer.Mark(segMeshTranslationOut, time.Now())
+		},
+	}
+	return httptrace.WithClientTrace(ctx, trace)
+}
 
 // timingSegment identifies one of the six named segments in the §B1
 // timing partition. The empty string is reserved for the "paused"

@@ -62,7 +62,11 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request, gwName, clientAPI
 		return
 	}
 
-	ureq, err := http.NewRequestWithContext(r.Context(), r.Method, upURL, bytes.NewReader(body))
+	ctx := r.Context()
+	if au := getAuditUpstream(r); au != nil {
+		ctx = attachTimingTrace(ctx, au.Timer)
+	}
+	ureq, err := http.NewRequestWithContext(ctx, r.Method, upURL, bytes.NewReader(body))
 	if err != nil {
 		writePassthroughError(w, clientAPI, 500, "cannot create upstream request")
 		return

@@ -686,6 +686,12 @@ type auditingWriter struct {
 	// first byte is usually the upstream's tiny message_start
 	// metadata, close to "first token" within tens of milliseconds).
 	firstWriteAt time.Time
+	// timer is the per-request §B1 segmentTimer. On the first
+	// non-empty Write to a non-streaming response the wrapper Marks
+	// segMeshToClient. For streaming responses (Content-Type
+	// text/event-stream) the Mark is suppressed — the streaming
+	// handler manages its own segment 5/6 split via Pause + Add.
+	timer *segmentTimer
 }
 
 func (a *auditingWriter) WriteHeader(code int) {
@@ -701,6 +707,18 @@ func (a *auditingWriter) Write(p []byte) (int, error) {
 	}
 	if a.firstWriteAt.IsZero() && len(p) > 0 {
 		a.firstWriteAt = time.Now()
+		// §B1 segment-6 boundary for non-streaming responses. The
+		// streaming case manages segment 6 via Add inside the SSE
+		// loop, so we suppress the Mark when Content-Type signals
+		// text/event-stream — Mark would open the span and the next
+		// loop iteration's read would falsely accumulate into
+		// mesh_to_client.
+		if a.timer != nil {
+			ct := strings.ToLower(a.Header().Get("Content-Type"))
+			if !strings.HasPrefix(ct, "text/event-stream") {
+				a.timer.Mark(segMeshToClient, a.firstWriteAt)
+			}
+		}
 	}
 	if !a.capped {
 		remain := int64(maxAuditBodyBytes) - int64(a.buf.Len())
@@ -806,11 +824,14 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 		upstream.TopToolResult = topTR
 		upstream.RepeatReads = repeatRR
 
-		aw := &auditingWriter{ResponseWriter: w}
+		aw := &auditingWriter{ResponseWriter: w, timer: timer}
 		// Close segment 1 (client_to_mesh) and open segment 2
 		// (mesh_translation_in) at the inner-handler entry boundary.
-		// Subsequent commits add Marks for segments 3-6 inside the
-		// upstream HTTP exchange and at firstWriteAt.
+		// Segments 3-5 are Marked from httptrace.ClientTrace
+		// callbacks attached by the upstream-dispatch handlers.
+		// Segment 6 opens at firstWriteAt for non-streaming; the
+		// streaming case manages its own boundary in subsequent
+		// commits.
 		timer.Mark(segMeshTranslationIn, time.Now())
 		inner(aw, r)
 

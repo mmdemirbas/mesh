@@ -310,7 +310,11 @@ func handleA2O(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 		headers["Authorization"] = "Bearer " + upstream.APIKey
 	}
 
-	statusCode, respBody, err := doUpstreamRequest(r.Context(), upstream.Client, upstream.Cfg.Target, oaiBody, headers, log)
+	ctx := r.Context()
+	if au := getAuditUpstream(r); au != nil {
+		ctx = attachTimingTrace(ctx, au.Timer)
+	}
+	statusCode, respBody, err := doUpstreamRequest(ctx, upstream.Client, upstream.Cfg.Target, oaiBody, headers, log)
 	if err != nil {
 		writeAnthropicError(w, 502, err.Error())
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
@@ -402,7 +406,11 @@ func handleO2A(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 		headers["anthropic-version"] = "2023-06-01"
 	}
 
-	statusCode, respBody, err := doUpstreamRequest(r.Context(), upstream.Client, upstream.Cfg.Target, anthBody, headers, log)
+	ctx := r.Context()
+	if au := getAuditUpstream(r); au != nil {
+		ctx = attachTimingTrace(ctx, au.Timer)
+	}
+	statusCode, respBody, err := doUpstreamRequest(ctx, upstream.Client, upstream.Cfg.Target, anthBody, headers, log)
 	if err != nil {
 		writeOpenAIError(w, 502, err.Error())
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))

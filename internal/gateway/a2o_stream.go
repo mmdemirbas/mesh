@@ -35,7 +35,11 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 		au.ReqBody = oaiBody
 	}
 
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), "POST", upstream.Cfg.Target, bytes.NewReader(oaiBody))
+	ctx := r.Context()
+	if au := getAuditUpstream(r); au != nil {
+		ctx = attachTimingTrace(ctx, au.Timer)
+	}
+	upstreamReq, err := http.NewRequestWithContext(ctx, "POST", upstream.Cfg.Target, bytes.NewReader(oaiBody))
 	if err != nil {
 		writeAnthropicError(w, 500, "cannot create upstream request")
 		return
