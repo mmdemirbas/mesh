@@ -108,6 +108,17 @@ func openFolderDB(dir, deviceID string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// Audit §6 commit 12 / V1: schema-evolution migration stub.
+	// Invoked unconditionally at every folder open so future
+	// schema bumps land at a known interception point. v1 → v1
+	// is a no-op; the function exists today to prove the
+	// invocation site and to give future schema bumps a stable
+	// home (no need to weave a new call site through openFolderDB
+	// when V2 lands).
+	if err := migrateSchema(db, schemaVersion, schemaVersion); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate schema: %w", err)
+	}
 	if err := seedFolderMeta(db, deviceID); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -191,6 +202,47 @@ func applyFolderDBPragmas(db *sql.DB) error {
 			return fmt.Errorf("%s: %w", s, err)
 		}
 	}
+	return nil
+}
+
+// migrateSchemaInvocations is a test-only counter incremented by
+// migrateSchema each time it is called. The audit (commit 12 / V1)
+// asserts the migration hook fires unconditionally at folder open;
+// the test reads this counter to prove invocation without coupling
+// to internal call sites.
+var migrateSchemaInvocations atomic.Int64
+
+// migrateSchema runs the schema-evolution migration ladder from
+// `from` to `to`. Audit §6 commit 12 / V1: the function exists at
+// v1 as a no-op for v1 → v1 (the only valid transition today)
+// and as a structural anchor — when V2 lands, the migration
+// arrows go HERE rather than threading new call sites through
+// openFolderDB. Idempotent within a version; calling twice with
+// the same (from, to) is harmless.
+//
+// Returns an error if to < from (downgrade is not supported) or
+// if to is past the current binary's known schema. The caller
+// transitions the folder to FolderDisabled with reason
+// `schema_version_mismatch` on either case.
+func migrateSchema(db *sql.DB, from, to int) error {
+	migrateSchemaInvocations.Add(1)
+	if db == nil {
+		return fmt.Errorf("migrateSchema: nil db")
+	}
+	if to < from {
+		return fmt.Errorf("migrateSchema: downgrade unsupported (from=%d to=%d)", from, to)
+	}
+	if to > schemaVersion {
+		return fmt.Errorf("migrateSchema: target %d past binary's schema %d", to, schemaVersion)
+	}
+	// v1 → v1: no-op. Future arrows (v1 → v2, etc.) land here as
+	// switch cases:
+	//
+	//	for v := from; v < to; v++ {
+	//	    switch v {
+	//	    case 1: ... // v1 → v2
+	//	    }
+	//	}
 	return nil
 }
 

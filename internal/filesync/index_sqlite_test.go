@@ -340,6 +340,50 @@ func TestSaveIndex_DeletePathRemovesRow(t *testing.T) {
 	}
 }
 
+// TestMigrate_NoOpForV1 pins audit §6 commit 12 / V1: the
+// schema-evolution migration hook fires unconditionally at every
+// folder open. v1 → v1 is a no-op (the only valid transition
+// today) but the invocation site is structurally anchored so
+// future bumps (V2) compose without reintroducing the hook.
+//
+// Cannot use t.Parallel — the test reads a process-global
+// counter and concurrent tests calling openFolderDB would
+// advance it too. Sequential execution is fine; the test is
+// fast.
+//
+// Mental mutation: removing the migrateSchema call from
+// openFolderDB makes the per-open delta zero and the assertion
+// below catches it.
+func TestMigrate_NoOpForV1(t *testing.T) {
+	dir := t.TempDir()
+
+	before := migrateSchemaInvocations.Load()
+	db, err := openFolderDB(dir, "ABCDE12345")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	after := migrateSchemaInvocations.Load()
+	t.Cleanup(func() { _ = db.Close() })
+
+	if after-before < 1 {
+		t.Errorf("migrateSchemaInvocations did not advance across one openFolderDB; want at least +1, got delta=%d",
+			after-before)
+	}
+
+	// Direct call: v1 → v1 returns nil (no-op).
+	if err := migrateSchema(db, schemaVersion, schemaVersion); err != nil {
+		t.Errorf("v1→v1: err=%v, want nil (no-op)", err)
+	}
+	// Downgrade rejected.
+	if err := migrateSchema(db, schemaVersion+1, schemaVersion); err == nil {
+		t.Error("downgrade accepted; expected error")
+	}
+	// Forward past binary's schema rejected.
+	if err := migrateSchema(db, schemaVersion, schemaVersion+1); err == nil {
+		t.Error("forward past binary schema accepted; expected error")
+	}
+}
+
 // TestSequenceConditionedUpsert_OldSequenceLoses pins audit §6
 // commit 7 phase E / INV-3: the UPSERT in applyIndexToTx carries
 // WHERE excluded.sequence > files.sequence. A second UPSERT with a
