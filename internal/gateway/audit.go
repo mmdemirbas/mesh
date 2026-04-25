@@ -705,19 +705,19 @@ func (a *auditingWriter) Write(p []byte) (int, error) {
 	if a.status == 0 {
 		a.status = http.StatusOK
 	}
+	pre := time.Now()
 	if a.firstWriteAt.IsZero() && len(p) > 0 {
-		a.firstWriteAt = time.Now()
-		// §B1 segment-6 boundary for non-streaming responses. The
-		// streaming case manages segment 6 via Add inside the SSE
-		// loop, so we suppress the Mark when Content-Type signals
-		// text/event-stream — Mark would open the span and the next
-		// loop iteration's read would falsely accumulate into
-		// mesh_to_client.
+		a.firstWriteAt = pre
+		// §B1 unified segment-6 entry: on the first non-empty
+		// Write, close whatever segment was open (typically
+		// segMeshTranslationOut, set by httptrace's
+		// GotFirstResponseByte) so the underlying ResponseWriter.Write
+		// duration is the only thing attributed to mesh_to_client.
+		// For streaming responses the handler may have already
+		// Paused the timer before reaching this point; Pause on a
+		// paused timer is a no-op.
 		if a.timer != nil {
-			ct := strings.ToLower(a.Header().Get("Content-Type"))
-			if !strings.HasPrefix(ct, "text/event-stream") {
-				a.timer.Mark(segMeshToClient, a.firstWriteAt)
-			}
+			a.timer.Pause(pre)
 		}
 	}
 	if !a.capped {
@@ -733,7 +733,11 @@ func (a *auditingWriter) Write(p []byte) (int, error) {
 			a.capped = true
 		}
 	}
-	return a.ResponseWriter.Write(p)
+	n, err := a.ResponseWriter.Write(p)
+	if a.timer != nil {
+		a.timer.Add(segMeshToClient, time.Since(pre))
+	}
+	return n, err
 }
 
 func (a *auditingWriter) Flush() {

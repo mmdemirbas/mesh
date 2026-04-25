@@ -92,9 +92,29 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 	// Emit message_start.
 	st.emitMessageStart()
 
+	// §B1 streaming partition: time scanner.Scan() as
+	// segUpstreamProcessing accumulator. Translate-only time inside
+	// processChunk falls into `other` for v1 — splitting it from
+	// embedded aw.Write calls requires deeper instrumentation that
+	// is deferred. Write durations are tracked uniformly by
+	// auditingWriter.Write.
+	var timer *segmentTimer
+	if st.au != nil {
+		timer = st.au.Timer
+	}
 	scanner := bufio.NewScanner(upstreamResp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxSSELineSize)
-	for scanner.Scan() {
+	for {
+		scanStart := time.Now()
+		if !scanner.Scan() {
+			if timer != nil {
+				timer.Add(segUpstreamProcessing, time.Since(scanStart))
+			}
+			break
+		}
+		if timer != nil {
+			timer.Add(segUpstreamProcessing, time.Since(scanStart))
+		}
 		line := scanner.Text()
 
 		if !strings.HasPrefix(line, "data: ") {

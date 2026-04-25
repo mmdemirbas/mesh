@@ -85,11 +85,26 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 	st.jsonEnc = json.NewEncoder(&st.jsonBuf)
 	st.jsonEnc.SetEscapeHTML(false)
 
+	// §B1 streaming partition: see a2o_stream for rationale.
+	var timer *segmentTimer
+	if st.au != nil {
+		timer = st.au.Timer
+	}
 	scanner := bufio.NewScanner(upstreamResp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxSSELineSize)
 	var eventType string
 
-	for scanner.Scan() {
+	for {
+		scanStart := time.Now()
+		if !scanner.Scan() {
+			if timer != nil {
+				timer.Add(segUpstreamProcessing, time.Since(scanStart))
+			}
+			break
+		}
+		if timer != nil {
+			timer.Add(segUpstreamProcessing, time.Since(scanStart))
+		}
 		line := scanner.Text()
 
 		if after, ok0 := strings.CutPrefix(line, "event: "); ok0 {

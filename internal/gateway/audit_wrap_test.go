@@ -840,6 +840,87 @@ func TestTranslationAudit_TimingMsLandsInRow(t *testing.T) {
 	}
 }
 
+// TestTranslationAudit_TimingMs_StreamingPopulatesSegments verifies
+// the streaming path's segment-4 (per-Scan accumulator) and segment-6
+// (per-Write accumulator) instrumentation. The upstream emits SSE
+// chunks with a small per-chunk delay so the loop's Scan blocks are
+// measurably non-zero.
+func TestTranslationAudit_TimingMs_StreamingPopulatesSegments(t *testing.T) {
+	t.Parallel()
+	const perChunkDelay = 15 * time.Millisecond
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		f := w.(http.Flusher)
+		chunks := []string{
+			`{"id":"x","model":"glm-4.7","choices":[{"delta":{"content":"a"},"finish_reason":null}]}`,
+			`{"id":"x","model":"glm-4.7","choices":[{"delta":{"content":"b"},"finish_reason":null}]}`,
+			`{"id":"x","model":"glm-4.7","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2}}`,
+		}
+		for _, c := range chunks {
+			time.Sleep(perChunkDelay)
+			_, _ = w.Write([]byte("data: " + c + "\n\n"))
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		f.Flush()
+	}))
+	defer upstream.Close()
+
+	base, gwName, logDir := startTranslationGateway(t, APIAnthropic, APIOpenAI, upstream.URL)
+
+	body := `{"model":"claude-opus-4-6","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":16}`
+	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	dir := filepath.Join(logDir, gwName)
+	rows := waitForRows(t, func() []map[string]any { return readRows(t, dir) }, 2, 2*time.Second)
+	respRow := rows[1]
+
+	timing, ok := respRow["timing_ms"].(map[string]any)
+	if !ok {
+		t.Fatalf("timing_ms missing on streaming path: %+v", respRow)
+	}
+	mt := func(k string) float64 { v, _ := timing[k].(float64); return v }
+
+	// Segment 4 (upstream_processing) accumulates across the SSE
+	// loop's Scan calls; with three chunks at 15 ms each, the
+	// scanner.Scan() reads block for at least ~30 ms total. This
+	// catches the failure mode where the per-Scan Add brackets
+	// were removed.
+	if mt("upstream_processing") <= 0 {
+		t.Errorf("upstream_processing=%v on streaming path — Scan brackets missing? timing=%+v", mt("upstream_processing"), timing)
+	}
+	// Segment 6 (mesh_to_client) is the sum of aw.Write durations.
+	// On localhost each Write completes in microseconds; summed
+	// across a small SSE stream the total is typically under 1 ms
+	// and truncates to 0 at integer-millisecond resolution. The
+	// "Adds actually fire" check therefore lives in the e2e suite
+	// where the network round-trip elongates the Writes (B1
+	// lead-in note 3). This unit test only checks partition
+	// closure plus segment-4 instrumentation; segment-6 is
+	// permitted to be 0.
+
+	// Partition closes.
+	sum := mt("client_to_mesh") + mt("mesh_translation_in") + mt("mesh_to_upstream") +
+		mt("upstream_processing") + mt("mesh_translation_out") + mt("mesh_to_client") + mt("other")
+	if sum != mt("total") {
+		t.Errorf("partition broken on streaming path: sum=%v total=%v timing=%+v", sum, mt("total"), timing)
+	}
+	// total must equal stream.total_ms.
+	stream, ok := respRow["stream"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream missing")
+	}
+	if mt("total") != stream["total_ms"] {
+		t.Errorf("timing_ms.total=%v != stream.total_ms=%v", mt("total"), stream["total_ms"])
+	}
+}
+
 // TestTranslationAudit_TimingMs_ErrorBeforeUpstreamDispatch is the
 // §6 third mandatory test from DESIGN_B1_timing.local.md: when the
 // request errors out before the upstream HTTP exchange (here: 400 on

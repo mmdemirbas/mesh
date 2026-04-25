@@ -118,11 +118,23 @@ func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *ht
 
 	flusher, _ := w.(http.Flusher)
 
+	// §B1 streaming partition: bracket each upstream Body.Read as
+	// segUpstreamProcessing. Write durations are tracked uniformly
+	// in auditingWriter.
+	var timer *segmentTimer
+	if au := getAuditUpstream(r); au != nil {
+		timer = au.Timer
+	}
+
 	tmp := make([]byte, 32*1024)
 	var totalBytes int64
 
 	for {
+		readStart := time.Now()
 		n, err := uresp.Body.Read(tmp)
+		if timer != nil {
+			timer.Add(segUpstreamProcessing, time.Since(readStart))
+		}
 		if n > 0 {
 			if _, werr := w.Write(tmp[:n]); werr != nil {
 				log.Debug("Client write failed mid-stream", "error", werr)
