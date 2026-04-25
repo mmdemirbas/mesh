@@ -151,6 +151,107 @@ Comparable tools: Syncthing's 52-character IDs are famously hard
 to type; the trust story there is different (TLS cert fingerprint).
 We are smaller and do not need that.
 
+### Index model — build-time protocol invariant
+
+The persistence layer ships in two shapes — **β** (in-memory
+`FileIndex` discarded between scans; SQLite is the sole source
+of truth read at every scan start) and **hybrid** (in-memory
+`FileIndex` retained between scans as a scan-private working
+copy populated from SQLite at folder open). The choice between
+them is gated by `BenchmarkLoadIndex_168kFiles` measured on the
+build host (see `PERSISTENCE-AUDIT.md` §2.8 INV-2 and §6
+commit 7).
+
+**The selection is a build-time constant**, not a runtime knob:
+
+```go
+const FILESYNC_INDEX_MODEL = "beta"   // or "hybrid"
+```
+
+Stamped on every `IndexExchange` alongside `protocol_version`
+and `device_id`. The handshake asserts equality — a peer whose
+binary carries a different value is rejected with
+`last_error="filesync_index_model_mismatch"` and dropped before
+any work. Same shape as `protocol_version`: no negotiation, no
+capability list, mismatch is a configuration bug.
+
+Why build-time, not runtime: the bench varies per hardware (an
+M1 may land in β; an x86 desktop may land in hybrid; a VPS
+bastion may land somewhere else). If each peer chose
+independently at runtime, three peers would silently run two
+different model selections and the audit's invariants (INV-1
+through INV-4) would only hold on the one with the matching
+model. Forcing build-time selection means the operator deploys
+**one** binary across all peers and the model question is
+settled at deploy.
+
+**Recorded decision (to be filled in at commit 2 of the cutover
+sequence):**
+
+```
+Bench: BenchmarkLoadIndex_168kFiles
+Hardware: <build host model + arch>
+Result: <median> ms ± <stddev> ms across N runs
+Selected: FILESYNC_INDEX_MODEL = "<beta|hybrid>"
+Rationale: <reason — bench < 80 ms, ≥ 80 ms, or borderline default>
+```
+
+Updated when the bench is re-run (e.g., after a modernc driver
+upgrade or a target-hardware change). Iter-4 O15 named this
+the missing protocol-level invariant.
+
+### Folder epoch — receiver re-baseline contract
+
+Every `IndexExchange` carries the sender's
+`folder_meta.epoch` (8 random bytes, hex-encoded) on the
+`Epoch` field. The epoch is seeded once at folder creation
+(per `PERSISTENCE-AUDIT.md` §2.6 I2) and rewritten only by
+the restore-from-backup admin endpoint (§2.7 L5).
+
+**Receiver contract.** On every incoming `IndexExchange`, the
+receiver compares `Epoch` against the cached
+`PeerState.LastEpoch` for that (folder, peer) pair:
+
+- **Match (or first-ever exchange with `LastEpoch == ""`):**
+  proceed normally; the delta query
+  `WHERE sequence > LastSeenSequence` is the standard path.
+- **Mismatch (`Epoch != LastEpoch && Epoch != ""`):** drop
+  `BaseHashes`, reset `LastSeenSequence` and
+  `LastSentSequence` to 0 for this (folder, peer), force a
+  full re-sync on the next cycle, and record
+  `last_error="epoch_mismatch"` for visibility.
+
+The contract is symmetric: peer A's restore bumps A's epoch;
+peers B and C see the new epoch on next exchange and
+re-baseline their PeerState rows for A. No manual
+intervention required on B / C.
+
+**Implementation note.** `internal/filesync/filesync.go`
+already implements branch A semantics (drop BaseHashes, reset
+LastSeenSequence) but triggers only on
+`remoteIdx.GetSequence() < peerLastSeq`. Iter-4 Z2 verified
+that this trigger misses one case: a peer that was offline
+during the backup-to-restore window, whose `LastSeenSeq`
+predates the backup point, may not see a sequence drop after
+the restore. The `PERSISTENCE-AUDIT.md` §6 commit 7 wires the
+epoch-mismatch trigger explicitly:
+
+```go
+if remoteIdx.GetSequence() < peerLastSeq ||
+    (remote.Epoch != "" && remote.Epoch != peer.LastEpoch) {
+    // existing reset path: drop BaseHashes, reset
+    // LastSeenSequence, set PendingEpoch to remote.Epoch
+}
+```
+
+Pin with `TestPeer_OfflineDuringRestore_ResetsOnEpochAlone`.
+The test scripts: peer A backs up at seq=1000; peer X is
+offline (X.LastSeenSeq=500); A advances to seq=2000; A
+restores from seq=1000 backup, epoch E1 → E2; X comes online
+and exchanges with A (A reports seq=1000, X.LastSeenSeq=500
+— sequence-drop trigger does NOT fire alone); the
+epoch-mismatch trigger MUST fire and X re-baselines.
+
 ---
 
 ## 1. C6 — Per-file vector clocks

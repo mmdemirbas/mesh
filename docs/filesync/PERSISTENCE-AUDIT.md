@@ -4,7 +4,7 @@
 > `DESIGN-v1.md` §4 (the schema sketch) and the actual code changes.
 > No code lands until this document is reviewed.
 >
-> Status: **draft, iteration 2** · last updated 2026-04-22.
+> Status: **draft, iteration 3** · last updated 2026-04-25.
 >
 > Iteration 2 folded seven gaps found on adversarial self-review:
 > (1) concurrent scan + download write race causing silent
@@ -21,6 +21,218 @@
 > backups wasteful on quiet folders and thin on busy ones —
 > replaced with commit-count + max-age schedule. Harness grew to
 > cover each gap (H11–H15).
+>
+> Iteration 3 folded a further set of gaps surfaced by the
+> companion review (`PERSISTENCE-AUDIT-REVIEW.md`):
+> (1') sequence collision across concurrent writers under β —
+> sequences must be assigned inside a `BEGIN IMMEDIATE` window,
+> never in scan memory; (2') split BaseHash / `last_sync_ns` crash
+> window leaving the C2 classifier between "first-sync fallback"
+> and "unknown ancestor → conflict" — folded into one tx; (3') no
+> dual-write window between flipping reads and flipping writes,
+> which would have left commit 4 reading from an empty SQLite —
+> commit C3.5 added; (4') `.bak` files had no lifecycle owner —
+> renamed under the existing temp-sweep prefix; (5') scan vs
+> in-flight download race left the wrong VectorClock semantics on
+> the winning row — scan fast-path now skips paths claimed by a
+> download; (6') `device_id` rotation silently corrupted
+> VectorClocks — mismatch at open now disables the folder; (7')
+> `prev_path` would persist forever in SQLite — cleared on next
+> row update, mirroring today; (8') β architecture cost was
+> unverified against the 7 ms `cloneInto` baseline — `Benchmark
+> LoadIndex_168kFiles` lands at commit 2 as the gate;
+> (9') `blocks` table was dead weight in the schema — dropped for
+> v1, reopen on measured block-sig latency. Iter-4 adversarial
+> review is gated before any code beyond commit 1 lands (see §8).
+>
+> **Scope correction (2026-04-25).** Filesync has **no production
+> state** on the three-peer deployment — every folder has been
+> running dry-run only. `~/.mesh/filesync/` is wipeable atomically
+> across all peers before the first real-data run, and DESIGN-v1
+> §0 already promises a cold protocol swap. Two iter-3 deltas
+> change as a result:
+>
+> - **Gap 3' becomes moot.** The dual-write window from commit 4
+>   was insurance against reads flipping to an empty SQLite while
+>   gob still served as authoritative. With no state to preserve,
+>   the cold swap is the correct posture; dual-write is dead
+>   weight. Commit 4 (the dual-write commit) is dropped from §6.
+> - **Gob retirement collapses into commit 2.** Without a
+>   burn-in window, there is no reason to ship gob deletion
+>   separately from the storage swap; the FileIndex encapsulation
+>   commit absorbs both. The old retire-gob commit (formerly
+>   commit 8 → renamed to "device_id rotation guard" in iter-3)
+>   keeps only the device-ID guard, which then folds into the
+>   FolderDisabled scaffold commit (commit 3 in the new
+>   numbering).
+>
+> The §6 sequence collapses from 14 commits to 13. The
+> structural seams (commit 2 bench gate, scan-claim-skip →
+> sync-persist ordering with startup assertion, β provisional)
+> all stand. Iter-4 lens reframed: "first-run blast radius on
+> real folders" (the moment the dry-run flip lands), not
+> "long-running production composition" — the failure model is
+> first-hour blast radius, not weeks of accumulated state.
+>
+> **Renumbering arithmetic (footnote).** β finish lives at the
+> same number (commit 7) before and after the rescope. This is
+> *coincidental*, not "unchanged." The arithmetic: iter-3 had
+> commits 1, 2, 3, 4(dual-write), 5(peer-reads), 6a, 6b, 7(β),
+> 8(retire-gob), 9, ..., 14. Iter-3.1 drops commit 4 and
+> commit 8, and collapses 6a/6b → 5/6. Two drops + one
+> collapse net zero shift at position 7, but every commit
+> below β finish has been re-scoped or re-numbered. Reviewers:
+> do **not** assume β finish was untouched by the rescope —
+> verify its prose matches the new commit-2 bench-gate
+> ordering and the explicit decision tree, both refined as
+> part of this scope correction.
+>
+> **Iteration-4 ops-lens findings folded (2026-04-25).** A
+> parallel iter-4 review through the operator-workflow lens
+> (`PERSISTENCE-AUDIT-REVIEW-ITER4-OPS.md`) surfaced 19
+> findings, of which seven are structural changes to this
+> audit. The §6 sequence grows from 13 to 14 commits with the
+> addition of an operator runbook as a structural deliverable
+> blocking v1 ship. Key promotions:
+>
+> - **O15 → protocol-level invariant.** β-vs-hybrid is a
+>   build-time selection (binary `FILESYNC_INDEX_MODEL` const),
+>   single value across all peers, asserted at the index-
+>   exchange handshake same shape as `protocol_version`.
+>   Runtime per-peer divergence is rejected as a
+>   session-mismatch error. DESIGN-v1 §0 carries this; commit 7
+>   wires it.
+> - **O11 → 🚨 structural deliverable.** Per-enum `action`
+>   string in the API response and dashboard cell. Implemented
+>   as a config table (enum → action string) referenced by the
+>   dashboard renderer and the operator runbook. Half the
+>   per-enum findings (O1, O2, O5, O6, O7) shrink to runbook
+>   entries once O11 ships.
+> - **O10 → new §2.7 L5 lifecycle row.** Restore-from-backup
+>   is a first-class lifecycle operation: stop folder → swap
+>   DB → bump `folder_meta.epoch` → restart folder. Without
+>   the epoch bump, peers silently skip rows because their
+>   `LastSeenSequence` already exceeds the rewound point.
+>   Code change, not doc change.
+> - **O3 → default branch for device_id mismatch.** Recovery
+>   tries restore-from-backup of the device-id file *first*;
+>   wipe-folder-and-resync is the fallback only when the
+>   original is genuinely unrecoverable. Cost asymmetry: branch
+>   1 keeps VectorClock continuity; branch 2 triggers a full
+>   re-sync against every peer.
+> - **O8 → diagnostic load expansion.** When the disabled
+>   reason is `unknown`, the JSON response carries the full
+>   reason text, a stack-trace excerpt, and the last 50 log
+>   lines for that folder. The diagnostic path loads into the
+>   response itself, not into a separate API call.
+> - **O13 + O16 → single runbook deliverable.** The first-run
+>   experience and the dry-run-to-real flip are folded into
+>   `OPERATOR-RUNBOOK.md` §§1–2 (blocking for v1 ship).
+> - **O12 promoted to v1-blocker.** `/reopen` endpoint ships
+>   at commit 9 alongside `/restore` and `/backups`. Original
+>   ops-review pass deferred O12 to runbook §7 as follow-up;
+>   that left runbook §5.3 (backup restore) citing an
+>   endpoint that did not exist in v1, and the alternative
+>   (manual `sqlite3` editing during recovery) is wrong UX
+>   for the ship-perfect bar. §7 promoted to runbook-blocker
+>   alongside the endpoint.
+> - **O4 → enum split.** D1's `parseInt64` failure routes to
+>   a new enum value `metadata_parse_failed`, not to
+>   `schema_version_mismatch`. The latter stays for actual
+>   schema mismatches.
+>
+> Iter-4 composition-lens review (the other half of §8 step 2)
+> opens next in a fresh conversation. The ops half closes here.
+>
+> **Iteration-4 composition-lens findings folded (2026-04-25).**
+> The composition-lens review
+> (`PERSISTENCE-AUDIT-REVIEW-ITER4-COMPOSITION.md`) surfaced 16
+> findings (Z1–Z16) on failure-mode composition during the
+> first hour after the dry-run flip. Decisions and folds:
+>
+> - **Z2 → epoch-mismatch promoted to a DESIGN-v1 §0
+>   protocol-level invariant.** Code verification (filesync.go
+>   ~L1635-1662, the H2b dance) confirms the existing reset
+>   path *does* drop BaseHashes (branch A semantics) — but only
+>   when triggered by `remote.seq < peer.LastSeenSeq`. An
+>   offline peer whose `LastSeenSeq` predates the backup point
+>   may not see a sequence drop after restore, leaving stale
+>   BaseHashes. **Promotion requires a small code change:**
+>   add `|| (remote.Epoch != "" && remote.Epoch != peer.LastEpoch)`
+>   to the reset trigger. ~5 LOC + the
+>   `TestPeer_OfflineDuringRestore_ResetsOnEpochAlone` test
+>   land in commit 7 (where DESIGN-v1 §0 invariants get wired
+>   into the handshake).
+> - **Z4 → §1.1 wording fix.** The composition reviewer flagged
+>   that §1.1's `rm -rf ~/.mesh/filesync/` wipes the device-id
+>   file at the parent level. Verification: §2.4 step 3 and
+>   §4.3 option 2 both use `rm -rf ~/.mesh/filesync/<folder-id>/`
+>   (folder-scoped, leaves device-id intact ✓). §1.1 needs the
+>   rewrite "wipe once, before the very first dry-run on each
+>   peer; do not rewipe between dry-run and the real-data
+>   flip." The path-scope distinction between the two
+>   instructions is documented explicitly.
+> - **Z6 → branch (A): cancel in-flight writer tx on disabled
+>   transition.** Pinned with
+>   `TestIntegrityCheckFailedMidLife_RollsBackInFlightTx`.
+>   Disabled-state JSON gains `tx_in_flight_rolled_back: true`.
+>   Lands in commit 3.
+> - **Z7 → runbook hardening only.** Wall-clock skew check + a
+>   stronger "one peer at a time" warning in §2.1 pre-flight
+>   and §2.2. No programmatic guard at v1 (three-peer scale
+>   doesn't justify it).
+> - **Z8 → synchronous `integrity_check` after detected SIGKILL
+>   recovery.** WAL un-checkpointed frames at open → run
+>   `integrity_check` synchronously before going live. New
+>   transient state `recovering` in the dashboard. Pin with
+>   `TestSIGKILLRecovery_RunsIntegrityCheckSync`. Lands in
+>   commit 11 (fault-injection + SIGKILL).
+> - **Z10 → metric + handshake rejection (no §8 promotion).**
+>   `mesh_filesync_peer_session_dropped{reason="filesync_index_model_mismatch"}`
+>   metric ships at commit 7. Runbook §3 surfaces the metric.
+>   §8 (build-time decisions documentation) stays in the
+>   first follow-up — the metric and the rejection are the
+>   load-bearing parts.
+> - **Z15 → doc-test (b) for action-string drift.** Parsing
+>   test reads `OPERATOR-RUNBOOK.md` §4 and asserts every
+>   `disabledReasonActions` map value appears verbatim. ~50
+>   LOC. Lands in commit 3.
+> - **Z16 → no §9 promotion.** §7 (per-folder reload) is
+>   already promoted to v1 in the prior fold; that shrinks
+>   the multi-folder `disk_full` blast radius enough that §9
+>   can stay follow-up.
+> - **Z1 → F7 sweep gains "DB unreadable" branch (defer to
+>   operator).** Sweep does nothing with `.bak` when SQLite is
+>   unreadable; restore-from-backup runs the sweep again
+>   post-reopen against the restored DB. Pin with
+>   `TestSweep_DBUnreadable_PreservesBak` and
+>   `TestRestore_RunsSweepAfterReopen`. Lands in commit 6
+>   (sweep) and commit 9 (restore endpoint).
+> - **Z3 → runbook §2.4 cites the epoch protocol contract.**
+>   "Rolling back a flipped peer also forces every other peer
+>   to re-baseline its PeerState for this peer, via the
+>   epoch-change protocol contract (Z2). Do not manually wipe
+>   peer state on B / C; the next index exchange resolves
+>   it." §2.3 verification gate adds: B and C show updated
+>   `PeerState.LastEpoch` for peer A after the flip.
+>
+> Mechanical folds:
+> - **Z5** → backup writes `*.sqlite.tmp`, atomic rename on
+>   `quick_check` pass; startup sweep cleans `.tmp`. Commit 9.
+> - **Z9** → R9 dirty-set cap is checked atomically inside the
+>   set's mutex on `Set`; overflow returns `errDirtySetOverflow`
+>   without opening `BEGIN IMMEDIATE`. Two tests pin the
+>   no-leak invariant. R9 wording updated; lands in commit 7.
+> - **Z11** → restore endpoint runs `quick_check` on the
+>   chosen backup before swap. Commit 9.
+> - **Z12** → `TestDisabledReasonActions_AllEnumsHaveAction`
+>   coverage test. Commit 3.
+> - **Z13** → F7 "neither matches" branch:
+>   `FolderDisabled(unknown)` with diagnostic load. Commit 6.
+> - **Z14** → `TestRetention_IdempotentOnExtraFile`. Commit 9.
+>
+> §8 step 2b closes here. Final §6 bounded-scope sweep with
+> the new commit-9 scope follows. Then commit 1 ships.
 >
 > Scope: everything that today reads or writes a file under
 > `~/.mesh/filesync/<folder-id>/` and the behaviors built on top of
@@ -76,6 +288,7 @@ Dispositions:
 | F4 | YAML fallback on read for legacy folders | `tryLoadYAMLIndex`, `tryLoadPeerStates` | `drop` | No v1 peer ever ran the gob/YAML layer in production; legacy files are refused at startup. |
 | F5 | Atomic peer-state double-write | `savePeerStates` | `supersede` | Same transaction as the index update — one commit covers both tables. |
 | F6 | `isNotExist` first-run detection | `loadIndex`, `loadPeerStates` | `redesign` | SQLite presence means "db file exists." First-run now means "no `folder_meta` row with `created_at`" — explicit, not filesystem-derived. |
+| F7 | Reversible filesystem rename for downloads (new) | new download path | `redesign` → **new** | Three-step pattern: `rename original → <path>.mesh-bak-<hash>` (named under the existing temp-sweep prefix so leftover files cannot accumulate); `rename temp → original`; commit SQLite row inside `BEGIN IMMEDIATE`; on commit success, `unlink .mesh-bak-<hash>`; on commit failure, `rename .mesh-bak-<hash> → original`, `unlink temp`, surface via metric. Startup sweep (extension of R7) reconciles any leftover `.mesh-bak-<hash>` against the SQLite row for the underlying path. **Three branches** (iter-4 Z1, Z13): (a) SQLite carries the new content's hash → unlink `.bak` (commit succeeded, only the unlink missed); (b) SQLite carries the original content's hash that matches `.bak` → restore `.bak → original`, unlink any temp; (c) **SQLite is unreadable for this folder** (open failed or `quick_check` failed) → sweep does NOTHING with `.bak` (no unlink, no restore); folder enters `FolderDisabled` with the SQLite-derived reason and `.bak` is left intact for the operator's restore-from-backup procedure to encounter. Restore endpoint re-runs the sweep against the restored DB after reopen (per L5 step). (d) **Neither file matches the SQLite row's hash** → folder enters `FolderDisabled` reason `unknown` with diagnostic load (`error_text = "sweep: neither disk file matches SQLite for path %q"`); operator triages. DESIGN-v1 §4 file-format stanza is updated with the new sidecar pattern alongside the existing `.mesh-tmp-*` and `*.mesh-delta-tmp-*` entries. Pin with `TestSweep_DBUnreadable_PreservesBak`, `TestSweep_NeitherMatches_DisablesWithUnknown`, `TestRestore_RunsSweepAfterReopen`. Closes Gap 4'. |
 
 ### 2.2 Recovery and corruption handling
 
@@ -88,7 +301,8 @@ Dispositions:
 | R5 | Peer-state reset when index was recreated (B15) | Folder startup in `Run` | `drop` | Motivated by "silent gob fallback gave us an empty index, so peer `LastSentSequence` is now wrong." Failure mode goes away when we fail loud on open (R2, R3). |
 | R6 | `prevPath` helper | `prevPath` | `drop` | No `.prev` files. |
 | R7 | Abandoned download temp-file sweep | `cleanTempFiles` | `keep` | Orthogonal to index storage; runs before folder init. |
-| R8 | Per-folder `FolderDisabled` state (new) | new `folderState` field + dashboard / metric surface | `redesign` → **new** | Failure classes R2, R3, F3, F5 all need a way to park a folder without blowing up the process. Introduce a folder-level disabled flag carrying a human-readable reason; the dashboard renders a red row, `/api/filesync/folders` reports `status: "disabled"` with the reason, and `mesh_filesync_folder_disabled{reason=...}` goes to 1. Folder stays disabled until the operator fixes the underlying issue and restarts the node. Every other folder and every other mesh component (SSH, proxy, clipsync, gateway) is untouched. |
+| R8 | Per-folder `FolderDisabled` state + per-enum `action` string + diagnostic load (new) | new `folderState` field + dashboard / metric surface + admin endpoint | `redesign` → **new** | Failure classes R2, R3, R9, F3, F5, I7 all need a way to park a folder without blowing up the process. Folder-level disabled flag carries a **closed-enum reason** (full text logged separately so Prometheus cardinality stays bounded) **plus a paired `action` string** (one-line operator instruction; iter-4 O11). Reason enum: `quick_check_failed`, `integrity_check_failed`, `device_id_mismatch`, `schema_version_mismatch`, `metadata_parse_failed` (new — D1 / iter-4 O4), `read_only_fs`, `disk_full`, `dirty_set_overflow`, `unknown`. **Action strings** live in a package-level `disabledReasonActions map[reason]string` consumed by the dashboard renderer and the runbook (§4 sections cite the same string). Sample mapping: `disk_full` → `"free disk space, then POST /api/filesync/folders/<id>/reopen (or restart node)"`; `device_id_mismatch` → `"restore ~/.mesh/filesync/device-id from backup, restart node — see runbook §4.3"`. The dashboard renders a red row showing reason + action; `/api/filesync/folders` reports `status: "disabled"`, `reason: <enum>`, `action: <string>`, and additionally for `reason=unknown` (iter-4 O8) carries `error_text: <full text>`, `stack_trace: <excerpt>`, `recent_log: [...last 50 lines for this folder...]` so the diagnostic path loads into the response itself rather than requiring a separate log query. `mesh_filesync_folder_disabled{reason=<enum>}` goes to 1. Folder stays disabled until the operator fixes the underlying issue and reopens the folder via `POST /api/filesync/folders/<id>/reopen` (iter-4 O12, ships at commit 9; runbook §7 documents usage). The full node restart remains an option for failure modes the reopen endpoint cannot recover (`device_id_mismatch`, `schema_version_mismatch`, `metadata_parse_failed` — all of which require either an identity-file restore or a backup restore before reopen succeeds). **Disabled transition cancels any in-flight writer transaction (iter-4 Z6 branch A):** the writer context is canceled the moment the disable fires, the tx rolls back, and the disabled-state JSON carries `tx_in_flight_rolled_back: true` for operator visibility. This prevents post-disable rows from being committed to a DB whose `integrity_check` (or other validity check) just failed. Pin with `TestIntegrityCheckFailedMidLife_RollsBackInFlightTx`. Every other folder and every other mesh component (SSH, proxy, clipsync, gateway) is untouched. |
+| R9 | Dirty-set overflow → disabled (new) | `folderState.dirtyPaths` cap | `redesign` → **new** | The per-path dirty-set (P2) grows on each scan whose commit fails. Sustained failure (disk full, read-only FS, schema corruption) would let it grow without bound. Cap at **10 000 entries**. **The cap is checked atomically inside the dirty-set's mutex on every `Set`** (iter-4 Z9): on overflow, the `Set` call returns a typed `errDirtySetOverflow`; callers (scan walker, download commit, rename, delete) propagate the error without opening `BEGIN IMMEDIATE`. The disabled transition fires from the caller's goroutine after the in-flight tx (if any) has rolled back; idempotent if multiple goroutines hit the cap simultaneously. Pin with `TestDirtySetCap_FiredFromDownloadGoroutine_NoLeak` and `TestDirtySetCap_FiredMidWalk_NoTxOpened`. 10 000 × ~200 B ≈ 2 MB — bounded, fast to surface. The cap is well below the 168k-file folder size so a single failed scan cycle never trips it; sustained failure is the trigger. Operator fixes the underlying issue and reopens via `/reopen` (or restarts the node). |
 
 ### 2.3 Concurrency and locking
 
@@ -99,6 +313,7 @@ Dispositions:
 | C3 | `indexDirty` / `peersDirty` flags skip persist when unchanged (P17a) | `folderState.indexDirty`, `.peersDirty` | `keep` | Skip the `BEGIN`/`COMMIT` round-trip when nothing changed. Cheap and useful even with SQLite. |
 | C4 | Reader queries (`/api/filesync/folders`, index exchange) take `indexMu.RLock` | `filesync.go` admin handlers, `protocol.go` index-exchange handler | `redesign` | Readers can go to SQLite directly via WAL snapshot isolation and stop taking `indexMu`. Simplifies lock hierarchy. Pin the boundary with a test that runs a slow scan transaction while a reader hits `/api/filesync/folders`. |
 | C5 | Scan and sync coexistence (ref `filesync.go` R2-cancelled invariant) | — | `keep` | Unchanged. |
+| C6 | Scan fast-path skips paths claimed by an in-flight download (new) | `claimPath`/`releasePath` extension; scan walker check | `redesign` → **new** | Today `claimPath` dedupes downloads against each other. The β model exposes a new race: between download step 2 (rename temp → original) and step 3 (commit SQLite), the on-disk path holds new content but SQLite still carries the old row. A scan that walks during that window would re-hash the new bytes and write a row with scan-derived VectorClock semantics (local-bumped) instead of the download's adopt-remote semantics. Extend the scan fast-path to consult the `inFlight` claim map and skip any claimed path; the next scan after `releasePath` picks it up and converges with the SQLite row that the commit wrote. Closes Gap 5'. |
 
 ### 2.4 Query shapes
 
@@ -118,6 +333,7 @@ Dispositions:
 | P3 | Scan allocates ~0 B via `cloneInto` recycling (P18c) | `FileIndex.cloneInto` | `keep` | Unchanged by the storage swap. Scan still mutates an in-memory `FileIndex`. Persistence is downstream. |
 | P4 | `buildIndexExchange` uses `seqIndex` for O(log N) delta-from-sequence | `filesync.go` index exchange | `redesign` | Replaced by Q1 / an indexed SQL query. |
 | P5 | P18b O(1) counters avoid scan on every API call | `cachedCount`/`cachedSize` | `keep` | Unchanged. |
+| P6 | Tombstone GC (`purgeTombstones`) | `runScan` tail | `redesign` | Today: per-scan in-memory pass that drops tombstones older than `tombstoneMaxAge` from `idx.Files`. SQLite world: `DELETE FROM files WHERE folder_id=? AND deleted=1 AND mtime_ns < ?` runs every **10th scan**, age-based. Mirrors today's semantics; keeps the hot table lean without paying the cost on every scan. Vacuuming is the existing backup pass. |
 
 #### Per-path dirty-set — the P2 redesign
 
@@ -167,6 +383,8 @@ should be materially faster because it touches three rows, not 168k.
 | I4 | G3 filesystem device id on `FileIndex.DeviceID` | `FileIndex.DeviceID` | `keep` | Stored as `folder_meta.fs_device_id`; already wired in step c. |
 | I5 | C6 per-file `VectorClock` | `FileEntry.Version`, `encodeVectorClock` | `keep` | Already round-trips through step c. |
 | I6 | C2 per-peer `BaseHashes` per-path map | `PeerState.BaseHashes` | `keep` | Already round-trips through peer-state helpers. |
+| I7 | Device-ID rotation guard (new) | `seedFolderMeta` open path | `redesign` → **fail loud** | At open, compare the node-level `~/.mesh/filesync/device-id` content against `folder_meta.device_id`. Mismatch → folder enters `FolderDisabled` with reason `device_id_mismatch`. The current "backfill only when stored value is empty" path silently accepts a rotated identity and corrupts every subsequent VectorClock bump (the local-bump uses a different device_id key from what the DB believes is "self"). **Recovery default (iter-4 O3): restore the original `~/.mesh/filesync/device-id` from a backup source (Time Machine, Syncthing copy, etc.) and restart.** This keeps VectorClock continuity, peer state, and avoids a conflict storm. Fallback only when the original is genuinely unrecoverable: wipe `~/.mesh/filesync/<folder-id>/` and accept full re-sync against every peer (which forces an epoch regeneration via L5). The action string for this enum names option 1 first; runbook §4.3 documents the decision tree explicitly. Closes Gap 6'. |
+| I8 | `prev_path` rename hint, transient single-use | `FileEntry.PrevPath`, scan rename pairing | `redesign` | Today the hint is cleared on the next rescan. SQLite world: same semantic — any UPSERT on the row clears `prev_path` unless a fresh hint is being recorded in this commit. The hint is *not* re-sent on subsequent delta exchanges. Pin with a regression test: two consecutive delta exchanges to the same peer; the second carries no `prev_path` for the renamed entry. Receiver idempotency (already shipped — applying a hint twice is a no-op) is also pinned by regression test, not new code. Closes Gap 7'. |
 
 ### 2.8 Architecture invariants (β)
 
@@ -185,26 +403,62 @@ never consulted by peer-facing code paths.
 - Dashboard active-count / active-size → folderState cached counters
   (INV-4), not a FileIndex field.
 
-**INV-2 — `FileIndex` is scan-local.** The in-memory `FileIndex`
-is constructed at scan start (`SELECT` the rows for the folder;
-~100 ms for 168k rows) and discarded after the scan's commit. Between
-scans there is no `FileIndex` — it does not exist, cannot be read,
-cannot drift. `setEntry` and `cloneInto` become internal to the
-scan path. Non-scan mutation paths (download, rename, delete)
-operate directly on SQLite via sync-persist.
+**INV-2 — `FileIndex` is scan-local (provisional pending bench).**
+The candidate model: at scan start the working copy is constructed
+via `SELECT` of the folder's rows and discarded after the scan's
+commit. Between scans there is no `FileIndex` — it does not exist,
+cannot be read, cannot drift. `setEntry` and `cloneInto` become
+internal to the scan path. Non-scan mutation paths (download,
+rename, delete) operate directly on SQLite via sync-persist.
 
-**INV-3 — Every write is sequence-conditioned.** Every `INSERT OR
-REPLACE` runs with `WHERE excluded.sequence > files.sequence` (or
-equivalent for other tables). A concurrent download with a newer
-sequence cannot be overwritten by a scan that cloned before the
-download committed. Closes Gap 1 (concurrent scan + download write
-race, data loss).
+The per-scan `SELECT` cost on `modernc.org/sqlite` (pure Go,
+typically 2–4× slower than CGo SQLite for row-decode-heavy queries
+on a 14-column row with two BLOBs) is not yet measured.
+**`BenchmarkLoadIndex_168kFiles` ships in commit 2 as the gate
+for INV-2:**
+
+- `< 80 ms` → INV-2 stands; commits 4–7 proceed as planned.
+- `≥ 80 ms` → pivot to **hybrid**: in-memory `FileIndex` is
+  retained between scans as a private scan-only working copy.
+  INV-1, INV-3, INV-4 are unchanged — SQLite remains the sole
+  peer-visible truth, sequences are still assigned in tx,
+  BaseHashes are still committed atomically. Only the "discard
+  after scan" rule is relaxed.
+
+The 80 ms gate is deliberately tight: today's `cloneInto`
+recycling baseline is 7 ms / 0 allocations on the target
+hardware, so any value above ~10× that floor regresses
+watch-triggered hot-path scans materially.
+
+**INV-3 — Every write is sequence-conditioned, sequences assigned
+inside the commit transaction.** Two parts:
+
+- *Assignment.* No mutation path increments `folder_meta.sequence`
+  outside a `BEGIN IMMEDIATE` ... `COMMIT` window. Inside the tx,
+  the writer reads the current sequence `S`, assigns `S+1..S+N` to
+  the rows it is about to write (deterministic order), updates
+  `folder_meta.sequence = S+N`, and commits. A scan or download
+  that runs concurrently waits for the writer lock — there is no
+  read-then-increment-then-write window during which two writers
+  can pick the same next sequence. During scan, paths in the
+  in-memory working copy carry a "pending" marker rather than a
+  pre-assigned sequence; the sequence is stamped on each row only
+  at commit time.
+
+- *Conditional UPSERT.* Every `INSERT OR REPLACE` runs with
+  `WHERE excluded.sequence > files.sequence` (or equivalent for
+  other tables). A concurrent download with a newer sequence
+  cannot be overwritten by a stale-sequence write that lost the
+  ordering race; the conditional UPSERT skips it.
+
+Closes Gap 1 (concurrent scan + download write race) and
+Gap 1' (sequence collision across concurrent writers).
 
 **INV-4 — Commit precedes observability, always.**
 
 - *Downloads*: three-step atomic pattern. `rename original → .bak` → `rename temp → original` → commit SQLite row → on success `unlink .bak`; on commit failure `rename .bak → original`, `unlink temp`, surface via metric. Closes Gap 3.
 - *Scan*: build pending in memory → `BEGIN IMMEDIATE` → sequence-conditioned UPSERT of dirty rows → `COMMIT` → on success swap pending to live for the remainder of the current call (which is all that uses it — discarded next). Commit failure discards pending; live (which doesn't exist between scans per INV-2 anyway) is untouched; next scan re-detects.
-- *Peer sync updates (BaseHashes, LastSentSequence, LastSeenSequence)*: part of the sync-outcome transaction. No BaseHash is trusted by a subsequent `diff()` unless its write was durable. Closes Gap 2.
+- *Peer sync updates (BaseHashes, LastSentSequence, LastSeenSequence, `last_sync_ns`)*: every per-peer field touched by a sync outcome is written inside **one** `BEGIN IMMEDIATE` ... `COMMIT`. The `peer_state` row update and the matching `peer_base_hashes` rows ride the same tx. A crash between them cannot leave `last_sync_ns > 0` while BaseHashes is empty (which would otherwise strand the next `diff()` between "first-sync, fall back to C1" and "prior sync but unknown ancestor → conflict" with the wrong choice). Closes Gap 2 and Gap 2' (split BaseHash / `last_sync_ns` crash window).
 - *Classifier semantics*: absence of a BaseHash entry for a (peer, path) pair means "unknown ancestor → conflict path," never "fall back to C1 mtime comparison." The C1 heuristic is only used when we have positive knowledge of no prior sync with this peer (first-sync case).
 
 ### 2.7 Lifecycle hooks
@@ -215,6 +469,7 @@ race, data loss).
 | L2 | `fs.root.Close()` on shutdown | `Run` shutdown tail | `keep` | Add `fs.db.Close()` beside it, after `wg.Wait` so no goroutine holds rows. |
 | L3 | `persistFolder(force=true)` after scan | `runScan` tail | `redesign` | Scan path owns its own commit (see §2.8 invariants). This hook reduces to "flush any pending dirty-set that hasn't committed for non-scan reasons." |
 | L4 | Admin backup currently copies gob bytes | n/a (planned) | `redesign` → `VACUUM INTO`, commit-count schedule | Triggered on every Nth successful commit (default N=100) with a max-age safety net (≥ 1 backup per 24 h). Retain 24 backups. Quiet folders produce few backups; busy folders produce many. Each `VACUUM INTO` runs on a dedicated goroutine so it never blocks the writer. |
+| L5 | Restore-from-backup as a first-class lifecycle (new — iter-4 O10) | new admin endpoint + ops procedure | `redesign` → **new** | Without an explicit restore lifecycle, an operator who swaps the SQLite file from a backup leaves peer state silently desynchronized: peers' `LastSentSequence` already exceeds the rewound `folder_meta.sequence`, so peer delta queries (`WHERE sequence > LastSeenSequence`) skip exactly the rows the restore brought back. C2 classification then fans out `.sync-conflict-*` siblings on every path whose hash diverges from the restored DB. **Defined sequence:** (1) stop the folder via the per-folder reload endpoint; (2) swap `index.sqlite` (and its `-wal` / `-shm` sidecars) with the chosen backup file; (3) **bump `folder_meta.epoch` to a new value** so peers treat us as a re-baselined source on next exchange and trigger a full re-sync rather than a delta; (4) restart the folder. The epoch bump is the load-bearing step — without it, peers see the same epoch and treat the rewind as silent data loss on our side. Admin endpoint `POST /api/filesync/folders/<id>/restore` accepts `{backup_path: ...}` and runs the four-step procedure atomically; runbook §5 documents the manual equivalent. Closes iter-4 O10. |
 
 ---
 
@@ -406,6 +661,24 @@ exemplar.
 - `TestFilesyncMeshC6` (just added) needs no changes; it already
   exercises the full persistence path via process restart.
 
+### 4.6 Applied during implementation (no design needed)
+
+The iteration-3 review (`PERSISTENCE-AUDIT-REVIEW.md` §D) named
+small obvious fixes that need no design but must not be lost on
+the floor. Each is folded into the commit that touches the
+relevant code; this checklist is the audit trail.
+
+| # | Fix | Lands in commit |
+|---|-----|-----------------|
+| D1 | `parseInt64` / `parseUint64` use `strconv.ParseInt`, propagate errors. Garbage in `folder_meta.sequence` transitions the folder to `FolderDisabled` with reason `schema_version_mismatch` rather than silently restarting from sequence `0`. (Pending stub at commit 2 because `FolderDisabled` is not yet wired; promotes to actual disabled-state transition at commit 3.) | 2 (stub) → 3 (wire) |
+| D2 | Rename the `saveIndex` local in `persistFolder` (e.g. `shouldSaveIndex`) to remove the shadowing of the package-level SQLite writer. | 2 |
+| D3 | Drop the dead `tx.Exec("BEGIN IMMEDIATE")` after `db.Begin()`; switch to the modernc DSN flag `?_txlock=immediate` (or `db.Conn(ctx)` + explicit `BEGIN IMMEDIATE`) so writer txs are immediate by construction. | 2 |
+| D4 | Closed-enum reason on `mesh_filesync_folder_disabled{reason=...}`. Already in §2.2 R8. | 3 |
+| D5 | `TestOpen_SynchronousIsFULL` also asserts `journal_mode=wal` so a future refactor cannot regress one without the other. | 2 |
+| D6 | `SetConnMaxLifetime` capped at 24 h instead of `0`. Connection rotation is cheap; leak containment is free on a weeks-long daemon. | 2 |
+| D7 | CRC32 trailer on the VectorClock blob — moved up so blobs are never written without it. | 6 |
+| D8 | `SIGKILL` mid-scan recovery e2e test. | 10 |
+
 ---
 
 ## 5. Resolved design calls
@@ -444,6 +717,201 @@ commits can cite them without re-arguing the case.
    future tests a hook for any new crash-resilience case. The
    one-time cost is worth the coverage floor it establishes.
 
+Iteration-3 calls (settled 2026-04-25):
+
+7. **`blocks` table.** **Drop for v1.** The current schema
+   declares it; no production code reads or writes it. Populating
+   would add per-block-row writes scaling with file size — a 10 GB
+   media file at 128 KB avg = ~80k rows, unbounded for the
+   workloads (drone footage, recordings) that pressure storage
+   most. Block sigs compute on demand from the open file, bounded
+   by file read speed and usually hitting the page cache. Reopen
+   criterion: measured cold-cache `/blocksigs` latency, not
+   speculation.
+8. **`prev_path` consumption.** **Clear on next row update
+   (option c).** Mirrors today's transient-hint semantic. SQLite
+   world: any UPSERT on the (folder_id, path) row sets
+   `prev_path = NULL` unless a fresh hint is being recorded.
+   Receiver idempotency (already shipped — applying a hint twice
+   is a no-op) is pinned by regression test, not new code.
+   See §2.6 I8.
+9. **β architecture finality.** **Provisional pending bench.**
+   `BenchmarkLoadIndex_168kFiles` runs in commit 2.
+   `< 80 ms` → β proceeds. `≥ 80 ms` → pivot to hybrid (in-memory
+   `FileIndex` retained between scans as scan-private working
+   copy; SQLite remains the sole peer-visible truth). The 80 ms
+   gate is deliberately tight: `cloneInto` is 7 ms today, and a
+   ≥ 10× regression on watch-triggered scans is not acceptable.
+   See §2.8 INV-2.
+10. **Reader handle.** **Two `*sql.DB` per folder, ship at
+    commit 4.** Replaces the iter-2 "defer until measured
+    regression" position. Writer handle stays at
+    `MaxOpenConns=1`; reader handle opens with
+    `?_pragma=query_only(true)&mode=ro` and
+    `MaxOpenConns=n_peers+3`. Eliminates the cutover-day risk of
+    every peer exchange and admin read serializing behind a
+    single writer connection.
+11. **Backup retention.** **Plain GFS — 5 daily + 4 weekly +
+    1 monthly.** No `max_backup_bytes` knob. Replaces the iter-2
+    "retain 24" rule. GFS bounds total at ~10× DB size by
+    construction (~30 GB across 15 folders worst case). A size
+    cap is operator config surface for a problem GFS already
+    solves; strip.
+12. **`PRAGMA mmap_size = 64 MiB`.** Apple Silicon and Linux
+    desktops have ample VA; 64-bit Windows is fine. 15 folders ×
+    64 MiB = 960 MiB virtual reservation, resident bounded by
+    actual page touches.
+13. **Fault-injection driver wiring.** **Plumb `driverName`
+    through `openFolderDB`.** Production default `"sqlite"`;
+    tests register `"sqlite_faulty"` in `_test.go` and pass that
+    name in. No global mutable hooks.
+14. **Dirty-set overflow cap.** **10 000 entries → folder enters
+    `FolderDisabled` with reason `dirty_set_overflow`.** See
+    §2.2 R9.
+15. **Tombstone GC cadence.** **Every 10th scan, age-based
+    DELETE.** Mirrors today's `purgeTombstones`. See §2.5 P6.
+
+Iteration-4 ops-lens calls (settled 2026-04-25):
+
+16. **β-vs-hybrid is a build-time protocol invariant
+    (iter-4 O15).** The selection between β (FileIndex
+    discarded between scans) and hybrid (FileIndex retained)
+    is baked into the binary at build time as a const
+    `FILESYNC_INDEX_MODEL` (values: `"beta"` or `"hybrid"`).
+    Same shape as `protocol_version`: stamped on every
+    `IndexExchange`, asserted at handshake, mismatched peers
+    rejected with `last_error="filesync_index_model_mismatch"`.
+    DESIGN-v1 §0 carries the field alongside `protocol_version`
+    and `device_id`. Per-peer runtime divergence is rejected,
+    not tolerated — three peers built with two different model
+    selections is a configuration bug, not a feature. The
+    decision is recorded in DESIGN-v1 §0 (durable home, not
+    just a commit message).
+17. **Restore-from-backup epoch bump (iter-4 O10).** Every
+    backup restore bumps `folder_meta.epoch`. Without the
+    bump, peers' `LastSeenSequence` already past the rewind
+    point silently skips the restored rows. See §2.7 L5.
+18. **Per-enum action strings (iter-4 O11).** Every disabled
+    reason has a paired one-line `action` string. Implemented
+    as a package-level `disabledReasonActions map[reason]string`
+    consumed by the dashboard renderer, the API response, and
+    the operator runbook. The action string is the
+    single-source-of-truth for "what to do next"; the runbook
+    §4 sections cite the same string verbatim so the dashboard
+    and the runbook can never drift. See §2.2 R8.
+19. **`unknown` reason carries diagnostic load (iter-4 O8).**
+    For `reason=unknown`, the API response carries
+    `error_text`, `stack_trace`, and `recent_log` (last 50
+    lines for that folder) inline. The operator does not need
+    a separate log query to triage the catch-all enum. See
+    §2.2 R8.
+20. **Device-id mismatch default branch (iter-4 O3).**
+    Recovery default is restore-from-backup of
+    `~/.mesh/filesync/device-id`; wipe-folder-and-resync is
+    the fallback only when the original is unrecoverable. See
+    §2.6 I7.
+21. **Operator runbook is a v1-ship blocker (iter-4 O13 +
+    O16).** `OPERATOR-RUNBOOK.md` ships with §1–§7 complete
+    before v1 flips from dry-run to real on any peer. §1
+    (before-first-run), §2 (dry-run-to-real flip), §3
+    (dashboard triage), §4 (recovery by enum), §5 (backup
+    restore), §6 (peer-state reconciliation), **§7
+    (per-folder reload endpoint)** are blocking. §7's
+    promotion is a runbook-internal contradiction fix:
+    runbook §5.3 (backup restore) cites the `/reopen`
+    endpoint, so the endpoint must ship in v1 and the
+    section documenting it must ship alongside. The
+    alternative — rewriting §5.3 as a manual `sqlite3` CLI
+    procedure — is the wrong UX for the ship-perfect bar
+    (manual SQL editing during recovery is exactly when the
+    operator is most likely to make a mistake). §8
+    (build-time decisions for operators), §9 (known limits),
+    §10 (escalation) stay follow-ups, not blockers. See §6
+    commit 13.
+22. **Enum split — `metadata_parse_failed` (iter-4 O4).**
+    D1's `parseInt64` failure on `folder_meta.sequence`
+    routes to a new enum value `metadata_parse_failed`, not
+    to `schema_version_mismatch`. The latter stays for actual
+    schema-version drift. See §2.2 R8.
+23. **Backup file naming + listing endpoint (iter-4 O9, O18).**
+    Backup files land at
+    `~/.mesh/filesync/<folder-id>/backups/index-<seq>-<unixns>.sqlite`,
+    mode `0600`, where `<seq>` is the highest sequence
+    committed at backup time and `<unixns>` is the wall clock
+    at backup. Admin endpoint
+    `GET /api/filesync/folders/<id>/backups` lists them with
+    metadata: `{path, sequence, created_at, quick_check_ok}`.
+    Operator picks by sequence + `quick_check_ok`, not "newest
+    file in the directory."
+
+Iteration-4 composition-lens calls (settled 2026-04-25):
+
+24. **Epoch-mismatch is a DESIGN-v1 §0 protocol invariant
+    (iter-4 Z2).** Same shape as `protocol_version` and
+    `FILESYNC_INDEX_MODEL`: receiver compares incoming `Epoch`
+    against cached `PeerState.LastEpoch`; on mismatch (or on
+    sequence drop, the existing trigger), drops `BaseHashes`
+    and `LastSeenSequence` for that (folder, peer) pair,
+    forces a full re-sync next cycle, and records
+    `last_error="epoch_mismatch"`. **Implementation note:**
+    code verification (filesync.go ~L1635-1662) shows the
+    existing reset path is branch A (drops BaseHashes, resets
+    LastSeenSeq) but is triggered only by sequence drop. The
+    promotion adds `|| (remote.Epoch != "" && remote.Epoch !=
+    peer.LastEpoch)` to the trigger condition (~5 LOC). Pin
+    with `TestPeer_OfflineDuringRestore_ResetsOnEpochAlone`.
+    Lands in commit 7. DESIGN-v1 §0 names the invariant.
+25. **Disabled-transition cancels in-flight writer tx
+    (iter-4 Z6 branch A).** When a folder transitions to
+    `FolderDisabled` mid-life, the writer context is
+    canceled; the in-flight tx rolls back; the disabled-state
+    JSON carries `tx_in_flight_rolled_back: true`. Pin with
+    `TestIntegrityCheckFailedMidLife_RollsBackInFlightTx`.
+    Lands in commit 3. R8 cites the contract.
+26. **Synchronous `integrity_check` after detected SIGKILL
+    recovery (iter-4 Z8).** When the WAL contains
+    un-checkpointed frames at folder open (the SIGKILL
+    signal), `integrity_check` runs **synchronously** before
+    the folder goes live. Adds ~20 s on a 200 MB DB —
+    acceptable on the recovery path; the silent
+    live-but-corrupt window is not. Dashboard renders a new
+    transient state `recovering` during the sync check. Pin
+    with `TestSIGKILLRecovery_RunsIntegrityCheckSync`. Lands
+    in commit 11.
+27. **Process-level `index_model_mismatch` metric +
+    handshake rejection (iter-4 Z10).**
+    `mesh_filesync_peer_session_dropped{reason="filesync_index_model_mismatch"}`
+    counter increments on every dropped session. Runbook §3
+    surfaces the metric with a warning row when > 0. **§8
+    (build-time decisions documentation) stays in the first
+    follow-up commit, not v1** — the metric and the handshake
+    rejection are the load-bearing parts; doc can follow once
+    operators have something concrete to read about. Lands in
+    commit 7.
+28. **Action-string drift enforcement: doc-test (iter-4
+    Z15).** `TestRunbookActionStringsMatchMap` parses
+    `OPERATOR-RUNBOOK.md` §4 and asserts every
+    `disabledReasonActions` map value appears verbatim in the
+    runbook prose. ~50 LOC. Lighter than codegen, catches
+    drift on the test run. Lands in commit 3 alongside the
+    map.
+29. **Backup write-temp-then-rename (iter-4 Z5).** `VACUUM
+    INTO` writes to `index-<seq>-<unixns>.sqlite.tmp`. On
+    `VACUUM` success and post-VACUUM `quick_check` pass,
+    atomically `rename` to the final name. On failure or
+    crash, `unlink` (the startup sweep extends to clean any
+    `*.sqlite.tmp` under `<folder>/backups/`). Retention
+    prune treats `.tmp` files as invisible. Pin with
+    `TestBackup_SIGKILLLeavesNoFinalFile` and
+    `TestBackup_StartupSweepCleansTmp`. Lands in commit 9.
+30. **Restore re-runs `quick_check` before swap (iter-4
+    Z11).** `POST /api/filesync/folders/<id>/restore` runs
+    `quick_check` on the chosen backup file as step 0 of
+    the four-step procedure. On failure, abort with a typed
+    error; folder remains in current state. Pin with
+    `TestRestore_RechecksBackupBeforeSwap`. Lands in
+    commit 9.
+
 ---
 
 ## 6. Commit sequence derived from the audit
@@ -454,93 +922,483 @@ ordered so each one leaves the tree green and the architecture
 consistent — never a "land now, fix later" intermediate state.
 
 1. **This doc.** (No code.)
-2. **FileIndex encapsulation + dirty-set.** `Files` map goes
-   private. `Set`, `Get`, `Range`, `Delete`, `DirtyPaths`,
+2. **FileIndex encapsulation + dirty-set + storage swap (gob
+   deleted) + INV-2 bench gate.** Heavy-lift commit. `Files` map
+   goes private. `Set`, `Get`, `Range`, `Delete`, `DirtyPaths`,
    `ClearDirty` become the only API. Dirty-set populated by
    `Set` / `Delete` as a side effect, not via diff. Legacy
-   `setEntry` call sites migrate via `gopls rename`. H1 invariant
-   re-compute and H2 property test land here.
-   Closes: P2 design prerequisite for the SQLite writer.
-3. **Two-phase integrity check + FolderDisabled scaffold.**
-   `PRAGMA quick_check` runs synchronously at folder open;
-   `PRAGMA integrity_check` runs on a goroutine afterward. A new
-   folder status field + `/api/filesync/folders` exposure + metric.
-   No caller yet uses this path, but the mechanism is in place for
-   commits 4+ to transition a folder into it on any persistence
-   failure class. H15 lands here.
-   Closes: R2 (quick_check path), R3, F3, F5 wiring target.
-4. **Peer-facing reads go to SQLite (INV-1).** `buildIndexExchange`,
-   delta / bundle / blocksigs handlers, `/api/filesync/folders`,
-   `/api/filesync/conflicts` all query SQLite. Dashboard gains
-   `folderState.summary` cache (INV-4). In-memory `FileIndex`
-   stops being peer-visible. `seqIndex` retired; `files_by_seq`
-   and `files_by_inode` indexes serve the range / inode queries.
-   `EXPLAIN QUERY PLAN` tests pin every hot query.
-   Closes: Q1, Q2, Q4, C4, N4, INV-1.
-5. **Sync-persist on download / rename / delete paths (INV-4).**
-   Three-step atomic pattern with `.bak` intermediate for
-   downloads; rename / delete mirror the shape. 100 ms batch
-   window coalesces concurrent downloads into a single commit.
-   BaseHashes and LastSentSequence / LastSeenSequence fold into
-   the same tx. Classifier tightens: absent BaseHash means
-   "conflict," never "C1 fallback." H6, H12, H13 land here.
-   Closes: INV-4 for non-scan paths, Gap 2, Gap 3.
-6. **β — FileIndex is scan-local; sequence-guarded writes
-   (INV-2, INV-3).** Scan loads its working copy at start via
-   `SELECT`; between scans, nothing is in memory. Scan commits
-   before swap; swap is a no-op beyond test observability
-   because nothing lives between scans. Every UPSERT carries
-   `WHERE excluded.sequence > files.sequence`. `activeCountAndSize`
-   moves to `folderState` and is maintained on every commit,
-   not on FileIndex. H7, H11, H14 land here.
-   Closes: INV-2, INV-3, P2 (per-path cost target), Gap 1, Gap 4.
-7. **Retire gob/YAML + legacy refusal.** Delete `loadIndex`,
+   `setEntry` call sites migrate via `gopls rename`.
+   `persistFolder` writes through `saveIndex` /
+   `savePeerStatesDB`; `runScan` loads from `loadIndexDB` /
+   `loadPeerStatesDB` at scan start; gob path deleted (`loadIndex`,
    `save`, `loadPeerStates`, `savePeerStates`, `tryLoad*`,
    `gobMarshalIndex`, `yamlToGobPath`, `prevPath`, `writeFileSync`,
-   all test helpers that exercised those paths. Add the typed
+   all test helpers that exercised those paths). Typed
    `filesync_legacy_index_refused` error on open when any legacy
-   sidecar file is present.
-   Closes: F3, F4, F5 (gob path), R1, R4, R5, R6, C1 (`persistMu`).
+   sidecar file is present (footgun guard against stale dev
+   directories — there is no production state to migrate, only
+   to refuse). Peer / admin code still reads in-memory `fs.index`
+   populated from SQLite at scan start; the peer-read swap to
+   SQLite arrives in commit 4. SQLite is the only on-disk store
+   after this commit.
+
+   **Internal ordering inside commit 2 (strict).** The bench is
+   a *gate*, not a deliverable, and must inform the choice
+   between β and hybrid before the gob path is gone:
+
+   1. Land `BenchmarkLoadIndex_168kFiles` against
+      `modernc.org/sqlite` first. The bench operates on a
+      synthetic 168k-row folder DB and does not depend on
+      production code being swapped — it can run while gob is
+      still authoritative.
+   2. Run the bench on the target hardware **with `-count=10`
+      (or higher); record the median, the standard deviation,
+      and the per-run numbers** in the commit message and in
+      `RESEARCH.md`. A single-run number is a coin flip, not a
+      decision artifact. Decision-grade form: "82 ms median,
+      ±3 ms std-dev across 10 runs"; reject "82 ms from one
+      run." If std-dev exceeds 10 ms, raise the run count or
+      stabilize the host (background load, CPU governor) before
+      recording — the 75–85 ms borderline band in commit 7 is
+      meaningful only when the variance is bounded.
+   3. **Decision recorded here, executed in commit 7:**
+      `< 80 ms` → β proceeds at commit 7 (FileIndex discarded
+      between scans). `≥ 80 ms` → hybrid pivot (in-memory
+      FileIndex retained between scans as scan-private). Commit
+      7's prose is the explicit decision tree.
+   4. Storage swap (gob deletion + SQLite wiring) lands after
+      the decision is recorded. The decision is durable in the
+      commit message even though the gob path is gone — a
+      hybrid is always reachable from where commit 2 lands
+      because the in-memory `fs.index` lives until commit 7
+      explicitly discards it (β path) or keeps it (hybrid path).
+
+   Open-path failures temporarily log and skip the folder here
+   — the `FolderDisabled` transition arrives in commit 3.
+   D1 (parse-error → `FolderDisabled`-pending stub),
+   D2 (rename `saveIndex` shadow), D3 (drop dead `BEGIN
+   IMMEDIATE`, use `?_txlock=immediate`), D5
+   (`TestOpen_SynchronousIsFULL` also asserts `journal_mode=wal`),
+   D6 (`SetConnMaxLifetime` cap at 24 h) all fold here. The
+   invariant-recompute test and the round-trip property tests
+   (§4.3 `TestFileIndex_RoundTripProperty`,
+   `TestPeerStates_RoundTripProperty`) land here. The
+   `mmap_size = 64 MiB` pragma is added to
+   `applyFolderDBPragmas` as part of the swap. The
+   `prev_path` clear-on-rescan semantic (I8) lands with
+   saveIndex: every UPSERT of a row clears `prev_path` unless
+   a fresh hint is being recorded in this commit; pin with the
+   regression test from §2.6 I8.
+   Closes: F1, F2, F3, F4, F5, F6 (atomicity, gob path),
+   R1, R4, R5, R6, C1 (`persistMu`), C3, I8, P1, P2 (per-path
+   cost target), L3, P17b, Gap 7' (`prev_path` clear-on-rescan),
+   Gap 8' (β cost bench, decision §5 #9), decision §5 #12
+   (`mmap_size = 64 MiB`).
+3. **FolderDisabled scaffold + two-phase integrity check + reason
+   enum + per-enum action strings + `unknown` diagnostic load +
+   `device_id` rotation guard + drop `blocks` table.**
+   `PRAGMA quick_check` runs synchronously at folder open;
+   `PRAGMA integrity_check` runs on a goroutine afterward. New
+   folder status field + `/api/filesync/folders` exposure +
+   `mesh_filesync_folder_disabled{reason=<enum>}` metric. Reason
+   is the closed enum from §2.2 R8 (now including
+   `metadata_parse_failed` for D1's parse error — iter-4 O4 split
+   it out from `schema_version_mismatch`). **Per-enum `action`
+   string** (iter-4 O11) ships in this commit as a package-level
+   `disabledReasonActions map[reason]string`; the dashboard
+   renderer and the API response both consume it; the runbook §4
+   cites the same strings verbatim. **Diagnostic load on
+   `unknown`** (iter-4 O8): when `reason=unknown`, the API
+   response carries `error_text`, `stack_trace`, and `recent_log`
+   inline so the operator can triage without a separate log
+   query. The "log and skip" stub from commit 2 promotes to a
+   disabled-state transition; commit 4 onward inherit the wired
+   machinery. Device-ID mismatch check at open
+   (`folder_meta.device_id` vs the node-level identity file)
+   → `FolderDisabled` reason `device_id_mismatch` (I7).
+   `applyFolderDBSchema` removes `CREATE TABLE blocks`; existing
+   DBs from dev builds are wiped per the v1 cold-start posture.
+   H15 lands here.
+   **Iter-4 composition folds:** the disabled-transition
+   handler cancels the in-flight writer tx (decision §5 #25 /
+   iter-4 Z6 branch A); disabled-state JSON carries
+   `tx_in_flight_rolled_back: true`. The
+   `disabledReasonActions` map ships with a coverage test
+   (`TestDisabledReasonActions_AllEnumsHaveAction`, iter-4
+   Z12) and a runbook drift doc-test
+   (`TestRunbookActionStringsMatchMap`, decision §5 #28 /
+   iter-4 Z15) that parses `OPERATOR-RUNBOOK.md` §4 against
+   the map.
+
+   Closes: R2, R3, R8, R9, F3 wiring, F5 wiring, I7,
+   metric cardinality (D4), Gap 5 (integrity_check sync /
+   async split), Gap 6' (`device_id`),
+   Gap 9' (drop `blocks`, decision §5 #7),
+   decisions §5 #18 (action strings), §5 #19 (diagnostic load),
+   §5 #20 (device_id default branch), §5 #22 (enum split),
+   §5 #25 (in-flight tx cancel), §5 #28 (runbook doc-test).
+4. **Peer-facing reads go to SQLite (INV-1) + reader handle.**
+   `buildIndexExchange`, delta / bundle / blocksigs handlers,
+   `/api/filesync/folders`, `/api/filesync/conflicts` all query
+   SQLite via a dedicated read-only `*sql.DB` handle
+   (`?_pragma=query_only(true)&mode=ro`,
+   `MaxOpenConns = n_peers + 3`). Writer handle stays at
+   `MaxOpenConns = 1`. Dashboard gains `folderState.summary`
+   cache (INV-4). In-memory `FileIndex` stops being peer-visible.
+   `seqIndex` retired; `files_by_seq` and `files_by_inode` serve
+   the range / inode queries. `EXPLAIN QUERY PLAN` tests pin
+   every hot query. `BenchmarkConcurrentReaderDuringScan` lands
+   alongside.
+   Closes: Q1, Q2, Q4, C4, N4, INV-1, decision §5 #10.
+5. **Scan fast-path skips paths claimed by in-flight downloads
+   (Gap 5').** Pure coordination change. Scan walker consults the
+   `inFlight` claim map (existing field, owned by
+   `claimPath`/`releasePath`); any claimed path is skipped for
+   the current cycle and reconsidered after `releasePath` clears
+   it. Lands first because it is the seam — independent of any
+   write-path code, harmless before commit 6 lights up the
+   extended claim window, and the safe ordering target for the
+   revert blast radius. Test: `TestScan_SkipsClaimedPaths`.
+   Closes: C6 (§2.3), Gap 5'.
+6. **Sync-persist on download / rename / delete paths (INV-4) +
+   VectorClock CRC + `.bak` lifecycle.** Three-step atomic
+   pattern using `.mesh-bak-<hash>` intermediate for downloads
+   (named under the existing temp-sweep prefix so leftover
+   `.bak` files cannot accumulate); rename / delete mirror the
+   shape. 100 ms batch window coalesces concurrent downloads into
+   a single commit. **BaseHashes, LastSentSequence /
+   LastSeenSequence, and `last_sync_ns` ride one tx** (INV-4
+   peer-update bullet). Classifier tightens: absent BaseHash
+   means "conflict," never "C1 fallback" — except first-sync,
+   gated on `last_sync_ns == 0` and resolved in the same tx.
+   CRC32 trailer on the VectorClock blob lands **here**, before
+   any production write path emits the packed form (D7). Startup
+   sweep reconciles `.mesh-bak-<hash>` against the SQLite row for
+   the underlying path. Download path extends the `claimPath`
+   window to span SQLite commit so commit 5's scan skip covers
+   the new race. **Structural ordering check.** Concrete
+   mechanism: commit 5 sets a package-level
+   `var scanClaimSkipWired = true` at the same site where the
+   walker check is installed. Commit 6's `Run` startup reads
+   this boolean and, if false, aborts folder open with a typed
+   error naming the missing commit (the typed error references
+   the commit by content, not by sequence number, so it stays
+   readable after future renumbering). Why the boolean and not
+   a hook function: a missing hook fails at runtime on first
+   scan with a nil-pointer dereference; the boolean fails at
+   startup with a clear error. The coupling between commit 5
+   and commit 6 is intentional — surviving refactors is
+   anti-feature here. A future revert of commit 5 alone now
+   fails loud at start instead of silently re-opening Gap 5'.
+   Pin with `TestStartup_RefusesWithoutClaimSkip`. H12, H13
+   land here.
+   **Iter-4 composition folds (F7 sweep robustness):** the
+   sweep gains two new branches (iter-4 Z1, Z13) — "DB
+   unreadable for this folder → leave `.bak` intact, defer to
+   restore-from-backup procedure"; "neither file matches
+   SQLite hash → `FolderDisabled(unknown)` with diagnostic
+   load." Pin with `TestSweep_DBUnreadable_PreservesBak` and
+   `TestSweep_NeitherMatches_DisablesWithUnknown`. The
+   restore endpoint (commit 9) re-runs the sweep against the
+   restored DB after reopen.
+
+   Closes: F7 (§2.1), INV-4 for non-scan paths, Gap 2, Gap 2',
+   Gap 3 (write ordering), Gap 4' (`.bak` lifecycle), iter-4
+   Z1 (DB-unreadable sweep branch), Z13 (neither-matches
+   sweep branch).
+7. **β finish — sequence-in-tx + FileIndex disposition (INV-2,
+   INV-3) + build-time protocol selection (iter-4 O15) +
+   epoch-mismatch handshake invariant (iter-4 Z2) +
+   index-model-mismatch metric (iter-4 Z10).** Decision tree,
+   executed against the bench number recorded in commit 2.
+   The choice between β and hybrid is **a build-time
+   constant** (`FILESYNC_INDEX_MODEL = "beta"` or `"hybrid"`)
+   stamped on every `IndexExchange` like `protocol_version`;
+   the index-exchange handshake rejects any peer with a
+   different value and records
+   `last_error="filesync_index_model_mismatch"` AND
+   increments
+   `mesh_filesync_peer_session_dropped{reason="filesync_index_model_mismatch"}`
+   (iter-4 Z10) so the dashboard surfaces a warning row when
+   a rolling deploy lands a drifted const. Three peers built
+   from the same source must produce the same selection — the
+   bench runs at build time on the build host, not at runtime
+   per peer. DESIGN-v1 §0 carries the field as a
+   protocol-level invariant; commit 7 wires the assertion
+   into `handleIndex`. The decision number is recorded in
+   DESIGN-v1 §0 (durable home), not just the commit message.
+
+   **Epoch-mismatch trigger (iter-4 Z2).** The existing
+   sequence-drop trigger in `filesync.go` is extended:
+   `if remoteIdx.GetSequence() < peerLastSeq ||
+   (remote.Epoch != "" && remote.Epoch != peer.LastEpoch)`.
+   The reset path that drops `BaseHashes` and resets
+   `LastSeenSequence` now fires on either condition, closing
+   the offline-peer-during-restore gap. Pin with
+   `TestPeer_OfflineDuringRestore_ResetsOnEpochAlone`.
+   DESIGN-v1 §0 names the epoch as a protocol invariant
+   alongside `protocol_version`, `device_id`, and
+   `FILESYNC_INDEX_MODEL`.
+
+   **Branch A — β path (`BenchmarkLoadIndex_168kFiles < 80 ms`).**
+   - Scan loads its working copy at start via `SELECT`; between
+     scans, nothing is in memory.
+   - `fs.index` field is removed; helpers that read it migrate
+     to SQLite-backed accessors or to scan-local arguments.
+   - `cloneInto` and `reusableFiles` (P18c recycling) are
+     deleted — there is no surviving in-memory map to recycle.
+   - Tests: `TestBetweenScans_NoInMemoryIndex` asserts that
+     after `runScan` returns, `fs.index` is nil and any peer
+     read goes through SQLite.
+
+   **Branch B — hybrid path (`BenchmarkLoadIndex_168kFiles ≥ 80 ms`).**
+   - In-memory `FileIndex` is retained between scans as a
+     scan-private working copy populated from SQLite at folder
+     open. SQLite remains the sole peer-visible truth; INV-1,
+     INV-3, INV-4 are unchanged.
+   - `cloneInto` recycling stays — it is the perf floor that
+     made the hybrid the right call.
+   - The 168k-file `SELECT` runs once per folder open, not once
+     per scan; subsequent scans diff against the in-memory copy
+     and persist deltas.
+   - Tests: `TestHybrid_InMemoryRetainedBetweenScans` plus a
+     bench that asserts the per-scan cost stays at the
+     `cloneInto` floor.
+
+   **Common to both branches:**
+   - Every UPSERT carries
+     `WHERE excluded.sequence > files.sequence`.
+   - Sequence assignment moves *inside* `BEGIN IMMEDIATE` (no
+     `folder_meta.sequence` increment outside a tx); paths in
+     the working copy carry a "pending" marker rather than a
+     pre-assigned sequence, stamped at commit time.
+   - `activeCountAndSize` moves to `folderState`, maintained on
+     every commit.
+   - INV-4 scan-path bullet ("Scan: build pending in memory →
+     `BEGIN IMMEDIATE` → sequence-conditioned UPSERT → COMMIT")
+     finalizes here — INV-4 closes in full across commits 6
+     (non-scan paths) and 7 (scan path).
+   - **Tombstone GC** runs every 10th scan as part of the
+     scan-tail logic: `DELETE FROM files WHERE folder_id=?
+     AND deleted=1 AND mtime_ns < ?` (age threshold mirrors
+     today's `tombstoneMaxAge`). Lands here, not commit 2,
+     because tombstone GC is a scan-discipline concern and
+     commit 7 is where scan discipline finalizes.
+   - H11, H14 land here.
+
+   **If the bench result is borderline (75–85 ms),** default to
+   the hybrid. The β path's only benefit is one in-memory map
+   eliminated; the cost of being wrong (chronic per-scan
+   regression on the 168k-file production folder) outweighs
+   the structural elegance.
+
+   Closes: INV-2 (final), INV-3, INV-4 (scan path), P2 (per-path
+   cost target), P6 (tombstone GC), R9 (atomic cap on `Set`,
+   iter-4 Z9), Gap 1, Gap 1' (sequence collision), Gap 4,
+   decision §5 #14 (dirty-set cap atomic on `Set`), §5 #15
+   (tombstone GC cadence), §5 #16 (β/hybrid build-time
+   protocol invariant), §5 #24 (epoch-mismatch protocol
+   invariant), §5 #27 (index-model-mismatch metric).
 8. **Shutdown deadline propagates into transactions.** New
    `shutdownCtx` with a bounded deadline; `db.BeginTx(ctx, ...)`
    picks it up; over-long transactions roll back and defer.
+   `PRAGMA optimize` runs on close. Verify modernc `ctx`
+   propagation against the pinned driver version.
    Closes: Gap 6.
-9. **`VACUUM INTO` backups — commit-count + max-age.** Triggered
-   on every Nth successful commit (default 100) or whenever the
-   last backup is older than 24 h, whichever first. Retain 24.
-   Backup file gets `0600`. Runs on a dedicated goroutine so it
-   never blocks the writer. H9 lands here.
-   Closes: L4, Y3, Gap 7.
-10. **CRC32 on VectorClock blob.** Trailing CRC on the packed form.
-    Decode verifies; corrupt blob rejects with a typed error and
-    transitions the folder through FolderDisabled. H10 lands here.
-11. **Fault-injection driver + full harness sweep.** The wrapping
-    `driver.Driver` lands under `_test.go`. Re-run all H-series
-    tests with the wrapper enabled to exercise injection paths
-    that couldn't be tested without it (SQLITE_FULL mid-commit,
-    SQLITE_IOERR_FSYNC during COMMIT, etc.).
-12. **Benchmarks with pinned baselines.** From the §4.4 ledger.
-    Separate commit so later regressions bisect cleanly.
-13. **Schema-evolution migration stub.** `migrate(db, from, to)`
-    no-op for v1→v1; invoked unconditionally at open; test asserts
-    it fires. Closes: V1.
-14. **DESIGN-v1 banner flip to "implemented".** Verification table
-    cites every code site and test name. Closes all outstanding
-    checklist boxes.
+9. **`VACUUM INTO` backups — GFS retention + atomic write +
+   restore + reopen + listing endpoints.** Bundles four
+   folder-level admin endpoints because all four are
+   folder-lifecycle operations consumed by runbook §§5–7 and
+   all four depend on commit 3's `FolderDisabled` scaffold.
+   Split internally into 9a (backup write path + listing) and
+   9b (restore + reopen) for review granularity, but lands as
+   one tree-green commit.
+
+   **9a — backup write path.** `VACUUM INTO` writes to
+   `~/.mesh/filesync/<folder-id>/backups/index-<seq>-<unixns>.sqlite.tmp`
+   first (iter-4 Z5 atomic write), runs `quick_check` on the
+   `.tmp`, atomically `rename` to the final
+   `index-<seq>-<unixns>.sqlite` only on pass; on failure or
+   crash, `unlink`. Mode `0600`, `<seq>` = highest committed
+   sequence at backup time, `<unixns>` = wall clock at backup
+   (iter-4 O18). Runs on a dedicated goroutine so it never
+   blocks the writer. Startup sweep (R7 extension) cleans any
+   `*.sqlite.tmp` under `<folder>/backups/`. Retention prune
+   treats `.tmp` files as invisible. GFS retention: 5 daily +
+   4 weekly + 1 monthly (decision §5 #11). Listing endpoint
+   `GET /api/filesync/folders/<id>/backups` (iter-4 O9)
+   returns `[{path, sequence, created_at, quick_check_ok},
+   ...]` sorted by `sequence` descending. Tests:
+   `TestBackup_SIGKILLLeavesNoFinalFile`,
+   `TestBackup_StartupSweepCleansTmp`,
+   `TestRetention_IdempotentOnExtraFile` (iter-4 Z14: writes
+   N+1 files, asserts deterministic prune; runs prune twice,
+   asserts file set unchanged on second run).
+
+   **9b — restore + reopen.**
+   `POST /api/filesync/folders/<id>/restore` (lifecycle L5,
+   iter-4 O10) accepts `{backup_path: ...}` and runs a
+   five-step procedure: (0) **re-run `quick_check` on the
+   chosen backup** (iter-4 Z11) — if it fails, abort with a
+   typed error and leave the folder in its current state;
+   (1) stop folder; (2) swap `index.sqlite` (and
+   `-wal`/`-shm` sidecars) with the chosen backup; (3) bump
+   `folder_meta.epoch` to a new value; (4) restart folder
+   via the `/reopen` path so the F7 sweep re-runs against
+   the restored DB (per the iter-4 Z1 sweep contract — the
+   restored DB now has the rewound hash that matches `.bak`,
+   so the sweep's restore branch fires and converges state).
+   The epoch bump is the load-bearing step (iter-4 O10); the
+   re-check on the backup is the load-bearing step against
+   between-list-and-swap corruption (iter-4 Z11).
+
+   `POST /api/filesync/folders/<id>/reopen` (per-folder
+   reload, iter-4 O12 promoted to v1-blocker) re-runs the
+   open path on a single folder — `loadIndexDB`,
+   `quick_check`, async `integrity_check` (or sync per
+   iter-4 Z8 / commit 11 when SIGKILL recovery is detected),
+   scan resume — without touching SSH / proxy / clipsync /
+   gateway. Recovery from `disk_full`, `read_only_fs`,
+   `dirty_set_overflow`, and the post-restore restart all
+   use this endpoint instead of a full process restart.
+   Manual SQL editing during recovery is the wrong UX for
+   the ship-perfect bar.
+
+   Tests: backup cycle asserts (5 → 5 files; clock + 1 day
+   produces daily promotion; clock + 7 days produces weekly
+   promotion; retention pruning never deletes the most
+   recent of any tier); restore asserts (epoch is bumped;
+   pre-swap `quick_check` aborts on failure; peer running
+   against pre-restore epoch sees fresh re-baseline on next
+   exchange; F7 sweep re-runs after reopen via
+   `TestRestore_RunsSweepAfterReopen`); reopen asserts (a
+   folder in `FolderDisabled(disk_full)` with disk freed
+   transitions back to `enabled` after `/reopen` without
+   other folders or other subsystems flapping).
+
+   Closes: L4, L5 (new), Y3, Gap 7,
+   decision §5 #11 (GFS), §5 #17 (restore epoch bump),
+   §5 #23 (backup filename + listing), §5 #29 (atomic backup
+   write, iter-4 Z5), §5 #30 (restore re-check, iter-4 Z11),
+   iter-4 O12 (per-folder reload promoted to v1-blocker),
+   iter-4 Z14 (idempotent retention prune).
+10. **Fault-injection driver + full harness sweep + `SIGKILL`
+    recovery test + sync `integrity_check` on detected SIGKILL
+    (iter-4 Z8).** The wrapping `driver.Driver` lands under
+    `_test.go`, registered as `sqlite_faulty`; `openFolderDB`
+    accepts a `driverName` parameter (production default
+    `"sqlite"`). Re-run all H-series tests with the wrapper
+    enabled to exercise injection paths that couldn't be tested
+    without it (`SQLITE_FULL` mid-commit, `SQLITE_IOERR_FSYNC`
+    during COMMIT, etc.). One scripted e2e test `SIGKILL`s the
+    process mid-scan and asserts clean restart with no data
+    lost since the last committed tx (D8).
+
+    **SIGKILL detection signal (iter-4 Z8).** At folder open,
+    inspect the WAL: if it contains un-checkpointed frames
+    (queryable via `PRAGMA wal_checkpoint`), the process did
+    not shut down cleanly. On detection, `integrity_check`
+    runs **synchronously** before the folder goes live — the
+    ~20 s delay on a 200 MB DB is acceptable on the recovery
+    path; the silent live-but-corrupt window between
+    `quick_check` and the async `integrity_check` (Z8 hazard)
+    is not. Dashboard renders a transient `recovering` state
+    during the sync check. On clean WAL (no un-checkpointed
+    frames), the existing async path stands. Pin with
+    `TestSIGKILLRecovery_RunsIntegrityCheckSync`.
+
+    Closes: decision §5 #13 (plumbed `driverName`),
+    §5 #26 (sync integrity_check on SIGKILL recovery,
+    iter-4 Z8), iter-4 D8 SIGKILL e2e test.
+11. **Benchmarks with pinned baselines.** §4.4 ledger plus the
+    commit-2 LoadIndex bench. Separate commit so later
+    regressions bisect cleanly.
+12. **Schema-evolution migration stub.** `migrate(db, from, to)`
+    no-op for v1→v1; invoked unconditionally at open; test
+    asserts it fires.
+    Closes: V1.
+13. **`OPERATOR-RUNBOOK.md` §§1–7 (v1-ship blocker, iter-4
+    O13 + O16, plus runbook contradiction fix).**
+    First-class deliverable. Sections that block v1 ship
+    from dry-run to real on any peer:
+    - §1 Before First Run (wipe `~/.mesh/filesync/`, config
+      verification, backup directory budget).
+    - §2 First Real-Data Run / Dry-Run → Real Flip
+      (pre-flight checklist, per-peer sequence with one peer
+      at a time, verification gate before next peer, rollback
+      procedure if any gate fails). Iter-4 O13 + O16 fold here.
+    - §3 Dashboard Triage (healthy signals; what to read
+      first when a row goes red; the action string is the
+      authoritative next step).
+    - §4 Recovery by Disabled Reason (one subsection per
+      enum value, citing the action string verbatim; §4.3
+      `device_id_mismatch` names option 1 first per
+      iter-4 O3).
+    - §5 Backup Restore (file location and naming per
+      §5 #23; how to pick — sequence + `quick_check_ok`,
+      not "newest"; the four-step restore procedure via
+      `POST /api/filesync/folders/<id>/restore`; expected
+      conflict-file fan-out and how to triage).
+    - §6 Peer-State vs File-State Divergence (what peers
+      cached during the disabled window; manual
+      reconciliation; when to wipe peer state on the other
+      peers too; iter-4 O19 / Gap-pending until composition
+      pass).
+    - §7 Per-Folder Reload (when to use
+      `POST /api/filesync/folders/<id>/reopen` instead of a
+      full node restart; which enums recover via reopen and
+      which require a prior step). Promoted from follow-up
+      to v1-blocker (decision §5 #21) because §5.3 cites the
+      `/reopen` endpoint and the alternative — manual SQL
+      CLI procedures during recovery — is the wrong UX for
+      the ship-perfect bar.
+
+    §§8–10 (build-time decisions recorded for operators,
+    known limits, escalation) ship in a follow-up commit
+    after the first real-data deploy.
+    Closes: decision §5 #21 (runbook v1-ship blocker).
+14. **DESIGN-v1 banner flip to "implemented".** Verification
+    table cites every code site and test name. Closes all
+    outstanding checklist boxes. Runbook §§7–10 fold in here
+    or in a follow-up — they are not a v1-ship blocker.
 
 Cutover milestones:
 
-- Commits 2–4 leave the existing gob path intact but re-route
-  peer reads to SQLite. Still green at every step.
-- Commit 5 makes every non-scan mutation durable before it is
-  observable. Downloads become bullet-proof first — they are the
-  most data-loss-sensitive mutation.
-- Commit 6 is the structural finish: β is complete; no state
-  survives in memory between scans; sequence discipline is
-  type-enforced via the Set gate + conditional UPSERT.
-- Commit 7 is where the gob path stops running. After commit 6
-  there is no code path that reads or writes gob; commit 7
-  deletes the source.
+- Commit 2 is the storage swap. Gob is gone; SQLite is the only
+  on-disk store. One heavy commit, but the no-production-state
+  cold swap (DESIGN-v1 §0) is the right shape: no dual-write
+  insurance, no burn-in window, no fallback path. Tree green:
+  every filesync code path uses SQLite via in-memory `fs.index`
+  populated from `loadIndexDB`. Open-path failures log and skip
+  pending the FolderDisabled wiring in commit 3.
+- Commit 3 lights up the failure machinery. `FolderDisabled` is
+  now wired so commits 4+ can transition folders cleanly; the
+  blocks-table drop and the device-ID rotation guard ride along
+  because they are all open-path concerns.
+- Commit 4 flips peer-facing reads to SQLite via the dedicated
+  reader handle. After this, in-memory `fs.index` exists only to
+  feed scan code (and, depending on the bench, to feed it
+  between scans in hybrid mode).
+- Commits 5 + 6 are the seam pair. Commit 5 lands the scan
+  claim-skip (pure coordination). Commit 6 extends the download
+  claim window to span SQLite commit and ships the `.bak`
+  lifecycle, CRC, and BaseHash co-atomicity. Commit 6's startup
+  assertion makes the ordering structural — a future revert of
+  commit 5 alone now fails loud.
+- Commit 7 is the structural finish, **provisional**. β stands
+  or pivots to hybrid based on the commit-2 bench. Either way,
+  sequence-in-tx and conditional UPSERT are enforced. The
+  selection is now a **build-time protocol invariant** stamped
+  on every `IndexExchange` and asserted at handshake — the
+  three peers cannot diverge silently (iter-4 O15).
+- Commit 9 makes backup restore a **first-class lifecycle
+  operation** (L5): stop folder, swap DB, bump epoch, restart.
+  Without the epoch bump, peers' `LastSeenSequence` past the
+  rewind silently skips restored rows (iter-4 O10).
+- Commit 13 is the **operator runbook**, a v1-ship blocker.
+  Sections §1–§6 must be complete before any peer flips from
+  dry-run to real. Without it, "highest-risk hour after the
+  flip" has no documented procedure (iter-4 O13 + O16).
 
 Every commit in this sequence either strengthens an invariant or
 removes superseded code; none adds ballast.
@@ -549,9 +1407,11 @@ removes superseded code; none adds ballast.
 
 ## 7. Non-goals for this audit
 
-- Revisiting the DESIGN-v1 schema further. Two documented
-  departures (PH columns on `files`; peer_state extensions +
-  `peer_base_hashes` table) are the full set.
+- Revisiting the DESIGN-v1 schema further. Three documented
+  departures: (1) PH columns on `files`; (2) peer_state
+  extensions plus `peer_base_hashes` table; (3) `blocks` table
+  dropped for v1 (decision §5 #7). The banner-flip commit cites
+  all three.
 - Anything about the SSH / tunnel / proxy / clipsync layers.
 - Performance work unrelated to persistence (scan walk, delta
   compression, watch/scan cadence — tracked separately in
@@ -561,15 +1421,163 @@ removes superseded code; none adds ballast.
 
 ## 8. Review gate
 
-Before any code from this audit lands:
+Before any code from this audit lands beyond commit 1:
 
-- [ ] §2 inventory has every row's disposition explicitly chosen.
-- [ ] §3 risk table has no "unassessed" cells.
-- [ ] §4 test strategy names a test per kept / redesigned behavior
+- [x] §2 inventory has every row's disposition explicitly chosen.
+- [x] §3 risk table has no "unassessed" cells.
+- [x] §4 test strategy names a test per kept / redesigned behavior
       and per risk category.
-- [x] §5 design calls resolved (β architecture, reader handle
-      deferred, per-folder DB, drop `persistMu`, `synchronous=FULL`,
-      add fault-injection driver).
+- [x] §5 design calls resolved — iter-2 set (β, per-folder DB,
+      drop `persistMu`, `synchronous=FULL`, fault-injection
+      driver) plus iter-3 set (drop `blocks` table for v1,
+      `prev_path` clear-on-rescan, β provisional pending bench,
+      two reader handles at commit 4, GFS backup retention,
+      `mmap_size = 64 MiB`, `driverName` plumbed, dirty-set cap
+      10k, tombstone GC every 10th scan).
 - [x] Iteration-2 gaps (Gap 1–7) closed with INV-1…INV-4 plus
       H11–H15.
-- [ ] §6 commit sequence reviewed; each commit's scope is bounded.
+- [x] Iteration-3 gaps (Gap 1'–9' surfaced in
+      `PERSISTENCE-AUDIT-REVIEW.md`) closed: A1 / Gap 1'
+      sequence-in-tx (INV-3); A5 / Gap 2' BaseHash co-atomicity
+      (INV-4); A2 / Gap 3' **moot under no-production-state
+      cold-swap** (scope correction 2026-04-25; dual-write
+      commit dropped); A4 / Gap 4' `.bak` lifecycle (F7,
+      commit 6); A3 / Gap 5' scan/download path claim (C6,
+      commit 5); A7 / Gap 6' `device_id` mismatch (I7,
+      commit 3); A8 / Gap 7' `prev_path` clear-on-rescan (I8);
+      B1 / Gap 8' β cost bench-gated (commit 2, decision §5 #9);
+      A6 / Gap 9' `blocks` dropped (decision §5 #7, commit 3).
+      Iter-3 obvious-fix list (review §D) folded into commits
+      2, 3, 6, 8, 10.
+- [x] **Step 1 — §6 commit sequence reviewed** (closed
+      2026-04-25). Each commit's scope is bounded; cross-
+      references to §2 / §5 / Gap-numbers consistent across the
+      13-commit sequence. Seven findings raised on the bounded-
+      scope review; all folded into §6:
+      - Finding 1: Commit 6 startup-assertion uses a boolean
+        sentinel (`var scanClaimSkipWired = true` in commit 5;
+        `Run` startup reads and aborts on false).
+      - Finding 2: Gap 7' / I8 added to commit 2's `Closes:`
+        line; the saveIndex UPSERT clears `prev_path` unless
+        a fresh hint is being recorded.
+      - Finding 3: Iter-2 Gap 5 (integrity_check sync/async
+        split) added to commit 3's `Closes:` line.
+      - Finding 4: INV-4 scan-path bullet added to commit 7's
+        `Closes:` line; INV-4 closes in full across commits 6
+        (non-scan paths) and 7 (scan path).
+      - Finding 5: Decision §5 #12 (`mmap_size = 64 MiB`)
+        added to commit 2's `Closes:` line; pragma lands in
+        `applyFolderDBPragmas`.
+      - Finding 6: Tombstone GC (P6 / decision §5 #15) placed
+        in commit 7, not commit 2 — scan-discipline concern
+        finalizes with the rest of scan in commit 7.
+      - Finding 7: H1, H2, H6, H7, H9, H10 stripped from §6
+        prose (informal labels with no §4 anchor); H11–H15
+        retained and remain pinned in §4.1.
+
+      Sub-checks for the §6 reviewer:
+      - **Commit 5 → commit 6 ordering is structural, not
+        disciplinary.** Commit 6 carries a startup assertion
+        that commit 5's claim-skip path is wired (sentinel
+        verified once on `Run`; failure aborts the folder
+        open with a typed error naming the missing claim-skip
+        code path). Without this, a future revert of commit 5
+        alone leaves commit 6 silently running with the Gap 5'
+        race re-opened. ~10 LOC + one test in commit 6. Pin
+        with `TestStartup_RefusesWithoutClaimSkip`.
+      - **Commit 2 is heavy by design.** Storage swap, gob
+        deletion, dirty-set, encapsulation, bench gate all
+        ride together because the no-production-state cold-
+        swap posture means there is no win in splitting them.
+        Reviewer confirms the commit message and tests carve
+        the change cleanly enough to bisect within it.
+      - Each commit's `Closes:` line names every Gap /
+        inventory row / decision number it closes; no Gap
+        appears in two `Closes:` lines (each gap closes
+        exactly once); Gap 3' explicitly cited as "moot under
+        no-production-state cold-swap" in the §8 closure
+        list, not in any `Closes:` line.
+      - No `Closes:` line names a Gap that hasn't appeared in
+        the iter-2 / iter-3 banner inventory.
+      - Cutover milestones paragraph references the new 13-
+        commit numbering consistently with the numbered list.
+- [x] **Step 2a — Iteration-4 ops-lens review** (closed
+      2026-04-25). Surfaced 19 findings; seven structural
+      changes folded into the audit, plus a runbook
+      contradiction fix on the second pass:
+      - O15 promoted to protocol-level invariant (decision
+        §5 #16, commit 7 prose, DESIGN-v1 §0).
+      - O11 promoted to 🚨 structural deliverable: per-enum
+        action strings (decision §5 #18, R8, commit 3).
+      - O10 added as new lifecycle row L5 (restore-from-
+        backup with epoch bump; decision §5 #17, commit 9).
+      - O3 named the default branch (restore device-id
+        first; decision §5 #20, I7, runbook §4.3).
+      - O8 expanded to inline diagnostic load on `unknown`
+        (decision §5 #19, R8, commit 3).
+      - O13 + O16 folded into single runbook deliverable
+        (decision §5 #21, new commit 13).
+      - O4 split enum: `metadata_parse_failed`
+        (decision §5 #22, R8, commit 3).
+      - O12 promoted from follow-up to v1-blocker on
+        contradiction-fix pass: `/reopen` endpoint ships at
+        commit 9; runbook §7 promoted to v1-blocker section
+        and filled in. Resolves the §5.3 vs §7 contradiction
+        the original ops fold left open.
+      - Runbook §2.1 dangling forward-pointer to §8 replaced
+        with concrete handshake-rejection language.
+      - Bonus folds: O9 + O18 backup naming + listing
+        (decision §5 #23, commit 9).
+
+      Source review: `PERSISTENCE-AUDIT-REVIEW-ITER4-OPS.md`.
+- [x] **Step 2b — Iteration-4 composition-lens review**
+      (closed 2026-04-25). Surfaced 16 findings (Z1–Z16) on
+      failure-mode composition during the first hour after
+      the dry-run flip. All 10 §E decisions resolved:
+      - Z1 → F7 sweep gains "DB unreadable" branch
+        (commit 6); restore re-runs sweep post-reopen
+        (commit 9 9b).
+      - Z2 → epoch-mismatch protocol invariant in DESIGN-v1
+        §0; trigger extension in commit 7 with
+        `TestPeer_OfflineDuringRestore_ResetsOnEpochAlone`.
+        Code-verification note: existing implementation has
+        branch A semantics on sequence-drop trigger only;
+        promotion adds the epoch-mismatch trigger (~5 LOC).
+      - Z3 → runbook §2.4 cites the epoch contract; §2.3
+        verification gate adds the LastEpoch check on B/C.
+      - Z4 → runbook §1.1 rewritten "wipe once, before first
+        dry-run, never again"; §2.4 path-scope distinction
+        documented explicitly (folder-scoped vs. parent).
+        Code verification: §2.4 step 3 and §4.3 option 2
+        are both correctly folder-scoped; only §1.1 needed
+        the wording fix.
+      - Z5 → backup write-temp-then-rename; startup sweep
+        cleans `.tmp` (commit 9 9a, decision §5 #29).
+      - Z6 → branch (A) cancel in-flight tx on disabled
+        transition (R8 + commit 3, decision §5 #25).
+      - Z7 → runbook hardening only — wall-clock check in
+        §2.1, "one peer at a time" warning in §2.2.
+      - Z8 → sync `integrity_check` on detected SIGKILL
+        recovery (commit 10, decision §5 #26).
+      - Z9 → R9 atomic cap on `Set` (commit 7, decision
+        §5 #24 wiring + R9 update).
+      - Z10 → process-level `index_model_mismatch` metric +
+        runbook §3.4 (commit 7, decision §5 #27); §8 stays
+        in first follow-up.
+      - Z11 → restore re-runs `quick_check` pre-swap
+        (commit 9 9b, decision §5 #30).
+      - Z12 → `TestDisabledReasonActions_AllEnumsHaveAction`
+        coverage test (commit 3).
+      - Z13 → F7 "neither matches" branch →
+        `FolderDisabled(unknown)` with diagnostic load
+        (commit 6).
+      - Z14 → `TestRetention_IdempotentOnExtraFile` (commit 9
+        9a).
+      - Z15 → doc-test (b)
+        `TestRunbookActionStringsMatchMap` parses runbook §4
+        against the map (commit 3, decision §5 #28).
+      - Z16 → §9 stays follow-up; §7 already promoted
+        absorbs the multi-folder `disk_full` blast radius.
+
+      Source review:
+      `PERSISTENCE-AUDIT-REVIEW-ITER4-COMPOSITION.md`.
