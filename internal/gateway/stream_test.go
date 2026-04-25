@@ -720,6 +720,10 @@ func runA2OStreamTest(t *testing.T, upstreamURL, model string, modelMap map[stri
 		},
 	}
 
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
@@ -764,6 +768,10 @@ func runO2AStreamTest(t *testing.T, upstreamURL, model string, modelMap map[stri
 		Routing: []RoutingRule{
 			{ClientModel: []string{"*"}, UpstreamName: "default"},
 		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())

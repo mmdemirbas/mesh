@@ -72,6 +72,10 @@ func TestGateway_A2O_NonStreaming(t *testing.T) {
 		},
 	}
 
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
@@ -184,6 +188,10 @@ func TestGateway_O2A_NonStreaming(t *testing.T) {
 		},
 	}
 
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
@@ -257,6 +265,10 @@ func TestGateway_Health(t *testing.T) {
 		},
 	}
 
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
@@ -304,6 +316,10 @@ func TestGateway_UpstreamError(t *testing.T) {
 		Routing: []RoutingRule{
 			{ClientModel: []string{"*"}, UpstreamName: "default"},
 		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -359,6 +375,10 @@ func TestGateway_O2A_UpstreamError_529(t *testing.T) {
 		},
 	}
 
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
@@ -408,6 +428,10 @@ func TestGateway_UpstreamError_ResponseFormat(t *testing.T) {
 		Routing: []RoutingRule{
 			{ClientModel: []string{"*"}, UpstreamName: "default"},
 		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -467,6 +491,10 @@ func TestGateway_A2O_InvalidJSON(t *testing.T) {
 		},
 	}
 
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
@@ -506,6 +534,10 @@ func TestGateway_O2A_InvalidJSON(t *testing.T) {
 		Routing: []RoutingRule{
 			{ClientModel: []string{"*"}, UpstreamName: "default"},
 		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -548,6 +580,10 @@ func TestGateway_A2O_UpstreamConnectionFailure(t *testing.T) {
 		Routing: []RoutingRule{
 			{ClientModel: []string{"*"}, UpstreamName: "default"},
 		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -599,6 +635,10 @@ func TestGateway_A2O_StreamUpstreamError(t *testing.T) {
 		},
 	}
 
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
@@ -645,6 +685,10 @@ func TestGateway_O2A_StreamUpstreamError(t *testing.T) {
 		Routing: []RoutingRule{
 			{ClientModel: []string{"*"}, UpstreamName: "default"},
 		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
