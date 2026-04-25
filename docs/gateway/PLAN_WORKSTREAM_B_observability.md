@@ -438,10 +438,11 @@ button strip and detail card naturally subsume.
 **PLAN_UX items not absorbed by Workstream B.** Item #2
 (multi-select filters), item #3 (gateway column in the requests
 table), item #9 (URL-encoded filter state), item #13 (separate
-input/output token columns), and the author's observations A,
-B, and C remain in PLAN_UX.local.md as a separate UX-polish
-workstream that can run in parallel with Workstream B without
-conflict.
+input/output token columns), item #6 (custom-block TOC sidebar),
+item #10 (upstream-response data-flow check), and the author's
+observations A, B, and C are tracked separately in
+`PLAN_WORKSTREAM_D_uxpolish.md`. Workstream D runs in parallel
+with Workstream B without conflict.
 
 ## 4. Audit row additions
 

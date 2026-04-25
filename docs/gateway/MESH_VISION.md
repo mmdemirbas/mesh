@@ -172,9 +172,10 @@ the tracked plans here distill their conclusions:
 - **PLAN_QUOTA.local.md** — upstream rate-limit header capture
   and account-usage polling architecture. Informs
   PLAN_WORKSTREAM_A items A1 and A3.
-- **PLAN_UX.local.md** — UI polish backlog. Informs
-  PLAN_WORKSTREAM_B items B2 through B6; specific item-level
-  cross-references appear in those item sections.
+- **PLAN_UX.local.md** — UI polish backlog. Items absorbed by
+  PLAN_WORKSTREAM_B (B2 through B6) are cross-referenced from
+  those item sections; remaining items are distilled into the
+  tracked PLAN_WORKSTREAM_D_uxpolish.md.
 - **PLAN_GATEWAY_SEPARATION.local.md** — visual
   distinguishability of gateway-routed sessions. Informs
   PLAN_WORKSTREAM_B item B3.
