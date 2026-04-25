@@ -121,6 +121,10 @@ func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *ht
 	// §B1 streaming partition: bracket each upstream Body.Read as
 	// segUpstreamProcessing. Write durations are tracked uniformly
 	// in auditingWriter.
+	//
+	// Tripwire: if `other` exceeds ~5% of `total` on a non-pathological
+	// streaming-passthrough row in live audit logs, an instrumentation
+	// gap has opened up and needs investigation.
 	var timer *segmentTimer
 	if au := getAuditUpstream(r); au != nil {
 		timer = au.Timer

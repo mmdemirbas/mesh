@@ -98,6 +98,10 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 	// embedded aw.Write calls requires deeper instrumentation that
 	// is deferred. Write durations are tracked uniformly by
 	// auditingWriter.Write.
+	//
+	// Tripwire: if `other` exceeds ~5% of `total` on a non-pathological
+	// streaming row in live audit logs, the v1 limitation has started
+	// to bite and the deeper translate/write split needs to land.
 	var timer *segmentTimer
 	if st.au != nil {
 		timer = st.au.Timer

@@ -85,7 +85,9 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 	st.jsonEnc = json.NewEncoder(&st.jsonBuf)
 	st.jsonEnc.SetEscapeHTML(false)
 
-	// §B1 streaming partition: see a2o_stream for rationale.
+	// §B1 streaming partition: see a2o_stream for rationale, including
+	// the 5%-of-total `other`-bucket tripwire that signals when the
+	// deferred translate/write split needs to land.
 	var timer *segmentTimer
 	if st.au != nil {
 		timer = st.au.Timer
