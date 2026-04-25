@@ -949,8 +949,39 @@ func (n *Node) tlsStatusFor(addr string) string {
 	return "encrypted"
 }
 
+// errScanClaimSkipMissing is returned by preflightScanClaimSkip when
+// the scan-walker invariant from audit §6 commit 5 has been reverted.
+// Names the contract by content (not by commit-sequence number) so
+// the message stays readable even if the audit's §6 numbering shifts
+// later.
+var errScanClaimSkipMissing = errors.New(
+	"filesync: scan walker missing in-flight claim skip; refusing to open any folder. " +
+		"scanWithStats MUST consult fs.isClaimed() per the C6 / Gap 5' invariant " +
+		"(docs/filesync/PERSISTENCE-AUDIT.md §6 commit 5). Without it, a download " +
+		"in flight while a scan re-hashes the same path produces scan-derived " +
+		"(local-bumped) VectorClock semantics that race the download tx and " +
+		"corrupt peer-visible state. Restore the claim-skip in scanWithStats " +
+		"and the corresponding scanClaimSkipWired = true assignment, then retry")
+
+// preflightScanClaimSkip enforces the structural-ordering invariant
+// declared at audit §6 commit 5/6 prose: scanWithStats must consult
+// the in-flight claim map. The flag flips to true at the install
+// site in scanWithStats; if it has been reverted (commit 5 rolled
+// back independently of commit 6), Start refuses to open any folder
+// rather than silently re-opening Gap 5'. Pinned by
+// TestStartup_RefusesWithoutClaimSkip.
+func preflightScanClaimSkip() error {
+	if !scanClaimSkipWired {
+		return errScanClaimSkipMissing
+	}
+	return nil
+}
+
 // Start initializes and runs the filesync node. Blocks until ctx is cancelled.
 func Start(ctx context.Context, cfg config.FilesyncCfg) error {
+	if err := preflightScanClaimSkip(); err != nil {
+		return err
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("user home dir: %w", err)
@@ -2919,8 +2950,45 @@ func (n *Node) persistFolder(folderID string, force bool) {
 	fs.indexMu.RUnlock()
 
 	var indexBytes int
-	var indexMs float64
-	if shouldSaveIndex {
+	var indexMs, peersMs float64
+
+	switch {
+	case shouldSaveIndex && shouldSavePeers:
+		// Audit §6 commit 6 phase C: file rows and peer-state rows ride
+		// ONE BEGIN IMMEDIATE...COMMIT so a crash mid-persist cannot
+		// leave a fresh file row paired with a stale BaseHashes map
+		// (which the Phase D classifier would read as "unknown
+		// ancestor → conflict"). Closes Gap 2 / Gap 2'.
+		idxStart := time.Now()
+		err := savePeerSyncOutcome(fs.writerCtx, fs.db, folderID, idxSnapshot, peersSnapshot)
+		bothMs := ms(time.Since(idxStart))
+		if err != nil {
+			slog.Warn("failed to save peer-sync outcome to SQLite",
+				"folder", folderID, "error", err)
+			fs.indexMu.Lock()
+			fs.indexDirty = true
+			fs.peersDirty = true
+			fs.indexMu.Unlock()
+		} else {
+			fs.indexMu.Lock()
+			fs.index.ClearDirty()
+			fs.indexMu.Unlock()
+		}
+		// Both halves rode one tx; the perf log keeps two columns for
+		// continuity with single-half writes — split the timing
+		// proportionally to row count so the columns still sum to the
+		// observed total.
+		idxRows := float64(idxSnapshot.Len())
+		peerCount := float64(len(peersSnapshot))
+		if total := idxRows + peerCount; total > 0 {
+			indexMs = bothMs * idxRows / total
+			peersMs = bothMs * peerCount / total
+		} else {
+			indexMs = bothMs
+		}
+		indexBytes = idxSnapshot.Len()
+
+	case shouldSaveIndex:
 		idxStart := time.Now()
 		if err := saveIndex(fs.writerCtx, fs.db, folderID, idxSnapshot); err != nil {
 			slog.Warn("failed to save index to SQLite",
@@ -2929,18 +2997,14 @@ func (n *Node) persistFolder(folderID string, force bool) {
 			fs.indexDirty = true // retry next cycle
 			fs.indexMu.Unlock()
 		} else {
-			// Commit succeeded — clear the live index's dirty-set so
-			// the next cycle does not re-write the same rows.
 			fs.indexMu.Lock()
 			fs.index.ClearDirty()
 			fs.indexMu.Unlock()
 		}
 		indexMs = ms(time.Since(idxStart))
 		indexBytes = idxSnapshot.Len()
-	}
 
-	var peersMs float64
-	if shouldSavePeers {
+	case shouldSavePeers:
 		peersStart := time.Now()
 		if err := savePeerStatesDB(fs.writerCtx, fs.db, folderID, peersSnapshot); err != nil {
 			slog.Warn("failed to save peer states to SQLite",

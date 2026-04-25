@@ -1,12 +1,20 @@
 package filesync
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"hash/crc32"
+	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 // TestOpen_SynchronousIsFULL pins decision §5 #5 (W5):
@@ -341,18 +349,224 @@ func TestEncodeVectorClock_DeterministicOrder(t *testing.T) {
 }
 
 // TestDecodeVectorClock_RejectsMalformed pins that a truncated blob
-// decodes as nil rather than panicking or returning garbage.
+// decodes as nil rather than panicking or returning garbage. Two
+// length classes are now legitimate (legacy = body, current = body+CRC);
+// any other length is malformed.
 func TestDecodeVectorClock_RejectsMalformed(t *testing.T) {
 	cases := map[string][]byte{
-		"empty":        nil,
-		"short":        {0},
-		"header only":  {0, 1},
-		"wrong length": append(append([]byte{0, 1}, []byte("ABCDE12345")...), 0, 0, 0, 0),
+		"empty":         nil,
+		"short":         {0},
+		"header only":   {0, 1}, // count=1 but no entry — neither legacy nor current
+		"wrong length":  append(append([]byte{0, 1}, []byte("ABCDE12345")...), 0, 0, 0, 0),
+		"between forms": make([]byte, 2+1*(deviceIDChars+8)+2), // body + 2 bytes (not 0, not 4)
 	}
 	for name, blob := range cases {
 		if got := decodeVectorClock(blob); got != nil {
 			t.Errorf("%s: got %v, want nil", name, got)
 		}
+	}
+}
+
+// TestEncodeVectorClock_TrailerRoundTrip pins audit D7 / commit 6
+// phase A: every emitted blob carries a CRC-32/IEEE trailer over all
+// preceding bytes, and decode round-trips. The empty case carries
+// the trailer too (uniform format — no special-cased lengths).
+func TestEncodeVectorClock_TrailerRoundTrip(t *testing.T) {
+	cases := []VectorClock{
+		nil,
+		{},
+		{"ABCDE12345": 1},
+		{"ABCDE12345": 7, "PEER00002X": 3, "QRSTU67890": 1},
+	}
+	for _, vc := range cases {
+		blob := encodeVectorClock(vc)
+		// Body length matches the entry-count header.
+		body := 2 + int(uint16BE(blob[0:2]))*(deviceIDChars+8)
+		if len(blob) != body+vclockCRCLen {
+			t.Errorf("blob len=%d, want body(%d)+CRC(%d)", len(blob), body, vclockCRCLen)
+			continue
+		}
+		// CRC trailer matches IEEE checksum of body.
+		want := crc32.ChecksumIEEE(blob[:body])
+		got := uint32BE(blob[body : body+vclockCRCLen])
+		if want != got {
+			t.Errorf("CRC mismatch: blob trailer=%08x, recomputed=%08x", got, want)
+		}
+		// Round-trips through decode.
+		decoded := decodeVectorClock(blob)
+		if !clocksEqual(decoded, normalizeVClock(vc)) {
+			t.Errorf("round-trip lost data:\n  in =%v\n  out=%v", vc, decoded)
+		}
+	}
+}
+
+// normalizeVClock mirrors encodeVectorClock's filtering: zero-valued
+// entries are dropped, empty becomes nil. Used by round-trip asserts
+// so a tiny input with all-zero counters compares as nil rather than
+// {} (and matches what decode returns).
+func normalizeVClock(v VectorClock) VectorClock {
+	out := VectorClock{}
+	for k, val := range v {
+		if val == 0 || len(k) != deviceIDChars {
+			continue
+		}
+		out[k] = val
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// TestDecodeVectorClock_AcceptsLegacyBlob pins the dev-loop migration
+// path: a blob written by an earlier D4 commit (no CRC trailer)
+// decodes successfully so a cold dev DB is not refused on first
+// open after Phase A. Upgrade to CRC happens at the next saveIndex
+// for that row.
+func TestDecodeVectorClock_AcceptsLegacyBlob(t *testing.T) {
+	// Hand-construct the legacy format directly (no CRC).
+	// One entry: ABCDE12345 → 7.
+	blob := make([]byte, 2+1*(deviceIDChars+8))
+	putUint16BE(blob[0:2], 1)
+	copy(blob[2:2+deviceIDChars], "ABCDE12345")
+	putUint64BE(blob[2+deviceIDChars:2+deviceIDChars+8], 7)
+
+	resetLegacyVClockWarned()
+	got := decodeVectorClock(blob)
+	want := VectorClock{"ABCDE12345": 7}
+	if !clocksEqual(got, want) {
+		t.Errorf("legacy decode: got %v, want %v", got, want)
+	}
+}
+
+// TestDecodeVectorClock_RejectsBadCRC pins that a current-format
+// blob with a corrupted trailer decodes as nil. The classifier
+// (Phase D) treats a missing VectorClock as "unknown ancestor →
+// conflict" rather than overwriting good local state with the
+// corrupted ancestor.
+func TestDecodeVectorClock_RejectsBadCRC(t *testing.T) {
+	good := encodeVectorClock(VectorClock{"ABCDE12345": 7, "PEER00002X": 3})
+	if decodeVectorClock(good) == nil {
+		t.Fatal("baseline: good blob should decode")
+	}
+
+	// Flip one bit in the CRC trailer.
+	bad := append([]byte(nil), good...)
+	bad[len(bad)-1] ^= 0x01
+	if got := decodeVectorClock(bad); got != nil {
+		t.Errorf("bad CRC: decoded as %v, want nil", got)
+	}
+
+	// Flip a bit in the body — CRC over body changes, so the trailer
+	// no longer matches and the blob is rejected.
+	bad2 := append([]byte(nil), good...)
+	bad2[5] ^= 0x01 // somewhere in device_id bytes
+	if got := decodeVectorClock(bad2); got != nil {
+		t.Errorf("bit-flip in body: decoded as %v, want nil", got)
+	}
+}
+
+// TestDecodeVectorClock_LegacyWarnOnce pins the once-per-process
+// contract on the legacy-format WARN: a dev DB carrying many pre-CRC
+// blobs from D4 commits 2-5 must produce a single WARN on the first
+// decode, not one per row. The test installs a counting slog handler,
+// decodes a hundred legacy blobs, and asserts the WARN counter
+// landed at exactly one.
+func TestDecodeVectorClock_LegacyWarnOnce(t *testing.T) {
+	// Capture WARN-level "filesync: decoding legacy VectorClock blob"
+	// emissions through a custom slog handler. Restore the previous
+	// default on cleanup so neighboring tests are not affected.
+	var warnCount atomic.Int64
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(&legacyWarnCounter{count: &warnCount}))
+
+	resetLegacyVClockWarned()
+
+	legacy := make([]byte, 2+1*(deviceIDChars+8))
+	putUint16BE(legacy[0:2], 1)
+	copy(legacy[2:2+deviceIDChars], "ABCDE12345")
+	putUint64BE(legacy[2+deviceIDChars:2+deviceIDChars+8], 7)
+
+	for range 100 {
+		if got := decodeVectorClock(legacy); got == nil {
+			t.Fatal("legacy decode returned nil")
+		}
+	}
+	if got := warnCount.Load(); got != 1 {
+		t.Errorf("legacy WARN fired %d times across 100 decodes, want 1", got)
+	}
+
+	// A second batch with a fresh atomic counter must not re-emit
+	// — the once-per-process latch survives until the test resets it.
+	warnCount.Store(0)
+	for range 50 {
+		_ = decodeVectorClock(legacy)
+	}
+	if got := warnCount.Load(); got != 0 {
+		t.Errorf("legacy WARN fired %d times after first round, want 0 (once-per-process)", got)
+	}
+}
+
+// legacyWarnCounter is a minimal slog.Handler that increments count
+// for every record whose message contains "legacy VectorClock blob".
+// Other records are accepted but ignored — we are testing the
+// counting contract, not log routing.
+type legacyWarnCounter struct {
+	count *atomic.Int64
+	mu    sync.Mutex
+	attrs []slog.Attr
+}
+
+func (h *legacyWarnCounter) Enabled(context.Context, slog.Level) bool { return true }
+func (h *legacyWarnCounter) Handle(_ context.Context, r slog.Record) error {
+	if strings.Contains(r.Message, "legacy VectorClock blob") {
+		h.count.Add(1)
+	}
+	return nil
+}
+func (h *legacyWarnCounter) WithAttrs(a []slog.Attr) slog.Handler {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return &legacyWarnCounter{count: h.count, attrs: append(h.attrs, a...)}
+}
+func (h *legacyWarnCounter) WithGroup(string) slog.Handler { return h }
+
+// TestProtoRoundTrip_NoCRCOnWire pins the wire-vs-disk split in
+// COMMIT-6-SCOPE.md §2: the protobuf-encoded wire form (Counter
+// messages in IndexExchange) carries NO CRC bytes. Disk-side CRC
+// changes at Phase A do not change the wire format. Mixed-version
+// composition (commit-6 peer talking to a commit-5 peer) is
+// transparent.
+func TestProtoRoundTrip_NoCRCOnWire(t *testing.T) {
+	vc := VectorClock{"ABCDE12345": 7, "PEER00002X": 3}
+
+	// Wire form: protobuf-encoded Counter messages.
+	counters := vc.toProto()
+	wire, err := proto.Marshal(&pb.FileInfo{Version: counters})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// Disk form: encodeVectorClock with CRC trailer.
+	disk := encodeVectorClock(vc)
+
+	// The CRC trailer is the last 4 bytes of `disk`. Those exact 4
+	// bytes must NOT appear at the end of the wire-encoded bytes —
+	// the wire never carries the trailer.
+	crcTrailer := disk[len(disk)-vclockCRCLen:]
+	if bytes.Contains(wire[len(wire)-vclockCRCLen:], crcTrailer) {
+		t.Errorf("wire form ends with the disk CRC trailer (%x); the wire must not carry CRC bytes", crcTrailer)
+	}
+
+	// Round-trip through wire — no CRC enforcement on the receive side.
+	var got pb.FileInfo
+	if err := proto.Unmarshal(wire, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	decoded := vectorClockFromProto(got.GetVersion())
+	if !clocksEqual(decoded, vc) {
+		t.Errorf("wire round-trip: got %v, want %v", decoded, vc)
 	}
 }
 
@@ -523,6 +737,170 @@ func TestSavePeerStates_ReplacesPriorRows(t *testing.T) {
 	if a.BaseHashes["keep.txt"] != hash256FromBytes(bytes32('k')) {
 		t.Errorf("peer-a.BaseHashes[keep.txt] wrong: %x",
 			a.BaseHashes["keep.txt"])
+	}
+}
+
+// TestSavePeerSyncOutcome_RoundTrip pins audit §6 commit 6 phase C:
+// the combined writer commits BOTH the file-index dirty set AND the
+// per-peer map atomically, and a subsequent reload sees the post-tx
+// state on every column. Closes the structural side of Gap 2 / Gap 2'
+// — the classifier-side test (TestCrashBeforeBaseHashCommit) lands
+// in Phase D.
+func TestSavePeerSyncOutcome_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openFolderDB(dir, "ABCDE12345")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	idx := newFileIndex()
+	idx.Sequence = 7
+	idx.Epoch = "deadbeefcafef00d"
+	idx.DeviceID = 0xABCDE12345
+	idx.Set("docs/a.txt", FileEntry{
+		Size: 11, MtimeNS: 1_700_000_000_000_000_000, SHA256: testHash("a"),
+		Sequence: 5, Mode: 0o644,
+	})
+	idx.Set("docs/b.txt", FileEntry{
+		Size: 22, MtimeNS: 1_700_000_000_000_000_001, SHA256: testHash("b"),
+		Sequence: 7, Mode: 0o644,
+	})
+
+	peers := map[string]PeerState{
+		"peer1": {
+			LastSeenSequence: 7,
+			LastSentSequence: 7,
+			LastSync:         time.Unix(0, 1_700_000_001_000_000_000).UTC(),
+			LastEpoch:        "deadbeefcafef00d",
+			BaseHashes: map[string]Hash256{
+				"docs/a.txt": testHash("a"),
+				"docs/b.txt": testHash("b"),
+			},
+		},
+		"peer2": {
+			LastSeenSequence: 5,
+			LastSentSequence: 5,
+			LastSync:         time.Unix(0, 1_700_000_002_000_000_000).UTC(),
+			BaseHashes: map[string]Hash256{
+				"docs/a.txt": testHash("a"),
+			},
+		},
+	}
+
+	if err := savePeerSyncOutcome(context.Background(), db, "f", idx, peers); err != nil {
+		t.Fatalf("savePeerSyncOutcome: %v", err)
+	}
+
+	gotIdx, err := loadIndexDB(db, "f")
+	if err != nil {
+		t.Fatalf("loadIndexDB: %v", err)
+	}
+	if gotIdx.Sequence != 7 || gotIdx.Epoch != "deadbeefcafef00d" {
+		t.Errorf("folder_meta wrong after combined write: seq=%d epoch=%q",
+			gotIdx.Sequence, gotIdx.Epoch)
+	}
+	for _, p := range []string{"docs/a.txt", "docs/b.txt"} {
+		if _, ok := gotIdx.Get(p); !ok {
+			t.Errorf("file row %s missing after combined write", p)
+		}
+	}
+
+	gotPeers, err := loadPeerStatesDB(db, "f")
+	if err != nil {
+		t.Fatalf("loadPeerStatesDB: %v", err)
+	}
+	if len(gotPeers) != 2 {
+		t.Errorf("peers count=%d, want 2", len(gotPeers))
+	}
+	if h, ok := gotPeers["peer1"].BaseHashes["docs/a.txt"]; !ok || h != testHash("a") {
+		t.Errorf("peer1.BaseHashes[docs/a.txt] missing or wrong after combined write")
+	}
+}
+
+// TestApplyToTx_RollbackLeavesNothing pins the structural co-tx
+// invariant: applyIndexToTx and applyPeerStatesToTx write through
+// the SAME *sql.Tx, so a rollback discards both halves together. If
+// either helper opened its own connection or its own implicit tx,
+// the rollback would leave the half it wrote behind. Mental
+// mutation: replacing `tx` with `db` on either inner Exec call
+// would make this test fail.
+func TestApplyToTx_RollbackLeavesNothing(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openFolderDB(dir, "ABCDE12345")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Seed a known baseline so we can detect any mutation that
+	// survived the rollback.
+	seedIdx := newFileIndex()
+	seedIdx.Sequence = 1
+	seedIdx.Set("seed.txt", FileEntry{
+		Size: 1, MtimeNS: 1, SHA256: testHash("seed"), Sequence: 1, Mode: 0o644,
+	})
+	seedPeers := map[string]PeerState{
+		"seedpeer": {LastSeenSequence: 1, LastSync: time.Unix(0, 1).UTC()},
+	}
+	if err := savePeerSyncOutcome(context.Background(), db, "f", seedIdx, seedPeers); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Build a new state both halves would change.
+	newIdx := newFileIndex()
+	newIdx.Sequence = 2
+	newIdx.Set("seed.txt", FileEntry{
+		Size: 1, MtimeNS: 1, SHA256: testHash("seed"), Sequence: 1, Mode: 0o644,
+	})
+	newIdx.Set("postroll.txt", FileEntry{
+		Size: 99, MtimeNS: 99, SHA256: testHash("postroll"), Sequence: 2, Mode: 0o644,
+	})
+	newPeers := map[string]PeerState{
+		"postpeer": {LastSeenSequence: 2, LastSync: time.Unix(0, 2).UTC()},
+	}
+
+	// Manually drive both apply* helpers through one tx, then rollback.
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if err := applyIndexToTx(tx, "f", newIdx); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("applyIndexToTx: %v", err)
+	}
+	if err := applyPeerStatesToTx(tx, "f", newPeers); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("applyPeerStatesToTx: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+
+	// Verify the seed survived intact (rollback restored it).
+	gotIdx, err := loadIndexDB(db, "f")
+	if err != nil {
+		t.Fatalf("loadIndexDB: %v", err)
+	}
+	if gotIdx.Sequence != 1 {
+		t.Errorf("Sequence=%d after rollback, want 1 (seed)", gotIdx.Sequence)
+	}
+	if _, ok := gotIdx.Get("postroll.txt"); ok {
+		t.Error("postroll.txt visible after rollback — applyIndexToTx wrote outside the tx")
+	}
+	if _, ok := gotIdx.Get("seed.txt"); !ok {
+		t.Error("seed.txt vanished after rollback — applyIndexToTx mangled the seed")
+	}
+
+	gotPeers, err := loadPeerStatesDB(db, "f")
+	if err != nil {
+		t.Fatalf("loadPeerStatesDB: %v", err)
+	}
+	if _, ok := gotPeers["postpeer"]; ok {
+		t.Error("postpeer visible after rollback — applyPeerStatesToTx wrote outside the tx")
+	}
+	if _, ok := gotPeers["seedpeer"]; !ok {
+		t.Error("seedpeer vanished after rollback — applyPeerStatesToTx mangled the seed")
 	}
 }
 

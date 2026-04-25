@@ -465,6 +465,45 @@ func TestScan_SkipsClaimedPaths(t *testing.T) {
 	}
 }
 
+// TestStartup_RefusesWithoutClaimSkip pins the structural-ordering
+// tripwire from audit §6 commit 5/6 prose: if scanWithStats's
+// in-flight claim skip is reverted (the package-level flag
+// scanClaimSkipWired flips back to false), Start refuses to open any
+// folder rather than silently re-opening Gap 5'. The boolean is the
+// load-bearing primitive; preflightScanClaimSkip is the function
+// Start calls. This test exercises the function directly so the
+// failure mode is provable without spinning up Start's full I/O
+// pipeline.
+//
+// Mental mutation: removing the `if !scanClaimSkipWired` branch
+// would silence the refusal and the assertion below would fail.
+func TestStartup_RefusesWithoutClaimSkip(t *testing.T) {
+	// Cannot use t.Parallel — we mutate a package-level flag.
+	orig := scanClaimSkipWired
+	t.Cleanup(func() { scanClaimSkipWired = orig })
+
+	// Wired (production state): no error.
+	scanClaimSkipWired = true
+	if err := preflightScanClaimSkip(); err != nil {
+		t.Errorf("preflight with flag set returned %v, want nil", err)
+	}
+
+	// Reverted (regression): typed error names the contract.
+	scanClaimSkipWired = false
+	err := preflightScanClaimSkip()
+	if !errors.Is(err, errScanClaimSkipMissing) {
+		t.Fatalf("preflight without flag: err=%v, want errScanClaimSkipMissing", err)
+	}
+	// Audit-citation appears in the message so an operator can find
+	// the contract without grepping the codebase.
+	msg := err.Error()
+	for _, want := range []string{"C6", "Gap 5'", "PERSISTENCE-AUDIT.md", "scanWithStats"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message missing %q anchor:\n  %s", want, msg)
+		}
+	}
+}
+
 // TestPurgeTombstonesReturnsCount pins the count return used by the debug
 // log. A silent drop to void return would blind the telemetry.
 func TestPurgeTombstonesReturnsCount(t *testing.T) {
@@ -1617,9 +1656,13 @@ func TestRetryTracker_MaxCountCap(t *testing.T) {
 
 func TestDiff(t *testing.T) {
 	t.Parallel()
-	// C1: "locally modified" is decided by MtimeNS > lastSyncNS.
-	// lastSyncNS=2000 → b.txt (MtimeNS=1000) is unchanged, c.txt
-	// (MtimeNS=3000) was modified locally after the last sync.
+	// Phase D narrows the no-BaseHash branch: with lastSyncNS > 0 and
+	// no ancestor for a path, the safe call is conflict (the silent-
+	// download behavior was the very gap Phase D closes). Pass a
+	// BaseHashes map covering b.txt with the pre-divergence ancestor
+	// so b.txt still classifies as the audit-intended "only remote
+	// modified → download." c.txt has no ancestor on purpose to pin
+	// the post-first-sync conflict.
 	const lastSyncNS = int64(2000)
 	local := newFileIndex()
 	local.Sequence = 5
@@ -1630,11 +1673,14 @@ func TestDiff(t *testing.T) {
 	remote := newFileIndex()
 	remote.Sequence = 10
 	remote.Set("a.txt", FileEntry{SHA256: testHash("aaa"), Sequence: 6})  // same content
-	remote.Set("b.txt", FileEntry{SHA256: testHash("bbb2"), Sequence: 7}) // remote changed
+	remote.Set("b.txt", FileEntry{SHA256: testHash("bbb2"), Sequence: 7}) // remote changed; ancestor present
 	remote.Set("c.txt", FileEntry{SHA256: testHash("ccc2"), Sequence: 8}) // both changed (conflict)
 	remote.Set("d.txt", FileEntry{SHA256: testHash("ddd"), Sequence: 9})  // new on remote
 
-	actions := local.diff(remote, 4, lastSyncNS, nil, "send-receive")
+	baseHashes := map[string]Hash256{
+		"b.txt": testHash("bbb"), // ancestor matches local → only remote modified
+	}
+	actions := local.diff(remote, 4, lastSyncNS, baseHashes, "send-receive")
 
 	actionMap := make(map[string]DiffAction)
 	for _, a := range actions {
@@ -1645,10 +1691,10 @@ func TestDiff(t *testing.T) {
 		t.Error("a.txt should have no action (same content)")
 	}
 	if actionMap["b.txt"] != ActionDownload {
-		t.Error("b.txt should be download (only remote changed)")
+		t.Error("b.txt should be download (ancestor known, only remote changed)")
 	}
 	if actionMap["c.txt"] != ActionConflict {
-		t.Error("c.txt should be conflict (both changed)")
+		t.Error("c.txt should be conflict (no ancestor + lastSyncNS > 0 — Phase D)")
 	}
 	if actionMap["d.txt"] != ActionDownload {
 		t.Error("d.txt should be download (new on remote)")
@@ -1661,6 +1707,12 @@ func TestDiff(t *testing.T) {
 // counters live on different scales — a high local Sequence simply
 // means our folder has done many operations and says nothing about
 // whether this particular file was touched.
+//
+// Phase D of audit §6 commit 6 narrows the C1 mtime path: the
+// heuristic only applies when lastSyncNS == 0 (first-sync, positive
+// knowledge of no prior sync). With lastSyncNS > 0 and no BaseHash,
+// the safe classification is conflict — see TestDiffC1MtimeVsLastSync_FirstSyncOnly
+// below for the first-sync coverage.
 func TestDiffC1MtimeVsLastSync(t *testing.T) {
 	t.Parallel()
 	const lastSyncNS = int64(5000)
@@ -1676,14 +1728,18 @@ func TestDiffC1MtimeVsLastSync(t *testing.T) {
 		wantSkipped bool
 	}{
 		{
-			// Key regression case: local Sequence (20) > lastSeenSeq (5)
-			// would have been flagged conflict by the prior heuristic.
-			// C1 correctly classifies it as remote-only → download.
-			name:        "remote_only_modified",
+			// Phase D: with lastSyncNS > 0 and no BaseHash for this
+			// path, the classifier no longer trusts the mtime heuristic
+			// to distinguish "remote-only" from "both modified" — the
+			// missing BaseHash could be a stranded crash window from
+			// pre-Phase-C, so the safe call is conflict. (The old
+			// behavior of silently downloading was the very gap
+			// Phase D closes.)
+			name:        "no_basehash_post_first_sync_is_conflict",
 			localMtime:  3000,
 			lastSeenSeq: 5,
 			remoteSeq:   10,
-			want:        ActionDownload,
+			want:        ActionConflict,
 		},
 		{
 			name:        "both_modified",
@@ -1749,6 +1805,243 @@ func TestDiffC1MtimeVsLastSync(t *testing.T) {
 				t.Fatalf("want action %v, got %v", tc.want, actions[0].Action)
 			}
 		})
+	}
+}
+
+// TestDiffC1MtimeVsLastSync_FirstSyncOnly pins audit §6 commit 6
+// phase D: the C1 mtime fallback is reserved for first-sync (positive
+// knowledge of no prior sync, encoded as lastSyncNS == 0). Real
+// filesystems stamp every file with mtime > 0, so first-sync C1
+// produces conflictEntry on every diverged path; the download leg
+// only fires for files somehow stamped before the epoch (degenerate
+// but kept for symmetry with the historical heuristic). This test
+// pins both legs explicitly.
+func TestDiffC1MtimeVsLastSync_FirstSyncOnly(t *testing.T) {
+	t.Parallel()
+	const localSeq = int64(20)
+
+	cases := []struct {
+		name       string
+		localMtime int64
+		want       DiffAction
+	}{
+		{"normal_file_first_sync_conflicts", 3000, ActionConflict},
+		{"epoch_or_earlier_first_sync_downloads", 0, ActionDownload},
+		// negative MtimeNS would also download under the
+		// `lEntry.MtimeNS <= lastSyncNS` predicate; not exercised
+		// because no real filesystem produces it.
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			local := newFileIndex()
+			local.Set("x.txt", FileEntry{
+				SHA256: testHash("local"), Sequence: localSeq,
+				MtimeNS: tc.localMtime, Size: 10,
+			})
+			remote := newFileIndex()
+			remote.Set("x.txt", FileEntry{
+				SHA256: testHash("remote"), Sequence: 10, Size: 10,
+			})
+			actions := local.diff(remote, 0, 0, nil, "send-receive")
+			if len(actions) != 1 {
+				t.Fatalf("want 1 action, got %d: %+v", len(actions), actions)
+			}
+			if actions[0].Action != tc.want {
+				t.Errorf("want %v, got %v", tc.want, actions[0].Action)
+			}
+		})
+	}
+}
+
+// TestCrashBeforeBaseHashCommit_ClassifiesAsConflict pins audit
+// §4.1 H12. Simulates the Gap 2' crash window: a sync started, the
+// in-memory BaseHash got updated for a path, but the persist tx
+// crashed before commit (so disk has the old peer_state + no
+// BaseHash entry, but lastSyncNS is from a PRIOR successful sync >
+// 0). After restart the peer fans out a new edit. The classifier
+// MUST treat this as conflict, not as "only they modified" — Phase
+// D's tightening is the load-bearing piece.
+//
+// Mental mutation: deleting Phase D's `else` branch and falling back
+// to C1 mtime would silently classify this as ActionDownload, which
+// the test catches.
+func TestCrashBeforeBaseHashCommit_ClassifiesAsConflict(t *testing.T) {
+	t.Parallel()
+
+	// Simulate post-restart state: prior sync completed (lastSyncNS > 0)
+	// but BaseHashes is empty (the crash window stranded it).
+	const lastSyncNS = int64(1_700_000_000_000_000_000)
+	const lastSeenSeq = int64(5)
+
+	local := newFileIndex()
+	local.Set("doc.txt", FileEntry{
+		SHA256:   testHash("local-version"),
+		Sequence: 8,
+		MtimeNS:  lastSyncNS - 1000, // local untouched since last sync
+		Size:     12,
+	})
+
+	remote := newFileIndex()
+	remote.Set("doc.txt", FileEntry{
+		SHA256:   testHash("remote-newer"),
+		Sequence: 9,
+		MtimeNS:  lastSyncNS + 1000,
+		Size:     12,
+	})
+
+	// BaseHashes is nil — the crash window. lastSyncNS > 0, lastSeenSeq > 0.
+	actions := local.diff(remote, lastSeenSeq, lastSyncNS, nil, "send-receive")
+	if len(actions) != 1 {
+		t.Fatalf("want 1 action, got %d: %+v", len(actions), actions)
+	}
+	if actions[0].Action != ActionConflict {
+		t.Errorf("crash-window classification: got %v, want ActionConflict (Phase D — never silently overwrite when ancestor knowledge is lost)",
+			actions[0].Action)
+	}
+}
+
+// TestFirstSync_ThreePeers_NoSpuriousConflicts pins the gap surfaced
+// in COMMIT-6-SCOPE.md §3.3 — the audit's §4 plan does not list a
+// fresh-state three-peer round, but Phase D's classifier change
+// makes the no-storm property load-bearing for cold-start composition.
+// Two-round contract:
+//
+//  1. First round (every peer at lastSyncNS == 0 against every other
+//     peer): no spurious .sync-conflict-* and no spurious downloads
+//     for paths that already agree on content. Different content on
+//     the same path DOES conflict (correct; first-sync C1 picks
+//     conflict for any normal-mtime divergence).
+//  2. Second round (every peer now has lastSyncNS > 0 from the
+//     first round and BaseHashes for the agreed paths): a deliberate
+//     conflicting edit on two peers MUST produce a conflict, proving
+//     the gate flipped from "first-sync C1 fallback" to "absent
+//     BaseHash → conflict" for the post-first-sync path.
+func TestFirstSync_ThreePeers_NoSpuriousConflicts(t *testing.T) {
+	t.Parallel()
+
+	// Three peers' indices. shared.txt has identical content on all
+	// three (different mtimes — they each created the same file
+	// independently at roughly the same time). a.txt only on peer A,
+	// b.txt only on peer B, c.txt only on peer C.
+	sharedHash := testHash("shared content")
+	mkPeer := func(uniquePath string, uniqueHash Hash256, sharedMtime int64) *FileIndex {
+		idx := newFileIndex()
+		idx.Sequence = 2
+		idx.Set("shared.txt", FileEntry{
+			SHA256: sharedHash, Sequence: 1, Size: 14, MtimeNS: sharedMtime,
+		})
+		idx.Set(uniquePath, FileEntry{
+			SHA256: uniqueHash, Sequence: 2, Size: 5, MtimeNS: 1000,
+		})
+		return idx
+	}
+	idxA := mkPeer("a.txt", testHash("only-a"), 1000)
+	idxB := mkPeer("b.txt", testHash("only-b"), 2000)
+	idxC := mkPeer("c.txt", testHash("only-c"), 3000)
+
+	// First round: every pair-wise diff is first-sync (lastSyncNS == 0,
+	// lastSeenSeq == 0, BaseHashes nil). Each peer asks: what should
+	// I do about the other peer's view?
+	//
+	// Expected actions per direction:
+	//   - shared.txt: same SHA on both → skip.
+	//   - the other peer's unique path: !localExists → download.
+	//   - our own unique path on the remote view: not present, no action.
+	type direction struct {
+		from, to string
+		local    *FileIndex
+		remote   *FileIndex
+	}
+	directions := []direction{
+		{"A", "B", idxA, idxB},
+		{"A", "C", idxA, idxC},
+		{"B", "A", idxB, idxA},
+		{"B", "C", idxB, idxC},
+		{"C", "A", idxC, idxA},
+		{"C", "B", idxC, idxB},
+	}
+	for _, d := range directions {
+		actions := d.local.diff(d.remote, 0, 0, nil, "send-receive")
+		var conflictPaths []string
+		var downloadPaths []string
+		for _, a := range actions {
+			switch a.Action {
+			case ActionConflict:
+				conflictPaths = append(conflictPaths, a.Path)
+			case ActionDownload:
+				downloadPaths = append(downloadPaths, a.Path)
+			}
+		}
+		if len(conflictPaths) != 0 {
+			t.Errorf("first round %s→%s: spurious conflicts on %v (Phase D first-sync gate must not fire on agreed-content paths)",
+				d.from, d.to, conflictPaths)
+		}
+		// Each pair has exactly one cross-unique download (the remote's unique).
+		if len(downloadPaths) != 1 {
+			t.Errorf("first round %s→%s: want 1 download, got %d: %v",
+				d.from, d.to, len(downloadPaths), downloadPaths)
+		}
+	}
+
+	// Second round: state from the first round is captured. Each peer
+	// now has lastSyncNS > 0 against every other peer AND BaseHashes
+	// entries for the paths that agreed (shared.txt) plus the paths
+	// they downloaded (each peer's unique). For this test we model
+	// peer A's view of peer B after the first round: BaseHashes
+	// includes shared.txt and b.txt (which A downloaded from B).
+	const r1LastSyncNS = int64(1_700_000_000_000_000_000)
+	const r1LastSeenSeq = int64(2)
+	baseHashesAtoB := map[string]Hash256{
+		"shared.txt": sharedHash,
+		"b.txt":      testHash("only-b"),
+	}
+
+	// Peer A's index after round 1: has all three uniques (downloaded
+	// b.txt and c.txt) and shared.
+	idxAfter := newFileIndex()
+	idxAfter.Sequence = 4
+	idxAfter.Set("shared.txt", FileEntry{SHA256: sharedHash, Sequence: 1, Size: 14, MtimeNS: 1000})
+	idxAfter.Set("a.txt", FileEntry{SHA256: testHash("only-a"), Sequence: 2, Size: 5, MtimeNS: 1000})
+	idxAfter.Set("b.txt", FileEntry{SHA256: testHash("only-b"), Sequence: 3, Size: 5, MtimeNS: 1000})
+	idxAfter.Set("c.txt", FileEntry{SHA256: testHash("only-c"), Sequence: 4, Size: 5, MtimeNS: 1000})
+
+	// Peer B's index in round 2: edited shared.txt locally to a new
+	// hash. A's local copy of shared.txt is unchanged from round 1.
+	idxBRound2 := newFileIndex()
+	idxBRound2.Sequence = 5
+	idxBRound2.Set("shared.txt", FileEntry{
+		SHA256: testHash("B-edited-shared"), Sequence: 5, Size: 14, MtimeNS: r1LastSyncNS + 100,
+	})
+
+	// Diff A's view against B's round-2 update. shared.txt is in
+	// BaseHashes with the round-1 value; B's hash differs. Local hash
+	// equals BaseHash → "only remote modified" → download (correct).
+	actions := idxAfter.diff(idxBRound2, r1LastSeenSeq, r1LastSyncNS, baseHashesAtoB, "send-receive")
+	if len(actions) != 1 {
+		t.Fatalf("round 2 with valid BaseHash: want 1 download, got %d: %+v", len(actions), actions)
+	}
+	if actions[0].Action != ActionDownload || actions[0].Path != "shared.txt" {
+		t.Errorf("round 2 with valid BaseHash: want shared.txt download, got %+v", actions[0])
+	}
+
+	// Now the load-bearing assertion: same diff, but BaseHashes is
+	// missing the entry for shared.txt (Gap 2' crash window). Phase D
+	// MUST classify this as conflict, not download.
+	idxAfter2 := idxAfter.clone()
+	idxAfter2.Set("shared.txt", FileEntry{
+		SHA256: testHash("A-locally-edited"), Sequence: 6, Size: 14,
+		MtimeNS: r1LastSyncNS - 100, // local mtime predates lastSync — old C1 would have downloaded
+	})
+	bhMissingShared := map[string]Hash256{"b.txt": testHash("only-b")}
+	actions2 := idxAfter2.diff(idxBRound2, r1LastSeenSeq, r1LastSyncNS, bhMissingShared, "send-receive")
+	if len(actions2) != 1 {
+		t.Fatalf("round 2 with stranded BaseHash: want 1 action, got %d: %+v", len(actions2), actions2)
+	}
+	if actions2[0].Action != ActionConflict {
+		t.Errorf("round 2 with stranded BaseHash for shared.txt: got %v, want ActionConflict (Phase D — must not silently overwrite when ancestor lost post-first-sync)",
+			actions2[0].Action)
 	}
 }
 
@@ -1857,19 +2150,25 @@ func TestDiffC2AncestorClassifier(t *testing.T) {
 			want:       ActionConflict,
 		},
 		{
-			// No ancestor entry for this path: fall back to C1 mtime.
-			// Local mtime predates lastSync → treat as only-remote.
-			name:       "no_ancestor_fallback_download",
+			// Phase D: lastSyncNS > 0 + no BaseHash for this path →
+			// conflict regardless of mtime. The pre-Phase-D behavior
+			// would have downloaded based on local mtime predating
+			// lastSync; Phase D treats the missing BaseHash as a
+			// signal that a crash may have stranded the BaseHash
+			// co-tx, so the safe call is conflict.
+			name:       "no_ancestor_post_first_sync_is_conflict",
 			baseHashes: map[string]Hash256{"other.txt": ancestor},
 			localHash:  localChanged,
 			remoteHash: remoteChanged,
 			localMtime: 3000,
-			want:       ActionDownload,
+			want:       ActionConflict,
 		},
 		{
-			// No ancestor entry for this path: fall back to C1 mtime.
-			// Local mtime postdates lastSync → treat as both-modified.
-			name:       "no_ancestor_fallback_conflict",
+			// No ancestor entry for this path AND lastSyncNS > 0 →
+			// conflict (Phase D — same rule as the case above; the
+			// historical "fallback to C1 mtime" branch is reserved
+			// for first-sync, see TestDiffC1MtimeVsLastSync_FirstSyncOnly).
+			name:       "no_ancestor_post_first_sync_conflict_high_mtime",
 			baseHashes: nil,
 			localHash:  localChanged,
 			remoteHash: remoteChanged,

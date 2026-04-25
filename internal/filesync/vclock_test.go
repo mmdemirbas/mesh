@@ -492,13 +492,15 @@ func TestDiff_VectorClockClassifier(t *testing.T) {
 }
 
 // TestDiff_LegacyFallbackWhenClockMissing pins that an entry without a
-// vector clock on either side falls through to the pre-C6 mtime heuristic
-// so rolling upgrades from pre-C6 indexes keep syncing.
+// vector clock on either side falls through to the pre-C6 mtime
+// heuristic so rolling upgrades from pre-C6 indexes keep syncing.
+// Phase D narrows the no-BaseHash branch (lastSyncNS > 0 + missing
+// ancestor → conflict), so this test now uses a BaseHash that
+// matches the local hash to keep the legacy classifier on the
+// download path: ancestor known, only remote modified → download.
 func TestDiff_LegacyFallbackWhenClockMissing(t *testing.T) {
 	t.Parallel()
 
-	// Local has no clock (legacy); remote has a clock. Mtime says local
-	// predates the last sync → the fallback must classify as Download.
 	local := &FileIndex{files: map[string]FileEntry{
 		"p.txt": {Size: 1, MtimeNS: 1, SHA256: testHash("old-local")},
 	}}
@@ -508,7 +510,8 @@ func TestDiff_LegacyFallbackWhenClockMissing(t *testing.T) {
 			SHA256: testHash("remote-newer"), Version: VectorClock{"PEER": 1},
 		},
 	}}
-	actions := local.diff(remote, 0, 100, nil, "send-receive")
+	baseHashes := map[string]Hash256{"p.txt": testHash("old-local")}
+	actions := local.diff(remote, 0, 100, baseHashes, "send-receive")
 	if len(actions) != 1 || actions[0].Action != ActionDownload {
 		t.Fatalf("legacy fallback did not emit Download: %+v", actions)
 	}

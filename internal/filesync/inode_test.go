@@ -419,14 +419,21 @@ func TestDiffPropagatesPrevPath(t *testing.T) {
 			wantHin: "was.txt",
 		},
 		{
-			name: "mtime-fallback-remote-newer",
+			// Phase D: the C1 mtime fallback only reaches the
+			// download leg in the degenerate `localMtime <= lastSyncNS == 0`
+			// case (files stamped at or before the epoch). To pin the
+			// hint-on-download contract for a realistic state we use
+			// the first-sync degenerate path: lastSyncNS == 0 and
+			// localMtime == 0 → download per the C1 fallback that is
+			// the only path Phase D leaves open without a BaseHash.
+			name: "first_sync_mtime_zero_downloads_with_hint",
 			local: &FileIndex{files: map[string]FileEntry{
-				"f.txt": {Size: 1, SHA256: testHash("l"), MtimeNS: 100, Sequence: 1},
+				"f.txt": {Size: 1, SHA256: testHash("l"), MtimeNS: 0, Sequence: 1},
 			}},
 			remote: &FileIndex{files: map[string]FileEntry{
 				"f.txt": {Size: 1, SHA256: testHash("r"), MtimeNS: 200, Sequence: 6, PrevPath: "earlier.txt"},
 			}},
-			lastSyn: 150, // local mtime 100 <= 150 → download path
+			lastSyn: 0, // first-sync: positive knowledge of no prior sync.
 			wantHin: "earlier.txt",
 		},
 	}

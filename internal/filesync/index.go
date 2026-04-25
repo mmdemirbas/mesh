@@ -434,15 +434,10 @@ type ScanStats struct {
 // scanClaimSkipWired is the structural-ordering invariant promised in
 // PERSISTENCE-AUDIT.md §6 commit 5 / commit 6 prose. It flips to true
 // at the same call site that installs the claimed-path skip in
-// scanWithStats; commit 6's Run startup reads this flag and refuses
-// to open folders if it is still false. The mechanism is intentional:
-// reverting commit 5 alone would silently re-open Gap 5' (a download
-// in flight while a scan re-hashes the same path with local-bumped
-// VectorClock semantics) — the boolean turns the silent regression
-// into a loud startup error. Tests (TestStartup_RefusesWithoutClaimSkip)
-// land with commit 6.
-//
-//lint:ignore U1000 read by commit 6's Run startup; intentional
+// scanWithStats. Start's preflightScanClaimSkip refuses to boot if it
+// is false — the boolean turns a silent revert of commit 5 into a
+// loud startup error rather than a regressed Gap 5' / C6 race.
+// Pinned by TestStartup_RefusesWithoutClaimSkip.
 var scanClaimSkipWired = true
 
 // isRenameHintLikely returns true when an inode-based rename hint has a
@@ -1512,9 +1507,28 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 			continue
 		}
 
-		// No ancestor known. C1 mtime fallback.
-		if lEntry.MtimeNS <= lastSyncNS {
-			actions = append(actions, downloadEntry(path, rEntry))
+		// No ancestor known. Audit §6 commit 6 phase D / INV-4
+		// classifier semantics: the C1 mtime heuristic is only valid
+		// when we have positive knowledge of no prior sync with this
+		// peer (lastSyncNS == 0). When a prior sync DID happen
+		// (lastSyncNS > 0) but the BaseHash for this path is absent,
+		// the only safe classification is conflict — either a crash
+		// stranded the BaseHash co-tx (closed by Phase C and proven
+		// by TestApplyToTx_RollbackLeavesNothing) or a genuine data
+		// hole opened in our ancestor map. Falling back to C1 mtime
+		// in that case can produce a silent overwrite of newer local
+		// content.
+		if lastSyncNS == 0 {
+			// First-sync C1 mtime fallback. For real filesystems
+			// MtimeNS > 0 so this branch overwhelmingly produces
+			// conflictEntry; the download leg covers only files
+			// somehow stamped before the epoch, which is degenerate
+			// but kept for symmetry with the historical heuristic.
+			if lEntry.MtimeNS <= lastSyncNS {
+				actions = append(actions, downloadEntry(path, rEntry))
+			} else {
+				actions = append(actions, conflictEntry(path, rEntry))
+			}
 		} else {
 			actions = append(actions, conflictEntry(path, rEntry))
 		}

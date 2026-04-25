@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"hash/crc32"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -616,7 +619,6 @@ func saveIndex(ctx context.Context, db *sql.DB, folderID string, idx *FileIndex)
 		// db.BeginTx. Production callers always pass fs.writerCtx.
 		ctx = context.Background()
 	}
-	dirty, deleted := idx.DirtyPaths()
 	// Begin a writer tx. With ?_txlock=immediate (D3) this emits
 	// BEGIN IMMEDIATE so we hold the writer lock before any other
 	// connection can claim it. The ctx propagates a folder-level
@@ -630,21 +632,39 @@ func saveIndex(ctx context.Context, db *sql.DB, folderID string, idx *FileIndex)
 			_ = tx.Rollback()
 		}
 	}()
-	// Folder-level scalars always re-written on every persist. They
-	// are tiny (3 rows total) and the cost is amortized.
-	if err = setFolderMeta(tx, "sequence", formatInt64(idx.Sequence)); err != nil {
+	if err = applyIndexToTx(tx, folderID, idx); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit save tx: %w", err)
+	}
+	return nil
+}
+
+// applyIndexToTx writes the dirty/deleted set from idx into the open
+// tx without committing. Extracted from saveIndex (audit §6 commit 6
+// phase C) so savePeerSyncOutcome can ride a single tx with both the
+// file rows and the peer_state / peer_base_hashes rows. Closes the
+// split-write window between saveIndex's commit and the subsequent
+// savePeerStatesDB commit (Gap 2 / Gap 2'): a crash after the index
+// commit but before the peer-state commit could leave fs.peers with
+// stale BaseHashes against a fresh file row, which the Phase D
+// classifier would then read as "unknown ancestor → conflict."
+func applyIndexToTx(tx *sql.Tx, folderID string, idx *FileIndex) error {
+	dirty, deleted := idx.DirtyPaths()
+	if err := setFolderMeta(tx, "sequence", formatInt64(idx.Sequence)); err != nil {
 		return err
 	}
 	if idx.Epoch != "" {
-		if err = setFolderMeta(tx, "epoch", idx.Epoch); err != nil {
+		if err := setFolderMeta(tx, "epoch", idx.Epoch); err != nil {
 			return err
 		}
 	}
-	if err = setFolderMeta(tx, "fs_device_id", formatUint64(idx.DeviceID)); err != nil {
+	if err := setFolderMeta(tx, "fs_device_id", formatUint64(idx.DeviceID)); err != nil {
 		return err
 	}
 	if idx.Path != "" {
-		if err = setFolderMeta(tx, "path", idx.Path); err != nil {
+		if err := setFolderMeta(tx, "path", idx.Path); err != nil {
 			return err
 		}
 	}
@@ -652,7 +672,7 @@ func saveIndex(ctx context.Context, db *sql.DB, folderID string, idx *FileIndex)
 	// commit 7 (β finish) replaces this with a sequence-conditioned
 	// UPSERT that skips writes losing the sequence race.
 	if len(dirty) > 0 {
-		stmt, perr := tx.Prepare(`INSERT INTO files(
+		stmt, err := tx.Prepare(`INSERT INTO files(
 			folder_id, path, size, mtime_ns, hash, deleted, sequence, mode,
 			version, inode, prev_path, hash_state, hashed_bytes, prefix_check
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -664,9 +684,8 @@ func saveIndex(ctx context.Context, db *sql.DB, folderID string, idx *FileIndex)
 			prev_path=excluded.prev_path, hash_state=excluded.hash_state,
 			hashed_bytes=excluded.hashed_bytes,
 			prefix_check=excluded.prefix_check`)
-		if perr != nil {
-			err = fmt.Errorf("prepare file upsert: %w", perr)
-			return err
+		if err != nil {
+			return fmt.Errorf("prepare file upsert: %w", err)
 		}
 		defer stmt.Close()
 		for path := range dirty {
@@ -684,7 +703,7 @@ func saveIndex(ctx context.Context, db *sql.DB, folderID string, idx *FileIndex)
 			if e.PrevPath != "" {
 				prevPath = e.PrevPath
 			}
-			if _, err = stmt.Exec(
+			if _, err := stmt.Exec(
 				folderID, path, e.Size, e.MtimeNS, e.SHA256[:], boolToInt(e.Deleted),
 				e.Sequence, int64(e.Mode), encodeVectorClock(e.Version),
 				inode, prevPath, nullIfEmpty(e.HashState), nullIfZero(e.HashedBytes),
@@ -696,20 +715,16 @@ func saveIndex(ctx context.Context, db *sql.DB, folderID string, idx *FileIndex)
 	}
 	// DELETE rows for hard-removed paths.
 	if len(deleted) > 0 {
-		dstmt, derr := tx.Prepare(`DELETE FROM files WHERE folder_id=? AND path=?`)
-		if derr != nil {
-			err = fmt.Errorf("prepare file delete: %w", derr)
-			return err
+		dstmt, err := tx.Prepare(`DELETE FROM files WHERE folder_id=? AND path=?`)
+		if err != nil {
+			return fmt.Errorf("prepare file delete: %w", err)
 		}
 		defer dstmt.Close()
 		for path := range deleted {
-			if _, err = dstmt.Exec(folderID, path); err != nil {
+			if _, err := dstmt.Exec(folderID, path); err != nil {
 				return fmt.Errorf("delete files[%s]: %w", path, err)
 			}
 		}
-	}
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("commit save tx: %w", err)
 	}
 	return nil
 }
@@ -827,13 +842,29 @@ func savePeerStatesDB(ctx context.Context, db *sql.DB, folderID string, peers ma
 			_ = tx.Rollback()
 		}
 	}()
-	if _, err = tx.Exec(`DELETE FROM peer_state       WHERE folder_id=?`, folderID); err != nil {
+	if err = applyPeerStatesToTx(tx, folderID, peers); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit peer save tx: %w", err)
+	}
+	return nil
+}
+
+// applyPeerStatesToTx writes the full per-peer map into the open tx
+// without committing. peer_state is rewritten in full alongside
+// peer_base_hashes so a crash within the tx leaves either pre-update
+// or post-update rows, never a hybrid (audit INV-4 peer-update
+// bullet, Gap 2 / Gap 2'). Extracted from savePeerStatesDB so
+// savePeerSyncOutcome can wrap both this and applyIndexToTx in a
+// single tx.
+func applyPeerStatesToTx(tx *sql.Tx, folderID string, peers map[string]PeerState) error {
+	if _, err := tx.Exec(`DELETE FROM peer_state       WHERE folder_id=?`, folderID); err != nil {
 		return fmt.Errorf("clear peer_state: %w", err)
 	}
-	if _, err = tx.Exec(`DELETE FROM peer_base_hashes WHERE folder_id=?`, folderID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM peer_base_hashes WHERE folder_id=?`, folderID); err != nil {
 		return fmt.Errorf("clear peer_base_hashes: %w", err)
 	}
-
 	stmt, err := tx.Prepare(`INSERT INTO peer_state(
 		folder_id, peer_id, last_seen_seq, last_sent_seq,
 		last_ancestor_hash, last_error, backoff_until_ns,
@@ -850,9 +881,8 @@ func savePeerStatesDB(ctx context.Context, db *sql.DB, folderID string, peers ma
 		return fmt.Errorf("prepare base-hash insert: %w", err)
 	}
 	defer hashStmt.Close()
-
 	for peer, ps := range peers {
-		if _, err = stmt.Exec(
+		if _, err := stmt.Exec(
 			folderID, peer,
 			ps.LastSeenSequence, ps.LastSentSequence,
 			nil, nil, nil, // last_ancestor_hash/last_error/backoff_until_ns — not
@@ -867,13 +897,52 @@ func savePeerStatesDB(ctx context.Context, db *sql.DB, folderID string, peers ma
 			return fmt.Errorf("insert peer_state[%s]: %w", peer, err)
 		}
 		for path, h := range ps.BaseHashes {
-			if _, err = hashStmt.Exec(folderID, peer, path, h[:]); err != nil {
+			if _, err := hashStmt.Exec(folderID, peer, path, h[:]); err != nil {
 				return fmt.Errorf("insert peer_base_hashes[%s/%s]: %w", peer, path, err)
 			}
 		}
 	}
+	return nil
+}
+
+// savePeerSyncOutcome writes the file-index dirty set AND the
+// per-peer map in ONE BEGIN IMMEDIATE...COMMIT (audit §6 commit 6
+// phase C). Closes Gap 2 / Gap 2': previously persistFolder ran
+// saveIndex and savePeerStatesDB as two separate transactions, so
+// a crash between them could commit a fresh file row while leaving
+// peer_state with stale BaseHashes. The Phase D classifier reads an
+// absent BaseHash on a non-first-sync peer as "unknown ancestor →
+// conflict," so the split-tx window would translate directly into
+// spurious .sync-conflict-* files on the next exchange. Bundling
+// both writes into one tx makes the failure mode atomic: either
+// both halves land or neither does.
+func savePeerSyncOutcome(ctx context.Context, db *sql.DB, folderID string, idx *FileIndex, peers map[string]PeerState) (err error) {
+	if db == nil {
+		return fmt.Errorf("savePeerSyncOutcome: nil db")
+	}
+	if idx == nil {
+		return fmt.Errorf("savePeerSyncOutcome: nil index")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin peer-sync outcome tx: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if err = applyIndexToTx(tx, folderID, idx); err != nil {
+		return err
+	}
+	if err = applyPeerStatesToTx(tx, folderID, peers); err != nil {
+		return err
+	}
 	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("commit peer save tx: %w", err)
+		return fmt.Errorf("commit peer-sync outcome tx: %w", err)
 	}
 	return nil
 }
@@ -981,14 +1050,27 @@ func removedAtNanos(t time.Time) int64 {
 	return t.UnixNano()
 }
 
-// encodeVectorClock packs a VectorClock into a deterministic byte slice:
-// uint16 BE count, then per entry: 10-byte ASCII device_id, uint64 BE
-// counter. Device IDs in v1 are exactly 10 Crockford base32 characters;
-// any other width is a bug.
+// vclockCRCLen is the trailer width on packed VectorClock blobs
+// (audit D7, §6 commit 6 phase A). CRC-32/IEEE — same polynomial as
+// gzip and SQLite's own page checksum, so future operator tools can
+// reuse the standard implementation. Disk-only: the wire form
+// (protobuf Counter messages in pb.IndexExchange) carries no CRC.
+// See COMMIT-6-SCOPE.md §2 for the wire-vs-disk rationale.
+const vclockCRCLen = 4
+
+// encodeVectorClock packs a VectorClock into a deterministic byte
+// slice: uint16 BE count, then per entry: 10-byte ASCII device_id,
+// uint64 BE counter, then a CRC-32 (IEEE polynomial) trailer over
+// all preceding bytes. Device IDs in v1 are exactly 10 Crockford
+// base32 characters; any other width is a bug.
+//
+// The trailer catches torn writes and silent on-disk corruption that
+// PRAGMA quick_check at open does not surface (single-row bit flips
+// inside a btree page). It MUST be appended before any production
+// write path emits the packed form; pre-CRC blobs from earlier
+// commits in the D4 cutover series decode with a one-shot warning
+// (decodeVectorClock) and upgrade on next write.
 func encodeVectorClock(v VectorClock) []byte {
-	if len(v) == 0 {
-		return []byte{0, 0}
-	}
 	keys := make([]string, 0, len(v))
 	for k, val := range v {
 		if val == 0 || len(k) != deviceIDChars {
@@ -997,8 +1079,9 @@ func encodeVectorClock(v VectorClock) []byte {
 		keys = append(keys, k)
 	}
 	sortStrings(keys)
-	out := make([]byte, 2+len(keys)*(deviceIDChars+8))
-	putUint16BE(out[0:2], uint16(len(keys))) //nolint:gosec // len bounded by VectorClock size
+	n := len(keys)
+	out := make([]byte, 2+n*(deviceIDChars+8)+vclockCRCLen)
+	putUint16BE(out[0:2], uint16(n)) //nolint:gosec // len bounded by VectorClock size
 	off := 2
 	for _, k := range keys {
 		copy(out[off:off+deviceIDChars], k)
@@ -1006,21 +1089,57 @@ func encodeVectorClock(v VectorClock) []byte {
 		putUint64BE(out[off:off+8], v[k])
 		off += 8
 	}
+	putUint32BE(out[off:off+vclockCRCLen], crc32.ChecksumIEEE(out[:off]))
 	return out
 }
 
-// decodeVectorClock reverses encodeVectorClock. Malformed or short blobs
-// decode as nil rather than returning an error because the scan path
-// would otherwise refuse to load an entire index for a single bad row.
+// legacyVClockWarned latches true the first time decodeVectorClock
+// accepts a pre-CRC (legacy) blob. Once-per-process: a dev DB
+// carrying many pre-CRC blobs from commits 2-5 produces a single
+// WARN, not one per row, so the operator notices the upgrade is in
+// flight without log spam. atomic.Bool over sync.Once because tests
+// need to reset it (resetLegacyVClockWarned, test-only).
+var legacyVClockWarned atomic.Bool
+
+// resetLegacyVClockWarned is for tests only — the production
+// contract is "warn once for the lifetime of the process."
+func resetLegacyVClockWarned() { legacyVClockWarned.Store(false) }
+
+// decodeVectorClock reverses encodeVectorClock. Returns nil for
+// malformed or short blobs (rather than an error) so a single bad
+// row cannot block loading an entire index. CRC-mismatched blobs
+// also decode as nil — the row's VectorClock becomes "missing,"
+// which the classifier handles as "unknown ancestor → conflict"
+// (Phase D) rather than silently overwriting good local state with
+// corrupted ancestor data.
+//
+// Pre-CRC (legacy) blobs from earlier D4 cutover commits are
+// accepted with a one-shot WARN. The blob upgrades to CRC the next
+// time saveIndex writes the row.
 func decodeVectorClock(data []byte) VectorClock {
 	if len(data) < 2 {
 		return nil
 	}
 	n := int(uint16BE(data[0:2]))
-	if n == 0 {
+	body := 2 + n*(deviceIDChars+8)
+	switch len(data) {
+	case body + vclockCRCLen:
+		// Current format — verify CRC trailer.
+		want := uint32BE(data[body : body+vclockCRCLen])
+		got := crc32.ChecksumIEEE(data[:body])
+		if want != got {
+			return nil
+		}
+	case body:
+		// Legacy format (pre-Phase-A). Accept; emit one-shot WARN
+		// so the operator sees the upgrade is in flight.
+		if legacyVClockWarned.CompareAndSwap(false, true) {
+			slog.Warn("filesync: decoding legacy VectorClock blob without CRC trailer; upgrades to CRC on next write (audit D7)")
+		}
+	default:
 		return nil
 	}
-	if len(data) != 2+n*(deviceIDChars+8) {
+	if n == 0 {
 		return nil
 	}
 	out := make(VectorClock, n)
@@ -1075,7 +1194,18 @@ func putUint64BE(b []byte, v uint64) {
 	}
 }
 
+func putUint32BE(b []byte, v uint32) {
+	b[0] = byte(v >> 24)
+	b[1] = byte(v >> 16)
+	b[2] = byte(v >> 8)
+	b[3] = byte(v)
+}
+
 func uint16BE(b []byte) uint16 { return uint16(b[0])<<8 | uint16(b[1]) }
+
+func uint32BE(b []byte) uint32 {
+	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+}
 
 func uint64BE(b []byte) uint64 {
 	var v uint64

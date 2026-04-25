@@ -616,7 +616,8 @@ they survive a future storage change.
 | L2 clean shutdown | `TestShutdown_ClosesDB` — after `Run` returns, open the DB from a separate handle and confirm it opens cleanly (no residual locks). |
 | INV-3 sequence-guarded write | `TestConcurrentScanDownload_NewerWins` — spawn a download that commits `path=P, seq=105` mid-scan whose pending has `P, seq=102`; assert post-scan SQLite has `seq=105` and pending's stale value is dropped. (H11) |
 | INV-4 BaseHash durability | `TestCrashBeforeBaseHashCommit_ClassifiesAsConflict` — inject commit failure after in-memory BaseHash update; restart; drive another sync; assert path is classified conflict, not "only they modified." (H12) |
-| INV-4 download atomic rollback | `TestDownloadCommitFails_RestoresOriginal` — inject `SQLITE_FULL` after temp→final rename; assert .bak is restored, temp unlinked, metric incremented, no row written. (H13) |
+| INV-4 first-sync gate | `TestFirstSync_ThreePeers_NoSpuriousConflicts` — three-peer fresh-state round; assert zero spurious conflicts on agreed-content paths and zero spurious downloads, then drive a second round with a stranded BaseHash and assert the missing-ancestor path classifies conflict (proves the `last_sync_ns == 0` gate flipped correctly). Closes the COMMIT-6-SCOPE.md §3.3 gap surfaced before commit 6.1 opened. |
+| INV-4 download atomic rollback | `TestDownloadCommitFails_RestoresOriginal` — inject `SQLITE_FULL` after temp→final rename; assert .bak is restored, temp unlinked, metric incremented, no row written. (H13 — lands in commit 6.2) |
 | β reload correctness | `TestScanReloadFromSQLite_StateConsistent` — post-scan, drop in-memory state, reload via SQLite; assert dashboard, peer exchange, next scan all see identical state. (H14) |
 | Two-phase integrity | `TestIntegrityCheck_QuickSyncFullAsync` — corrupt DB after folder open; assert quick_check passed, folder goes live, background integrity_check fails, folder transitions to disabled without taking the node down. (H15) |
 | Shutdown deadline | `TestShutdown_DeadlinePreemptsScanCommit` — start a scan-reset tx (large row count); signal shutdown with 1 s deadline; assert the tx rolls back cleanly, DB is at the last durable state, shutdown completes before deadline × 2. |
@@ -1074,7 +1075,25 @@ consistent — never a "land now, fix later" intermediate state.
    revert blast radius. Test: `TestScan_SkipsClaimedPaths`.
    Closes: C6 (§2.3), Gap 5'.
 6. **Sync-persist on download / rename / delete paths (INV-4) +
-   VectorClock CRC + `.bak` lifecycle.** Three-step atomic
+   VectorClock CRC + `.bak` lifecycle.**
+   *Ships in two git commits — 6.1 (phases A–D, foundational +
+   no write-path changes) and 6.2 (phases E–J, the `.bak`
+   lifecycle and surrounding write-path work). Both close audit
+   rows under the same logical commit 6: 6.1 closes D7, INV-4
+   peer-update bullet, INV-4 classifier semantics, and the
+   structural-ordering tripwire (so commit 5's invariant is
+   load-bearing as soon as the tripwire reads it); 6.2 closes
+   F7, INV-4 non-scan-path bullet, the `claimPath` extension
+   to span SQLite commit, Gap 2/2'/3/4', and iter-4 Z1/Z13.
+   The split is shape-only — no audit row migrates between
+   commits and no logical contract changes; see commit 6.1 git
+   log for the rationale and commit 6.2 for the residue. The
+   structural-ordering tripwire (Phase B) works in 6.1
+   regardless of whether 6.2's `.bak` lifecycle has landed —
+   `scanClaimSkipWired` is set in commit 5 and read by 6.1's
+   `preflightScanClaimSkip`.*
+
+   Three-step atomic
    pattern using `.mesh-bak-<hash>` intermediate for downloads
    (named under the existing temp-sweep prefix so leftover
    `.bak` files cannot accumulate); rename / delete mirror the
