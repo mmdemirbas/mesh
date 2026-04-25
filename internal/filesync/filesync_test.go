@@ -652,6 +652,55 @@ func TestScanReloadFromSQLite_StateConsistent(t *testing.T) {
 // at the top of every scan cycle (the β path the audit closed)
 // would fail this test because the post-scan in-memory pointer
 // would change.
+
+// TestShutdown_TxTimeoutBoundsCommit pins audit §6 commit 8 /
+// Gap 6: a saveIndex call running under a cancelled ctx observes
+// ctx.Done and surfaces context.Canceled rather than wedging on
+// a stuck COMMIT. Without ctx propagation through db.BeginTx the
+// shutdown could hang indefinitely on a filesystem stall.
+//
+// Mental mutation: replacing `db.BeginTx(ctx, nil)` with
+// `db.BeginTx(context.Background(), nil)` would let the call
+// block waiting for the writer slot; this test catches that.
+func TestShutdown_TxTimeoutBoundsCommit(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	db, err := openFolderDB(dir, "ABCDE12345")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	idx := newFileIndex()
+	idx.Sequence = 1
+	idx.Set("doc.txt", FileEntry{Size: 1, MtimeNS: 1, SHA256: testHash("a"), Sequence: 1})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = saveIndex(ctx, db, "f", idx)
+	if err == nil {
+		t.Fatal("saveIndex with cancelled ctx returned nil; expected ctx.Err propagation")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("saveIndex error: got %v, want context.Canceled in chain", err)
+	}
+}
+
+// TestShutdown_TxTimeoutConstant pins the deadline value: must
+// be positive (a zero deadline fires before BeginTx grabs the
+// writer slot, breaking every shutdown persist) and bounded
+// (anything over ~30s would let a stuck shutdown hang CI).
+func TestShutdown_TxTimeoutConstant(t *testing.T) {
+	t.Parallel()
+	if shutdownTxTimeout <= 0 {
+		t.Errorf("shutdownTxTimeout=%v, want positive", shutdownTxTimeout)
+	}
+	if shutdownTxTimeout > 30*time.Second {
+		t.Errorf("shutdownTxTimeout=%v, want <= 30s (operator-visible delay budget)", shutdownTxTimeout)
+	}
+}
+
 func TestHybrid_InMemoryRetainedBetweenScans(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

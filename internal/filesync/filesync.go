@@ -29,6 +29,19 @@ import (
 const (
 	tombstoneMaxAge = 30 * 24 * time.Hour // 30 days
 
+	// shutdownTxTimeout bounds how long the shutdown-time persist
+	// pass waits on a single writer transaction. Audit §6 commit 8
+	// / Gap 6: without a deadline, a stuck COMMIT (filesystem
+	// stall on the WAL fsync, NFS server unreachable, disk
+	// pressure stalling the kernel) would hang the process
+	// indefinitely. 10s is comfortably longer than a healthy
+	// fsync (sub-ms) and short enough that a hung shutdown
+	// surfaces as an operator-visible delay rather than "the
+	// process never exits." The deadline propagates via
+	// db.BeginTx(ctx, ...) so the SQLite driver observes
+	// ctx.Done and rolls back the partial tx cleanly.
+	shutdownTxTimeout = 10 * time.Second
+
 	// tombstoneGCEvery is the scan cadence for the tombstone GC
 	// pass. Audit §6 commit 7 phase D / P6 / decision §5 #15: every
 	// 10th scan, purgeTombstones runs as part of the scan-tail
@@ -1551,8 +1564,20 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 
 	<-ctx.Done()
 
-	// Persist state before exit.
-	n.persistAll()
+	// Audit §6 commit 8 / Gap 6: shutdown gets a bounded deadline.
+	// Without one, a stuck SQLite tx (e.g., a filesystem stall on
+	// the WAL fsync) would hang the process indefinitely. The
+	// folder-level writerCtx derives from the parent ctx and is
+	// already cancelled at this point; we now also re-derive a
+	// shutdown-wide deadline for the per-folder persists below so
+	// over-long transactions observe ctx.Err and roll back rather
+	// than deadlock on COMMIT. 10 seconds is comfortably longer
+	// than a healthy fsync (~ms) and short enough that a hung
+	// shutdown surfaces as an operator-visible delay rather than
+	// "the process never exits."
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTxTimeout)
+	defer cancelShutdown()
+	n.persistAllCtx(shutdownCtx)
 
 	wg.Wait()
 
@@ -1569,6 +1594,14 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	// no goroutine still holds rows. Close the reader before the
 	// writer so any straggling read tx releases its WAL snapshot
 	// before the writer's checkpoint flush.
+	//
+	// Audit §6 commit 8 phase B: PRAGMA optimize on the writer
+	// before close. SQLite recommends running PRAGMA optimize at
+	// shutdown so stale ANALYZE stats from updated tables are
+	// refreshed lazily; the cost is bounded (read-only scan of
+	// dirty tables) and the next folder open starts with fresh
+	// query plans. Errors are logged but never block close — a
+	// stale stat is a perf concern, not a correctness one.
 	for _, fs := range n.folders {
 		if fs.root != nil {
 			_ = fs.root.Close()
@@ -1577,6 +1610,10 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			_ = fs.dbReader.Close()
 		}
 		if fs.db != nil {
+			if _, err := fs.db.Exec("PRAGMA optimize"); err != nil {
+				slog.Debug("PRAGMA optimize at close failed (non-fatal)",
+					"folder", fs.cfg.ID, "error", err)
+			}
 			_ = fs.db.Close()
 		}
 	}
@@ -3162,10 +3199,39 @@ func (n *Node) isPeerConfigured(requestIP string) bool {
 	return false
 }
 
-// persistAll saves all folder indices and peer states to disk (shutdown path).
+// persistAll saves all folder indices and peer states to disk
+// using each folder's writerCtx. Used by hot-path persists where
+// the writer has its own folder-level ctx that disable() can
+// cancel.
 func (n *Node) persistAll() {
 	for id := range n.folders {
 		n.persistFolder(id, true)
+	}
+}
+
+// persistAllCtx is the shutdown-path persist that overrides each
+// folder's writerCtx with a single bounded shutdown deadline
+// (audit §6 commit 8 / Gap 6). Each folder's saveIndex /
+// savePeerSyncOutcome runs under shutdownCtx so a stuck COMMIT
+// trips ctx.Done and rolls back rather than wedging the process.
+// Per-folder failures are logged and the loop continues — every
+// folder gets its persist attempt within the shared deadline.
+func (n *Node) persistAllCtx(shutdownCtx context.Context) {
+	for id, fs := range n.folders {
+		// Swap the folder's writerCtx for the shutdown-wide ctx.
+		// Saved state is restored on exit so post-shutdown
+		// teardown of the folder still observes a sane writerCtx
+		// (the folder is closing anyway, but defensive).
+		fs.indexMu.Lock()
+		origCtx := fs.writerCtx
+		fs.writerCtx = shutdownCtx
+		fs.indexMu.Unlock()
+
+		n.persistFolder(id, true)
+
+		fs.indexMu.Lock()
+		fs.writerCtx = origCtx
+		fs.indexMu.Unlock()
 	}
 }
 
