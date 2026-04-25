@@ -8,6 +8,131 @@ import (
 	"time"
 )
 
+// BenchmarkPersist_168kFiles_3Dirty pins the steady-state cost of
+// the per-path persist contract from commit 2. After the bench
+// seeds 168k rows and clears the dirty set, only 3 rows are
+// re-Set and saveIndex is timed. The audit's §4.4 baseline is
+// ≤50 ms — anything past that is a regression on the dirty-set
+// model that the cutover bench-disqualified at 655 ms full-write.
+//
+// Run with:
+//   go test -run NONE -bench BenchmarkPersist_168kFiles_3Dirty \
+//     -benchtime=1x -count=10 ./internal/filesync/
+func BenchmarkPersist_168kFiles_3Dirty(b *testing.B) {
+	const folderID = "bench-folder"
+	const n = 168_000
+
+	dir := b.TempDir()
+	db, err := openFolderDB(dir, "BENCHDEV01")
+	if err != nil {
+		b.Fatalf("openFolderDB: %v", err)
+	}
+	b.Cleanup(func() { _ = db.Close() })
+
+	idx := newFileIndex()
+	idx.Sequence = int64(n)
+	idx.Epoch = "deadbeefcafef00d"
+	idx.DeviceID = 0x0102030405060708
+	for i := 0; i < n; i++ {
+		_ = idx.Set(syntheticPath(i), FileEntry{
+			Size:     int64(i * 137),
+			MtimeNS:  int64(1_700_000_000_000_000_000) + int64(i)*1_000_000,
+			SHA256:   hash256FromBytes(syntheticHash(i)),
+			Sequence: int64(i + 1),
+			Mode:     0o644,
+			Inode:    uint64(1_000_000 + i),
+			Version: VectorClock{
+				"BENCHDEV01": uint64(i/7 + 1),
+				"PEER000002": uint64(i/11 + 1),
+			},
+		})
+	}
+	idx.recomputeCache()
+
+	if err := saveIndex(context.Background(), db, folderID, idx); err != nil {
+		b.Fatalf("seed saveIndex: %v", err)
+	}
+	idx.ClearDirty()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		// Bump 3 paths' sequences. The dirty-set model UPSERTs
+		// only these 3 rows; folder_meta.sequence is the only
+		// folder-level field touched.
+		idx.Sequence++
+		_ = idx.Set(syntheticPath(0), FileEntry{
+			Size: 1, MtimeNS: 1, SHA256: hash256FromBytes(syntheticHash(0)),
+			Sequence: idx.Sequence, Mode: 0o644,
+		})
+		idx.Sequence++
+		_ = idx.Set(syntheticPath(1), FileEntry{
+			Size: 2, MtimeNS: 2, SHA256: hash256FromBytes(syntheticHash(1)),
+			Sequence: idx.Sequence, Mode: 0o644,
+		})
+		idx.Sequence++
+		_ = idx.Set(syntheticPath(2), FileEntry{
+			Size: 3, MtimeNS: 3, SHA256: hash256FromBytes(syntheticHash(2)),
+			Sequence: idx.Sequence, Mode: 0o644,
+		})
+
+		if err := saveIndex(context.Background(), db, folderID, idx); err != nil {
+			b.Fatalf("saveIndex: %v", err)
+		}
+		idx.ClearDirty()
+	}
+}
+
+// BenchmarkPersist_168kFiles_FullWrite pins the bootstrap cost of
+// writing 168k rows in one tx (every row dirty). Audit §4.4
+// baseline is ≤2 s — bootstrap happens once at folder open after
+// a fresh load from peer, and 2 s is the operator-tolerance
+// budget for that one-shot operation.
+//
+// Run with:
+//   go test -run NONE -bench BenchmarkPersist_168kFiles_FullWrite \
+//     -benchtime=1x -count=5 ./internal/filesync/
+func BenchmarkPersist_168kFiles_FullWrite(b *testing.B) {
+	const folderID = "bench-folder"
+	const n = 168_000
+
+	for i := 0; i < b.N; i++ {
+		dir := b.TempDir()
+		db, err := openFolderDB(dir, "BENCHDEV01")
+		if err != nil {
+			b.Fatalf("openFolderDB: %v", err)
+		}
+
+		idx := newFileIndex()
+		idx.Sequence = int64(n)
+		idx.Epoch = "deadbeefcafef00d"
+		idx.DeviceID = 0x0102030405060708
+		for j := 0; j < n; j++ {
+			_ = idx.Set(syntheticPath(j), FileEntry{
+				Size:     int64(j * 137),
+				MtimeNS:  int64(1_700_000_000_000_000_000) + int64(j)*1_000_000,
+				SHA256:   hash256FromBytes(syntheticHash(j)),
+				Sequence: int64(j + 1),
+				Mode:     0o644,
+				Inode:    uint64(1_000_000 + j),
+				Version: VectorClock{
+					"BENCHDEV01": uint64(j/7 + 1),
+					"PEER000002": uint64(j/11 + 1),
+				},
+			})
+		}
+		idx.recomputeCache()
+
+		b.ResetTimer()
+		if err := saveIndex(context.Background(), db, folderID, idx); err != nil {
+			b.Fatalf("saveIndex: %v", err)
+		}
+		b.StopTimer()
+
+		_ = db.Close()
+	}
+}
+
 // BenchmarkLoadIndex_168kFiles measures the cost of loading a folder
 // index of representative production size (168 000 file entries) from a
 // SQLite database via loadIndexDB. The result gates the β/hybrid
