@@ -164,11 +164,46 @@ func (idx *FileIndex) Has(path string) bool {
 // Len returns the total number of entries (including tombstones).
 func (idx *FileIndex) Len() int { return len(idx.files) }
 
-// Set installs entry at path, maintains the cached counters, appends to
-// the secondary sequence index, and marks the path dirty for the next
-// persist. The previous behavior of `setEntry` is preserved exactly;
-// the dirty-set bookkeeping is the new piece.
-func (idx *FileIndex) Set(path string, entry FileEntry) {
+// maxDirtySetSize caps the in-memory dirty set so a runaway scan or
+// a malformed remote payload cannot push the writer tx into an
+// out-of-memory state mid-COMMIT. Audit §6 commit 7 phase C / R9 /
+// iter-4 Z9: the cap is checked atomically inside Set so overflow
+// returns errDirtySetOverflow BEFORE saveIndex opens BEGIN IMMEDIATE
+// — without this, an overflowing dirty set would still open the
+// writer lock, allocate the per-row UPSERT slabs, and only then
+// fail, leaving the connection wedged on a partially-built tx that
+// disable() has to reach in via writerCancel.
+//
+// Sized at 1.5× the production scan cap (defaultMaxIndexFiles is
+// 1_000_000) so legitimate scans on huge folders never trip it; only
+// genuinely pathological mutation rates surface as the disabled
+// reason `dirty_set_overflow`.
+const maxDirtySetSize = 1_500_000
+
+// errDirtySetOverflow is returned by Set when adding a NEW path
+// would push the dirty set past maxDirtySetSize. Audit §6 commit 7
+// phase C / R9. Adding a path that is already dirty does NOT count
+// against the cap — the rewrite is in-place.
+var errDirtySetOverflow = fmt.Errorf("filesync: dirty-set overflow (cap %d); transition folder to disabled with reason %q", maxDirtySetSize, DisabledDirtySetOverflow)
+
+// Set installs entry at path, maintains the cached counters, and
+// marks the path dirty for the next persist. Returns
+// errDirtySetOverflow when adding a NEW path would exceed
+// maxDirtySetSize; the index is left untouched in that case so the
+// caller can transition the folder to FolderDisabled
+// (DisabledDirtySetOverflow) and surface a runbook §4.7 link to
+// the operator. Audit §6 commit 7 phase C / R9 / iter-4 Z9: the
+// check fires here, NOT in saveIndex, so the writer tx never opens
+// in an over-capacity state.
+//
+// Replacing an already-dirty path is a no-op for the cap (the
+// rewrite is in place, no new entry added).
+func (idx *FileIndex) Set(path string, entry FileEntry) error {
+	if _, alreadyDirty := idx.dirty[path]; !alreadyDirty {
+		if len(idx.dirty) >= maxDirtySetSize {
+			return errDirtySetOverflow
+		}
+	}
 	old, exists := idx.files[path]
 	if exists && !old.Deleted {
 		idx.cachedCount--
@@ -190,6 +225,7 @@ func (idx *FileIndex) Set(path string, entry FileEntry) {
 	// reinstating it, clear the deleted marker — the row will be UPSERTed,
 	// not DELETEd.
 	delete(idx.deleted, path)
+	return nil
 }
 
 // Delete removes path entirely from the index. This is the hard-remove
@@ -909,7 +945,14 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 					dirty = true
 				}
 				if dirty {
-					idx.Set(wf.rel, existing)
+					if setErr := idx.Set(wf.rel, existing); setErr != nil {
+						// R9 cap fired on the fast path. Record and stop
+						// the loop; scan caller transitions to
+						// FolderDisabled(dirty_set_overflow).
+						err = setErr
+						capExceeded = true
+						break
+					}
 				}
 				stats.FastPathHits++
 				continue
@@ -999,7 +1042,10 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			}
 			// R1 Phase 2: single-use rename hint cleared on re-seen entry.
 			entry.PrevPath = ""
-			idx.Set(p.rel, entry)
+			if setErr := idx.Set(p.rel, entry); setErr != nil {
+				err = setErr
+				break
+			}
 			continue
 		}
 
@@ -1011,7 +1057,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		if idx.selfID != "" {
 			version = p.old.Version.bump(idx.selfID)
 		}
-		idx.Set(p.rel, FileEntry{
+		if setErr := idx.Set(p.rel, FileEntry{
 			Size:        p.size,
 			MtimeNS:     p.mtimeNS,
 			SHA256:      r.hash,
@@ -1022,7 +1068,10 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			HashState:   r.hashState,
 			HashedBytes: p.size,
 			PrefixCheck: r.prefixCheck,
-		})
+		}); setErr != nil {
+			err = setErr
+			break
+		}
 		changed = true
 	}
 	stats.HashDuration = time.Since(hashDrainStart)
@@ -1156,7 +1205,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 							if newEntry, ok := idx.Get(newRel); ok {
 								if isRenameHintLikely(entry.Size, newEntry.Size) {
 									newEntry.PrevPath = rel
-									idx.Set(newRel, newEntry)
+									_ = idx.Set(newRel, newEntry)
 									stats.RenamesDetected++
 								} else {
 									stats.RenameHintsSkipped++
@@ -1172,7 +1221,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 					if idx.selfID != "" {
 						entry.Version = entry.Version.bump(idx.selfID)
 					}
-					idx.Set(rel, entry)
+					_ = idx.Set(rel, entry)
 					changed = true
 					stats.Deletions++
 				}

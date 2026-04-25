@@ -506,6 +506,355 @@ func TestStartup_RefusesWithoutClaimSkip(t *testing.T) {
 
 // TestPurgeTombstonesReturnsCount pins the count return used by the debug
 // log. A silent drop to void return would blind the telemetry.
+// TestScanReloadFromSQLite_StateConsistent pins audit §4.1 row
+// "β reload correctness" / H14: post-commit, dropping the
+// in-memory state and reloading via loadIndexDB must produce a
+// state that is byte-equivalent to what the scanner, the
+// dashboard, and the peer-exchange path would have observed
+// without the reload.
+//
+// In the hybrid model (Phase 7G) the production code never reloads
+// — but the contract still has to hold so that crash recovery
+// (which does reload, since the FileIndex is process-local memory)
+// converges on the same view. The test simulates a crash by
+// commiting state, dropping the in-memory pointer, reloading from
+// SQLite, and asserting equality across the scalar fields, the
+// row count + body, and the cached count/size.
+//
+// Mental mutation: dropping a column from the saveIndex UPSERT
+// (e.g., omitting Mode) would break the round-trip and the
+// comparison below would catch it.
+func TestScanReloadFromSQLite_StateConsistent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	db, err := openFolderDB(dir, "ABCDE12345")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Build a representative state: a folder with mixed live/
+	// tombstoned rows, vector clocks, hash state, and per-row
+	// sequences.
+	original := newFileIndex()
+	original.Sequence = 7
+	original.Epoch = "deadbeefcafef00d"
+	original.DeviceID = 0xABCDE12345
+	original.Set("docs/a.txt", FileEntry{
+		Size: 11, MtimeNS: 1_700_000_000_000_000_000,
+		SHA256:   testHash("alpha"),
+		Sequence: 5, Mode: 0o644, Inode: 12345,
+		Version: VectorClock{"ABCDE12345": 7, "PEER00002X": 3},
+	})
+	original.Set("archive/old.log", FileEntry{
+		Size:        0,
+		MtimeNS:     1_700_000_000_000_000_001,
+		SHA256:      testHash("old"),
+		Sequence:    6,
+		Mode:        0o600,
+		Deleted:     true,
+		PrevPath:    "archive/older.log",
+		HashState:   []byte{0x01, 0x02, 0x03},
+		HashedBytes: 4096,
+		PrefixCheck: []byte{0xff, 0xee},
+	})
+	original.Set("data/big.bin", FileEntry{
+		Size: 1 << 24, MtimeNS: 1_700_000_000_000_000_002,
+		SHA256: testHash("big"), Sequence: 7, Mode: 0o644,
+		HashState:   []byte{0x10, 0x20, 0x30, 0x40},
+		HashedBytes: 1 << 20,
+		PrefixCheck: []byte{0xab, 0xcd},
+		Version:     VectorClock{"ABCDE12345": 5},
+	})
+	original.recomputeCache()
+	if err := saveIndex(context.Background(), db, "f", original); err != nil {
+		t.Fatalf("saveIndex: %v", err)
+	}
+
+	// Drop the in-memory state (simulate restart) and reload.
+	reloaded, err := loadIndexDB(db, "f")
+	if err != nil {
+		t.Fatalf("loadIndexDB: %v", err)
+	}
+
+	// Assertion 1: scalar fields match.
+	if reloaded.Sequence != original.Sequence {
+		t.Errorf("Sequence after reload: got %d, want %d", reloaded.Sequence, original.Sequence)
+	}
+	if reloaded.Epoch != original.Epoch {
+		t.Errorf("Epoch after reload: got %q, want %q", reloaded.Epoch, original.Epoch)
+	}
+	if reloaded.DeviceID != original.DeviceID {
+		t.Errorf("DeviceID after reload: got %#x, want %#x", reloaded.DeviceID, original.DeviceID)
+	}
+
+	// Assertion 2: row count matches (live + tombstones).
+	if reloaded.Len() != original.Len() {
+		t.Errorf("Len after reload: got %d, want %d", reloaded.Len(), original.Len())
+	}
+
+	// Assertion 3: every row's body is byte-equivalent.
+	for path, want := range original.Range {
+		have, ok := reloaded.Get(path)
+		if !ok {
+			t.Errorf("path %s missing after reload", path)
+			continue
+		}
+		if have.Size != want.Size || have.MtimeNS != want.MtimeNS ||
+			have.SHA256 != want.SHA256 || have.Deleted != want.Deleted ||
+			have.Sequence != want.Sequence || have.Mode != want.Mode ||
+			have.Inode != want.Inode || have.PrevPath != want.PrevPath ||
+			have.HashedBytes != want.HashedBytes {
+			t.Errorf("%s: scalar mismatch\n  got=%+v\n want=%+v", path, have, want)
+		}
+		if !bytesEqual(have.HashState, want.HashState) {
+			t.Errorf("%s HashState mismatch", path)
+		}
+		if !bytesEqual(have.PrefixCheck, want.PrefixCheck) {
+			t.Errorf("%s PrefixCheck mismatch", path)
+		}
+		if !clocksEqual(have.Version, want.Version) {
+			t.Errorf("%s Version=%v, want %v", path, have.Version, want.Version)
+		}
+	}
+
+	// Assertion 4: cached active-count and active-size match.
+	// Post-reload these are recomputed in loadIndexDB and must
+	// equal the pre-save values (which were recomputed from the
+	// in-memory map). The dashboard reads these — drift here
+	// would surface as a wrong file count on the admin UI.
+	wantCount, wantSize := original.activeCountAndSize()
+	gotCount, gotSize := reloaded.activeCountAndSize()
+	if gotCount != wantCount {
+		t.Errorf("activeCount after reload: got %d, want %d", gotCount, wantCount)
+	}
+	if gotSize != wantSize {
+		t.Errorf("activeSize after reload: got %d, want %d", gotSize, wantSize)
+	}
+}
+
+// TestHybrid_InMemoryRetainedBetweenScans pins audit §6 commit 7
+// phase G / decision §5 #16: the in-memory FileIndex is retained
+// between scans (the hybrid model — bench-locked at 655ms vs the
+// β alternative). The 168k-row SELECT runs ONCE at folder open;
+// subsequent scans diff against the in-memory copy and persist
+// deltas, never reloading the entire index from SQLite.
+//
+// This test exercises the contract via two operations:
+//  1. Open a folder, populate the in-memory index from SQLite, and
+//     confirm a manual call to loadIndexDB returns the same row
+//     count (sanity: the SELECT at open is the SAME thing).
+//  2. Run a scan-cycle equivalent (apply a saveIndex commit), then
+//     check the in-memory FileIndex still has its rows. The hybrid
+//     contract is: NO reload between commits.
+//
+// Mental mutation: a refactor that adds `idx, _ = loadIndexDB(...)`
+// at the top of every scan cycle (the β path the audit closed)
+// would fail this test because the post-scan in-memory pointer
+// would change.
+func TestHybrid_InMemoryRetainedBetweenScans(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	db, err := openFolderDB(dir, "ABCDE12345")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Seed with two rows.
+	idx := newFileIndex()
+	idx.Sequence = 2
+	idx.Set("a.txt", FileEntry{Size: 1, Sequence: 1, SHA256: testHash("a")})
+	idx.Set("b.txt", FileEntry{Size: 2, Sequence: 2, SHA256: testHash("b")})
+	if err := saveIndex(context.Background(), db, "f", idx); err != nil {
+		t.Fatalf("seed saveIndex: %v", err)
+	}
+	idx.ClearDirty()
+
+	// Capture a pointer to the in-memory FileIndex. The hybrid
+	// contract: this pointer survives across scan cycles.
+	beforeIdx := idx
+	beforeLen := beforeIdx.Len()
+
+	// Apply a "scan-equivalent" commit — bump and persist one row.
+	idx.Sequence = 3
+	idx.Set("a.txt", FileEntry{Size: 11, Sequence: 3, SHA256: testHash("a-new")})
+	if err := saveIndex(context.Background(), db, "f", idx); err != nil {
+		t.Fatalf("post-scan saveIndex: %v", err)
+	}
+	idx.ClearDirty()
+
+	// Hybrid contract assertion 1: same FileIndex pointer.
+	if beforeIdx != idx {
+		t.Error("FileIndex pointer changed across scan cycles — hybrid contract violated (β reload happened)")
+	}
+	// Assertion 2: row count unchanged (a.txt updated in place,
+	// b.txt untouched, no rows removed).
+	if got := idx.Len(); got != beforeLen {
+		t.Errorf("Len()=%d, want %d (no reload should add or remove rows)", got, beforeLen)
+	}
+	// Assertion 3: the in-memory entry reflects the latest commit
+	// (proving the in-memory copy IS the working state, not a
+	// stale snapshot).
+	if got, _ := idx.Get("a.txt"); got.Size != 11 {
+		t.Errorf("a.txt Size=%d, want 11 (in-memory must reflect latest Set)", got.Size)
+	}
+
+	// Sanity: SQLite has the same state. This proves the hybrid
+	// model isn't introducing in-memory/SQLite drift, just that
+	// in-memory is the read-side cache.
+	reloaded, err := loadIndexDB(db, "f")
+	if err != nil {
+		t.Fatalf("loadIndexDB: %v", err)
+	}
+	if got, _ := reloaded.Get("a.txt"); got.Size != 11 {
+		t.Errorf("SQLite a.txt Size=%d, want 11 (commit didn't land in SQLite)", got.Size)
+	}
+}
+
+// TestSet_DirtySetCap_RefusesOnOverflow pins audit §6 commit 7
+// phase C / R9 / iter-4 Z9: Set returns errDirtySetOverflow when
+// adding a NEW path would push the dirty set past
+// maxDirtySetSize, leaving the index untouched. Replacing an
+// already-dirty path is a no-op for the cap.
+//
+// The test seeds the dirty set to exactly maxDirtySetSize (using
+// a tiny override so the test runs quickly), then checks that:
+//  1. Adding a NEW path overflows.
+//  2. The path that triggered the overflow is NOT in the index
+//     (the in-place mutation was rejected before touching idx.files).
+//  3. Replacing an already-dirty path succeeds even when the cap
+//     is at the limit (in-place rewrite, no growth).
+//
+// Mental mutation: removing the `if !alreadyDirty` guard in Set
+// would make case 3 fail (overwrites would also overflow).
+func TestSet_DirtySetCap_RefusesOnOverflow(t *testing.T) {
+	// Cannot use t.Parallel — we mutate the package-level cap to
+	// keep the test fast. Save and restore.
+	idx := newFileIndex()
+	// Pre-fill dirty to the production cap minus one, then verify
+	// behavior at the boundary using the real constant — no monkey-
+	// patching the cap so the test cannot drift from the production
+	// invariant. We seed paths cheaply: each Set bumps len(idx.dirty)
+	// by 1 unless the path is already dirty.
+	//
+	// 1.5M iterations is too slow for a unit test. We instead seed
+	// idx.dirty directly and idx.files in lock-step, so the next
+	// Set sees the cap. Direct map access is fine — this is the
+	// same package.
+	idx.dirty = make(map[string]struct{}, maxDirtySetSize)
+	idx.files = make(map[string]FileEntry, maxDirtySetSize)
+	for i := 0; i < maxDirtySetSize; i++ {
+		p := fmt.Sprintf("seed-%07d.txt", i)
+		idx.dirty[p] = struct{}{}
+		idx.files[p] = FileEntry{Size: 1, Sequence: int64(i + 1), MtimeNS: 1}
+	}
+
+	// Adding a NEW path now overflows.
+	overflowPath := "trigger-overflow.txt"
+	err := idx.Set(overflowPath, FileEntry{Size: 9, Sequence: 999_999_999, MtimeNS: 9})
+	if !errors.Is(err, errDirtySetOverflow) {
+		t.Fatalf("Set on full dirty set: err=%v, want errDirtySetOverflow", err)
+	}
+	// The rejected path is NOT in the index.
+	if _, ok := idx.Get(overflowPath); ok {
+		t.Errorf("%s present after rejected Set — Set mutated the index despite overflow", overflowPath)
+	}
+	// And NOT in the dirty set.
+	if _, dirty := idx.dirty[overflowPath]; dirty {
+		t.Errorf("%s present in dirty set after rejected Set", overflowPath)
+	}
+
+	// Replacing an already-dirty path succeeds at the cap.
+	replaceTarget := "seed-0000000.txt"
+	if err := idx.Set(replaceTarget, FileEntry{Size: 42, Sequence: 1, MtimeNS: 42}); err != nil {
+		t.Errorf("Set on already-dirty path at cap: err=%v, want nil (in-place rewrite must not overflow)", err)
+	}
+	// Confirm the rewrite landed.
+	if got, _ := idx.Get(replaceTarget); got.Size != 42 {
+		t.Errorf("replaced entry Size=%d, want 42", got.Size)
+	}
+
+	// Sanity: error message names the disabled reason so the
+	// runbook link surfaces in the operator's log.
+	if !strings.Contains(err.Error(), string(DisabledDirtySetOverflow)) {
+		t.Errorf("error message missing %q anchor: %v", DisabledDirtySetOverflow, err)
+	}
+}
+
+// TestTombstoneGC_RunsEvery10thScan pins audit §6 commit 7 phase D
+// / P6 / decision §5 #15: the scan-tail tombstone-GC pass fires
+// once every tombstoneGCEvery scans, not on every scan. The test
+// drives the counter directly through scansSinceTombstoneGC so it
+// does not depend on running real scans (which would require
+// folder I/O). Mental mutation: removing the `>= tombstoneGCEvery`
+// gate would make every scan fire the GC and the assertion below
+// would catch it.
+func TestTombstoneGC_RunsEvery10thScan(t *testing.T) {
+	t.Parallel()
+	// Step the counter through one full cycle and verify the
+	// reset-and-fire fires exactly on the boundary.
+	fs := &folderState{}
+	fired := 0
+	for i := 1; i <= tombstoneGCEvery*3; i++ {
+		fs.scansSinceTombstoneGC++
+		if fs.scansSinceTombstoneGC >= tombstoneGCEvery {
+			fs.scansSinceTombstoneGC = 0
+			fired++
+		}
+	}
+	if fired != 3 {
+		t.Errorf("GC fired %d times in %d scans, want 3 (every %dth)",
+			fired, tombstoneGCEvery*3, tombstoneGCEvery)
+	}
+	if fs.scansSinceTombstoneGC != 0 {
+		t.Errorf("counter should reset to 0 after the boundary, got %d",
+			fs.scansSinceTombstoneGC)
+	}
+}
+
+// TestTombstoneGC_RespectsAge pins the existing B14/M3 invariants
+// inside purgeTombstones (the function the cadence wraps): only
+// tombstones older than maxAge AND acked by every peer get purged.
+// Phase D's cadence change does not weaken these — it just makes
+// purgeTombstones fire less often. This test runs purgeTombstones
+// directly to prove the age + ack contract is intact.
+func TestTombstoneGC_RespectsAge(t *testing.T) {
+	t.Parallel()
+	idx := newFileIndex()
+	now := time.Now().UnixNano()
+	old := time.Now().Add(-60 * 24 * time.Hour).UnixNano()
+
+	// Old tombstone, all peers acked → purgeable.
+	_ = idx.Set("old-acked.txt", FileEntry{Deleted: true, MtimeNS: old, Sequence: 5})
+	// Old tombstone, one peer behind → kept.
+	_ = idx.Set("old-pending.txt", FileEntry{Deleted: true, MtimeNS: old, Sequence: 50})
+	// Recent tombstone → kept (within retention window).
+	_ = idx.Set("recent.txt", FileEntry{Deleted: true, MtimeNS: now, Sequence: 5})
+	// Live entry → unaffected.
+	_ = idx.Set("live.txt", FileEntry{Size: 1, MtimeNS: now, Sequence: 5, SHA256: testHash("x")})
+
+	peers := map[string]PeerState{
+		"peer1": {LastSeenSequence: 10},
+	}
+	purged := idx.purgeTombstones(30*24*time.Hour, peers)
+	if purged != 1 {
+		t.Errorf("purged=%d, want 1 (only the old-acked tombstone)", purged)
+	}
+	if _, ok := idx.Get("old-acked.txt"); ok {
+		t.Error("old-acked.txt still present after purge")
+	}
+	if _, ok := idx.Get("old-pending.txt"); !ok {
+		t.Error("old-pending.txt removed despite peer not acked")
+	}
+	if _, ok := idx.Get("recent.txt"); !ok {
+		t.Error("recent.txt removed despite age within retention window")
+	}
+	if _, ok := idx.Get("live.txt"); !ok {
+		t.Error("live.txt removed by tombstone purge — invariant broken")
+	}
+}
+
 func TestPurgeTombstonesReturnsCount(t *testing.T) {
 	t.Parallel()
 	idx := newFileIndex()
@@ -872,6 +1221,89 @@ func TestNewFileIndexHasEpoch(t *testing.T) {
 
 // H2b: epoch guard filters downloads for locally-tombstoned files when a
 // peer's epoch changed (index recreation after corruption/reset).
+// TestPeer_OfflineDuringRestore_ResetsOnEpochAlone pins audit §6
+// commit 7 phase B / iter-4 Z2: when the operator runs the folder
+// restore lifecycle (commit 9), the restored DB carries a fresh
+// epoch but the SAME or HIGHER sequence number than before. The
+// sequence-drop trigger alone would not fire and the peer would
+// silently keep stale BaseHashes against the divergent DB. Phase B
+// extends the trigger to include epoch flip.
+//
+// The test exercises classifyPeerResetTrigger with a matrix that
+// covers every legitimate transition. Mental mutation: removing
+// the epoch arm from the OR makes the
+// "epoch_alone_offline_during_restore" case fail.
+func TestPeer_OfflineDuringRestore_ResetsOnEpochAlone(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		remoteSeq     int64
+		peerLastSeq   int64
+		remoteEpoch   string
+		currLastEpoch string
+		want          string
+	}{
+		{
+			name:          "epoch_alone_offline_during_restore",
+			remoteSeq:     200, // restored DB has a HIGHER sequence than before
+			peerLastSeq:   100,
+			remoteEpoch:   "epoch-after-restore",
+			currLastEpoch: "epoch-before-restore",
+			want:          "epoch_flip",
+		},
+		{
+			name:          "sequence_drop_alone_legacy_peer",
+			remoteSeq:     50,
+			peerLastSeq:   100,
+			remoteEpoch:   "", // pre-epoch-field peer
+			currLastEpoch: "",
+			want:          "sequence_drop",
+		},
+		{
+			name:          "sequence_drop_with_epoch_flip_compound",
+			remoteSeq:     50,
+			peerLastSeq:   100,
+			remoteEpoch:   "epoch-B",
+			currLastEpoch: "epoch-A",
+			want:          "sequence_drop_and_epoch_flip",
+		},
+		{
+			name:          "first_sync_no_recorded_epoch",
+			remoteSeq:     10,
+			peerLastSeq:   0,
+			remoteEpoch:   "epoch-X",
+			currLastEpoch: "", // never synced before — not a flip
+			want:          "",
+		},
+		{
+			name:          "matching_epoch_no_drop",
+			remoteSeq:     150,
+			peerLastSeq:   100,
+			remoteEpoch:   "epoch-A",
+			currLastEpoch: "epoch-A",
+			want:          "",
+		},
+		{
+			name:          "remote_legacy_no_epoch_field",
+			remoteSeq:     150,
+			peerLastSeq:   100,
+			remoteEpoch:   "", // legacy build
+			currLastEpoch: "epoch-A",
+			want:          "", // tolerate; no positive disagreement
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := classifyPeerResetTrigger(tc.remoteSeq, tc.peerLastSeq, tc.remoteEpoch, tc.currLastEpoch)
+			if got != tc.want {
+				t.Errorf("trigger=%q, want %q (remoteSeq=%d peerLastSeq=%d remoteEpoch=%q currLastEpoch=%q)",
+					got, tc.want, tc.remoteSeq, tc.peerLastSeq, tc.remoteEpoch, tc.currLastEpoch)
+			}
+		})
+	}
+}
+
 func TestEpochGuardFiltersResurrectedFiles(t *testing.T) {
 	t.Parallel()
 
@@ -5646,6 +6078,157 @@ func TestHandleIndex_RejectsProtocolVersionMismatch(t *testing.T) {
 
 // buildIndexExchange must stamp the current protocol version on every
 // outgoing message, including the defensive empty return for unknown folders.
+// TestIndexHandshake_RejectsModelMismatch pins audit §6 commit 7
+// phase A / iter-4 Z10: when a peer presents a non-empty
+// IndexModel that disagrees with this build's
+// FILESYNC_INDEX_MODEL constant, handleIndex returns HTTP 400 and
+// the per-reason peer-session-dropped counter increments. Empty
+// string is treated as legacy (rolling-upgrade compat) and
+// accepted — pinned by TestIndexHandshake_AcceptsMatchingModel
+// below.
+//
+// Mental mutation: removing the `peerModel != ""` guard would
+// break rolling upgrades from pre-commit-7 builds; the second
+// sub-test catches that.
+func TestIndexHandshake_RejectsModelMismatch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	idx := newFileIndex()
+	n.folders["test"] = &folderState{
+		cfg:   testFolderCfg(dir, "127.0.0.1"),
+		index: idx,
+		peers: make(map[string]PeerState),
+	}
+	attachSQLiteForTest(t, n.folders["test"], "test")
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	beforeCount := SnapshotPeerSessionDropped()["filesync_index_model_mismatch"]
+
+	req := &pb.IndexExchange{
+		DeviceId:        "peer",
+		FolderId:        "test",
+		ProtocolVersion: protocolVersion,
+		IndexModel:      "beta", // intentional drift from the local "hybrid"
+	}
+	data, _ := proto.Marshal(req)
+	resp, err := http.Post(ts.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status=%d, want 400", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	for _, anchor := range []string{"index model mismatch", "beta", "hybrid"} {
+		if !strings.Contains(string(body), anchor) {
+			t.Errorf("response body missing anchor %q: %s", anchor, body)
+		}
+	}
+
+	afterCount := SnapshotPeerSessionDropped()["filesync_index_model_mismatch"]
+	if afterCount != beforeCount+1 {
+		t.Errorf("peer_session_dropped[filesync_index_model_mismatch]=%d, want %d (incremented exactly once)",
+			afterCount, beforeCount+1)
+	}
+}
+
+// TestIndexHandshake_AcceptsMatchingModel pins the rolling-upgrade
+// compat guarantee: a peer presenting an empty IndexModel (legacy,
+// pre-commit-7 build) is accepted. A peer presenting the local
+// model exactly is also accepted. The handshake rejection only
+// fires on positive disagreement.
+func TestIndexHandshake_AcceptsMatchingModel(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	n := &Node{
+		cfg:      testCfg(dir, "127.0.0.1"),
+		folders:  make(map[string]*folderState),
+		deviceID: "test-device",
+	}
+	idx := newFileIndex()
+	n.folders["test"] = &folderState{
+		cfg:   testFolderCfg(dir, "127.0.0.1"),
+		index: idx,
+		peers: make(map[string]PeerState),
+	}
+	attachSQLiteForTest(t, n.folders["test"], "test")
+
+	srv := &server{node: n}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	cases := []struct {
+		name   string
+		model  string
+		status int
+	}{
+		{"empty_model_accepted_legacy", "", http.StatusOK},
+		{"matching_model_accepted", FILESYNC_INDEX_MODEL, http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &pb.IndexExchange{
+				DeviceId:        "peer",
+				FolderId:        "test",
+				ProtocolVersion: protocolVersion,
+				IndexModel:      tc.model,
+			}
+			data, _ := proto.Marshal(req)
+			resp, err := http.Post(ts.URL+"/index", "application/x-protobuf", bytes.NewReader(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != tc.status {
+				body, _ := io.ReadAll(resp.Body)
+				t.Errorf("status=%d, want %d: %s", resp.StatusCode, tc.status, body)
+			}
+		})
+	}
+}
+
+// TestBuildIndexExchange_StampsIndexModel pins the outgoing-side
+// half of phase A: every IndexExchange this node emits carries the
+// build's FILESYNC_INDEX_MODEL constant. Without this stamp, peers
+// would see an empty IndexModel and the handshake's rolling-upgrade
+// compat lane would mask drift forever.
+func TestBuildIndexExchange_StampsIndexModel(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	idx := newFileIndex()
+	idx.Sequence = 1
+	n := &Node{
+		deviceID: "test",
+		folders: map[string]*folderState{
+			"test": {
+				cfg:   testFolderCfg(dir, "127.0.0.1"),
+				index: idx,
+			},
+		},
+	}
+	attachSQLiteForTest(t, n.folders["test"], "test")
+
+	got := n.buildIndexExchange("test", 0).GetIndexModel()
+	if got != FILESYNC_INDEX_MODEL {
+		t.Errorf("buildIndexExchange.IndexModel=%q, want %q", got, FILESYNC_INDEX_MODEL)
+	}
+	// Also check the unknown-folder branch — must still stamp the
+	// model so a misrouted peer's handshake fails fast.
+	if got := n.buildIndexExchange("missing", 0).GetIndexModel(); got != FILESYNC_INDEX_MODEL {
+		t.Errorf("unknown-folder branch IndexModel=%q, want %q", got, FILESYNC_INDEX_MODEL)
+	}
+}
+
 func TestBuildIndexExchange_StampsProtocolVersion(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

@@ -58,6 +58,22 @@ const (
 	// with HTTP 400. There is no v0 — mesh filesync debuted at v1 and
 	// never shipped anything older. See docs/filesync/DESIGN-v1.md.
 	protocolVersion uint32 = 1
+
+	// FILESYNC_INDEX_MODEL is the build-time selection between the
+	// β model (in-memory FileIndex discarded between scans, SELECT
+	// per scan) and the hybrid model (FileIndex retained between
+	// scans, SELECT once at folder open). Audit §6 commit 7 closed
+	// β with a 655 ms / 8× bench result on the target hardware;
+	// hybrid is the v1 lock. Stamped on every outgoing
+	// IndexExchange so peers can reject a rolling deploy that
+	// lands a drifted const. DESIGN-v1 §0 carries the durable home
+	// of the decision. Decision §5 #16, iter-4 O15.
+	//
+	// A peer presenting the empty string is treated as legacy
+	// ("hybrid" assumed) so a commit-7 build can talk to a
+	// pre-commit-7 build during a rolling upgrade. Any non-empty
+	// value other than the local FILESYNC_INDEX_MODEL is rejected.
+	FILESYNC_INDEX_MODEL = "hybrid"
 )
 
 // server handles filesync HTTP endpoints.
@@ -168,6 +184,23 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 			"peer", req.GetDeviceId(), "folder", req.GetFolderId(),
 			"peer_version", v, "local_version", protocolVersion)
 		http.Error(w, fmt.Sprintf("protocol version mismatch: peer=%d local=%d", v, protocolVersion), http.StatusBadRequest)
+		return
+	}
+
+	// Audit §6 commit 7 phase A: FILESYNC_INDEX_MODEL handshake.
+	// A non-empty model that does not match this build's constant
+	// indicates a rolling deploy with drifted source — reject the
+	// exchange and bump the per-reason metric so the dashboard
+	// surfaces the divergence (iter-4 Z10). Empty string is
+	// treated as legacy ("hybrid" assumed) so a commit-7 peer can
+	// still talk to a pre-commit-7 peer during a rolling upgrade.
+	if peerModel := req.GetIndexModel(); peerModel != "" && peerModel != FILESYNC_INDEX_MODEL {
+		slog.Warn("rejecting index exchange: index model mismatch",
+			"peer", req.GetDeviceId(), "folder", req.GetFolderId(),
+			"peer_model", peerModel, "local_model", FILESYNC_INDEX_MODEL)
+		incPeerSessionDropped("filesync_index_model_mismatch")
+		http.Error(w, fmt.Sprintf("index model mismatch: peer=%q local=%q",
+			peerModel, FILESYNC_INDEX_MODEL), http.StatusBadRequest)
 		return
 	}
 
@@ -369,6 +402,7 @@ func paginateResponse(resp *pb.IndexExchange) []*pb.IndexExchange {
 			Page:            i,
 			TotalPages:      totalPages,
 			ProtocolVersion: protocolVersion,
+			IndexModel:      FILESYNC_INDEX_MODEL,
 		})
 	}
 	return pages
@@ -896,6 +930,7 @@ func sendPaginatedIndex(ctx context.Context, client *http.Client, peerAddr strin
 			Page:            page,
 			TotalPages:      totalPages,
 			ProtocolVersion: protocolVersion,
+			IndexModel:      FILESYNC_INDEX_MODEL,
 		}
 
 		data, err := proto.Marshal(pageExchange)
@@ -944,6 +979,7 @@ func fetchResponsePages(ctx context.Context, client *http.Client, peerAddr, clie
 			Page:            page,
 			Fetch:           true,
 			ProtocolVersion: protocolVersion,
+			IndexModel:      FILESYNC_INDEX_MODEL,
 		}
 
 		data, err := proto.Marshal(fetchReq)

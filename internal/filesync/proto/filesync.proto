@@ -15,6 +15,16 @@ message IndexExchange {
   bool   fetch       = 8;          // True = client is fetching a server response page
   string epoch       = 9;          // Random ID regenerated on index creation; used to detect index loss
   uint32 protocol_version = 10;    // Filesync wire protocol version. Current: 1. Mismatches are rejected.
+  // FILESYNC_INDEX_MODEL build-time constant (audit §6 commit 7,
+  // decision §5 #16). Stamped on every IndexExchange so peers can
+  // reject a rolling deploy that lands a drifted const. Three peers
+  // built from the same source must produce the same value; a
+  // mismatch records last_error="filesync_index_model_mismatch" and
+  // increments mesh_filesync_peer_session_dropped (Z10).
+  // Empty string is treated as legacy ("hybrid" assumed) so a
+  // commit-7 peer can still talk to a pre-commit-7 peer during a
+  // rolling upgrade.
+  string index_model = 11;
 }
 
 // FileInfo describes a single file (or a deletion tombstone) in the index.

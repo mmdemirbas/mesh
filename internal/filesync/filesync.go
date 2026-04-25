@@ -28,6 +28,16 @@ import (
 
 const (
 	tombstoneMaxAge = 30 * 24 * time.Hour // 30 days
+
+	// tombstoneGCEvery is the scan cadence for the tombstone GC
+	// pass. Audit §6 commit 7 phase D / P6 / decision §5 #15: every
+	// 10th scan, purgeTombstones runs as part of the scan-tail
+	// logic; the other 9 scans skip the O(N) tombstone-walk and
+	// the per-row Range traversal it costs. The cadence is a perf
+	// optimization — correctness is preserved by purgeTombstones'
+	// B14/M3 invariants (only purge when ALL peers including
+	// removed ones have acknowledged the tombstone).
+	tombstoneGCEvery = 10
 	// C3: stale download temp files older than this are removed on
 	// startup. Anything younger is kept so downloadWithBlockVerify can
 	// resume from the last verified block boundary across a process
@@ -425,6 +435,40 @@ type FolderMetricsSnapshot struct {
 	Reason   DisabledReason
 }
 
+// peerSessionDropped is the process-level counter behind the
+// mesh_filesync_peer_session_dropped{reason=...} Prometheus gauge.
+// Audit §6 commit 7 phase A / iter-4 Z10: every reason for which a
+// handleIndex request is rejected at the wire layer (today:
+// "filesync_index_model_mismatch") increments the corresponding
+// reason bucket so the dashboard surfaces a warning row when a
+// rolling deploy lands a drifted const. Map keyed by reason string;
+// guarded by peerSessionDroppedMu so concurrent goroutines (each
+// peer is its own goroutine) cannot race the map write.
+var (
+	peerSessionDroppedMu sync.Mutex
+	peerSessionDropped   = make(map[string]int64)
+)
+
+func incPeerSessionDropped(reason string) {
+	peerSessionDroppedMu.Lock()
+	peerSessionDropped[reason]++
+	peerSessionDroppedMu.Unlock()
+}
+
+// SnapshotPeerSessionDropped returns a copy of the per-reason
+// counter map so the metrics handler can serialize it without
+// holding the lock across the response write. Stable iteration
+// order is the caller's responsibility (admin.go sorts by reason).
+func SnapshotPeerSessionDropped() map[string]int64 {
+	peerSessionDroppedMu.Lock()
+	defer peerSessionDroppedMu.Unlock()
+	out := make(map[string]int64, len(peerSessionDropped))
+	for k, v := range peerSessionDropped {
+		out[k] = v
+	}
+	return out
+}
+
 // GetFolderMetrics returns a snapshot of sync metrics for all active folders.
 func GetFolderMetrics() []FolderMetricsSnapshot {
 	var result []FolderMetricsSnapshot
@@ -534,10 +578,65 @@ type folderState struct {
 
 	isNetworkFS bool              // C2: true when folder root is on a network filesystem
 	metrics     FolderSyncMetrics // lock-free counters for Prometheus
+	// scansSinceTombstoneGC counts completed scans since the last
+	// tombstone-GC pass. The scan-tail logic runs purgeTombstones
+	// every tombstoneGCEvery scans (audit §6 commit 7 phase D / P6
+	// / decision §5 #15). Scans that hit the cap (errIndexCapExceeded)
+	// or that errored out do not count — only successful completions
+	// advance the counter. Read/written under indexMu.
+	scansSinceTombstoneGC int
 	// P18c: recycled scan-clone backing map. Stashed after swap, reused on
 	// the next runScan to avoid a ~30 MB/scan allocation on large folders.
 	// Accessed only under indexMu.
 	reusableFiles map[string]FileEntry
+}
+
+// classifyPeerResetTrigger names the reset-trigger condition that
+// applies to an incoming index exchange — empty string if no reset
+// is needed, otherwise one of the closed enum values used in log
+// lines and (potentially) future metrics. Audit §6 commit 7 phase
+// B / iter-4 Z2.
+//
+// Two conditions trigger a reset (drop BaseHashes, zero
+// LastSeenSequence, full exchange next cycle):
+//
+//  1. **Sequence drop.** remoteSeq < peerLastSeq means the peer's
+//     sequence counter went backward — the peer was reset (deleted
+//     index, fresh install, restore from a backup whose sequence
+//     was lower than what we last saw). Today's behavior; preserved.
+//
+//  2. **Epoch flip.** The remote presents a different epoch from
+//     the one we last recorded against this peer. This closes the
+//     offline-peer-during-restore gap (iter-4 Z2): when an operator
+//     runs the folder restore lifecycle (commit 9), the restored DB
+//     carries a fresh epoch but the SAME or HIGHER sequence number
+//     than before, so the sequence-drop trigger alone would not
+//     fire and peers would silently keep stale BaseHashes against
+//     a divergent DB.
+//
+// Both conditions can fire at the same time; the trigger string
+// identifies which (compound returns "sequence_drop_and_epoch_flip"
+// for log readability).
+//
+// Edge cases:
+//   - currentLastEpoch == "" means we have never recorded an epoch
+//     against this peer (legitimate first sync). Skip the epoch
+//     check; rely on sequence-drop alone.
+//   - remoteEpoch == "" means the peer is on a pre-epoch-field
+//     build (rolling-upgrade compat). Skip the epoch check.
+func classifyPeerResetTrigger(remoteSeq, peerLastSeq int64, remoteEpoch, currentLastEpoch string) string {
+	seqDropped := remoteSeq < peerLastSeq
+	epochFlipped := currentLastEpoch != "" && remoteEpoch != "" && remoteEpoch != currentLastEpoch
+	switch {
+	case seqDropped && epochFlipped:
+		return "sequence_drop_and_epoch_flip"
+	case seqDropped:
+		return "sequence_drop"
+	case epochFlipped:
+		return "epoch_flip"
+	default:
+		return ""
+	}
 }
 
 // claimPath attempts to mark a path as in-flight for download. Returns false
@@ -653,7 +752,11 @@ func (fs *folderState) applyHintRenames(ctx context.Context, folderID, peerAddr 
 			if fs.index.selfID != "" {
 				oldEntry.Version = oldEntry.Version.bump(fs.index.selfID)
 			}
-			fs.index.Set(oldPath, oldEntry)
+			// Hint-rename mutation: tombstone the old path with a
+			// vector-clock bump. Set returns errDirtySetOverflow only
+			// when the dirty set is at the 1.5M cap; bounded by
+			// in-flight sync action count, never reaches the cap.
+			_ = fs.index.Set(oldPath, oldEntry)
 		}
 		fs.retries.clearAll(oldPath)
 		fs.indexMu.Unlock()
@@ -1590,8 +1693,24 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 			slog.Warn("scan error", "folder", id, "error", err)
 		}
 
+		// Audit §6 commit 7 phase D / P6: tombstone GC runs every
+		// tombstoneGCEvery scans (see counter on folderState). The
+		// other 9 scans skip the O(N) Range walk that
+		// purgeTombstones costs. Read+bump the counter under
+		// indexMu so concurrent reads of fs see a consistent value.
+		fs.indexMu.Lock()
+		fs.scansSinceTombstoneGC++
+		runTombstoneGC := fs.scansSinceTombstoneGC >= tombstoneGCEvery
+		if runTombstoneGC {
+			fs.scansSinceTombstoneGC = 0
+		}
+		fs.indexMu.Unlock()
+
 		purgeStart := time.Now()
-		purged := idxCopy.purgeTombstones(tombstoneMaxAge, peersCopy)
+		var purged int
+		if runTombstoneGC {
+			purged = idxCopy.purgeTombstones(tombstoneMaxAge, peersCopy)
+		}
 		purgeDuration := time.Since(purgeStart)
 
 		// Swap under a short write lock. Merge-preserve any entries that were
@@ -1602,7 +1721,9 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		mergedBack := 0
 		for path, live := range fs.index.Range {
 			if live.Sequence > scanStartSeq {
-				idxCopy.Set(path, live)
+				// Merge-back of concurrent sync downloads. Bounded by
+				// in-flight goroutines, never approaches the 1.5M cap.
+				_ = idxCopy.Set(path, live)
 				if live.Sequence > idxCopy.Sequence {
 					idxCopy.Sequence = live.Sequence
 				}
@@ -1897,31 +2018,37 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	state.Global.Update("filesync-peer", stateKey, state.Connected, "")
 	state.Global.UpdateTLSStatus("filesync-peer", stateKey, n.tlsStatusFor(peerAddr))
 
-	// Detect peer restart: if remote sequence dropped below what we last saw,
-	// reset tracking and request a full exchange on the next cycle.
-	if remoteIdx.GetSequence() < peerLastSeq {
-		slog.Info("peer sequence reset detected, will do full exchange next cycle",
-			"folder", folderID, "peer", peerAddr,
-			"remote_seq", remoteIdx.GetSequence(), "last_seen", peerLastSeq)
+	// Detect peer restart or epoch flip: either condition triggers a
+	// reset that drops BaseHashes and resets LastSeenSequence so the
+	// next cycle does a full exchange. Audit §6 commit 7 phase B /
+	// iter-4 Z2: see classifyPeerResetTrigger for the full contract.
+	currentLastEpoch := ""
+	if old, ok := fs.peers[peerAddr]; ok {
+		currentLastEpoch = old.LastEpoch
+	}
+	remoteEpoch := remoteIdx.GetEpoch()
+	if trigger := classifyPeerResetTrigger(remoteIdx.GetSequence(), peerLastSeq, remoteEpoch, currentLastEpoch); trigger != "" {
+		slog.Info("peer reset detected, will do full exchange next cycle",
+			"folder", folderID, "peer", peerAddr, "trigger", trigger,
+			"remote_seq", remoteIdx.GetSequence(), "last_seen", peerLastSeq,
+			"remote_epoch", remoteEpoch, "last_epoch", currentLastEpoch)
 		fs.indexMu.Lock()
-		// H2b: preserve LastEpoch from old state so the epoch change is
-		// visible on the next cycle when diff actually runs.
-		var lastEpoch string
-		if old, ok := fs.peers[peerAddr]; ok {
-			lastEpoch = old.LastEpoch
-		}
-		// Store remote's new epoch as PendingEpoch. On the next cycle's
-		// diff, downloads for locally-tombstoned files will be filtered.
+		// Store remote's new epoch as PendingEpoch. On the next
+		// cycle's diff, downloads for locally-tombstoned files will
+		// be filtered.
 		var pendingEpoch string
-		if remoteEpoch := remoteIdx.GetEpoch(); remoteEpoch != "" && remoteEpoch != lastEpoch {
+		if remoteEpoch != "" && remoteEpoch != currentLastEpoch {
 			pendingEpoch = remoteEpoch
 		}
 		fs.peers[peerAddr] = PeerState{
 			LastSeenSequence: 0,
 			LastSentSequence: 0,
 			LastSync:         time.Now(),
-			LastEpoch:        lastEpoch,
+			LastEpoch:        currentLastEpoch,
 			PendingEpoch:     pendingEpoch,
+			// BaseHashes intentionally unset: the reset path drops
+			// them per the audit's branch A semantics. The next
+			// successful sync re-populates via updateBaseHashes.
 		}
 		fs.peersDirty = true // P17a
 		fs.indexMu.Unlock()
@@ -2147,7 +2274,9 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					} else if fs.index.selfID != "" {
 						oldEntry.Version = oldEntry.Version.bump(fs.index.selfID)
 					}
-					fs.index.Set(rp.OldPath, oldEntry)
+					// Bounded by per-action mutation rate; the 1.5M
+					// dirty-set cap is unreachable here.
+					_ = fs.index.Set(rp.OldPath, oldEntry)
 				}
 				// Write the new-path entry with remote metadata.
 				fs.index.Sequence++
@@ -2156,7 +2285,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				// e.g., a pre-C6 peer sending an empty clock, or a local
 				// tombstone at rp.NewPath from an earlier delete.
 				newLocal, _ := fs.index.Get(rp.NewPath)
-				fs.index.Set(rp.NewPath, FileEntry{
+				_ = fs.index.Set(rp.NewPath, FileEntry{
 					Size:     rp.RemoteSize,
 					MtimeNS:  rp.RemoteMtime,
 					SHA256:   rp.RemoteHash,
@@ -2275,7 +2404,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						// did not carry (rolling upgrade, concurrent local
 						// write) survives the adopt.
 						localPrev, _ := fs.index.Get(path)
-						fs.index.Set(path, FileEntry{
+						_ = fs.index.Set(path, FileEntry{
 							Size:     a.RemoteSize,
 							MtimeNS:  a.RemoteMtime,
 							SHA256:   a.RemoteHash,
@@ -2488,7 +2617,8 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					snapshot.Sequence = seq
 					snapshot.Epoch = epoch
 					snapshot.DeviceID = deviceID
-					snapshot.Set(action.Path, newEntry)
+					// Single-path snapshot — the dirty-set cap cannot fire on a fresh FileIndex with one Set.
+					_ = snapshot.Set(action.Path, newEntry)
 
 					if err := saveIndex(fs.writerCtx, fs.db, folderID, snapshot); err != nil {
 						return fmt.Errorf("saveIndex: %w", err)
@@ -2498,7 +2628,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					// live in-memory FileIndex. Other goroutines in this
 					// sync cycle observe the post-download state.
 					fs.indexMu.Lock()
-					fs.index.Set(action.Path, newEntry)
+					_ = fs.index.Set(action.Path, newEntry)
 					fs.retries.clearAll(action.Path)
 					fs.indexMu.Unlock()
 
@@ -2556,7 +2686,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						// path converges without losing local components
 						// the peer did not carry.
 						localPrev, _ := fs.index.Get(action.Path)
-						fs.index.Set(action.Path, FileEntry{
+						_ = fs.index.Set(action.Path, FileEntry{
 							Size:     action.RemoteSize,
 							MtimeNS:  action.RemoteMtime,
 							SHA256:   action.RemoteHash,
@@ -2687,7 +2817,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					// C6: remote wins — merge clocks so local components
 					// the peer did not carry survive the adopt.
 					localPrev, _ := fs.index.Get(action.Path)
-					fs.index.Set(action.Path, FileEntry{
+					_ = fs.index.Set(action.Path, FileEntry{
 						Size:     action.RemoteSize,
 						MtimeNS:  action.RemoteMtime,
 						SHA256:   action.RemoteHash,
@@ -2727,7 +2857,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						if fs.index.selfID != "" {
 							entry.Version = entry.Version.bump(fs.index.selfID)
 						}
-						fs.index.Set(action.Path, entry)
+						_ = fs.index.Set(action.Path, entry)
 					}
 					fs.indexMu.Unlock()
 				}
@@ -2801,14 +2931,14 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					snapshot.Sequence = seq
 					snapshot.Epoch = epoch
 					snapshot.DeviceID = deviceID
-					snapshot.Set(action.Path, tomb)
+					_ = snapshot.Set(action.Path, tomb)
 
 					if err := saveIndex(fs.writerCtx, fs.db, folderID, snapshot); err != nil {
 						return fmt.Errorf("saveIndex (tombstone): %w", err)
 					}
 
 					fs.indexMu.Lock()
-					fs.index.Set(action.Path, tomb)
+					_ = fs.index.Set(action.Path, tomb)
 					fs.indexMu.Unlock()
 					fs.metrics.FilesDeleted.Add(1)
 					return nil
@@ -2946,7 +3076,10 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.IndexExchange {
 	fs, ok := n.folders[folderID]
 	if !ok {
-		return &pb.IndexExchange{ProtocolVersion: protocolVersion}
+		return &pb.IndexExchange{
+			ProtocolVersion: protocolVersion,
+			IndexModel:      FILESYNC_INDEX_MODEL,
+		}
 	}
 
 	// Folder-level scalars under RLock. The dbReader query runs
@@ -2968,6 +3101,7 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 			Sequence:        currentSeq,
 			Epoch:           currentEpoch,
 			ProtocolVersion: protocolVersion,
+			IndexModel:      FILESYNC_INDEX_MODEL,
 		}
 	}
 
@@ -3003,6 +3137,7 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 		Epoch:           currentEpoch,
 		Files:           files,
 		ProtocolVersion: protocolVersion,
+		IndexModel:      FILESYNC_INDEX_MODEL,
 	}
 }
 
@@ -3182,7 +3317,7 @@ func protoToFileIndex(idx *pb.IndexExchange) *FileIndex {
 	for _, f := range idx.GetFiles() {
 		// B17: normalize remote paths to NFC for cross-platform consistency.
 		path := norm.NFC.String(f.GetPath())
-		fi.Set(path, FileEntry{
+		_ = fi.Set(path, FileEntry{
 			Size:     f.GetSize(),
 			MtimeNS:  f.GetMtimeNs(),
 			SHA256:   hash256FromBytes(f.GetSha256()),

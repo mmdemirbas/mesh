@@ -308,8 +308,9 @@ func TestSaveIndex_DeletePathRemovesRow(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	first := newFileIndex()
-	first.Set("a.txt", FileEntry{Size: 1, SHA256: hash256FromBytes(bytes32('a'))})
-	first.Set("b.txt", FileEntry{Size: 2, SHA256: hash256FromBytes(bytes32('b'))})
+	first.Set("a.txt", FileEntry{Size: 1, Sequence: 1, SHA256: hash256FromBytes(bytes32('a'))})
+	first.Set("b.txt", FileEntry{Size: 2, Sequence: 2, SHA256: hash256FromBytes(bytes32('b'))})
+	first.Sequence = 2
 	if err := saveIndex(context.Background(), db, "shared", first); err != nil {
 		t.Fatalf("first saveIndex: %v", err)
 	}
@@ -318,7 +319,10 @@ func TestSaveIndex_DeletePathRemovesRow(t *testing.T) {
 	// Update a.txt and explicitly Delete b.txt — the second save
 	// must UPSERT a.txt and DELETE b.txt; rows not touched stay
 	// untouched (there are none here, but the contract is clear).
-	first.Set("a.txt", FileEntry{Size: 11, SHA256: hash256FromBytes(bytes32('a'))})
+	// Phase 7E: the UPSERT carries WHERE excluded.sequence >
+	// files.sequence, so the rewrite must bump the sequence.
+	first.Set("a.txt", FileEntry{Size: 11, Sequence: 3, SHA256: hash256FromBytes(bytes32('a'))})
+	first.Sequence = 3
 	first.Delete("b.txt")
 	if err := saveIndex(context.Background(), db, "shared", first); err != nil {
 		t.Fatalf("second saveIndex: %v", err)
@@ -333,6 +337,95 @@ func TestSaveIndex_DeletePathRemovesRow(t *testing.T) {
 	}
 	if got := reloaded.Files()["a.txt"].Size; got != 11 {
 		t.Fatalf("a.txt Size=%d want 11", got)
+	}
+}
+
+// TestSequenceConditionedUpsert_OldSequenceLoses pins audit §6
+// commit 7 phase E / INV-3: the UPSERT in applyIndexToTx carries
+// WHERE excluded.sequence > files.sequence. A second UPSERT with a
+// SMALLER sequence than the row's current sequence MUST NOT
+// overwrite the row — even if every other column is different.
+// This is the load-bearing protection against a torn write or a
+// future race that opens a parallel writer connection.
+//
+// Mental mutation: removing the WHERE clause would make the second
+// UPSERT clobber the row and the assertion below would catch it.
+func TestSequenceConditionedUpsert_OldSequenceLoses(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	db, err := openFolderDB(dir, "ABCDE12345")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Step 1: write a row at sequence=10 with content "high".
+	idx := newFileIndex()
+	idx.Sequence = 10
+	idx.Set("doc.txt", FileEntry{
+		Size:     100,
+		MtimeNS:  1,
+		SHA256:   hash256FromBytes(bytes32('h')),
+		Sequence: 10,
+	})
+	if err := saveIndex(context.Background(), db, "f", idx); err != nil {
+		t.Fatalf("first saveIndex: %v", err)
+	}
+
+	// Step 2: try to overwrite with sequence=5 (smaller). The
+	// WHERE clause must reject this UPSERT silently — the row
+	// should remain at sequence=10 with the original content.
+	idx2 := newFileIndex()
+	idx2.Sequence = 5
+	idx2.Set("doc.txt", FileEntry{
+		Size:     999,
+		MtimeNS:  9,
+		SHA256:   hash256FromBytes(bytes32('l')),
+		Sequence: 5,
+	})
+	if err := saveIndex(context.Background(), db, "f", idx2); err != nil {
+		t.Fatalf("second saveIndex: %v", err)
+	}
+
+	// Reload — the original sequence=10 entry must survive.
+	got, err := loadIndexDB(db, "f")
+	if err != nil {
+		t.Fatalf("loadIndexDB: %v", err)
+	}
+	entry, ok := got.Get("doc.txt")
+	if !ok {
+		t.Fatal("doc.txt missing after both upserts")
+	}
+	if entry.Sequence != 10 {
+		t.Errorf("sequence=%d, want 10 (older UPSERT must lose)", entry.Sequence)
+	}
+	if entry.Size != 100 {
+		t.Errorf("size=%d, want 100 (older UPSERT must not clobber row body)", entry.Size)
+	}
+	if entry.SHA256 != hash256FromBytes(bytes32('h')) {
+		t.Errorf("sha256 changed; older UPSERT clobbered the row")
+	}
+
+	// Sanity: a NEWER sequence DOES overwrite, proving the
+	// check is asymmetric and not a no-op for every UPSERT.
+	idx3 := newFileIndex()
+	idx3.Sequence = 20
+	idx3.Set("doc.txt", FileEntry{
+		Size:     200,
+		MtimeNS:  20,
+		SHA256:   hash256FromBytes(bytes32('n')),
+		Sequence: 20,
+	})
+	if err := saveIndex(context.Background(), db, "f", idx3); err != nil {
+		t.Fatalf("third saveIndex: %v", err)
+	}
+	got2, _ := loadIndexDB(db, "f")
+	entry2, _ := got2.Get("doc.txt")
+	if entry2.Sequence != 20 {
+		t.Errorf("after newer UPSERT sequence=%d, want 20", entry2.Sequence)
+	}
+	if entry2.Size != 200 {
+		t.Errorf("after newer UPSERT size=%d, want 200", entry2.Size)
 	}
 }
 

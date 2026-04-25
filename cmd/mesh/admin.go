@@ -423,6 +423,25 @@ func buildAdminMux(ring *logRing, logFilePath, perfLogPath string) *http.ServeMu
 			}
 		}
 
+		// mesh_filesync_peer_session_dropped — process-level counter
+		// (no folder label) bumped each time handleIndex rejects a
+		// peer at the wire layer. Reason label is one of the closed
+		// enum values; today the only emitter is
+		// "filesync_index_model_mismatch" from audit §6 commit 7
+		// phase A / iter-4 Z10.
+		if dropped := filesync.SnapshotPeerSessionDropped(); len(dropped) > 0 {
+			b.WriteString("# HELP mesh_filesync_peer_session_dropped Cumulative peer sessions dropped at the index handshake by reason.\n")
+			b.WriteString("# TYPE mesh_filesync_peer_session_dropped counter\n")
+			reasons := make([]string, 0, len(dropped))
+			for r := range dropped {
+				reasons = append(reasons, r)
+			}
+			sort.Strings(reasons)
+			for _, r := range reasons {
+				fmt.Fprintf(&b, "mesh_filesync_peer_session_dropped{reason=%q} %d\n", r, dropped[r])
+			}
+		}
+
 		// mesh_process_goroutines
 		b.WriteString("# HELP mesh_process_goroutines Current number of goroutines.\n")
 		b.WriteString("# TYPE mesh_process_goroutines gauge\n")

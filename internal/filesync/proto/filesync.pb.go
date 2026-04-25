@@ -35,8 +35,18 @@ type IndexExchange struct {
 	Fetch           bool                   `protobuf:"varint,8,opt,name=fetch,proto3" json:"fetch,omitempty"`                                             // True = client is fetching a server response page
 	Epoch           string                 `protobuf:"bytes,9,opt,name=epoch,proto3" json:"epoch,omitempty"`                                              // Random ID regenerated on index creation; used to detect index loss
 	ProtocolVersion uint32                 `protobuf:"varint,10,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"` // Filesync wire protocol version. Current: 1. Mismatches are rejected.
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// FILESYNC_INDEX_MODEL build-time constant (audit §6 commit 7,
+	// decision §5 #16). Stamped on every IndexExchange so peers can
+	// reject a rolling deploy that lands a drifted const. Three peers
+	// built from the same source must produce the same value; a
+	// mismatch records last_error="filesync_index_model_mismatch" and
+	// increments mesh_filesync_peer_session_dropped (Z10).
+	// Empty string is treated as legacy ("hybrid" assumed) so a
+	// commit-7 peer can still talk to a pre-commit-7 peer during a
+	// rolling upgrade.
+	IndexModel    string `protobuf:"bytes,11,opt,name=index_model,json=indexModel,proto3" json:"index_model,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *IndexExchange) Reset() {
@@ -137,6 +147,13 @@ func (x *IndexExchange) GetProtocolVersion() uint32 {
 		return x.ProtocolVersion
 	}
 	return 0
+}
+
+func (x *IndexExchange) GetIndexModel() string {
+	if x != nil {
+		return x.IndexModel
+	}
+	return ""
 }
 
 // FileInfo describes a single file (or a deletion tombstone) in the index.
@@ -643,7 +660,7 @@ var File_internal_filesync_proto_filesync_proto protoreflect.FileDescriptor
 
 const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
 	"\n" +
-	"&internal/filesync/proto/filesync.proto\x12\bfilesync\"\xb1\x02\n" +
+	"&internal/filesync/proto/filesync.proto\x12\bfilesync\"\xd2\x02\n" +
 	"\rIndexExchange\x12\x1b\n" +
 	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12\x1b\n" +
 	"\tfolder_id\x18\x02 \x01(\tR\bfolderId\x12\x1a\n" +
@@ -656,7 +673,9 @@ const file_internal_filesync_proto_filesync_proto_rawDesc = "" +
 	"\x05fetch\x18\b \x01(\bR\x05fetch\x12\x14\n" +
 	"\x05epoch\x18\t \x01(\tR\x05epoch\x12)\n" +
 	"\x10protocol_version\x18\n" +
-	" \x01(\rR\x0fprotocolVersion\"\xf9\x01\n" +
+	" \x01(\rR\x0fprotocolVersion\x12\x1f\n" +
+	"\vindex_model\x18\v \x01(\tR\n" +
+	"indexModel\"\xf9\x01\n" +
 	"\bFileInfo\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x03R\x04size\x12\x19\n" +

@@ -668,9 +668,26 @@ func applyIndexToTx(tx *sql.Tx, folderID string, idx *FileIndex) error {
 			return err
 		}
 	}
-	// UPSERT every dirty path. INSERT OR REPLACE is fine for commit 2;
-	// commit 7 (β finish) replaces this with a sequence-conditioned
-	// UPSERT that skips writes losing the sequence race.
+	// UPSERT every dirty path. Audit §6 commit 7 phase E / INV-3:
+	// the WHERE excluded.sequence > files.sequence clause ensures
+	// no UPSERT silently overwrites a row whose sequence is
+	// already at or past the incoming value. With the writer's
+	// MaxOpenConns=1 the within-process race is impossible by
+	// construction; the WHERE is a defense-in-depth assertion that
+	// makes a future code path that opens a parallel connection
+	// (or a torn write recovered with a higher row sequence) loud-
+	// fail rather than silently regress.
+	//
+	// "Pending marker" sequence assignment (the second half of
+	// the audit's Phase E spec) — replacing pre-assigned sequence
+	// values with commit-time stamping — is deferred to a follow-up
+	// commit. Today's flow pre-assigns sequence under indexMu just
+	// before saveIndex (filesync.go ActionDownload commit callback,
+	// scan loop, conflict resolver) and writes folder_meta.sequence
+	// inside the same tx. The architectural pending-marker shift is
+	// substantial (changes when the in-memory entry is "real") and
+	// scoped out of this commit; the WHERE-clause half is the
+	// load-bearing protection.
 	if len(dirty) > 0 {
 		stmt, err := tx.Prepare(`INSERT INTO files(
 			folder_id, path, size, mtime_ns, hash, deleted, sequence, mode,
@@ -683,7 +700,8 @@ func applyIndexToTx(tx *sql.Tx, folderID string, idx *FileIndex) error {
 			version=excluded.version, inode=excluded.inode,
 			prev_path=excluded.prev_path, hash_state=excluded.hash_state,
 			hashed_bytes=excluded.hashed_bytes,
-			prefix_check=excluded.prefix_check`)
+			prefix_check=excluded.prefix_check
+		WHERE excluded.sequence > files.sequence`)
 		if err != nil {
 			return fmt.Errorf("prepare file upsert: %w", err)
 		}
@@ -811,7 +829,11 @@ func loadIndexDB(db *sql.DB, folderID string) (*FileIndex, error) {
 			e.HashedBytes = hashedBytes.Int64
 		}
 		e.PrefixCheck = prefixCheck
-		idx.Set(path, e)
+		// Reload from SQLite — bounded by the row count we just
+		// queried, so the dirty-set cap is structurally unreachable.
+		// Set populates the dirty set even on reload (every Set marks
+		// the path dirty), but ClearDirty fires immediately below.
+		_ = idx.Set(path, e)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate files: %w", err)
