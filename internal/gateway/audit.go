@@ -81,12 +81,78 @@ type ResponseMeta struct {
 	RepeatReads                  *RepeatReadsInfo    // re-read activity this turn, if non-trivial
 	ResponseBytes                *ResponseByteCounts // §4.3 partition of the decoded response body
 	Stream                       *StreamInfo         // §4.3 stream accounting; emitted on every audited response
+	Timing                       *TimingInfo         // §B1 six-segment timing partition; emitted on every audited response
 	Summarize                    *SummarizeInfo      // §4.5 summarize delta; emitted only when fired
 	StartTime                    time.Time
 	EndTime                      time.Time
 	Headers                      map[string][]string
 	UpstreamReq                  []byte // translated request body sent upstream (set by handler)
 	UpstreamResp                 []byte // raw upstream response body (non-streaming; set by handler)
+}
+
+// TimingInfo is the §B1 six-segment timing partition. Always emitted
+// on audited responses. The seven named segments plus Total partition
+// the request's wall-clock with no overlap and no gap (Other absorbs
+// residual). Total equals StreamInfo.TotalMs by construction —
+// both are derived from the same (end - start) pair sampled in
+// wrapAuditing.
+//
+// See DESIGN_B1_timing.local.md for the partition discipline, the
+// per-segment capture points, and the sum-to-total invariant.
+type TimingInfo struct {
+	ClientToMesh       int64 `json:"client_to_mesh"`
+	MeshTranslationIn  int64 `json:"mesh_translation_in"`
+	MeshToUpstream     int64 `json:"mesh_to_upstream"`
+	UpstreamProcessing int64 `json:"upstream_processing"`
+	MeshTranslationOut int64 `json:"mesh_translation_out"`
+	MeshToClient       int64 `json:"mesh_to_client"`
+	Other              int64 `json:"other"`
+	Total              int64 `json:"total"`
+}
+
+// buildTimingInfo converts a segmentTimer Snapshot plus the request's
+// total wall-clock into the on-disk TimingInfo. Total is computed by
+// the caller from the same start/end pair used for stream.total_ms,
+// so timing_ms.total == stream.total_ms by construction (D1).
+//
+// Other is computed by subtraction (D2). Per-segment truncation to
+// integer milliseconds happens here, exactly once per segment (D5).
+// Snapshot durations are clamped to [0, total] before truncation so
+// that an out-of-order callback that produced a near-total span
+// cannot push other negative.
+//
+// Pure function so the partition math is unit-testable without the
+// HTTP machinery.
+func buildTimingInfo(snapshot map[timingSegment]time.Duration, totalMs int64) *TimingInfo {
+	totalMs = max(totalMs, 0)
+	total := time.Duration(totalMs) * time.Millisecond
+	segMs := func(seg timingSegment) int64 {
+		d := snapshot[seg]
+		if d < 0 {
+			return 0
+		}
+		if d > total {
+			d = total
+		}
+		return d.Milliseconds()
+	}
+	t := &TimingInfo{
+		ClientToMesh:       segMs(segClientToMesh),
+		MeshTranslationIn:  segMs(segMeshTranslationIn),
+		MeshToUpstream:     segMs(segMeshToUpstream),
+		UpstreamProcessing: segMs(segUpstreamProcessing),
+		MeshTranslationOut: segMs(segMeshTranslationOut),
+		MeshToClient:       segMs(segMeshToClient),
+		Total:              totalMs,
+	}
+	sum := t.ClientToMesh + t.MeshTranslationIn + t.MeshToUpstream +
+		t.UpstreamProcessing + t.MeshTranslationOut + t.MeshToClient
+	// Defensive: the per-segment clamp above bounds each value to
+	// [0, total], so totalMs - sum is non-negative whenever total
+	// equals end-start. The max() guard catches the case where a
+	// future change breaks the clamp invariant.
+	t.Other = max(totalMs-sum, 0)
+	return t
 }
 
 // StreamInfo is the §4.3 stream-accounting block. Always emitted on
@@ -370,6 +436,9 @@ func (r *Recorder) Response(id RequestID, meta ResponseMeta, body []byte) {
 	if meta.Stream != nil {
 		row["stream"] = meta.Stream
 	}
+	if meta.Timing != nil {
+		row["timing_ms"] = meta.Timing
+	}
 	if meta.Summarize != nil {
 		row["summarize"] = meta.Summarize
 	}
@@ -578,6 +647,12 @@ type AuditUpstream struct {
 	SummarizeBytesRemoved   int
 	SummarizeBytesAdded     int
 	SummarizeTurnsCollapsed int
+	// Timer is the per-request segmentTimer for the §B1 timing
+	// partition. wrapAuditing creates it at request start and
+	// stashes it here so handlers, httptrace callbacks, and
+	// streaming loops can call Mark / Pause / Add. nil-safe; tests
+	// that bypass wrapAuditing do not initialize it.
+	Timer *segmentTimer
 }
 
 type auditUpstreamKey struct{}
@@ -680,6 +755,8 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 			return
 		}
 		start := time.Now()
+		timer := newSegmentTimer()
+		timer.Mark(segClientToMesh, start)
 
 		body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodySize+1))
 		if err != nil {
@@ -718,6 +795,7 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 		r.ContentLength = int64(len(body))
 
 		upstream, r := WithAuditUpstream(r)
+		upstream.Timer = timer
 
 		// Walk the request body once for top_tool_result and
 		// repeat_reads. analyzeRequest returns nil for branches that
@@ -729,6 +807,11 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 		upstream.RepeatReads = repeatRR
 
 		aw := &auditingWriter{ResponseWriter: w}
+		// Close segment 1 (client_to_mesh) and open segment 2
+		// (mesh_translation_in) at the inner-handler entry boundary.
+		// Subsequent commits add Marks for segments 3-6 inside the
+		// upstream HTTP exchange and at firstWriteAt.
+		timer.Mark(segMeshTranslationIn, time.Now())
 		inner(aw, r)
 
 		status := aw.status
@@ -749,11 +832,16 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 		var summary *SSESummary
 		var usage *Usage
 		var responseBytes *ResponseByteCounts
+		totalMs := end.Sub(start).Milliseconds()
 		streamInfo := &StreamInfo{
 			Terminated:   "normal",
-			TotalMs:      end.Sub(start).Milliseconds(),
+			TotalMs:      totalMs,
 			FirstTokenMs: deriveFirstTokenMs(start, end, upstream.FirstContentDeltaAt, aw.firstWriteAt),
 		}
+		// §B1 timing partition — same end / start pair as
+		// streamInfo.TotalMs so the two field values are identical
+		// by construction (D1).
+		timing := buildTimingInfo(timer.Snapshot(end), totalMs)
 		auditBody := decodeForAudit(aw.buf.Bytes(), aw.Header().Get("Content-Encoding"), nil)
 		ct := aw.Header().Get("Content-Type")
 		isStreaming := strings.HasPrefix(strings.ToLower(ct), "text/event-stream")
@@ -803,6 +891,7 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 			RepeatReads:                  upstream.RepeatReads,
 			ResponseBytes:                responseBytes,
 			Stream:                       streamInfo,
+			Timing:                       timing,
 			Summarize:                    summarizeInfo,
 			StartTime:                    start,
 			EndTime:                      end,

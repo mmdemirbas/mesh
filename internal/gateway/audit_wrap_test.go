@@ -739,3 +739,80 @@ func TestTranslationAudit_RepeatReadsLandsInRow(t *testing.T) {
 		t.Errorf("repeat_reads.max_same_path = %v, want 2", got)
 	}
 }
+
+// TestTranslationAudit_TimingMsLandsInRow verifies that every audited
+// resp row carries a timing_ms object whose six named segments plus
+// other sum to total, and whose total equals stream.total_ms exactly
+// (D1 invariant from DESIGN_B1_timing.local.md).
+func TestTranslationAudit_TimingMsLandsInRow(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := ChatCompletionResponse{
+			ID: "x", Model: "glm-4.7",
+			Choices: []OpenAIChoice{{
+				Message:      OpenAIMsg{Role: "assistant", Content: json.RawMessage(`"hi"`)},
+				FinishReason: "stop",
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	base, gwName, logDir := startTranslationGateway(t, APIAnthropic, APIOpenAI, upstream.URL)
+
+	body := `{"model":"claude-opus-4-6","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`
+	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	dir := filepath.Join(logDir, gwName)
+	rows := waitForRows(t, func() []map[string]any { return readRows(t, dir) }, 2, 2*time.Second)
+	respRow := rows[1]
+
+	timing, ok := respRow["timing_ms"].(map[string]any)
+	if !ok {
+		t.Fatalf("timing_ms missing from resp row: %+v", respRow)
+	}
+	stream, ok := respRow["stream"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream missing from resp row: %+v", respRow)
+	}
+
+	// All eight fields present.
+	for _, key := range []string{
+		"client_to_mesh", "mesh_translation_in", "mesh_to_upstream",
+		"upstream_processing", "mesh_translation_out", "mesh_to_client",
+		"other", "total",
+	} {
+		if _, present := timing[key]; !present {
+			t.Errorf("timing_ms.%s missing", key)
+		}
+	}
+
+	// D1: timing_ms.total == stream.total_ms exactly.
+	timingTotal, _ := timing["total"].(float64)
+	streamTotal, _ := stream["total_ms"].(float64)
+	if timingTotal != streamTotal {
+		t.Errorf("timing_ms.total=%v != stream.total_ms=%v", timingTotal, streamTotal)
+	}
+
+	// Partition closes: six named + other == total.
+	sum := 0.0
+	for _, key := range []string{
+		"client_to_mesh", "mesh_translation_in", "mesh_to_upstream",
+		"upstream_processing", "mesh_translation_out", "mesh_to_client",
+		"other",
+	} {
+		v, _ := timing[key].(float64)
+		if v < 0 {
+			t.Errorf("timing_ms.%s=%v, must be non-negative", key, v)
+		}
+		sum += v
+	}
+	if sum != timingTotal {
+		t.Errorf("partition broken: sum(named+other)=%v != total=%v; timing=%+v", sum, timingTotal, timing)
+	}
+}
