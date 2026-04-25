@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -14,10 +15,46 @@ import (
 // Any future schema change bumps this integer and writes a migration.
 const schemaVersion = 1
 
+// errLegacyIndexRefused is the typed error returned by refuseLegacyIndex
+// when any legacy gob / YAML sidecar is present in a folder's cache
+// directory. Per DESIGN-v1.md §0 cold-swap posture and
+// PERSISTENCE-AUDIT.md §6 commit 2, the v1 binary refuses to start a
+// folder whose cache directory carries left-over dev files; recovery is
+// to delete them by hand.
+var errLegacyIndexRefused = fmt.Errorf("filesync_legacy_index_refused")
+
+// refuseLegacyIndex returns errLegacyIndexRefused (wrapped) when any
+// known legacy filename is present in dir. The check is cheap: at most
+// a handful of os.Stat calls per folder open. It runs before
+// openFolderDB so the SQLite file is not created in a directory the
+// operator clearly forgot to clean up.
+//
+// The legacy filenames cover the gob path's outputs: index.yaml (P17b
+// legacy), index.gob, index.gob.prev, peers.yaml, peers.yaml.prev,
+// plus .tmp variants left behind by a mid-write crash.
+func refuseLegacyIndex(dir string) error {
+	legacy := []string{
+		"index.yaml",
+		"index.yaml.prev",
+		"index.yaml.tmp",
+		"index.gob",
+		"index.gob.prev",
+		"index.gob.tmp",
+		"peers.yaml",
+		"peers.yaml.prev",
+		"peers.yaml.tmp",
+	}
+	for _, name := range legacy {
+		p := filepath.Join(dir, name)
+		if _, err := os.Stat(p); err == nil {
+			return fmt.Errorf("%w: %s exists; delete legacy state before opening folder",
+				errLegacyIndexRefused, p)
+		}
+	}
+	return nil
+}
+
 // folderDBFilename is the SQLite file inside each folder's cache dir.
-// The legacy gob/YAML files coexist on disk during the D4 transition;
-// subsequent commits port each read and write path over and finally
-// retire the gob/YAML helpers.
 const folderDBFilename = "index.sqlite"
 
 // openFolderDB opens (or creates) the per-folder SQLite database at
@@ -38,8 +75,13 @@ func openFolderDB(dir, deviceID string) (*sql.DB, error) {
 	}
 	path := filepath.Join(dir, folderDBFilename)
 	// modernc's DSN accepts _pragma= parameters but we prefer explicit
-	// PRAGMA statements below so the values are visible in logs and tests.
-	db, err := sql.Open("sqlite", path)
+	// PRAGMA statements below so the values are visible in logs and
+	// tests. _txlock=immediate (D3 / iter-3 review §D) makes db.Begin
+	// emit BEGIN IMMEDIATE so writers hold the writer lock before any
+	// other connection can claim it; this replaces the prior pattern of
+	// running tx.Exec("BEGIN IMMEDIATE") after sql.Begin (which is a
+	// no-op or error in many drivers).
+	db, err := sql.Open("sqlite", path+"?_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %s: %w", path, err)
 	}
@@ -49,7 +91,10 @@ func openFolderDB(dir, deviceID string) (*sql.DB, error) {
 	// concurrently via WAL snapshot isolation.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0)
+	// D6 / iter-3 review: cap connection lifetime at 24h instead of
+	// SetConnMaxLifetime(0) (= never expire). Connection rotation is
+	// cheap; leak containment is free on a weeks-long daemon.
+	db.SetConnMaxLifetime(24 * time.Hour)
 
 	if err := applyFolderDBPragmas(db); err != nil {
 		_ = db.Close()
@@ -93,6 +138,11 @@ func applyFolderDBPragmas(db *sql.DB) error {
 		// Mildly larger cache amortizes repeated hot-path reads without
 		// materially raising resident memory.
 		"PRAGMA cache_size=-4000;",
+		// Decision §5 #12 (iter-3): mmap_size = 64 MiB. Apple Silicon
+		// and Linux desktops have ample VA; 64-bit Windows is fine.
+		// Resident memory is bounded by actual page touches, not by
+		// the mapping size.
+		"PRAGMA mmap_size=67108864;", // 64 * 1024 * 1024
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
@@ -271,7 +321,24 @@ type sqlExecer interface {
 //
 // folder_meta stores the folder-level scalars (Sequence, Epoch, the G3
 // filesystem device id as fs_device_id). files holds one row per path.
-// Rows present on disk but absent from idx.Files are removed.
+//
+// Per PERSISTENCE-AUDIT.md §2.5 P2 (per-path dirty-set), saveIndex
+// writes only the paths the FileIndex reports as dirty since the last
+// successful persist, plus the deleted-paths set. The previous
+// DELETE+INSERT-everything pattern is gone — the bench gate (§6
+// commit 2) showed full reload at 655 ms median, which makes
+// per-path UPSERT mandatory for any folder past a few thousand
+// entries.
+//
+// Special case: when MarkAllDirty has been called (initial load,
+// scan-rebuild), every path is dirty and the persist writes the
+// whole index. The path that previously DELETEd-then-INSERTed every
+// row is reachable that way, but only when explicitly requested.
+//
+// On commit success, callers MUST call idx.ClearDirty() to empty the
+// dirty/deleted sets. On commit failure, the sets stay populated so
+// the next cycle retries the same rows. saveIndex itself does NOT
+// clear them — the caller decides based on commit success.
 func saveIndex(db *sql.DB, folderID string, idx *FileIndex) (err error) {
 	if db == nil {
 		return fmt.Errorf("saveIndex: nil db")
@@ -279,6 +346,10 @@ func saveIndex(db *sql.DB, folderID string, idx *FileIndex) (err error) {
 	if idx == nil {
 		return fmt.Errorf("saveIndex: nil index")
 	}
+	dirty, deleted := idx.DirtyPaths()
+	// Begin a writer tx. With ?_txlock=immediate (D3) this emits
+	// BEGIN IMMEDIATE so we hold the writer lock before any other
+	// connection can claim it.
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin save tx: %w", err)
@@ -288,12 +359,8 @@ func saveIndex(db *sql.DB, folderID string, idx *FileIndex) (err error) {
 			_ = tx.Rollback()
 		}
 	}()
-	if _, err = tx.Exec(`BEGIN IMMEDIATE`); err != nil {
-		// database/sql already started a DEFERRED tx; escalate to
-		// IMMEDIATE so we know we hold the writer lock before any other
-		// connection gets the chance to claim it.
-		// A no-op on pure-go SQLite when the tx is already a writer.
-	}
+	// Folder-level scalars always re-written on every persist. They
+	// are tiny (3 rows total) and the cost is amortized.
 	if err = setFolderMeta(tx, "sequence", formatInt64(idx.Sequence)); err != nil {
 		return err
 	}
@@ -305,33 +372,69 @@ func saveIndex(db *sql.DB, folderID string, idx *FileIndex) (err error) {
 	if err = setFolderMeta(tx, "fs_device_id", formatUint64(idx.DeviceID)); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(`DELETE FROM files WHERE folder_id=?`, folderID); err != nil {
-		return fmt.Errorf("clear files: %w", err)
-	}
-	stmt, err := tx.Prepare(`INSERT INTO files(
-		folder_id, path, size, mtime_ns, hash, deleted, sequence, mode,
-		version, inode, prev_path, hash_state, hashed_bytes, prefix_check
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-	if err != nil {
-		return fmt.Errorf("prepare file insert: %w", err)
-	}
-	defer stmt.Close()
-	for path, e := range idx.Files {
-		var inode any
-		if e.Inode != 0 {
-			inode = int64(e.Inode) //nolint:gosec // G115: inode bits preserved by int64 round-trip
+	if idx.Path != "" {
+		if err = setFolderMeta(tx, "path", idx.Path); err != nil {
+			return err
 		}
-		var prevPath any
-		if e.PrevPath != "" {
-			prevPath = e.PrevPath
+	}
+	// UPSERT every dirty path. INSERT OR REPLACE is fine for commit 2;
+	// commit 7 (β finish) replaces this with a sequence-conditioned
+	// UPSERT that skips writes losing the sequence race.
+	if len(dirty) > 0 {
+		stmt, perr := tx.Prepare(`INSERT INTO files(
+			folder_id, path, size, mtime_ns, hash, deleted, sequence, mode,
+			version, inode, prev_path, hash_state, hashed_bytes, prefix_check
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(folder_id, path) DO UPDATE SET
+			size=excluded.size, mtime_ns=excluded.mtime_ns,
+			hash=excluded.hash, deleted=excluded.deleted,
+			sequence=excluded.sequence, mode=excluded.mode,
+			version=excluded.version, inode=excluded.inode,
+			prev_path=excluded.prev_path, hash_state=excluded.hash_state,
+			hashed_bytes=excluded.hashed_bytes,
+			prefix_check=excluded.prefix_check`)
+		if perr != nil {
+			err = fmt.Errorf("prepare file upsert: %w", perr)
+			return err
 		}
-		if _, err = stmt.Exec(
-			folderID, path, e.Size, e.MtimeNS, e.SHA256[:], boolToInt(e.Deleted),
-			e.Sequence, int64(e.Mode), encodeVectorClock(e.Version),
-			inode, prevPath, nullIfEmpty(e.HashState), nullIfZero(e.HashedBytes),
-			nullIfEmpty(e.PrefixCheck),
-		); err != nil {
-			return fmt.Errorf("insert files[%s]: %w", path, err)
+		defer stmt.Close()
+		for path := range dirty {
+			e, ok := idx.Get(path)
+			if !ok {
+				// Path was Set then Deleted before commit — the deleted
+				// set carries it; skip the upsert.
+				continue
+			}
+			var inode any
+			if e.Inode != 0 {
+				inode = int64(e.Inode) //nolint:gosec // G115: inode bits preserved by int64 round-trip
+			}
+			var prevPath any
+			if e.PrevPath != "" {
+				prevPath = e.PrevPath
+			}
+			if _, err = stmt.Exec(
+				folderID, path, e.Size, e.MtimeNS, e.SHA256[:], boolToInt(e.Deleted),
+				e.Sequence, int64(e.Mode), encodeVectorClock(e.Version),
+				inode, prevPath, nullIfEmpty(e.HashState), nullIfZero(e.HashedBytes),
+				nullIfEmpty(e.PrefixCheck),
+			); err != nil {
+				return fmt.Errorf("upsert files[%s]: %w", path, err)
+			}
+		}
+	}
+	// DELETE rows for hard-removed paths.
+	if len(deleted) > 0 {
+		dstmt, derr := tx.Prepare(`DELETE FROM files WHERE folder_id=? AND path=?`)
+		if derr != nil {
+			err = fmt.Errorf("prepare file delete: %w", derr)
+			return err
+		}
+		defer dstmt.Close()
+		for path := range deleted {
+			if _, err = dstmt.Exec(folderID, path); err != nil {
+				return fmt.Errorf("delete files[%s]: %w", path, err)
+			}
 		}
 	}
 	if err = tx.Commit(); err != nil {
@@ -351,7 +454,11 @@ func loadIndexDB(db *sql.DB, folderID string) (*FileIndex, error) {
 	if seq, err := folderMeta(db, "sequence"); err != nil {
 		return nil, err
 	} else if seq != "" {
-		idx.Sequence = parseInt64(seq)
+		v, perr := parseInt64(seq)
+		if perr != nil {
+			return nil, fmt.Errorf("folder_meta.sequence: %w", perr)
+		}
+		idx.Sequence = v
 	}
 	if epoch, err := folderMeta(db, "epoch"); err != nil {
 		return nil, err
@@ -361,7 +468,16 @@ func loadIndexDB(db *sql.DB, folderID string) (*FileIndex, error) {
 	if fsdev, err := folderMeta(db, "fs_device_id"); err != nil {
 		return nil, err
 	} else if fsdev != "" {
-		idx.DeviceID = parseUint64(fsdev)
+		v, perr := parseUint64(fsdev)
+		if perr != nil {
+			return nil, fmt.Errorf("folder_meta.fs_device_id: %w", perr)
+		}
+		idx.DeviceID = v
+	}
+	if path, err := folderMeta(db, "path"); err != nil {
+		return nil, err
+	} else if path != "" {
+		idx.Path = path
 	}
 
 	rows, err := db.Query(`SELECT path, size, mtime_ns, hash, deleted, sequence,
@@ -409,7 +525,7 @@ func loadIndexDB(db *sql.DB, folderID string) (*FileIndex, error) {
 			e.HashedBytes = hashedBytes.Int64
 		}
 		e.PrefixCheck = prefixCheck
-		idx.Files[path] = e
+		idx.Set(path, e)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate files: %w", err)
@@ -703,16 +819,29 @@ func sortStrings(s []string) {
 	}
 }
 
-func formatInt64(n int64) string   { return fmt.Sprintf("%d", n) }
-func formatUint64(n uint64) string { return fmt.Sprintf("%d", n) }
+func formatInt64(n int64) string   { return strconv.FormatInt(n, 10) }
+func formatUint64(n uint64) string { return strconv.FormatUint(n, 10) }
 
-func parseInt64(s string) int64 {
-	var n int64
-	_, _ = fmt.Sscanf(s, "%d", &n)
-	return n
+// parseInt64 / parseUint64 are the strict counterparts: garbage in
+// folder_meta scalar columns surfaces as an error rather than being
+// silently coerced to zero (D1 / iter-3 review §D). A zero
+// folder_meta.sequence after a previously-non-zero one would re-run
+// the entire index from sequence 1 and confuse every peer with a
+// LastSeenSequence mismatch — fail loud instead, let commit 3's
+// FolderDisabled scaffold transition the folder to
+// `metadata_parse_failed`.
+func parseInt64(s string) (int64, error) {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse int64 %q: %w", s, err)
+	}
+	return n, nil
 }
-func parseUint64(s string) uint64 {
-	var n uint64
-	_, _ = fmt.Sscanf(s, "%d", &n)
-	return n
+
+func parseUint64(s string) (uint64, error) {
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse uint64 %q: %w", s, err)
+	}
+	return n, nil
 }

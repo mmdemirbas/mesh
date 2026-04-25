@@ -223,7 +223,7 @@ func TestFileInfo_VersionWireRoundTrip(t *testing.T) {
 	}
 
 	got := protoToFileIndex(idx)
-	back, ok := got.Files["p.txt"]
+	back, ok := got.Get("p.txt")
 	if !ok {
 		t.Fatal("entry missing after round-trip")
 	}
@@ -250,7 +250,7 @@ func TestScan_BumpsSelfOnLocalWrite(t *testing.T) {
 	if _, _, _, err := idx.scan(context.Background(), dir, newIgnoreMatcher(nil)); err != nil {
 		t.Fatal(err)
 	}
-	e1, ok := idx.Files["a.txt"]
+	e1, ok := idx.Get("a.txt")
 	if !ok {
 		t.Fatal("a.txt missing after first scan")
 	}
@@ -263,7 +263,7 @@ func TestScan_BumpsSelfOnLocalWrite(t *testing.T) {
 	if _, _, _, err := idx.scan(context.Background(), dir, newIgnoreMatcher(nil)); err != nil {
 		t.Fatal(err)
 	}
-	e2 := idx.Files["a.txt"]
+	e2, _ := idx.Get("a.txt")
 	if e2.Version[selfID] != 2 {
 		t.Fatalf("content change: Version[self]=%d, want 2 (full=%v)", e2.Version[selfID], e2.Version)
 	}
@@ -278,7 +278,7 @@ func TestScan_BumpsSelfOnLocalWrite(t *testing.T) {
 	if _, _, _, err := idx.scan(context.Background(), dir, newIgnoreMatcher(nil)); err != nil {
 		t.Fatal(err)
 	}
-	e3 := idx.Files["a.txt"]
+	e3, _ := idx.Get("a.txt")
 	if !e3.Deleted {
 		t.Fatal("a.txt not tombstoned after local delete")
 	}
@@ -303,7 +303,7 @@ func TestScan_StatOnlyChangeDoesNotBump(t *testing.T) {
 	if _, _, _, err := idx.scan(context.Background(), dir, newIgnoreMatcher(nil)); err != nil {
 		t.Fatal(err)
 	}
-	before := idx.Files["a.txt"].Version.clone()
+	before := idx.Files()["a.txt"].Version.clone()
 
 	// Touch mtime without changing content — forces the hash path but
 	// the same-hash branch must NOT bump.
@@ -314,7 +314,7 @@ func TestScan_StatOnlyChangeDoesNotBump(t *testing.T) {
 	if _, _, _, err := idx.scan(context.Background(), dir, newIgnoreMatcher(nil)); err != nil {
 		t.Fatal(err)
 	}
-	after := idx.Files["a.txt"].Version
+	after := idx.Files()["a.txt"].Version
 	if compareClocks(before, after) != ClockEqual {
 		t.Fatalf("stat-only change bumped clock: before=%v after=%v", before, after)
 	}
@@ -334,7 +334,7 @@ func TestScan_EmptySelfIDSkipsBump(t *testing.T) {
 	if _, _, _, err := idx.scan(context.Background(), dir, newIgnoreMatcher(nil)); err != nil {
 		t.Fatal(err)
 	}
-	e := idx.Files["a.txt"]
+	e, _ := idx.Get("a.txt")
 	if len(e.Version) != 0 {
 		t.Fatalf("empty selfID leaked into Version: %v", e.Version)
 	}
@@ -349,11 +349,11 @@ func TestDiff_PopulatesRemoteVersion(t *testing.T) {
 
 	// Remote has: p_new.txt (new), p_mod.txt (content changed), p_del.txt (tombstoned).
 	// Local has: p_mod.txt (older content), p_del.txt (unchanged).
-	local := &FileIndex{Files: map[string]FileEntry{
+	local := &FileIndex{files: map[string]FileEntry{
 		"p_mod.txt": {Size: 1, MtimeNS: 1, SHA256: testHash("local-old")},
 		"p_del.txt": {Size: 1, MtimeNS: 1, SHA256: testHash("stable")},
 	}}
-	remote := &FileIndex{Files: map[string]FileEntry{
+	remote := &FileIndex{files: map[string]FileEntry{
 		"p_new.txt": {
 			Size: 1, MtimeNS: 10, SHA256: testHash("new"), Sequence: 1,
 			Version: VectorClock{"PEER-AA": 1},
@@ -462,13 +462,13 @@ func TestDiff_VectorClockClassifier(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			local := &FileIndex{Files: map[string]FileEntry{
+			local := &FileIndex{files: map[string]FileEntry{
 				"p.txt": {
 					Size: 1, MtimeNS: tc.localMtime,
 					SHA256: testHash("local"), Version: tc.local,
 				},
 			}}
-			remote := &FileIndex{Files: map[string]FileEntry{
+			remote := &FileIndex{files: map[string]FileEntry{
 				"p.txt": {
 					Size: 1, MtimeNS: 999, Sequence: 1,
 					SHA256: testHash("remote"), Version: tc.remote,
@@ -499,10 +499,10 @@ func TestDiff_LegacyFallbackWhenClockMissing(t *testing.T) {
 
 	// Local has no clock (legacy); remote has a clock. Mtime says local
 	// predates the last sync → the fallback must classify as Download.
-	local := &FileIndex{Files: map[string]FileEntry{
+	local := &FileIndex{files: map[string]FileEntry{
 		"p.txt": {Size: 1, MtimeNS: 1, SHA256: testHash("old-local")},
 	}}
-	remote := &FileIndex{Files: map[string]FileEntry{
+	remote := &FileIndex{files: map[string]FileEntry{
 		"p.txt": {
 			Size: 1, MtimeNS: 500, Sequence: 1,
 			SHA256: testHash("remote-newer"), Version: VectorClock{"PEER": 1},
@@ -520,13 +520,13 @@ func TestDiff_LegacyFallbackWhenClockMissing(t *testing.T) {
 func TestDiff_RemoteTombstoneVsLocalWriteConcurrent(t *testing.T) {
 	t.Parallel()
 
-	local := &FileIndex{Files: map[string]FileEntry{
+	local := &FileIndex{files: map[string]FileEntry{
 		"p.txt": {
 			Size: 1, MtimeNS: 200, SHA256: testHash("local"),
 			Version: VectorClock{"SELF": 1, "PEER": 1},
 		},
 	}}
-	remote := &FileIndex{Files: map[string]FileEntry{
+	remote := &FileIndex{files: map[string]FileEntry{
 		"p.txt": {
 			Deleted: true, MtimeNS: 200, Sequence: 2,
 			Version: VectorClock{"SELF": 1, "PEER": 2},
@@ -536,10 +536,10 @@ func TestDiff_RemoteTombstoneVsLocalWriteConcurrent(t *testing.T) {
 	// marked deleted. Neither dominates because local's {SELF:1,PEER:1}
 	// is ≤ remote's {SELF:1,PEER:2} — actually remote dominates. Rewrite
 	// to genuinely concurrent:
-	local.Files["p.txt"] = FileEntry{
+	local.Set("p.txt", FileEntry{
 		Size: 1, MtimeNS: 200, SHA256: testHash("local"),
 		Version: VectorClock{"SELF": 2, "PEER": 1},
-	}
+	})
 	// local {SELF:2,PEER:1} vs remote {SELF:1,PEER:2} → concurrent.
 	actions := local.diff(remote, 1 /*lastSeen>0 bypasses H8*/, 0, nil, "send-receive")
 	if len(actions) != 0 {
@@ -553,13 +553,13 @@ func TestDiff_RemoteTombstoneVsLocalWriteConcurrent(t *testing.T) {
 func TestDiff_RemoteTombstoneDominatesLocalWrite(t *testing.T) {
 	t.Parallel()
 
-	local := &FileIndex{Files: map[string]FileEntry{
+	local := &FileIndex{files: map[string]FileEntry{
 		"p.txt": {
 			Size: 1, MtimeNS: 100, SHA256: testHash("local"),
 			Version: VectorClock{"PEER": 1},
 		},
 	}}
-	remote := &FileIndex{Files: map[string]FileEntry{
+	remote := &FileIndex{files: map[string]FileEntry{
 		"p.txt": {
 			Deleted: true, MtimeNS: 200, Sequence: 2,
 			Version: VectorClock{"PEER": 2},
@@ -591,24 +591,24 @@ func TestFileIndex_CloneInto_BumpDoesNotAliasSource(t *testing.T) {
 	t.Parallel()
 
 	src := newFileIndex()
-	src.Files["a.txt"] = FileEntry{
+	src.Set("a.txt", FileEntry{
 		Size:    1,
 		SHA256:  testHash("x"),
 		Version: VectorClock{"A": 1},
-	}
+	})
 
 	cp := src.clone()
-	entry := cp.Files["a.txt"]
+	entry, _ := cp.Get("a.txt")
 	entry.Version = entry.Version.bump("A")
-	cp.Files["a.txt"] = entry
+	cp.Set("a.txt", entry)
 
-	if src.Files["a.txt"].Version["A"] != 1 {
+	if v, _ := src.Get("a.txt"); v.Version["A"] != 1 {
 		t.Fatalf("bump on clone entry reached source: src[A]=%d",
-			src.Files["a.txt"].Version["A"])
+			v.Version["A"])
 	}
-	if cp.Files["a.txt"].Version["A"] != 2 {
+	if v, _ := cp.Get("a.txt"); v.Version["A"] != 2 {
 		t.Fatalf("bump did not advance clone: cp[A]=%d",
-			cp.Files["a.txt"].Version["A"])
+			v.Version["A"])
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding"
-	"encoding/gob"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -101,23 +100,43 @@ type FileEntry struct {
 }
 
 // FileIndex is the in-memory index for a single folder.
+//
+// Per PERSISTENCE-AUDIT.md §6 commit 2: Files goes private; Set / Get /
+// Range / Delete / DirtyPaths / ClearDirty are the only public API.
+// Direct map access is forbidden so the dirty-set tracking required by
+// the SQLite per-path UPSERT path (decision §5 P2) cannot be bypassed.
 type FileIndex struct {
-	Path     string               `yaml:"path"`
-	Sequence int64                `yaml:"sequence"`
-	Epoch    string               `yaml:"epoch,omitempty"`     // H2b: random ID, regenerated on index creation
-	DeviceID uint64               `yaml:"device_id,omitempty"` // G3: filesystem device ID at first scan
-	Files    map[string]FileEntry `yaml:"files"`
+	Path     string `yaml:"path"`
+	Sequence int64  `yaml:"sequence"`
+	Epoch    string `yaml:"epoch,omitempty"`     // H2b: random ID, regenerated on index creation
+	DeviceID uint64 `yaml:"device_id,omitempty"` // G3: filesystem device ID at first scan
+
+	// files is the in-memory map. Private; access via Get / Set / Range /
+	// Delete. Direct map writes bypass the dirty-set; direct map reads
+	// would couple callers to the storage shape.
+	files map[string]FileEntry `yaml:"files"`
+
+	// dirty tracks paths that need INSERT OR REPLACE on the next persist.
+	// Populated by Set; cleared by ClearDirty after a successful commit.
+	// Persist failure leaves it populated so the next cycle retries.
+	dirty map[string]struct{} `yaml:"-"`
+
+	// deleted tracks paths that need DELETE on the next persist.
+	// Populated by Delete; cleared by ClearDirty. Distinct from in-place
+	// tombstones (deleted=1 row), which are normal Set calls — Delete is
+	// the rare hard-remove case after tombstone GC.
+	deleted map[string]struct{} `yaml:"-"`
 
 	// P18b: cached active (non-deleted) count and total size, maintained
-	// incrementally by trackAdd/trackRemove. Avoids O(n) iteration on
-	// every sync cycle and admin API call.
+	// incrementally by Set / Delete. Avoids O(n) iteration on every sync
+	// cycle and admin API call.
 	cachedCount int   `yaml:"-"`
 	cachedSize  int64 `yaml:"-"`
 
 	// PG: secondary index sorted by Sequence for O(log N + delta) delta
 	// exchange. May contain stale entries (path updated with a newer
-	// sequence); consumers must verify against Files map. Rebuilt after
-	// scan swap and index load; appended to by setEntry.
+	// sequence); consumers must verify against the files map. Rebuilt
+	// after scan swap and index load; appended to by Set.
 	seqIndex []seqEntry `yaml:"-"`
 
 	// C6: this node's device ID (10-char Crockford base32). Populated by
@@ -126,6 +145,152 @@ type FileIndex struct {
 	// FileIndex directly; bump is skipped in that case.
 	selfID string `yaml:"-"`
 }
+
+// Get returns the entry for path and a presence flag. The zero
+// FileEntry is returned when the path is absent — callers that previously
+// used `entry := idx.Get(path)` (zero-value-on-miss) should use
+// `entry, _ := idx.Get(path)`.
+func (idx *FileIndex) Get(path string) (FileEntry, bool) {
+	e, ok := idx.files[path]
+	return e, ok
+}
+
+// Has reports whether path has an entry (deleted or not).
+func (idx *FileIndex) Has(path string) bool {
+	_, ok := idx.files[path]
+	return ok
+}
+
+// Len returns the total number of entries (including tombstones).
+func (idx *FileIndex) Len() int { return len(idx.files) }
+
+// Set installs entry at path, maintains the cached counters, appends to
+// the secondary sequence index, and marks the path dirty for the next
+// persist. The previous behavior of `setEntry` is preserved exactly;
+// the dirty-set bookkeeping is the new piece.
+func (idx *FileIndex) Set(path string, entry FileEntry) {
+	old, exists := idx.files[path]
+	if exists && !old.Deleted {
+		idx.cachedCount--
+		idx.cachedSize -= old.Size
+	}
+	if !entry.Deleted {
+		idx.cachedCount++
+		idx.cachedSize += entry.Size
+	}
+	idx.files[path] = entry
+	// PG: append to secondary index. Stale entries (same path, older seq)
+	// are tolerated and filtered at query time.
+	idx.seqIndex = append(idx.seqIndex, seqEntry{seq: entry.Sequence, path: path})
+	if idx.dirty == nil {
+		idx.dirty = make(map[string]struct{})
+	}
+	idx.dirty[path] = struct{}{}
+	// If a prior Delete marked this path for hard-removal and we are now
+	// reinstating it, clear the deleted marker — the row will be UPSERTed,
+	// not DELETEd.
+	delete(idx.deleted, path)
+}
+
+// Delete removes path entirely from the index. This is the hard-remove
+// case (e.g., after tombstone GC) — for normal tombstoning, callers
+// should Set an entry with Deleted=true. The path is added to the
+// deleted-set so the next persist issues a SQL DELETE.
+func (idx *FileIndex) Delete(path string) {
+	old, exists := idx.files[path]
+	if !exists {
+		return
+	}
+	if !old.Deleted {
+		idx.cachedCount--
+		idx.cachedSize -= old.Size
+	}
+	delete(idx.files, path)
+	if idx.deleted == nil {
+		idx.deleted = make(map[string]struct{})
+	}
+	idx.deleted[path] = struct{}{}
+	// A path being hard-removed is no longer dirty for UPSERT.
+	delete(idx.dirty, path)
+}
+
+// Range yields path/entry pairs in unspecified order. Yield false to
+// stop iteration. Compatible with Go 1.23+ range-over-func:
+//
+//	for path, entry := range idx.Range {
+//	    // ...
+//	}
+func (idx *FileIndex) Range(yield func(path string, entry FileEntry) bool) {
+	for k, v := range idx.files {
+		if !yield(k, v) {
+			return
+		}
+	}
+}
+
+// DirtyPaths returns a snapshot of (dirty, deleted) path sets for the
+// next persist cycle. The returned maps are copies; callers may iterate
+// without holding indexMu, but ClearDirty must be called only after the
+// SQLite commit succeeds. The two sets are disjoint by construction
+// (Set clears any deleted entry; Delete clears any dirty entry).
+func (idx *FileIndex) DirtyPaths() (dirty, deleted map[string]struct{}) {
+	if len(idx.dirty) > 0 {
+		dirty = make(map[string]struct{}, len(idx.dirty))
+		for k := range idx.dirty {
+			dirty[k] = struct{}{}
+		}
+	}
+	if len(idx.deleted) > 0 {
+		deleted = make(map[string]struct{}, len(idx.deleted))
+		for k := range idx.deleted {
+			deleted[k] = struct{}{}
+		}
+	}
+	return dirty, deleted
+}
+
+// ClearDirty empties both dirty- and deleted-set, called after a
+// successful persist commit. On commit failure the caller MUST NOT call
+// this — the sets stay populated so the next cycle retries the same
+// rows.
+func (idx *FileIndex) ClearDirty() {
+	if len(idx.dirty) > 0 {
+		clear(idx.dirty)
+	}
+	if len(idx.deleted) > 0 {
+		clear(idx.deleted)
+	}
+}
+
+// MarkAllDirty stamps every current path as dirty. Used by the
+// initial-load path (when a fresh in-memory index is populated from
+// SQLite, the dirty-set should NOT fire on first persist) and by any
+// scenario that wants to force-rewrite every row. Most callers do not
+// need this — Set handles incremental updates.
+func (idx *FileIndex) MarkAllDirty() {
+	if idx.dirty == nil {
+		idx.dirty = make(map[string]struct{}, len(idx.files))
+	}
+	for k := range idx.files {
+		idx.dirty[k] = struct{}{}
+	}
+}
+
+// Files returns the live underlying files map. DEPRECATED for new
+// production code — use Get / Set / Range / Delete so the dirty-set
+// tracking and counter maintenance fires. This accessor exists for
+// (a) tests that mutate the map at setup time where dirty-set
+// tracking is irrelevant, and (b) the scan path which performs bulk
+// recompute via recomputeCache and rebuildSeqIndex after the swap.
+//
+// Direct mutation through the returned map BYPASSES Set's seqIndex
+// append, dirty-set marker, and cachedCount/cachedSize maintenance.
+// Callers MUST run idx.recomputeCache() + idx.rebuildSeqIndex() +
+// idx.MarkAllDirty() after bulk modification to restore invariants.
+//
+// This shim is migration scaffolding. Once every test mutates via
+// Set, the method should be removed.
+func (idx *FileIndex) Files() map[string]FileEntry { return idx.files }
 
 // seqEntry maps a sequence number to a path for the secondary index.
 type seqEntry struct {
@@ -156,7 +321,7 @@ type PeerState struct {
 func newFileIndex() *FileIndex {
 	return &FileIndex{
 		Epoch: generateEpoch(),
-		Files: make(map[string]FileEntry),
+		files: make(map[string]FileEntry),
 	}
 }
 
@@ -174,17 +339,21 @@ func (idx *FileIndex) clone() *FileIndex {
 	return idx.cloneInto(nil)
 }
 
-// cloneInto returns a deep copy reusing `dst` as the Files backing map.
+// cloneInto returns a deep copy reusing `dst` as the files backing map.
 // If dst is nil or has insufficient capacity, a fresh map is allocated.
 // Callers use this with a recycled map from the previous scan to eliminate
 // the ~30 MB per-scan allocation on large folders (P18c).
+//
+// The clone does NOT inherit the source's dirty/deleted sets — the
+// scan path operates on a private working copy, and the swap-back code
+// reconciles dirtiness on the live index, not on the clone.
 func (idx *FileIndex) cloneInto(dst map[string]FileEntry) *FileIndex {
 	if dst == nil {
-		dst = make(map[string]FileEntry, len(idx.Files))
+		dst = make(map[string]FileEntry, len(idx.files))
 	} else {
 		clear(dst)
 	}
-	for k, v := range idx.Files {
+	for k, v := range idx.files {
 		// C6: VectorClock is shared by reference. All production mutation
 		// paths (bump, merge) allocate a new map rather than mutating in
 		// place, so aliasing between source and clone is safe. Direct
@@ -194,241 +363,17 @@ func (idx *FileIndex) cloneInto(dst map[string]FileEntry) *FileIndex {
 	}
 	return &FileIndex{
 		Path: idx.Path, Sequence: idx.Sequence, Epoch: idx.Epoch, DeviceID: idx.DeviceID,
-		Files: dst, cachedCount: idx.cachedCount, cachedSize: idx.cachedSize,
+		files: dst, cachedCount: idx.cachedCount, cachedSize: idx.cachedSize,
 		selfID: idx.selfID,
 	}
 }
 
-// prevPath returns the backup path for double-write persistence.
-func prevPath(path string) string { return path + ".prev" }
-
-// loadIndex reads a persisted index from disk.
-// P17b: tries gob files first (fast binary), falls back to YAML (migration).
-// H2a: tries both primary and backup, returning whichever has the higher
-// sequence. This survives single-file corruption (disk sector error, partial write).
-func loadIndex(path string) (*FileIndex, error) {
-	gobPath := yamlToGobPath(path)
-
-	// Try gob files first (preferred format).
-	primary := tryLoadGobIndex(gobPath)
-	backup := tryLoadGobIndex(prevPath(gobPath))
-
-	// Fall back to YAML for migration from older installations.
-	if primary == nil {
-		primary = tryLoadYAMLIndex(path)
-	}
-	if backup == nil {
-		backup = tryLoadYAMLIndex(prevPath(path))
-	}
-
-	var idx *FileIndex
-	switch {
-	case primary != nil && backup != nil:
-		if backup.Sequence > primary.Sequence {
-			idx = backup
-		} else {
-			idx = primary
-		}
-	case primary != nil:
-		idx = primary
-	case backup != nil:
-		slog.Warn("index loaded from backup (primary corrupted or missing)", "path", path)
-		idx = backup
-	default:
-		// Both missing (first run) → not an error.
-		if isNotExist(gobPath) && isNotExist(prevPath(gobPath)) &&
-			isNotExist(path) && isNotExist(prevPath(path)) {
-			return newFileIndex(), nil
-		}
-		return nil, fmt.Errorf("all index files unreadable: %s", path)
-	}
-	// H2b migration: assign an epoch to indexes persisted before epoch support.
-	if idx.Epoch == "" {
-		idx.Epoch = generateEpoch()
-	}
-	return idx, nil
-}
-
-// tryLoadGobIndex attempts to read and decode a gob index file.
-func tryLoadGobIndex(path string) *FileIndex {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path from user cache dir
-	if err != nil {
-		return nil
-	}
-	idx, err := gobUnmarshalIndex(data)
-	if err != nil {
-		slog.Warn("corrupt gob index file, skipping", "path", path, "error", err)
-		return nil
-	}
-	return idx
-}
-
-// tryLoadYAMLIndex attempts to read and parse a YAML index file (legacy format).
-func tryLoadYAMLIndex(path string) *FileIndex {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path from user cache dir
-	if err != nil {
-		return nil
-	}
-	idx := newFileIndex()
-	if err := yaml.Unmarshal(data, idx); err != nil {
-		slog.Warn("corrupt yaml index file, skipping", "path", path, "error", err)
-		return nil
-	}
-	return idx
-}
-
-// save writes the index to disk with fsync and double-write.
-// P17b: uses gob (binary) encoding instead of YAML for ~3-5x faster
-// marshal/unmarshal and ~40% smaller output. The path argument still
-// ends in .yaml (callers unchanged); we derive .gob paths from it.
-// H2a: writes to .prev first, then primary — same crash-safety guarantee.
-func (idx *FileIndex) save(path string) error {
-	gobPath := yamlToGobPath(path)
-	data, err := gobMarshalIndex(idx)
-	if err != nil {
-		return fmt.Errorf("marshal index: %w", err)
-	}
-	dir := filepath.Dir(gobPath)
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		return fmt.Errorf("create index dir: %w", err)
-	}
-	if err := writeFileSync(prevPath(gobPath), data); err != nil {
-		return fmt.Errorf("write index backup: %w", err)
-	}
-	if err := writeFileSync(gobPath, data); err != nil {
-		return fmt.Errorf("write index primary: %w", err)
-	}
-	return nil
-}
-
-// yamlToGobPath replaces .yaml extension with .gob.
-func yamlToGobPath(path string) string {
-	return strings.TrimSuffix(path, ".yaml") + ".gob"
-}
-
-// gobMarshalIndex encodes a FileIndex to gob bytes.
-func gobMarshalIndex(idx *FileIndex) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(idx); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-// gobUnmarshalIndex decodes a FileIndex from gob bytes.
-func gobUnmarshalIndex(data []byte) (*FileIndex, error) {
-	idx := newFileIndex()
-	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(idx); err != nil {
-		return nil, err
-	}
-	return idx, nil
-}
-
-// loadPeerStates reads per-peer sync state from disk. H2a: tries both
-// primary and backup, preferring the one with a later LastSync timestamp.
-func loadPeerStates(path string) (map[string]PeerState, error) {
-	primary := tryLoadPeerStates(path)
-	backup := tryLoadPeerStates(prevPath(path))
-
-	switch {
-	case primary != nil && backup != nil:
-		if latestSync(backup).After(latestSync(primary)) {
-			return backup, nil
-		}
-		return primary, nil
-	case primary != nil:
-		return primary, nil
-	case backup != nil:
-		slog.Warn("peer state loaded from backup (primary corrupted or missing)", "path", path)
-		return backup, nil
-	default:
-		if isNotExist(path) && isNotExist(prevPath(path)) {
-			return make(map[string]PeerState), nil
-		}
-		return nil, fmt.Errorf("both peer state files unreadable: %s", path)
-	}
-}
-
-// tryLoadPeerStates attempts to read and parse a single peer state file.
-func tryLoadPeerStates(path string) map[string]PeerState {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed from user cache dir
-	if err != nil {
-		return nil
-	}
-	peers := make(map[string]PeerState)
-	if err := yaml.Unmarshal(data, &peers); err != nil {
-		slog.Warn("corrupt peer state file, skipping", "path", path, "error", err)
-		return nil
-	}
-	return peers
-}
-
-// latestSync returns the most recent LastSync across all peers.
-func latestSync(peers map[string]PeerState) time.Time {
-	var latest time.Time
-	for _, ps := range peers {
-		if ps.LastSync.After(latest) {
-			latest = ps.LastSync
-		}
-	}
-	return latest
-}
-
-// savePeerStates writes peer state to disk with fsync and double-write.
-// Both copies are written every time (peer state is small) so they stay
-// in sync and either can serve as a recovery source.
-func savePeerStates(path string, peers map[string]PeerState) error {
-	data, err := yaml.Marshal(peers)
-	if err != nil {
-		return fmt.Errorf("marshal peers: %w", err)
-	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		return fmt.Errorf("create peers dir: %w", err)
-	}
-	if err := writeFileSync(path, data); err != nil {
-		return fmt.Errorf("write peers primary: %w", err)
-	}
-	if err := writeFileSync(prevPath(path), data); err != nil {
-		return fmt.Errorf("write peers backup: %w", err)
-	}
-	return nil
-}
-
-// writeFileSync writes data to path via temp+fsync+rename. The fsync
-// ensures data hits stable storage before the rename makes it visible.
-func writeFileSync(path string, data []byte) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600) //nolint:gosec // G304
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := renameReplace(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
-}
-
-// isNotExist returns true if the path does not exist.
-func isNotExist(path string) bool {
-	_, err := os.Stat(path)
-	return os.IsNotExist(err)
-}
+// PERSISTENCE-AUDIT.md §6 commit 2: gob/YAML persistence is gone.
+// The legacy loadIndex / save / loadPeerStates / savePeerStates /
+// tryLoad* / gobMarshalIndex / gobUnmarshalIndex / yamlToGobPath /
+// prevPath / writeFileSync helpers have been deleted; SQLite is the
+// only on-disk store. refuseLegacyIndex (in index_sqlite.go) rejects
+// folder cache directories that still carry left-over dev sidecars.
 
 // activeCountAndSize returns the number of non-deleted files and their total size.
 // activeCountAndSize returns the cached active file count and total size.
@@ -443,7 +388,7 @@ func (idx *FileIndex) activeCountAndSize() (int, int64) {
 func (idx *FileIndex) recomputeCache() {
 	var count int
 	var size int64
-	for _, e := range idx.Files {
+	for _, e := range idx.files {
 		if !e.Deleted {
 			count++
 			size += e.Size
@@ -453,31 +398,11 @@ func (idx *FileIndex) recomputeCache() {
 	idx.cachedSize = size
 }
 
-// setEntry updates a file entry and maintains the cached counters
-// and the secondary sequence index.
-// Must be used instead of direct idx.Files[key] = entry assignment
-// in all mutation paths outside of scanWithStats (which bulk-recomputes).
-func (idx *FileIndex) setEntry(key string, entry FileEntry) {
-	old, exists := idx.Files[key]
-	if exists && !old.Deleted {
-		idx.cachedCount--
-		idx.cachedSize -= old.Size
-	}
-	if !entry.Deleted {
-		idx.cachedCount++
-		idx.cachedSize += entry.Size
-	}
-	idx.Files[key] = entry
-	// PG: append to secondary index. Stale entries (same path, older seq)
-	// are tolerated and filtered at query time.
-	idx.seqIndex = append(idx.seqIndex, seqEntry{seq: entry.Sequence, path: key})
-}
-
 // rebuildSeqIndex reconstructs the secondary sequence index from the
-// Files map. Called after scan swap and index load.
+// files map. Called after scan swap and index load.
 func (idx *FileIndex) rebuildSeqIndex() {
-	idx.seqIndex = make([]seqEntry, 0, len(idx.Files))
-	for path, entry := range idx.Files {
+	idx.seqIndex = make([]seqEntry, 0, len(idx.files))
+	for path, entry := range idx.files {
 		idx.seqIndex = append(idx.seqIndex, seqEntry{seq: entry.Sequence, path: path})
 	}
 	sort.Slice(idx.seqIndex, func(i, j int) bool {
@@ -749,8 +674,8 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		}
 	}
 
-	seen := make(map[string]struct{}, len(idx.Files)) // P18a: pre-size to avoid rehash cascades
-	errorPaths := make(map[string]struct{})           // paths with walk/stat/hash errors — exempt from tombstoning
+	seen := make(map[string]struct{}, idx.Len()) // P18a: pre-size to avoid rehash cascades
+	errorPaths := make(map[string]struct{})      // paths with walk/stat/hash errors — exempt from tombstoning
 	tempCutoff := time.Now().Add(-maxTempFileAge)
 
 	// PL: short-circuit deletion detection. If every previously-active file
@@ -769,8 +694,8 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	var sortedPaths []string
 	descendantsOf := func(dir string) []string {
 		if sortedPaths == nil {
-			sortedPaths = make([]string, 0, len(idx.Files))
-			for rel := range idx.Files {
+			sortedPaths = make([]string, 0, idx.Len())
+			for rel := range idx.Range {
 				sortedPaths = append(sortedPaths, rel)
 			}
 			sort.Strings(sortedPaths)
@@ -863,7 +788,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			// O(log N + matches) lookup instead of O(N) per error.
 			if dr.dirRel != "" {
 				if _, already := seen[dr.dirRel]; !already {
-					if e, ok := idx.Files[dr.dirRel]; ok && !e.Deleted {
+					if e, ok := idx.Get(dr.dirRel); ok && !e.Deleted {
 						seenPrevActive++
 					}
 				}
@@ -871,7 +796,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 				errorPaths[dr.dirRel] = struct{}{}
 				for _, child := range descendantsOf(dr.dirRel) {
 					if _, already := seen[child]; !already {
-						if e := idx.Files[child]; !e.Deleted {
+						if e, _ := idx.Get(child); !e.Deleted {
 							seenPrevActive++
 						}
 					}
@@ -895,7 +820,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 				err = errIndexCapExceeded
 				break
 			}
-			existing, exists := idx.Files[wf.rel]
+			existing, exists := idx.Get(wf.rel)
 			if _, already := seen[wf.rel]; !already && exists && !existing.Deleted {
 				seenPrevActive++ // PL
 			}
@@ -946,7 +871,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 					dirty = true
 				}
 				if dirty {
-					idx.Files[wf.rel] = existing
+					idx.Set(wf.rel, existing)
 				}
 				stats.FastPathHits++
 				continue
@@ -1036,7 +961,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			}
 			// R1 Phase 2: single-use rename hint cleared on re-seen entry.
 			entry.PrevPath = ""
-			idx.Files[p.rel] = entry
+			idx.Set(p.rel, entry)
 			continue
 		}
 
@@ -1048,7 +973,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		if idx.selfID != "" {
 			version = p.old.Version.bump(idx.selfID)
 		}
-		idx.Files[p.rel] = FileEntry{
+		idx.Set(p.rel, FileEntry{
 			Size:        p.size,
 			MtimeNS:     p.mtimeNS,
 			SHA256:      r.hash,
@@ -1059,7 +984,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 			HashState:   r.hashState,
 			HashedBytes: p.size,
 			PrefixCheck: r.prefixCheck,
-		}
+		})
 		changed = true
 	}
 	stats.HashDuration = time.Since(hashDrainStart)
@@ -1073,7 +998,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 	// stat and the WalkDir. Re-stat to distinguish a genuinely empty folder
 	// from a vanished mount point. Without this, all tracked files would be
 	// tombstoned and the deletions propagated to every peer.
-	if len(seen) == 0 && len(idx.Files) > 0 {
+	if len(seen) == 0 && idx.Len() > 0 {
 		if _, statErr := os.Stat(folderRoot); statErr != nil {
 			return false, 0, 0, stats, nil, fmt.Errorf("folder root vanished during scan: %w", statErr)
 		}
@@ -1113,7 +1038,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		}
 		// Record only if the hashed path is actually in idx.Files now
 		// (drain succeeded and TOCTOU didn't reject it).
-		entry, ok := idx.Files[p.rel]
+		entry, ok := idx.Get(p.rel)
 		if !ok {
 			continue
 		}
@@ -1165,7 +1090,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 		// a real deletion or a stale cache — fall through to the full loop.
 		if seenPrevActive != activeBefore {
 			// Mark deletions: entries in index not seen on disk.
-			for rel, entry := range idx.Files {
+			for rel, entry := range idx.Range {
 				if entry.Deleted {
 					continue
 				}
@@ -1190,10 +1115,10 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 					// off.
 					if entry.Inode != 0 {
 						if newRel, found := inodeToNewPath[entry.Inode]; found && newRel != rel {
-							if newEntry, ok := idx.Files[newRel]; ok {
+							if newEntry, ok := idx.Get(newRel); ok {
 								if isRenameHintLikely(entry.Size, newEntry.Size) {
 									newEntry.PrevPath = rel
-									idx.Files[newRel] = newEntry
+									idx.Set(newRel, newEntry)
 									stats.RenamesDetected++
 								} else {
 									stats.RenameHintsSkipped++
@@ -1209,7 +1134,7 @@ func (idx *FileIndex) scanWithStats(ctx context.Context, folderRoot string, igno
 					if idx.selfID != "" {
 						entry.Version = entry.Version.bump(idx.selfID)
 					}
-					idx.Files[rel] = entry
+					idx.Set(rel, entry)
 					changed = true
 					stats.Deletions++
 				}
@@ -1452,12 +1377,12 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 		}
 	}
 
-	for path, rEntry := range remote.Files {
+	for path, rEntry := range remote.Range {
 		if rEntry.Sequence <= lastSeenSeq {
 			continue // Already processed
 		}
 
-		lEntry, localExists := idx.Files[path]
+		lEntry, localExists := idx.Get(path)
 
 		if rEntry.Deleted {
 			// Remote tombstoned. Decide whether to apply the delete.
@@ -1578,7 +1503,7 @@ func (idx *FileIndex) diff(remote *FileIndex, lastSeenSeq int64, lastSyncNS int6
 func (idx *FileIndex) purgeTombstones(maxAge time.Duration, peers map[string]PeerState) int {
 	cutoff := time.Now().Add(-maxAge).UnixNano()
 	purged := 0
-	for path, entry := range idx.Files {
+	for path, entry := range idx.Range {
 		if !entry.Deleted || entry.MtimeNS >= cutoff {
 			continue
 		}
@@ -1591,7 +1516,7 @@ func (idx *FileIndex) purgeTombstones(maxAge time.Duration, peers map[string]Pee
 			}
 		}
 		if allAcked {
-			delete(idx.Files, path)
+			idx.Delete(path)
 			purged++
 		}
 	}
@@ -1615,22 +1540,22 @@ func (idx *FileIndex) purgeTombstones(maxAge time.Duration, peers map[string]Pee
 // exchange (full or delta). Unchanged paths not in the exchange keep
 // their prior ancestor in prior.
 func updateBaseHashes(prior map[string]Hash256, local *FileIndex, remote *FileIndex) map[string]Hash256 {
-	if remote == nil || len(remote.Files) == 0 {
+	if remote == nil || remote.Len() == 0 {
 		return prior
 	}
 	// Return a fresh map: aliasing prior and mutating it in place violates
 	// the "preserve prior" contract the callers rely on, and is a
 	// footgun if any future caller wants to inspect prior after the call.
-	out := make(map[string]Hash256, len(prior)+len(remote.Files))
+	out := make(map[string]Hash256, len(prior)+remote.Len())
 	for k, v := range prior {
 		out[k] = v
 	}
-	for path, rEntry := range remote.Files {
+	for path, rEntry := range remote.Range {
 		if rEntry.Deleted {
 			delete(out, path)
 			continue
 		}
-		lEntry, ok := local.Files[path]
+		lEntry, ok := local.Get(path)
 		if !ok || lEntry.Deleted {
 			continue
 		}
@@ -1693,7 +1618,7 @@ func planRenames(actions []DiffEntry, local *FileIndex) ([]RenamePlan, map[strin
 		if a.Action != ActionDelete {
 			continue
 		}
-		lEntry, ok := local.Files[a.Path]
+		lEntry, ok := local.Get(a.Path)
 		if !ok || lEntry.Deleted || lEntry.SHA256.IsZero() {
 			continue
 		}
@@ -1711,7 +1636,7 @@ func planRenames(actions []DiffEntry, local *FileIndex) ([]RenamePlan, map[strin
 		if a.Action != ActionDownload || a.RemoteHash.IsZero() {
 			continue
 		}
-		if lEntry, ok := local.Files[a.Path]; ok && !lEntry.Deleted {
+		if lEntry, ok := local.Get(a.Path); ok && !lEntry.Deleted {
 			continue // target exists locally — do not clobber
 		}
 		queue := delsByHash[a.RemoteHash]

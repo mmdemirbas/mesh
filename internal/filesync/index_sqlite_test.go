@@ -7,6 +7,38 @@ import (
 	"time"
 )
 
+// TestOpen_SynchronousIsFULL pins decision §5 #5 (W5):
+// synchronous=FULL is required so the last committed tx survives a
+// power loss; NORMAL is rejected. It also asserts journal_mode=wal in
+// the same test (D5 / iter-3 review §D) so a future refactor cannot
+// regress one PRAGMA without the other — the two are inseparable for
+// the audit's durability contract.
+func TestOpen_SynchronousIsFULL(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openFolderDB(dir, "ABCDE12345")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	var sync int
+	if err := db.QueryRow("PRAGMA synchronous;").Scan(&sync); err != nil {
+		t.Fatalf("pragma synchronous: %v", err)
+	}
+	// SQLite reports synchronous=FULL as integer 2.
+	if sync != 2 {
+		t.Fatalf("synchronous=%d want 2 (FULL)", sync)
+	}
+
+	var mode string
+	if err := db.QueryRow("PRAGMA journal_mode;").Scan(&mode); err != nil {
+		t.Fatalf("pragma journal_mode: %v", err)
+	}
+	if strings.ToLower(mode) != "wal" {
+		t.Fatalf("journal_mode=%q want wal", mode)
+	}
+}
+
 // TestOpenFolderDB_CreatesSchemaAndPragmas pins that the first open of a
 // new folder cache dir yields a SQLite database with the v1 tables, the
 // v1 PRAGMA values, and the seeded folder_meta rows.
@@ -168,7 +200,7 @@ func TestSaveLoadIndex_RoundTrip(t *testing.T) {
 	idx.Sequence = 42
 	idx.Epoch = "deadbeefcafef00d"
 	idx.DeviceID = 0x10203040
-	idx.Files["docs/readme.md"] = FileEntry{
+	idx.Set("docs/readme.md", FileEntry{
 		Size:     1234,
 		MtimeNS:  1_700_000_000_000_000_000,
 		SHA256:   hash256FromBytes(bytes32('a')),
@@ -177,8 +209,8 @@ func TestSaveLoadIndex_RoundTrip(t *testing.T) {
 		Mode:     0o644,
 		Inode:    987654,
 		Version:  VectorClock{"ABCDE12345": 7, "PEER00002X": 3},
-	}
-	idx.Files["archive/old.log"] = FileEntry{
+	})
+	idx.Set("archive/old.log", FileEntry{
 		Size:        0,
 		MtimeNS:     1_700_000_001_000_000_000,
 		SHA256:      hash256FromBytes(bytes32('b')),
@@ -189,7 +221,7 @@ func TestSaveLoadIndex_RoundTrip(t *testing.T) {
 		HashState:   []byte{0x01, 0x02, 0x03},
 		HashedBytes: 4096,
 		PrefixCheck: []byte{0xff, 0xee},
-	}
+	})
 	idx.recomputeCache()
 
 	if err := saveIndex(db, "shared", idx); err != nil {
@@ -210,11 +242,11 @@ func TestSaveLoadIndex_RoundTrip(t *testing.T) {
 	if got.DeviceID != idx.DeviceID {
 		t.Errorf("DeviceID=%#x want %#x", got.DeviceID, idx.DeviceID)
 	}
-	if len(got.Files) != len(idx.Files) {
-		t.Fatalf("Files len=%d want %d", len(got.Files), len(idx.Files))
+	if got.Len() != idx.Len() {
+		t.Fatalf("Files len=%d want %d", got.Len(), idx.Len())
 	}
-	for path, want := range idx.Files {
-		have, ok := got.Files[path]
+	for path, want := range idx.Range {
+		have, ok := got.Get(path)
 		if !ok {
 			t.Errorf("%s missing after reload", path)
 			continue
@@ -246,9 +278,15 @@ func TestSaveLoadIndex_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestSaveIndex_ReplacesPriorRows pins that a second save drops file rows
-// that disappeared between snapshots instead of leaving ghost entries.
-func TestSaveIndex_ReplacesPriorRows(t *testing.T) {
+// TestSaveIndex_DeletePathRemovesRow pins the per-path persist
+// model (PERSISTENCE-AUDIT.md §2.5 P2): a row is removed from SQLite
+// only when the FileIndex's Delete API is called for that path; a
+// second saveIndex without Delete leaves untouched rows in place.
+// This is a deliberate behavior change from commit 1's
+// DELETE+INSERT-everything pattern (which was the bench-disqualified
+// 655 ms cost path) — the dirty/deleted set tells saveIndex what to
+// touch.
+func TestSaveIndex_DeletePathRemovesRow(t *testing.T) {
 	dir := t.TempDir()
 	db, err := openFolderDB(dir, "ABCDE12345")
 	if err != nil {
@@ -257,15 +295,19 @@ func TestSaveIndex_ReplacesPriorRows(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	first := newFileIndex()
-	first.Files["a.txt"] = FileEntry{Size: 1, SHA256: hash256FromBytes(bytes32('a'))}
-	first.Files["b.txt"] = FileEntry{Size: 2, SHA256: hash256FromBytes(bytes32('b'))}
+	first.Set("a.txt", FileEntry{Size: 1, SHA256: hash256FromBytes(bytes32('a'))})
+	first.Set("b.txt", FileEntry{Size: 2, SHA256: hash256FromBytes(bytes32('b'))})
 	if err := saveIndex(db, "shared", first); err != nil {
 		t.Fatalf("first saveIndex: %v", err)
 	}
+	first.ClearDirty()
 
-	second := newFileIndex()
-	second.Files["a.txt"] = FileEntry{Size: 11, SHA256: hash256FromBytes(bytes32('a'))}
-	if err := saveIndex(db, "shared", second); err != nil {
+	// Update a.txt and explicitly Delete b.txt — the second save
+	// must UPSERT a.txt and DELETE b.txt; rows not touched stay
+	// untouched (there are none here, but the contract is clear).
+	first.Set("a.txt", FileEntry{Size: 11, SHA256: hash256FromBytes(bytes32('a'))})
+	first.Delete("b.txt")
+	if err := saveIndex(db, "shared", first); err != nil {
 		t.Fatalf("second saveIndex: %v", err)
 	}
 
@@ -273,10 +315,10 @@ func TestSaveIndex_ReplacesPriorRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadIndexDB: %v", err)
 	}
-	if _, present := reloaded.Files["b.txt"]; present {
-		t.Fatalf("b.txt not purged after second save: %+v", reloaded.Files)
+	if _, present := reloaded.Get("b.txt"); present {
+		t.Fatalf("b.txt not removed after Delete + saveIndex: %+v", reloaded.Files())
 	}
-	if got := reloaded.Files["a.txt"].Size; got != 11 {
+	if got := reloaded.Files()["a.txt"].Size; got != 11 {
 		t.Fatalf("a.txt Size=%d want 11", got)
 	}
 }

@@ -56,7 +56,7 @@ func TestInodePopulatedDuringScan(t *testing.T) {
 	}
 
 	for _, rel := range []string{"alpha.txt", "sub/beta.txt"} {
-		entry, ok := idx.Files[rel]
+		entry, ok := idx.Get(rel)
 		if !ok {
 			t.Fatalf("entry missing: %s", rel)
 		}
@@ -94,7 +94,7 @@ func TestInodeStableAcrossRescan(t *testing.T) {
 	}
 
 	want := observeInode(t, filepath.Join(dir, "stable.txt"))
-	entry := idx.Files["stable.txt"]
+	entry, _ := idx.Get("stable.txt")
 	if entry.Inode != want {
 		t.Errorf("after rescan Inode=%d, want %d (fast-path must preserve inode)", entry.Inode, want)
 	}
@@ -121,12 +121,12 @@ func TestInodeBackfillAfterMigration(t *testing.T) {
 
 	// Simulate a pre-Inode persisted entry: wipe the recorded inode
 	// but keep the size/mtime/hash as a real scan would have produced.
-	entry := idx.Files["legacy.txt"]
+	entry, _ := idx.Get("legacy.txt")
 	if entry.Inode == 0 {
 		t.Fatal("precondition failed: scan should have populated Inode")
 	}
 	entry.Inode = 0
-	idx.Files["legacy.txt"] = entry
+	idx.Set("legacy.txt", entry)
 
 	// Rescan — either fast-path backfill (Unix) or forced hash-phase
 	// inode extraction (Windows) must produce a non-zero Inode.
@@ -135,7 +135,7 @@ func TestInodeBackfillAfterMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := idx.Files["legacy.txt"]
+	got, _ := idx.Get("legacy.txt")
 	if got.Inode == 0 {
 		t.Error("scan did not backfill Inode — migration from pre-Inode indexes will not happen until content changes")
 	}
@@ -169,7 +169,7 @@ func TestScanDetectsRenameSameContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	idx.recomputeCache()
-	oldEntry := idx.Files["old/name.txt"]
+	oldEntry, _ := idx.Get("old/name.txt")
 	if oldEntry.Inode == 0 {
 		t.Fatal("precondition failed: first scan must populate inode")
 	}
@@ -194,7 +194,7 @@ func TestScanDetectsRenameSameContent(t *testing.T) {
 		t.Errorf("Deletions=%d, want 1 (tombstone still emitted for capability-less peers)", stats.Deletions)
 	}
 
-	newEntry, ok := idx.Files["new/name.txt"]
+	newEntry, ok := idx.Get("new/name.txt")
 	if !ok {
 		t.Fatal("new path missing from index")
 	}
@@ -208,7 +208,7 @@ func TestScanDetectsRenameSameContent(t *testing.T) {
 		t.Error("content hash changed across rename, unexpected")
 	}
 
-	tomb, ok := idx.Files["old/name.txt"]
+	tomb, ok := idx.Get("old/name.txt")
 	if !ok || !tomb.Deleted {
 		t.Error("old path tombstone not emitted")
 	}
@@ -229,8 +229,8 @@ func TestScanDetectsRenameWithEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	idx.recomputeCache()
-	oldHash := idx.Files["source.bin"].SHA256
-	oldInode := idx.Files["source.bin"].Inode
+	oldHash := idx.Files()["source.bin"].SHA256
+	oldInode := idx.Files()["source.bin"].Inode
 
 	// Rename and edit in-place. The edit must be observable via mtime
 	// or size so the scan does not take the fast path.
@@ -256,7 +256,7 @@ func TestScanDetectsRenameWithEdit(t *testing.T) {
 		t.Errorf("RenamesDetected=%d, want 1", stats.RenamesDetected)
 	}
 
-	newEntry := idx.Files["target.bin"]
+	newEntry, _ := idx.Get("target.bin")
 	if newEntry.PrevPath != "source.bin" {
 		t.Errorf("PrevPath=%q, want %q", newEntry.PrevPath, "source.bin")
 	}
@@ -288,7 +288,7 @@ func TestScanRenameHintClearedOnRescan(t *testing.T) {
 	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
 		t.Fatal(err)
 	}
-	if idx.Files["b.txt"].PrevPath != "a.txt" {
+	if idx.Files()["b.txt"].PrevPath != "a.txt" {
 		t.Fatal("precondition failed: second scan must set PrevPath")
 	}
 	idx.recomputeCache()
@@ -298,7 +298,7 @@ func TestScanRenameHintClearedOnRescan(t *testing.T) {
 	if _, _, _, _, _, err := idx.scanWithStats(context.Background(), dir, newIgnoreMatcher(nil), defaultMaxIndexFiles); err != nil {
 		t.Fatal(err)
 	}
-	got := idx.Files["b.txt"].PrevPath
+	got := idx.Files()["b.txt"].PrevPath
 	if got != "" {
 		t.Errorf("PrevPath=%q after stable rescan, want empty (hint is single-use)", got)
 	}
@@ -330,7 +330,7 @@ func TestScanRenameIgnoresUnchangedPaths(t *testing.T) {
 	if stats.RenamesDetected != 0 {
 		t.Errorf("RenamesDetected=%d on in-place edit, want 0", stats.RenamesDetected)
 	}
-	if got := idx.Files["keep.txt"].PrevPath; got != "" {
+	if got := idx.Files()["keep.txt"].PrevPath; got != "" {
 		t.Errorf("PrevPath=%q for in-place edit, want empty", got)
 	}
 }
@@ -344,7 +344,7 @@ func TestPrevPathRoundTripsThroughProto(t *testing.T) {
 	t.Parallel()
 	idx := &FileIndex{
 		Sequence: 2,
-		Files: map[string]FileEntry{
+		files: map[string]FileEntry{
 			"old.txt": {Deleted: true, Sequence: 1, MtimeNS: 100},
 			"new.txt": {
 				Size: 5, MtimeNS: 200, SHA256: testHash("zzz"), Sequence: 2,
@@ -380,7 +380,7 @@ func TestPrevPathRoundTripsThroughProto(t *testing.T) {
 		}
 
 		decoded := protoToFileIndex(exch)
-		got := decoded.Files["new.txt"]
+		got, _ := decoded.Get("new.txt")
 		if got.PrevPath != "old.txt" {
 			t.Errorf("since=%d: decoded PrevPath=%q, want %q", since, got.PrevPath, "old.txt")
 		}
@@ -405,18 +405,18 @@ func TestDiffPropagatesPrevPath(t *testing.T) {
 	}{
 		{
 			name:  "missing-locally",
-			local: &FileIndex{Files: map[string]FileEntry{}},
-			remote: &FileIndex{Files: map[string]FileEntry{
+			local: &FileIndex{files: map[string]FileEntry{}},
+			remote: &FileIndex{files: map[string]FileEntry{
 				"new.txt": {Size: 1, SHA256: testHash("n"), Sequence: 5, PrevPath: "old.txt"},
 			}},
 			wantHin: "old.txt",
 		},
 		{
 			name: "ancestor-remote-only-change",
-			local: &FileIndex{Files: map[string]FileEntry{
+			local: &FileIndex{files: map[string]FileEntry{
 				"f.txt": {Size: 1, SHA256: testHash("base"), MtimeNS: 100, Sequence: 1},
 			}},
-			remote: &FileIndex{Files: map[string]FileEntry{
+			remote: &FileIndex{files: map[string]FileEntry{
 				"f.txt": {Size: 1, SHA256: testHash("r"), MtimeNS: 200, Sequence: 6, PrevPath: "was.txt"},
 			}},
 			baseHsh: map[string]Hash256{"f.txt": testHash("base")},
@@ -424,10 +424,10 @@ func TestDiffPropagatesPrevPath(t *testing.T) {
 		},
 		{
 			name: "mtime-fallback-remote-newer",
-			local: &FileIndex{Files: map[string]FileEntry{
+			local: &FileIndex{files: map[string]FileEntry{
 				"f.txt": {Size: 1, SHA256: testHash("l"), MtimeNS: 100, Sequence: 1},
 			}},
-			remote: &FileIndex{Files: map[string]FileEntry{
+			remote: &FileIndex{files: map[string]FileEntry{
 				"f.txt": {Size: 1, SHA256: testHash("r"), MtimeNS: 200, Sequence: 6, PrevPath: "earlier.txt"},
 			}},
 			lastSyn: 150, // local mtime 100 <= 150 → download path
@@ -456,10 +456,10 @@ func TestDiffPropagatesPrevPath(t *testing.T) {
 // consumers that assume the field is action-specific.
 func TestDiffOmitsPrevPathFromNonDownloads(t *testing.T) {
 	t.Parallel()
-	local := &FileIndex{Files: map[string]FileEntry{
+	local := &FileIndex{files: map[string]FileEntry{
 		"a.txt": {Size: 1, SHA256: testHash("l"), MtimeNS: 100, Sequence: 1},
 	}}
-	remote := &FileIndex{Files: map[string]FileEntry{
+	remote := &FileIndex{files: map[string]FileEntry{
 		"a.txt": {Deleted: true, Sequence: 7, PrevPath: "stale.txt"},
 	}}
 	// lastSeenSeq>0 and local not modified since lastSync → delete propagates.
@@ -488,7 +488,7 @@ func newHintRenameFolderState(t *testing.T, dir string, seed map[string]FileEntr
 	t.Cleanup(func() { _ = root.Close() })
 	idx := newFileIndex()
 	for path, entry := range seed {
-		idx.Files[path] = entry
+		idx.Set(path, entry)
 		if entry.Sequence > idx.Sequence {
 			idx.Sequence = entry.Sequence
 		}
@@ -541,7 +541,7 @@ func TestApplyHintRenamesHappyPath(t *testing.T) {
 	if renamedPaths["new.txt"] {
 		t.Errorf("renamedPaths[new.txt]=true, want false (download must still run for /delta)")
 	}
-	oldEntry, ok := fs.index.Files["old.txt"]
+	oldEntry, ok := fs.index.Get("old.txt")
 	if !ok {
 		t.Fatalf("old.txt entry removed from index, want tombstone")
 	}
@@ -655,7 +655,7 @@ func TestApplyHintRenamesFallsBackWhenOldPathMissing(t *testing.T) {
 	if len(renamedPaths) != 0 {
 		t.Errorf("renamedPaths=%v, want empty on rename failure", renamedPaths)
 	}
-	if entry := fs.index.Files["old.txt"]; entry.Deleted {
+	if entry, _ := fs.index.Get("old.txt"); entry.Deleted {
 		t.Errorf("old.txt tombstoned despite rename failure")
 	}
 	if got := fs.metrics.FilesRenamed.Load(); got != 0 {
@@ -688,7 +688,7 @@ func TestApplyHintRenamesSkipsPathsClaimedByPlanRenames(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(dir, "old.txt")); err != nil || string(b) != "stay-put" {
 		t.Errorf("old.txt disturbed by hint after planRenames claim: content=%q err=%v", b, err)
 	}
-	if entry := fs.index.Files["old.txt"]; entry.Deleted {
+	if entry, _ := fs.index.Get("old.txt"); entry.Deleted {
 		t.Errorf("hint pass tombstoned a planRenames-owned path")
 	}
 	if got := fs.metrics.FilesRenamed.Load(); got != 0 {
@@ -775,7 +775,7 @@ func TestScanSkipsRenameHintOnSizeMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	idx.recomputeCache()
-	if idx.Files["large.bin"].Inode == 0 {
+	if idx.Files()["large.bin"].Inode == 0 {
 		t.Fatal("precondition failed: first scan must populate inode")
 	}
 
@@ -800,10 +800,10 @@ func TestScanSkipsRenameHintOnSizeMismatch(t *testing.T) {
 	if stats.RenameHintsSkipped != 1 {
 		t.Errorf("RenameHintsSkipped=%d, want 1", stats.RenameHintsSkipped)
 	}
-	if got := idx.Files["small.bin"].PrevPath; got != "" {
+	if got := idx.Files()["small.bin"].PrevPath; got != "" {
 		t.Errorf("PrevPath=%q, want empty (gate must clear the hint)", got)
 	}
-	if tomb, ok := idx.Files["large.bin"]; !ok || !tomb.Deleted {
+	if tomb, ok := idx.Get("large.bin"); !ok || !tomb.Deleted {
 		t.Error("old path tombstone not emitted")
 	}
 }

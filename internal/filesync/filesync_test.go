@@ -22,13 +22,38 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
-	"gopkg.in/yaml.v3"
 
 	"github.com/mmdemirbas/mesh/internal/config"
 	pb "github.com/mmdemirbas/mesh/internal/filesync/proto"
 	"github.com/mmdemirbas/mesh/internal/zstdutil"
 	"google.golang.org/protobuf/proto"
 )
+
+// testPersistAndReload saves an index via SQLite, then reloads it.
+// Helper for tests that previously called idx.save(path) + loadIndex(path);
+// the gob path was deleted in PERSISTENCE-AUDIT.md §6 commit 2 and
+// SQLite is the only on-disk store.
+func testPersistAndReload(t *testing.T, dataDir, folderID string, idx *FileIndex) *FileIndex {
+	t.Helper()
+	folderCacheDir := filepath.Join(dataDir, folderID)
+	if err := os.MkdirAll(folderCacheDir, 0o700); err != nil {
+		t.Fatalf("mkdir cache dir: %v", err)
+	}
+	db, err := openFolderDB(folderCacheDir, "TESTDEVICE")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	idx.MarkAllDirty()
+	if err := saveIndex(db, folderID, idx); err != nil {
+		t.Fatalf("saveIndex: %v", err)
+	}
+	loaded, err := loadIndexDB(db, folderID)
+	if err != nil {
+		t.Fatalf("loadIndexDB: %v", err)
+	}
+	return loaded
+}
 
 // testHash returns a deterministic Hash256 from a short label string.
 // Used in tests where distinct hash values are needed but the actual
@@ -319,22 +344,22 @@ func TestPurgeTombstonesReturnsCount(t *testing.T) {
 	idx := newFileIndex()
 	oldNs := time.Now().Add(-60 * 24 * time.Hour).UnixNano()
 	recentNs := time.Now().UnixNano()
-	idx.Files["old-gone"] = FileEntry{Deleted: true, MtimeNS: oldNs}
-	idx.Files["also-old-gone"] = FileEntry{Deleted: true, MtimeNS: oldNs}
-	idx.Files["recent-gone"] = FileEntry{Deleted: true, MtimeNS: recentNs}
-	idx.Files["live"] = FileEntry{Size: 3, MtimeNS: recentNs, SHA256: testHash("x")}
+	idx.Set("old-gone", FileEntry{Deleted: true, MtimeNS: oldNs})
+	idx.Set("also-old-gone", FileEntry{Deleted: true, MtimeNS: oldNs})
+	idx.Set("recent-gone", FileEntry{Deleted: true, MtimeNS: recentNs})
+	idx.Set("live", FileEntry{Size: 3, MtimeNS: recentNs, SHA256: testHash("x")})
 
 	n := idx.purgeTombstones(30*24*time.Hour, nil)
 	if n != 2 {
 		t.Errorf("purgeTombstones returned %d, want 2", n)
 	}
-	if _, ok := idx.Files["live"]; !ok {
+	if _, ok := idx.Get("live"); !ok {
 		t.Error("live entry removed")
 	}
-	if _, ok := idx.Files["recent-gone"]; !ok {
+	if _, ok := idx.Get("recent-gone"); !ok {
 		t.Error("recent tombstone removed (within retention)")
 	}
-	if _, ok := idx.Files["old-gone"]; ok {
+	if _, ok := idx.Get("old-gone"); ok {
 		t.Error("old tombstone not removed")
 	}
 }
@@ -347,21 +372,21 @@ func TestFileIndexClone(t *testing.T) {
 	orig := newFileIndex()
 	orig.Path = "/tmp/src"
 	orig.Sequence = 7
-	orig.Files["a.txt"] = FileEntry{Size: 5, SHA256: testHash("aaa"), Sequence: 1}
-	orig.Files["b.txt"] = FileEntry{Size: 9, SHA256: testHash("bbb"), Sequence: 2}
+	orig.Set("a.txt", FileEntry{Size: 5, SHA256: testHash("aaa"), Sequence: 1})
+	orig.Set("b.txt", FileEntry{Size: 9, SHA256: testHash("bbb"), Sequence: 2})
 
 	clone := orig.clone()
 	clone.Sequence = 99
-	clone.Files["a.txt"] = FileEntry{Size: 100, SHA256: testHash("mutated"), Sequence: 50}
-	clone.Files["c.txt"] = FileEntry{Size: 1, SHA256: testHash("ccc"), Sequence: 99}
+	clone.Set("a.txt", FileEntry{Size: 100, SHA256: testHash("mutated"), Sequence: 50})
+	clone.Set("c.txt", FileEntry{Size: 1, SHA256: testHash("ccc"), Sequence: 99})
 
 	if orig.Sequence != 7 {
 		t.Errorf("orig.Sequence mutated: got %d want 7", orig.Sequence)
 	}
-	if orig.Files["a.txt"].SHA256 != testHash("aaa") {
-		t.Errorf("orig file mutated via clone: got %q want aaa", orig.Files["a.txt"].SHA256)
+	if orig.Files()["a.txt"].SHA256 != testHash("aaa") {
+		t.Errorf("orig file mutated via clone: got %q want aaa", orig.Files()["a.txt"].SHA256)
 	}
-	if _, ok := orig.Files["c.txt"]; ok {
+	if _, ok := orig.Get("c.txt"); ok {
 		t.Error("orig gained entry that was only added to clone")
 	}
 	if orig.Path != clone.Path {
@@ -391,7 +416,7 @@ func TestRunScanRecyclesCloneMap(t *testing.T) {
 	n := &Node{folders: map[string]*folderState{"f1": fs}}
 
 	n.runScan(context.Background(), nil)
-	firstFilesMap := fs.index.Files
+	firstFilesMap := fs.index.Files()
 	if len(firstFilesMap) != 2 {
 		t.Fatalf("first scan: want 2 entries, got %d", len(firstFilesMap))
 	}
@@ -405,8 +430,8 @@ func TestRunScanRecyclesCloneMap(t *testing.T) {
 	recycledBefore := fs.reusableFiles
 	n.runScan(context.Background(), nil)
 
-	if len(fs.index.Files) != 3 {
-		t.Fatalf("second scan: want 3 entries, got %d", len(fs.index.Files))
+	if fs.index.Len() != 3 {
+		t.Fatalf("second scan: want 3 entries, got %d", fs.index.Len())
 	}
 	if fs.reusableFiles == nil {
 		t.Fatalf("expected reusableFiles to be re-populated after second scan")
@@ -450,20 +475,20 @@ func TestRunScanPreservesConcurrentWrites(t *testing.T) {
 	// Rather than orchestrate timing, we insert the entry at Sequence=1000 and
 	// run a normal runScan: the walk sees only "scanned.txt" on disk, so a
 	// naive swap would drop "from-peer.txt". The merge rule must preserve it.
-	fs.index.Files["from-peer.txt"] = FileEntry{
+	fs.index.Set("from-peer.txt", FileEntry{
 		Size: 7, SHA256: testHash("peerhash"), Sequence: 1000,
-	}
+	})
 	fs.index.Sequence = 1000
 
 	n.runScan(context.Background(), nil)
 
-	if _, ok := fs.index.Files["from-peer.txt"]; !ok {
+	if _, ok := fs.index.Get("from-peer.txt"); !ok {
 		t.Fatal("runScan clobbered a concurrently-written peer entry (expected merge-preserve)")
 	}
-	if fs.index.Files["from-peer.txt"].SHA256 != testHash("peerhash") {
-		t.Errorf("peer entry content lost: got %+v", fs.index.Files["from-peer.txt"])
+	if fs.index.Files()["from-peer.txt"].SHA256 != testHash("peerhash") {
+		t.Errorf("peer entry content lost: got %+v", fs.index.Files()["from-peer.txt"])
 	}
-	if _, ok := fs.index.Files["scanned.txt"]; !ok {
+	if _, ok := fs.index.Get("scanned.txt"); !ok {
 		t.Error("scan failed to pick up on-disk file")
 	}
 	if fs.index.Sequence < 1000 {
@@ -504,16 +529,16 @@ func TestRunScanTargeted(t *testing.T) {
 	// Targeted scan: only dir1 is dirty.
 	n.runScan(context.Background(), map[string]bool{dir1: true})
 
-	if _, ok := fs1.index.Files["a.txt"]; !ok {
+	if _, ok := fs1.index.Get("a.txt"); !ok {
 		t.Error("targeted scan should have scanned f1")
 	}
-	if len(fs2.index.Files) != 0 {
-		t.Errorf("targeted scan should NOT have scanned f2, but it has %d files", len(fs2.index.Files))
+	if fs2.index.Len() != 0 {
+		t.Errorf("targeted scan should NOT have scanned f2, but it has %d files", fs2.index.Len())
 	}
 
 	// Full scan (nil): both folders scanned.
 	n.runScan(context.Background(), nil)
-	if _, ok := fs2.index.Files["b.txt"]; !ok {
+	if _, ok := fs2.index.Get("b.txt"); !ok {
 		t.Error("full scan should have scanned f2")
 	}
 }
@@ -558,7 +583,7 @@ func TestRunScanCapExceededDoesNotAbortOtherFolders(t *testing.T) {
 
 	// The capped folder should NOT have been swapped (partial index).
 	// The normal folder MUST have been scanned despite the other folder's error.
-	if _, ok := fs2.index.Files["ok.txt"]; !ok {
+	if _, ok := fs2.index.Get("ok.txt"); !ok {
 		t.Fatal("runScan aborted all folders when one exceeded cap — must continue to remaining folders")
 	}
 }
@@ -618,13 +643,13 @@ func TestScanAndPersist(t *testing.T) {
 	if !changed {
 		t.Fatal("expected changes on first scan")
 	}
-	if len(idx.Files) != 2 {
-		t.Fatalf("expected 2 files, got %d", len(idx.Files))
+	if idx.Len() != 2 {
+		t.Fatalf("expected 2 files, got %d", idx.Len())
 	}
-	if _, ok := idx.Files["a.txt"]; !ok {
+	if _, ok := idx.Get("a.txt"); !ok {
 		t.Error("missing a.txt")
 	}
-	if _, ok := idx.Files["sub/b.txt"]; !ok {
+	if _, ok := idx.Get("sub/b.txt"); !ok {
 		t.Error("missing sub/b.txt")
 	}
 
@@ -637,175 +662,27 @@ func TestScanAndPersist(t *testing.T) {
 		t.Error("expected no changes on re-scan")
 	}
 
-	// Persist and reload.
-	idxPath := filepath.Join(t.TempDir(), "index.yaml")
-	if err := idx.save(idxPath); err != nil {
-		t.Fatal(err)
+	// Persist and reload via SQLite (commit 2).
+	dbDir := t.TempDir()
+	db, err := openFolderDB(dbDir, "TESTPERSIST")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	idx.MarkAllDirty()
+	if err := saveIndex(db, "f1", idx); err != nil {
+		t.Fatalf("saveIndex: %v", err)
 	}
 
-	loaded, err := loadIndex(idxPath)
+	loaded, err := loadIndexDB(db, "f1")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("loadIndexDB: %v", err)
 	}
 	if loaded.Sequence != idx.Sequence {
 		t.Errorf("sequence mismatch: got %d, want %d", loaded.Sequence, idx.Sequence)
 	}
-	if len(loaded.Files) != len(idx.Files) {
-		t.Errorf("file count mismatch: got %d, want %d", len(loaded.Files), len(idx.Files))
-	}
-}
-
-// H2a: when primary index.yaml is corrupted, load falls back to .prev.
-func TestLoadIndex_FallbackToPrev(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	idxPath := filepath.Join(dir, "index.yaml")
-
-	// Save an index — both primary and .prev get the same data.
-	idx := newFileIndex()
-	idx.Sequence = 20
-	idx.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 5}
-	idx.Files["b.txt"] = FileEntry{SHA256: testHash("bbb"), Sequence: 15}
-	if err := idx.save(idxPath); err != nil {
-		t.Fatal(err)
-	}
-
-	// P17b: save now writes .gob files; corrupt those.
-	gobPath := yamlToGobPath(idxPath)
-
-	// Corrupt primary — backup should still load.
-	if err := os.WriteFile(gobPath, []byte("corrupt!!!"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	loaded, err := loadIndex(idxPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Sequence != 20 {
-		t.Errorf("expected sequence 20 from backup, got %d", loaded.Sequence)
-	}
-	if _, ok := loaded.Files["b.txt"]; !ok {
-		t.Error("expected b.txt in loaded index")
-	}
-
-	// Corrupt backup too — should fail.
-	if err := os.WriteFile(prevPath(gobPath), []byte("also corrupt"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	_, err = loadIndex(idxPath)
-	if err == nil {
-		t.Error("expected error when both files are corrupt")
-	}
-}
-
-// P17b: verify gob roundtrip preserves all fields.
-func TestLoadIndex_GobRoundtrip(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	idxPath := filepath.Join(dir, "index.yaml")
-
-	idx := newFileIndex()
-	idx.Sequence = 42
-	idx.Epoch = "deadbeef12345678"
-	idx.Files["doc.txt"] = FileEntry{Size: 999, MtimeNS: 12345, SHA256: testHash("abc123"), Sequence: 10, Mode: 0644}
-	idx.Files["deleted.txt"] = FileEntry{Size: 0, Deleted: true, Sequence: 20}
-	if err := idx.save(idxPath); err != nil {
-		t.Fatal(err)
-	}
-
-	loaded, err := loadIndex(idxPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Sequence != 42 {
-		t.Errorf("sequence = %d, want 42", loaded.Sequence)
-	}
-	if loaded.Epoch != "deadbeef12345678" {
-		t.Errorf("epoch = %q, want deadbeef12345678", loaded.Epoch)
-	}
-	if e, ok := loaded.Files["doc.txt"]; !ok || e.Size != 999 || e.SHA256 != testHash("abc123") || e.Mode != 0644 {
-		t.Errorf("doc.txt mismatch: %+v", e)
-	}
-	if e, ok := loaded.Files["deleted.txt"]; !ok || !e.Deleted {
-		t.Errorf("deleted.txt should be tombstone: %+v", e)
-	}
-}
-
-// P17b: verify migration from YAML to gob (no .gob files → reads .yaml).
-func TestLoadIndex_YAMLMigration(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	idxPath := filepath.Join(dir, "index.yaml")
-
-	// Write YAML directly (simulating a pre-gob installation).
-	idx := newFileIndex()
-	idx.Sequence = 7
-	idx.Files["legacy.txt"] = FileEntry{Size: 100, SHA256: testHash("legacyhash"), Sequence: 3}
-	data, err := yaml.Marshal(idx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(idxPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	loaded, err := loadIndex(idxPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Sequence != 7 {
-		t.Errorf("sequence = %d, want 7", loaded.Sequence)
-	}
-	if _, ok := loaded.Files["legacy.txt"]; !ok {
-		t.Error("expected legacy.txt from YAML migration")
-	}
-}
-
-// H2a: when both files are missing (first run), loadIndex returns empty index.
-func TestLoadIndex_BothMissing(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	idxPath := filepath.Join(dir, "nonexistent", "index.yaml")
-
-	loaded, err := loadIndex(idxPath)
-	if err != nil {
-		t.Fatalf("expected no error for missing files, got: %v", err)
-	}
-	if loaded.Sequence != 0 || len(loaded.Files) != 0 {
-		t.Error("expected empty index for first run")
-	}
-}
-
-// H2a: peer state double-write survives primary corruption.
-func TestLoadPeerStates_FallbackToPrev(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	peersPath := filepath.Join(dir, "peers.yaml")
-
-	// Save peer state — both primary and .prev get the same data.
-	peers := map[string]PeerState{
-		"10.0.0.1:7756": {LastSeenSequence: 200, LastSync: time.Now()},
-	}
-	if err := savePeerStates(peersPath, peers); err != nil {
-		t.Fatal(err)
-	}
-
-	// Corrupt primary — backup should still load.
-	if err := os.WriteFile(peersPath, []byte("corrupt!!!"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	loaded, err := loadPeerStates(peersPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(loaded) == 0 {
-		t.Fatal("expected peer state from backup")
-	}
-	ps := loaded["10.0.0.1:7756"]
-	if ps.LastSeenSequence != 200 {
-		t.Errorf("expected LastSeenSequence 200 from backup, got %d", ps.LastSeenSequence)
+	if loaded.Len() != idx.Len() {
+		t.Errorf("file count mismatch: got %d, want %d", loaded.Len(), idx.Len())
 	}
 }
 
@@ -826,30 +703,6 @@ func TestNewFileIndexHasEpoch(t *testing.T) {
 	}
 }
 
-// H2b: old persisted indexes without epoch get one assigned on load.
-func TestLoadIndex_MigratesEpoch(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	idxPath := filepath.Join(dir, "index.yaml")
-
-	// Write an index without an epoch field (simulates pre-H2b format).
-	data := []byte("path: /tmp\nsequence: 5\nfiles:\n  a.txt:\n    sha256: 9834876dcfb05cb167a5c24953eba58c4ac89b1adf57f28f2f9d09af107ee8f0\n    sequence: 1\n")
-	if err := os.WriteFile(idxPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	loaded, err := loadIndex(idxPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Epoch == "" {
-		t.Error("loaded index should have an epoch after migration")
-	}
-	if loaded.Sequence != 5 {
-		t.Errorf("expected sequence 5, got %d", loaded.Sequence)
-	}
-}
-
 // H2b: epoch guard filters downloads for locally-tombstoned files when a
 // peer's epoch changed (index recreation after corruption/reset).
 func TestEpochGuardFiltersResurrectedFiles(t *testing.T) {
@@ -858,15 +711,15 @@ func TestEpochGuardFiltersResurrectedFiles(t *testing.T) {
 	// Local index: file X is tombstoned, file Y is live.
 	local := newFileIndex()
 	local.Sequence = 100
-	local.Files["x.txt"] = FileEntry{SHA256: testHash("old"), Sequence: 50, Deleted: true, MtimeNS: time.Now().UnixNano()}
-	local.Files["y.txt"] = FileEntry{SHA256: testHash("yyy"), Sequence: 60, Size: 10}
+	local.Set("x.txt", FileEntry{SHA256: testHash("old"), Sequence: 50, Deleted: true, MtimeNS: time.Now().UnixNano()})
+	local.Set("y.txt", FileEntry{SHA256: testHash("yyy"), Sequence: 60, Size: 10})
 
 	// Remote index (recreated with new epoch): X and Z are live.
 	// X was deleted by local but the reset peer re-indexed it.
 	remote := newFileIndex()
 	remote.Sequence = 50
-	remote.Files["x.txt"] = FileEntry{SHA256: testHash("new-hash"), Sequence: 30, Size: 20}
-	remote.Files["z.txt"] = FileEntry{SHA256: testHash("zzz"), Sequence: 40, Size: 30}
+	remote.Set("x.txt", FileEntry{SHA256: testHash("new-hash"), Sequence: 30, Size: 20})
+	remote.Set("z.txt", FileEntry{SHA256: testHash("zzz"), Sequence: 40, Size: 30})
 
 	// Cycle 2 scenario: lastSeenSeq=0 (after restart detection zeroed it).
 	// diff() with lastSeenSeq=0 will produce ActionDownload for x.txt and z.txt.
@@ -891,7 +744,7 @@ func TestEpochGuardFiltersResurrectedFiles(t *testing.T) {
 	n := 0
 	for _, a := range actions {
 		if a.Action == ActionDownload {
-			if le, ok := local.Files[a.Path]; ok && le.Deleted {
+			if le, ok := local.Get(a.Path); ok && le.Deleted {
 				filtered++
 				continue
 			}
@@ -936,7 +789,7 @@ func TestScanDetectsDeletion(t *testing.T) {
 		t.Fatal("expected change after deletion")
 	}
 
-	entry, ok := idx.Files["b.txt"]
+	entry, ok := idx.Get("b.txt")
 	if !ok {
 		t.Fatal("b.txt should still be in index as tombstone")
 	}
@@ -959,7 +812,7 @@ func TestScanDeletion_TombstoneMtimeIsNow(t *testing.T) {
 	_, _, _, _ = idx.scan(context.Background(), dir, ignore)
 
 	// Verify the indexed mtime reflects the backdated time.
-	entry := idx.Files["old.txt"]
+	entry, _ := idx.Get("old.txt")
 	if entry.MtimeNS > time.Now().Add(-59*24*time.Hour).UnixNano() {
 		t.Fatal("pre-condition: file mtime should be ~60 days ago")
 	}
@@ -968,7 +821,7 @@ func TestScanDeletion_TombstoneMtimeIsNow(t *testing.T) {
 	_ = os.Remove(filepath.Join(dir, "old.txt"))
 	_, _, _, _ = idx.scan(context.Background(), dir, ignore)
 
-	entry = idx.Files["old.txt"]
+	entry, _ = idx.Get("old.txt")
 	if !entry.Deleted {
 		t.Fatal("expected tombstone")
 	}
@@ -981,7 +834,7 @@ func TestScanDeletion_TombstoneMtimeIsNow(t *testing.T) {
 
 	// A 30-day purge must NOT remove this freshly-created tombstone.
 	idx.purgeTombstones(30*24*time.Hour, nil)
-	if _, ok := idx.Files["old.txt"]; !ok {
+	if _, ok := idx.Get("old.txt"); !ok {
 		t.Error("fresh tombstone should survive purge")
 	}
 }
@@ -1012,7 +865,7 @@ func TestScanShortCircuitNoDeletions(t *testing.T) {
 	if idx.Sequence != seqBefore {
 		t.Errorf("sequence advanced without deletions: before=%d after=%d", seqBefore, idx.Sequence)
 	}
-	for rel, entry := range idx.Files {
+	for rel, entry := range idx.Range {
 		if entry.Deleted {
 			t.Errorf("unexpected tombstone for %q after no-op scan", rel)
 		}
@@ -1038,7 +891,7 @@ func TestScanShortCircuitDetectsDeletion(t *testing.T) {
 	if !changed {
 		t.Fatal("expected change after deletion")
 	}
-	entry, ok := idx.Files["b.txt"]
+	entry, ok := idx.Get("b.txt")
 	if !ok || !entry.Deleted {
 		t.Fatalf("b.txt should be tombstoned, got ok=%v entry=%+v", ok, entry)
 	}
@@ -1055,10 +908,10 @@ func TestScanRespectsIgnore(t *testing.T) {
 
 	_, _, _, _ = idx.scan(context.Background(), dir, ignore)
 
-	if _, ok := idx.Files["keep.txt"]; !ok {
+	if _, ok := idx.Get("keep.txt"); !ok {
 		t.Error("keep.txt should be indexed")
 	}
-	if _, ok := idx.Files["skip.log"]; ok {
+	if _, ok := idx.Get("skip.log"); ok {
 		t.Error("skip.log should be ignored")
 	}
 }
@@ -1080,7 +933,7 @@ func TestScanErrorsSuppressTombstones(t *testing.T) {
 	if scanErr != nil {
 		t.Fatal(scanErr)
 	}
-	if _, ok := idx.Files["locked.txt"]; !ok {
+	if _, ok := idx.Get("locked.txt"); !ok {
 		t.Fatal("locked.txt should be in index after first scan")
 	}
 
@@ -1101,7 +954,7 @@ func TestScanErrorsSuppressTombstones(t *testing.T) {
 	}
 
 	// locked.txt must NOT be tombstoned — it's in errorPaths.
-	entry, ok := idx.Files["locked.txt"]
+	entry, ok := idx.Get("locked.txt")
 	if !ok {
 		t.Fatal("locked.txt should still be in index")
 	}
@@ -1143,15 +996,15 @@ func TestScanPerFileErrorAllowsOtherTombstones(t *testing.T) {
 	}
 
 	// locked.txt must NOT be tombstoned (error path).
-	if e := idx.Files["locked.txt"]; e.Deleted {
+	if e, _ := idx.Get("locked.txt"); e.Deleted {
 		t.Error("locked.txt must not be tombstoned — it had a hash error")
 	}
 	// deleted.txt MUST be tombstoned (genuinely deleted, not an error).
-	if e := idx.Files["deleted.txt"]; !e.Deleted {
+	if e, _ := idx.Get("deleted.txt"); !e.Deleted {
 		t.Error("deleted.txt must be tombstoned — it was genuinely deleted")
 	}
 	// good.txt must be untouched.
-	if e := idx.Files["good.txt"]; e.Deleted {
+	if e, _ := idx.Get("good.txt"); e.Deleted {
 		t.Error("good.txt must not be tombstoned")
 	}
 }
@@ -1195,7 +1048,7 @@ func TestScanBulkErrorsSuppressAllTombstones(t *testing.T) {
 	}
 
 	// Bulk suppression: even file9.txt (genuinely deleted) must NOT be tombstoned.
-	if e := idx.Files["file9.txt"]; e.Deleted {
+	if e, _ := idx.Get("file9.txt"); e.Deleted {
 		t.Error("bulk error threshold should suppress all tombstones including genuine deletes")
 	}
 }
@@ -1242,7 +1095,7 @@ func TestScanUnreadableSubdirProtectsAllDescendants(t *testing.T) {
 	}
 
 	for _, p := range []string{"top/a.txt", "top/deep/b.txt", "top/deep/deeper/c.txt"} {
-		entry, ok := idx.Files[p]
+		entry, ok := idx.Get(p)
 		if !ok {
 			t.Errorf("%s disappeared from index", p)
 			continue
@@ -1252,7 +1105,7 @@ func TestScanUnreadableSubdirProtectsAllDescendants(t *testing.T) {
 		}
 	}
 	// sibling.txt is outside the protected subtree and must be untouched.
-	if e := idx.Files["sibling.txt"]; e.Deleted {
+	if e, _ := idx.Get("sibling.txt"); e.Deleted {
 		t.Error("sibling.txt must not be affected by unrelated subtree error")
 	}
 }
@@ -1262,7 +1115,7 @@ func TestScanFolderRootInaccessible(t *testing.T) {
 	t.Parallel()
 
 	idx := newFileIndex()
-	idx.Files["important.txt"] = FileEntry{SHA256: testHash("abc"), Sequence: 1}
+	idx.Set("important.txt", FileEntry{SHA256: testHash("abc"), Sequence: 1})
 
 	ignore := &ignoreMatcher{}
 	_, _, _, scanErr := idx.scan(context.Background(), "/nonexistent/path/that/does/not/exist", ignore)
@@ -1271,7 +1124,7 @@ func TestScanFolderRootInaccessible(t *testing.T) {
 	}
 
 	// The existing index must be untouched — no tombstones created.
-	entry := idx.Files["important.txt"]
+	entry, _ := idx.Get("important.txt")
 	if entry.Deleted {
 		t.Error("B10: inaccessible folder root must not tombstone existing entries")
 	}
@@ -1285,8 +1138,8 @@ func TestScanEmptyWalkWithExistingIndex(t *testing.T) {
 
 	// Populate an index as if a previous scan found files.
 	idx := newFileIndex()
-	idx.Files["doc.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 1, Size: 5, MtimeNS: 1}
-	idx.Files["img.png"] = FileEntry{SHA256: testHash("bbb"), Sequence: 2, Size: 10, MtimeNS: 2}
+	idx.Set("doc.txt", FileEntry{SHA256: testHash("aaa"), Sequence: 1, Size: 5, MtimeNS: 1})
+	idx.Set("img.png", FileEntry{SHA256: testHash("bbb"), Sequence: 2, Size: 10, MtimeNS: 2})
 	idx.recomputeCache() // PL precondition: cachedCount must reflect manual inserts.
 
 	// Point the scan at an empty but existing directory (simulates a
@@ -1303,7 +1156,7 @@ func TestScanEmptyWalkWithExistingIndex(t *testing.T) {
 	}
 	// Both entries should be tombstoned (folder exists, legitimately empty).
 	for _, name := range []string{"doc.txt", "img.png"} {
-		if e := idx.Files[name]; !e.Deleted {
+		if e, _ := idx.Get(name); !e.Deleted {
 			t.Errorf("%s should be tombstoned in a legitimately empty folder", name)
 		}
 	}
@@ -1315,7 +1168,7 @@ func TestScanFolderVanishedDuringWalk(t *testing.T) {
 	t.Parallel()
 
 	idx := newFileIndex()
-	idx.Files["important.txt"] = FileEntry{SHA256: testHash("abc"), Sequence: 1, Size: 5, MtimeNS: 1}
+	idx.Set("important.txt", FileEntry{SHA256: testHash("abc"), Sequence: 1, Size: 5, MtimeNS: 1})
 
 	// Create a dir, then remove it before scan — but the pre-walk os.Stat
 	// will fail too (B10 catches it). To test M1 specifically, we need the
@@ -1334,7 +1187,7 @@ func TestScanFolderVanishedDuringWalk(t *testing.T) {
 	if scanErr == nil {
 		t.Fatal("expected error for vanished folder root")
 	}
-	if idx.Files["important.txt"].Deleted {
+	if idx.Files()["important.txt"].Deleted {
 		t.Error("M1: vanished folder root must not tombstone existing entries")
 	}
 }
@@ -1353,7 +1206,7 @@ func TestScanTOCTOU_FileModifiedDuringHash(t *testing.T) {
 	if scanErr != nil {
 		t.Fatal(scanErr)
 	}
-	origEntry := idx.Files["stable.txt"]
+	origEntry, _ := idx.Get("stable.txt")
 
 	// Now modify stable.txt's content but keep the mtime the same,
 	// then change the mtime to trigger a re-hash.
@@ -1377,7 +1230,7 @@ func TestScanTOCTOU_FileModifiedDuringHash(t *testing.T) {
 	}
 
 	// The entry should remain unchanged.
-	if idx.Files["stable.txt"].SHA256 != origEntry.SHA256 {
+	if idx.Files()["stable.txt"].SHA256 != origEntry.SHA256 {
 		t.Error("stable file hash should not change")
 	}
 	_ = changed
@@ -1396,8 +1249,8 @@ func TestScanCapExceeded(t *testing.T) {
 		t.Fatalf("expected errIndexCapExceeded, got %v", err)
 	}
 	// Index should have at most 3 entries (the cap).
-	if len(idx.Files) > 3 {
-		t.Errorf("expected at most 3 files in index after cap, got %d", len(idx.Files))
+	if idx.Len() > 3 {
+		t.Errorf("expected at most 3 files in index after cap, got %d", idx.Len())
 	}
 }
 
@@ -1642,16 +1495,16 @@ func TestDiff(t *testing.T) {
 	const lastSyncNS = int64(2000)
 	local := newFileIndex()
 	local.Sequence = 5
-	local.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 3, MtimeNS: 1000}
-	local.Files["b.txt"] = FileEntry{SHA256: testHash("bbb"), Sequence: 2, MtimeNS: 1000}
-	local.Files["c.txt"] = FileEntry{SHA256: testHash("ccc"), Sequence: 5, MtimeNS: 3000} // modified locally
+	local.Set("a.txt", FileEntry{SHA256: testHash("aaa"), Sequence: 3, MtimeNS: 1000})
+	local.Set("b.txt", FileEntry{SHA256: testHash("bbb"), Sequence: 2, MtimeNS: 1000})
+	local.Set("c.txt", FileEntry{SHA256: testHash("ccc"), Sequence: 5, MtimeNS: 3000}) // modified locally
 
 	remote := newFileIndex()
 	remote.Sequence = 10
-	remote.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 6}  // same content
-	remote.Files["b.txt"] = FileEntry{SHA256: testHash("bbb2"), Sequence: 7} // remote changed
-	remote.Files["c.txt"] = FileEntry{SHA256: testHash("ccc2"), Sequence: 8} // both changed (conflict)
-	remote.Files["d.txt"] = FileEntry{SHA256: testHash("ddd"), Sequence: 9}  // new on remote
+	remote.Set("a.txt", FileEntry{SHA256: testHash("aaa"), Sequence: 6})  // same content
+	remote.Set("b.txt", FileEntry{SHA256: testHash("bbb2"), Sequence: 7}) // remote changed
+	remote.Set("c.txt", FileEntry{SHA256: testHash("ccc2"), Sequence: 8}) // both changed (conflict)
+	remote.Set("d.txt", FileEntry{SHA256: testHash("ddd"), Sequence: 9})  // new on remote
 
 	actions := local.diff(remote, 4, lastSyncNS, nil, "send-receive")
 
@@ -1740,19 +1593,19 @@ func TestDiffC1MtimeVsLastSync(t *testing.T) {
 			}
 
 			local := newFileIndex()
-			local.Files["x.txt"] = FileEntry{
+			local.Set("x.txt", FileEntry{
 				SHA256:   localHash,
 				Sequence: localSeq,
 				MtimeNS:  tc.localMtime,
 				Size:     10,
-			}
+			})
 
 			remote := newFileIndex()
-			remote.Files["x.txt"] = FileEntry{
+			remote.Set("x.txt", FileEntry{
 				SHA256:   remoteHash,
 				Sequence: tc.remoteSeq,
 				Size:     10,
-			}
+			})
 
 			actions := local.diff(remote, tc.lastSeenSeq, lastSyncNS, nil, "send-receive")
 			if tc.wantSkipped {
@@ -1794,15 +1647,15 @@ func TestDiffC1TombstoneMtimeVsLastSync(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			local := newFileIndex()
-			local.Files["x.txt"] = FileEntry{
+			local.Set("x.txt", FileEntry{
 				SHA256:   testHash("local-version"),
 				Sequence: 20, // high local sequence
 				MtimeNS:  tc.localMtime,
 				Size:     10,
-			}
+			})
 
 			remote := newFileIndex()
-			remote.Files["x.txt"] = FileEntry{Deleted: true, Sequence: 10}
+			remote.Set("x.txt", FileEntry{Deleted: true, Sequence: 10})
 
 			actions := local.diff(remote, 5, lastSyncNS, nil, "send-receive")
 			if tc.wantDeleted {
@@ -1902,19 +1755,19 @@ func TestDiffC2AncestorClassifier(t *testing.T) {
 			t.Parallel()
 
 			local := newFileIndex()
-			local.Files["x.txt"] = FileEntry{
+			local.Set("x.txt", FileEntry{
 				SHA256:   tc.localHash,
 				Sequence: localSeq,
 				MtimeNS:  tc.localMtime,
 				Size:     10,
-			}
+			})
 
 			remote := newFileIndex()
-			remote.Files["x.txt"] = FileEntry{
+			remote.Set("x.txt", FileEntry{
 				SHA256:   tc.remoteHash,
 				Sequence: remoteSeq,
 				Size:     10,
-			}
+			})
 
 			actions := local.diff(remote, lastSeenSeq, lastSyncNS, tc.baseHashes, "send-receive")
 			if tc.wantSkip {
@@ -1960,15 +1813,15 @@ func TestDiffC2TombstoneAncestor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			local := newFileIndex()
-			local.Files["x.txt"] = FileEntry{
+			local.Set("x.txt", FileEntry{
 				SHA256:   tc.localHash,
 				Sequence: 20,
 				MtimeNS:  3000, // pre-dates lastSyncNS → C1 alone would allow delete
 				Size:     10,
-			}
+			})
 
 			remote := newFileIndex()
-			remote.Files["x.txt"] = FileEntry{Deleted: true, Sequence: 10}
+			remote.Set("x.txt", FileEntry{Deleted: true, Sequence: 10})
 
 			baseHashes := map[string]Hash256{"x.txt": ancestor}
 			actions := local.diff(remote, lastSeenSeq, lastSyncNS, baseHashes, "send-receive")
@@ -1997,14 +1850,14 @@ func TestUpdateBaseHashes(t *testing.T) {
 	staleAncestor := testHash("stale")
 
 	local := newFileIndex()
-	local.Files["agreed.txt"] = FileEntry{SHA256: agreed, Size: 10}
-	local.Files["diverged.txt"] = FileEntry{SHA256: localOnly, Size: 10}
-	local.Files["kept.txt"] = FileEntry{SHA256: testHash("kept"), Size: 10}
+	local.Set("agreed.txt", FileEntry{SHA256: agreed, Size: 10})
+	local.Set("diverged.txt", FileEntry{SHA256: localOnly, Size: 10})
+	local.Set("kept.txt", FileEntry{SHA256: testHash("kept"), Size: 10})
 
 	remote := newFileIndex()
-	remote.Files["agreed.txt"] = FileEntry{SHA256: agreed, Sequence: 1, Size: 10}
-	remote.Files["diverged.txt"] = FileEntry{SHA256: remoteOnly, Sequence: 2, Size: 10}
-	remote.Files["tomb.txt"] = FileEntry{Deleted: true, Sequence: 3}
+	remote.Set("agreed.txt", FileEntry{SHA256: agreed, Sequence: 1, Size: 10})
+	remote.Set("diverged.txt", FileEntry{SHA256: remoteOnly, Sequence: 2, Size: 10})
+	remote.Set("tomb.txt", FileEntry{Deleted: true, Sequence: 3})
 
 	prior := map[string]Hash256{
 		"tomb.txt":      testHash("pre-delete"),
@@ -2051,14 +1904,14 @@ func TestUpdateBaseHashes_DoesNotAliasPrior(t *testing.T) {
 	}
 
 	local := newFileIndex()
-	local.Files["a.txt"] = FileEntry{SHA256: testHash("a-new"), Size: 10}
-	local.Files["b.txt"] = FileEntry{SHA256: testHash("b-new"), Size: 10}
+	local.Set("a.txt", FileEntry{SHA256: testHash("a-new"), Size: 10})
+	local.Set("b.txt", FileEntry{SHA256: testHash("b-new"), Size: 10})
 
 	remote := newFileIndex()
 	// Agreement: update ancestor for a.txt.
-	remote.Files["a.txt"] = FileEntry{SHA256: testHash("a-new"), Sequence: 1, Size: 10}
+	remote.Set("a.txt", FileEntry{SHA256: testHash("a-new"), Sequence: 1, Size: 10})
 	// Tombstone: must drop ancestor for b.txt.
-	remote.Files["b.txt"] = FileEntry{Deleted: true, Sequence: 2}
+	remote.Set("b.txt", FileEntry{Deleted: true, Sequence: 2})
 
 	out := updateBaseHashes(prior, local, remote)
 
@@ -2093,7 +1946,7 @@ func TestPlanRenamesSimpleRename(t *testing.T) {
 	h := testHash("shared-content")
 
 	local := newFileIndex()
-	local.Files["docs/old.md"] = FileEntry{SHA256: h, Size: 100, Sequence: 1}
+	local.Set("docs/old.md", FileEntry{SHA256: h, Size: 100, Sequence: 1})
 
 	actions := []DiffEntry{
 		{Path: "docs/old.md", Action: ActionDelete, RemoteSequence: 10},
@@ -2123,7 +1976,7 @@ func TestPlanRenamesHashMismatch(t *testing.T) {
 	t.Parallel()
 
 	local := newFileIndex()
-	local.Files["docs/old.md"] = FileEntry{SHA256: testHash("local-only"), Size: 100, Sequence: 1}
+	local.Set("docs/old.md", FileEntry{SHA256: testHash("local-only"), Size: 100, Sequence: 1})
 
 	actions := []DiffEntry{
 		{Path: "docs/old.md", Action: ActionDelete, RemoteSequence: 10},
@@ -2147,8 +2000,8 @@ func TestPlanRenamesOneToOne(t *testing.T) {
 	h := testHash("shared")
 
 	local := newFileIndex()
-	local.Files["a"] = FileEntry{SHA256: h, Size: 1, Sequence: 1}
-	local.Files["b"] = FileEntry{SHA256: h, Size: 1, Sequence: 2}
+	local.Set("a", FileEntry{SHA256: h, Size: 1, Sequence: 1})
+	local.Set("b", FileEntry{SHA256: h, Size: 1, Sequence: 2})
 
 	actions := []DiffEntry{
 		{Path: "a", Action: ActionDelete, RemoteSequence: 10},
@@ -2175,8 +2028,8 @@ func TestPlanRenamesTargetExists(t *testing.T) {
 	h := testHash("content")
 
 	local := newFileIndex()
-	local.Files["old"] = FileEntry{SHA256: h, Size: 1, Sequence: 1}
-	local.Files["new"] = FileEntry{SHA256: testHash("other"), Size: 1, Sequence: 2}
+	local.Set("old", FileEntry{SHA256: h, Size: 1, Sequence: 1})
+	local.Set("new", FileEntry{SHA256: testHash("other"), Size: 1, Sequence: 2})
 
 	actions := []DiffEntry{
 		{Path: "old", Action: ActionDelete, RemoteSequence: 10},
@@ -2197,7 +2050,7 @@ func TestPlanRenamesTombstonedSource(t *testing.T) {
 	h := testHash("content")
 
 	local := newFileIndex()
-	local.Files["old"] = FileEntry{SHA256: h, Deleted: true, Size: 1, Sequence: 1}
+	local.Set("old", FileEntry{SHA256: h, Deleted: true, Size: 1, Sequence: 1})
 
 	actions := []DiffEntry{
 		{Path: "old", Action: ActionDelete, RemoteSequence: 10},
@@ -2237,7 +2090,7 @@ func TestPlanRenames_CarriesRemoteDelVersion(t *testing.T) {
 	h := testHash("shared-content")
 
 	local := newFileIndex()
-	local.Files["old.md"] = FileEntry{SHA256: h, Size: 100, Sequence: 1}
+	local.Set("old.md", FileEntry{SHA256: h, Size: 100, Sequence: 1})
 
 	delClock := VectorClock{"PEER": 5}
 	newClock := VectorClock{"PEER": 5}
@@ -2312,7 +2165,7 @@ func TestDiffReceiveOnly(t *testing.T) {
 	t.Parallel()
 	local := newFileIndex()
 	remote := newFileIndex()
-	remote.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 1}
+	remote.Set("a.txt", FileEntry{SHA256: testHash("aaa"), Sequence: 1})
 
 	actions := local.diff(remote, 0, 0, nil, "receive-only")
 	if len(actions) != 1 || actions[0].Action != ActionDownload {
@@ -2324,7 +2177,7 @@ func TestDiffSendOnly(t *testing.T) {
 	t.Parallel()
 	local := newFileIndex()
 	remote := newFileIndex()
-	remote.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 1}
+	remote.Set("a.txt", FileEntry{SHA256: testHash("aaa"), Sequence: 1})
 
 	actions := local.diff(remote, 0, 0, nil, "send-only")
 	if len(actions) != 0 {
@@ -2335,10 +2188,10 @@ func TestDiffSendOnly(t *testing.T) {
 func TestDiffDeleteTombstone(t *testing.T) {
 	t.Parallel()
 	local := newFileIndex()
-	local.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 1}
+	local.Set("a.txt", FileEntry{SHA256: testHash("aaa"), Sequence: 1})
 
 	remote := newFileIndex()
-	remote.Files["a.txt"] = FileEntry{Deleted: true, Sequence: 5}
+	remote.Set("a.txt", FileEntry{Deleted: true, Sequence: 5})
 
 	// H8: lastSeenSeq > 0 means we've synced before — remote tombstone
 	// should delete the unchanged local file.
@@ -2358,11 +2211,11 @@ func TestDiffPopulatesRemoteSequence(t *testing.T) {
 
 	remote := newFileIndex()
 	remote.Sequence = 10
-	remote.Files["new.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 7}
-	remote.Files["del.txt"] = FileEntry{Deleted: true, Sequence: 8}
+	remote.Set("new.txt", FileEntry{SHA256: testHash("aaa"), Sequence: 7})
+	remote.Set("del.txt", FileEntry{Deleted: true, Sequence: 8})
 	// Also add del.txt to local so the delete action is generated.
 	// C1: MtimeNS=0 < lastSyncNS=1000 → not locally modified → delete proceeds.
-	local.Files["del.txt"] = FileEntry{SHA256: testHash("bbb"), Sequence: 1}
+	local.Set("del.txt", FileEntry{SHA256: testHash("bbb"), Sequence: 1})
 
 	actions := local.diff(remote, 4, 1000, nil, "send-receive")
 	if len(actions) != 2 {
@@ -2390,11 +2243,11 @@ func TestDiffDeleteTombstone_LocalModifiedWins(t *testing.T) {
 	local.Sequence = 5
 	// C1: local file was modified after the last sync
 	// (MtimeNS=2000 > lastSyncNS=1000).
-	local.Files["a.txt"] = FileEntry{SHA256: testHash("aaa-modified"), Sequence: 3, MtimeNS: 2000}
+	local.Set("a.txt", FileEntry{SHA256: testHash("aaa-modified"), Sequence: 3, MtimeNS: 2000})
 
 	remote := newFileIndex()
 	remote.Sequence = 10
-	remote.Files["a.txt"] = FileEntry{Deleted: true, Sequence: 7}
+	remote.Set("a.txt", FileEntry{Deleted: true, Sequence: 7})
 
 	actions := local.diff(remote, 2, 1000, nil, "send-receive")
 
@@ -2412,11 +2265,11 @@ func TestDiffDeleteTombstone_LocalUnchanged(t *testing.T) {
 	local.Sequence = 5
 	// C1: local file was NOT modified since last sync
 	// (MtimeNS=500 <= lastSyncNS=1000).
-	local.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 1, MtimeNS: 500}
+	local.Set("a.txt", FileEntry{SHA256: testHash("aaa"), Sequence: 1, MtimeNS: 500})
 
 	remote := newFileIndex()
 	remote.Sequence = 10
-	remote.Files["a.txt"] = FileEntry{Deleted: true, Sequence: 7}
+	remote.Set("a.txt", FileEntry{Deleted: true, Sequence: 7})
 
 	actions := local.diff(remote, 2, 1000, nil, "send-receive")
 	if len(actions) != 1 || actions[0].Action != ActionDelete {
@@ -2430,10 +2283,10 @@ func TestDiffDeleteTombstone_LocalUnchanged(t *testing.T) {
 func TestDiffDeleteTombstone_FirstSync(t *testing.T) {
 	t.Parallel()
 	local := newFileIndex()
-	local.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 1}
+	local.Set("a.txt", FileEntry{SHA256: testHash("aaa"), Sequence: 1})
 
 	remote := newFileIndex()
-	remote.Files["a.txt"] = FileEntry{Deleted: true, Sequence: 5}
+	remote.Set("a.txt", FileEntry{Deleted: true, Sequence: 5})
 
 	// lastSeenSeq=0 means we've never synced — guard protects local files.
 	actions := local.diff(remote, 0, 0, nil, "send-receive")
@@ -2446,10 +2299,10 @@ func TestDiffDeleteTombstone_FirstSync(t *testing.T) {
 func TestDiffDeleteTombstone_BothDeleted(t *testing.T) {
 	t.Parallel()
 	local := newFileIndex()
-	local.Files["a.txt"] = FileEntry{Deleted: true, Sequence: 2}
+	local.Set("a.txt", FileEntry{Deleted: true, Sequence: 2})
 
 	remote := newFileIndex()
-	remote.Files["a.txt"] = FileEntry{Deleted: true, Sequence: 5}
+	remote.Set("a.txt", FileEntry{Deleted: true, Sequence: 5})
 
 	actions := local.diff(remote, 1, 1000, nil, "send-receive")
 	for _, a := range actions {
@@ -2463,16 +2316,16 @@ func TestPurgeTombstones(t *testing.T) {
 	t.Parallel()
 	idx := newFileIndex()
 	// Old tombstone (mtime = 0 means epoch, well past 30 days ago).
-	idx.Files["old.txt"] = FileEntry{Deleted: true, MtimeNS: 0}
+	idx.Set("old.txt", FileEntry{Deleted: true, MtimeNS: 0})
 	// Recent tombstone.
-	idx.Files["recent.txt"] = FileEntry{Deleted: true, MtimeNS: time.Now().UnixNano()}
+	idx.Set("recent.txt", FileEntry{Deleted: true, MtimeNS: time.Now().UnixNano()})
 
 	idx.purgeTombstones(30*24*time.Hour, nil)
 
-	if _, ok := idx.Files["old.txt"]; ok {
+	if _, ok := idx.Get("old.txt"); ok {
 		t.Error("old tombstone should have been purged")
 	}
-	if _, ok := idx.Files["recent.txt"]; !ok {
+	if _, ok := idx.Get("recent.txt"); !ok {
 		t.Error("recent tombstone should be kept")
 	}
 }
@@ -2484,9 +2337,9 @@ func TestPurgeTombstones_BlockedByUnackedPeer(t *testing.T) {
 	oldNs := time.Now().Add(-60 * 24 * time.Hour).UnixNano()
 
 	// Tombstone at sequence 10.
-	idx.Files["deleted.txt"] = FileEntry{Deleted: true, MtimeNS: oldNs, Sequence: 10}
+	idx.Set("deleted.txt", FileEntry{Deleted: true, MtimeNS: oldNs, Sequence: 10})
 	// Tombstone at sequence 5.
-	idx.Files["also-deleted.txt"] = FileEntry{Deleted: true, MtimeNS: oldNs, Sequence: 5}
+	idx.Set("also-deleted.txt", FileEntry{Deleted: true, MtimeNS: oldNs, Sequence: 5})
 
 	// Peer A has seen up to 10, peer B only up to 7.
 	peers := map[string]PeerState{
@@ -2497,11 +2350,11 @@ func TestPurgeTombstones_BlockedByUnackedPeer(t *testing.T) {
 	n := idx.purgeTombstones(30*24*time.Hour, peers)
 
 	// deleted.txt (seq=10): peer A acked (10>=10), peer B NOT acked (7<10) → kept
-	if _, ok := idx.Files["deleted.txt"]; !ok {
+	if _, ok := idx.Get("deleted.txt"); !ok {
 		t.Error("tombstone at seq=10 should be kept: peer B hasn't acknowledged it")
 	}
 	// also-deleted.txt (seq=5): both peers acked (10>=5, 7>=5) → purged
-	if _, ok := idx.Files["also-deleted.txt"]; ok {
+	if _, ok := idx.Get("also-deleted.txt"); ok {
 		t.Error("tombstone at seq=5 should be purged: all peers acknowledged")
 	}
 	if n != 1 {
@@ -2514,13 +2367,13 @@ func TestPurgeTombstones_NoPeers(t *testing.T) {
 	t.Parallel()
 	idx := newFileIndex()
 	oldNs := time.Now().Add(-60 * 24 * time.Hour).UnixNano()
-	idx.Files["gone.txt"] = FileEntry{Deleted: true, MtimeNS: oldNs, Sequence: 5}
+	idx.Set("gone.txt", FileEntry{Deleted: true, MtimeNS: oldNs, Sequence: 5})
 
 	n := idx.purgeTombstones(30*24*time.Hour, nil)
 	if n != 1 {
 		t.Errorf("purgeTombstones returned %d, want 1", n)
 	}
-	if _, ok := idx.Files["gone.txt"]; ok {
+	if _, ok := idx.Get("gone.txt"); ok {
 		t.Error("tombstone should be purged with no peers")
 	}
 }
@@ -2530,7 +2383,7 @@ func TestPurgeTombstones_RemovedPeerBlocksPurge(t *testing.T) {
 	t.Parallel()
 	idx := newFileIndex()
 	oldNs := time.Now().Add(-60 * 24 * time.Hour).UnixNano()
-	idx.Files["gone.txt"] = FileEntry{Deleted: true, MtimeNS: oldNs, Sequence: 50}
+	idx.Set("gone.txt", FileEntry{Deleted: true, MtimeNS: oldNs, Sequence: 50})
 
 	peers := map[string]PeerState{
 		"10.0.0.1:7756": {LastSeenSequence: 100, LastSync: time.Now()},
@@ -2546,7 +2399,7 @@ func TestPurgeTombstones_RemovedPeerBlocksPurge(t *testing.T) {
 	if n != 0 {
 		t.Errorf("expected 0 purged (removed peer blocks), got %d", n)
 	}
-	if _, ok := idx.Files["gone.txt"]; !ok {
+	if _, ok := idx.Get("gone.txt"); !ok {
 		t.Error("tombstone should NOT be purged while removed peer hasn't acked")
 	}
 }
@@ -2786,7 +2639,7 @@ func TestConflictAutoResolve_SameHash(t *testing.T) {
 	// Local index: stale hash from version 1, seq=10 > lastSeenSeq=5.
 	localIdx := newFileIndex()
 	localIdx.Sequence = 10
-	localIdx.setEntry("shared.txt", FileEntry{
+	localIdx.Set("shared.txt", FileEntry{
 		Size: 24, MtimeNS: time.Now().Add(-2 * time.Hour).UnixNano(),
 		SHA256: oldHash, Sequence: 10,
 	})
@@ -2794,7 +2647,7 @@ func TestConflictAutoResolve_SameHash(t *testing.T) {
 	// Remote index: has the new hash from version 2.
 	remoteIdx := &FileIndex{
 		Sequence: 20,
-		Files: map[string]FileEntry{
+		files: map[string]FileEntry{
 			"shared.txt": {
 				Size: int64(len(finalContent)), MtimeNS: time.Now().Add(-1 * time.Hour).UnixNano(),
 				SHA256: newHash, Sequence: 20,
@@ -2839,14 +2692,14 @@ func TestConflictAutoResolve_DifferentHash(t *testing.T) {
 
 	localIdx := newFileIndex()
 	localIdx.Sequence = 10
-	localIdx.setEntry("diverged.txt", FileEntry{
+	localIdx.Set("diverged.txt", FileEntry{
 		Size: 14, MtimeNS: time.Now().UnixNano(),
 		SHA256: localIdxHash, Sequence: 10,
 	})
 
 	remoteIdx := &FileIndex{
 		Sequence: 20,
-		Files: map[string]FileEntry{
+		files: map[string]FileEntry{
 			"diverged.txt": {
 				Size: int64(len(remoteContent)), MtimeNS: time.Now().UnixNano(),
 				SHA256: remoteHash, Sequence: 20,
@@ -2876,13 +2729,13 @@ func TestConflictAutoResolve_EmptyRemoteHash(t *testing.T) {
 	t.Parallel()
 	localIdx := newFileIndex()
 	localIdx.Sequence = 10
-	localIdx.setEntry("file.txt", FileEntry{
+	localIdx.Set("file.txt", FileEntry{
 		Size: 5, MtimeNS: time.Now().UnixNano(),
 		SHA256: testHash("abc123"), Sequence: 10,
 	})
 	remoteIdx := &FileIndex{
 		Sequence: 20,
-		Files: map[string]FileEntry{
+		files: map[string]FileEntry{
 			"file.txt": {Size: 5, MtimeNS: time.Now().UnixNano(), SHA256: Hash256{}, Sequence: 20},
 		},
 	}
@@ -3040,7 +2893,7 @@ func TestHandleBundle_RoundTrip(t *testing.T) {
 	idx := newFileIndex()
 	for path, content := range files {
 		h := sha256.Sum256([]byte(content))
-		idx.setEntry(path, FileEntry{
+		idx.Set(path, FileEntry{
 			Size:   int64(len(content)),
 			SHA256: Hash256(h),
 		})
@@ -3131,7 +2984,7 @@ func TestDownloadBundle_Integration(t *testing.T) {
 	// Build server index.
 	idx := newFileIndex()
 	for name, fd := range files {
-		idx.setEntry(name, FileEntry{
+		idx.Set(name, FileEntry{
 			Size:   int64(len(fd.content)),
 			SHA256: fd.hash,
 		})
@@ -3293,8 +3146,8 @@ func TestDownloadBundle_HashMismatch(t *testing.T) {
 	badH := sha256.Sum256([]byte("actual-content"))
 
 	idx := newFileIndex()
-	idx.setEntry("good.txt", FileEntry{Size: 7, SHA256: Hash256(goodH)})
-	idx.setEntry("bad.txt", FileEntry{Size: 14, SHA256: Hash256(badH)})
+	idx.Set("good.txt", FileEntry{Size: 7, SHA256: Hash256(goodH)})
+	idx.Set("bad.txt", FileEntry{Size: 14, SHA256: Hash256(badH)})
 
 	n := &Node{
 		cfg:      testCfg(serverDir, "127.0.0.1"),
@@ -3522,9 +3375,9 @@ func TestScanNormalizesNFD(t *testing.T) {
 	}
 
 	// The index key should be NFC regardless of what the filesystem stores.
-	if _, ok := idx.Files[nfcName]; !ok {
+	if _, ok := idx.Get(nfcName); !ok {
 		// Show what keys exist for debugging.
-		for k := range idx.Files {
+		for k := range idx.Range {
 			t.Logf("index key: %q (len=%d)", k, len(k))
 		}
 		t.Errorf("expected NFC key %q in index", nfcName)
@@ -3544,8 +3397,8 @@ func TestProtoToFileIndex_NormalizesNFD(t *testing.T) {
 		},
 	})
 
-	if _, ok := idx.Files[nfcPath]; !ok {
-		for k := range idx.Files {
+	if _, ok := idx.Get(nfcPath); !ok {
+		for k := range idx.Range {
 			t.Logf("key: %q", k)
 		}
 		t.Errorf("expected NFC key %q in converted index", nfcPath)
@@ -3996,29 +3849,29 @@ func TestFileIndex_CachedCountAndSize(t *testing.T) {
 	idx.recomputeCache()
 
 	// Insert two active files.
-	idx.setEntry("a.txt", FileEntry{Size: 100})
-	idx.setEntry("b.txt", FileEntry{Size: 200})
+	idx.Set("a.txt", FileEntry{Size: 100})
+	idx.Set("b.txt", FileEntry{Size: 200})
 	count, size := idx.activeCountAndSize()
 	if count != 2 || size != 300 {
 		t.Fatalf("after insert: count=%d size=%d, want 2/300", count, size)
 	}
 
 	// Update a file (size change).
-	idx.setEntry("a.txt", FileEntry{Size: 150})
+	idx.Set("a.txt", FileEntry{Size: 150})
 	count, size = idx.activeCountAndSize()
 	if count != 2 || size != 350 {
 		t.Fatalf("after update: count=%d size=%d, want 2/350", count, size)
 	}
 
 	// Delete a file (tombstone).
-	idx.setEntry("b.txt", FileEntry{Size: 200, Deleted: true})
+	idx.Set("b.txt", FileEntry{Size: 200, Deleted: true})
 	count, size = idx.activeCountAndSize()
 	if count != 1 || size != 150 {
 		t.Fatalf("after delete: count=%d size=%d, want 1/150", count, size)
 	}
 
 	// Re-insert over a tombstone.
-	idx.setEntry("b.txt", FileEntry{Size: 300})
+	idx.Set("b.txt", FileEntry{Size: 300})
 	count, size = idx.activeCountAndSize()
 	if count != 2 || size != 450 {
 		t.Fatalf("after re-insert: count=%d size=%d, want 2/450", count, size)
@@ -4194,7 +4047,7 @@ func TestHandleIndex_ExchangeRoundtrip(t *testing.T) {
 	}
 	idx := newFileIndex()
 	idx.Sequence = 5
-	idx.Files["local.txt"] = FileEntry{Size: 100, SHA256: testHash("abc123"), Sequence: 5}
+	idx.Set("local.txt", FileEntry{Size: 100, SHA256: testHash("abc123"), Sequence: 5})
 	n.folders["test"] = &folderState{
 		cfg:   testFolderCfg(dir, "127.0.0.1"),
 		index: idx,
@@ -4255,8 +4108,8 @@ func TestHandleIndex_DeltaMode(t *testing.T) {
 	}
 	idx := newFileIndex()
 	idx.Sequence = 10
-	idx.Files["old.txt"] = FileEntry{Size: 100, SHA256: testHash("aaa"), Sequence: 3}
-	idx.Files["new.txt"] = FileEntry{Size: 200, SHA256: testHash("bbb"), Sequence: 8}
+	idx.Set("old.txt", FileEntry{Size: 100, SHA256: testHash("aaa"), Sequence: 3})
+	idx.Set("new.txt", FileEntry{Size: 200, SHA256: testHash("bbb"), Sequence: 8})
 	n.folders["test"] = &folderState{
 		cfg:   testFolderCfg(dir, "127.0.0.1"),
 		index: idx,
@@ -4319,7 +4172,7 @@ func TestBuildIndexExchange_DeltaFiltering(t *testing.T) {
 	t.Parallel()
 	idx := &FileIndex{
 		Sequence: 10,
-		Files: map[string]FileEntry{
+		files: map[string]FileEntry{
 			"old.txt": {SHA256: testHash("aaa"), Sequence: 2},
 			"mid.txt": {SHA256: testHash("bbb"), Sequence: 5},
 			"new.txt": {SHA256: testHash("ccc"), Sequence: 9},
@@ -4358,11 +4211,11 @@ func TestSeqIndex_SetEntryAppends(t *testing.T) {
 
 	// Add entries via setEntry — should append to seqIndex.
 	idx.Sequence = 1
-	idx.setEntry("a.txt", FileEntry{SHA256: testHash("aaa"), Sequence: 1})
+	idx.Set("a.txt", FileEntry{SHA256: testHash("aaa"), Sequence: 1})
 	idx.Sequence = 2
-	idx.setEntry("b.txt", FileEntry{SHA256: testHash("bbb"), Sequence: 2})
+	idx.Set("b.txt", FileEntry{SHA256: testHash("bbb"), Sequence: 2})
 	idx.Sequence = 3
-	idx.setEntry("c.txt", FileEntry{SHA256: testHash("ccc"), Sequence: 3})
+	idx.Set("c.txt", FileEntry{SHA256: testHash("ccc"), Sequence: 3})
 
 	if len(idx.seqIndex) != 3 {
 		t.Fatalf("expected 3 seqIndex entries, got %d", len(idx.seqIndex))
@@ -4370,7 +4223,7 @@ func TestSeqIndex_SetEntryAppends(t *testing.T) {
 
 	// Update a.txt — should create a 4th entry (stale a.txt at seq=1 remains).
 	idx.Sequence = 4
-	idx.setEntry("a.txt", FileEntry{SHA256: testHash("aaa2"), Sequence: 4})
+	idx.Set("a.txt", FileEntry{SHA256: testHash("aaa2"), Sequence: 4})
 
 	if len(idx.seqIndex) != 4 {
 		t.Fatalf("expected 4 seqIndex entries after update, got %d", len(idx.seqIndex))
@@ -4394,7 +4247,7 @@ func TestSeqIndex_DeltaExchangeSkipsStale(t *testing.T) {
 	t.Parallel()
 	idx := &FileIndex{
 		Sequence: 5,
-		Files: map[string]FileEntry{
+		files: map[string]FileEntry{
 			"a.txt": {SHA256: testHash("v2"), Sequence: 5}, // updated from seq=1 to seq=5
 			"b.txt": {SHA256: testHash("bbb"), Sequence: 3},
 		},
@@ -4468,7 +4321,7 @@ func TestHandleIndex_LoopbackTrusted(t *testing.T) {
 		deviceID: "test-device",
 	}
 	idx := newFileIndex()
-	idx.Files["local.txt"] = FileEntry{Size: 100, SHA256: testHash("abc"), Sequence: 1}
+	idx.Set("local.txt", FileEntry{Size: 100, SHA256: testHash("abc"), Sequence: 1})
 	n.folders["test"] = &folderState{
 		cfg:   testFolderCfg(dir, "10.99.99.99"),
 		index: idx,
@@ -4548,9 +4401,9 @@ func TestPaginatedIndexExchange(t *testing.T) {
 	}
 	idx := newFileIndex()
 	for i := range indexPageSize + 500 { // slightly more than one page
-		idx.Files[fmt.Sprintf("file-%05d.txt", i)] = FileEntry{
+		idx.Set(fmt.Sprintf("file-%05d.txt", i), FileEntry{
 			Size: int64(i), SHA256: testHash(fmt.Sprintf("hash%05d", i)), Sequence: int64(i + 1),
-		}
+		})
 	}
 	idx.Sequence = int64(indexPageSize + 500)
 	n.folders["bigfolder"] = &folderState{
@@ -4606,7 +4459,7 @@ func TestPaginatedIndexExchange_SmallIndex(t *testing.T) {
 		deviceID: "srv",
 	}
 	idx := newFileIndex()
-	idx.Files["a.txt"] = FileEntry{Size: 10, SHA256: testHash("aaa"), Sequence: 1}
+	idx.Set("a.txt", FileEntry{Size: 10, SHA256: testHash("aaa"), Sequence: 1})
 	idx.Sequence = 1
 	n.folders["test"] = &folderState{
 		cfg:   testFolderCfg(dir, "127.0.0.1"),
@@ -4909,7 +4762,7 @@ func TestTwoNodeSync(t *testing.T) {
 
 	// remoteIdx should contain from-a.txt.
 	remoteFileIndex := protoToFileIndex(remoteIdx)
-	if _, ok := remoteFileIndex.Files["from-a.txt"]; !ok {
+	if _, ok := remoteFileIndex.Get("from-a.txt"); !ok {
 		t.Fatal("expected from-a.txt in remote index")
 	}
 
@@ -5242,7 +5095,7 @@ func TestDryRunComputesDiffWithoutExecution(t *testing.T) {
 	// Simulate a remote index with a file we don't have.
 	remote := &FileIndex{
 		Sequence: 10,
-		Files: map[string]FileEntry{
+		files: map[string]FileEntry{
 			"remote.txt": {Size: 100, MtimeNS: 1000, SHA256: testHash("abc123"), Sequence: 10},
 		},
 	}
@@ -5285,11 +5138,11 @@ func TestDisabledFolderSkippedInScan(t *testing.T) {
 	n.runScan(context.Background(), nil)
 
 	// Active folder should have scanned files.
-	if len(n.folders["active"].index.Files) == 0 {
+	if n.folders["active"].index.Len() == 0 {
 		t.Error("active folder should have scanned files")
 	}
 	// Disabled folder should remain empty.
-	if len(n.folders["off"].index.Files) != 0 {
+	if n.folders["off"].index.Len() != 0 {
 		t.Error("disabled folder should not have scanned files")
 	}
 }
@@ -5433,7 +5286,7 @@ func TestBuildIndexExchange_StampsProtocolVersion(t *testing.T) {
 		deviceID: "test-device",
 	}
 	idx := newFileIndex()
-	idx.Files["a.txt"] = FileEntry{Size: 1, SHA256: testHash("a"), Sequence: 1}
+	idx.Set("a.txt", FileEntry{Size: 1, SHA256: testHash("a"), Sequence: 1})
 	idx.Sequence = 1
 	n.folders["test"] = &folderState{
 		cfg:   testFolderCfg(dir, "127.0.0.1"),
@@ -5461,9 +5314,9 @@ func TestDownloadBundle_PathTraversalInTarEntry(t *testing.T) {
 
 	idx := newFileIndex()
 	h := sha256.Sum256([]byte("ok"))
-	idx.setEntry("legit.txt", FileEntry{Size: 2, SHA256: Hash256(h)})
+	idx.Set("legit.txt", FileEntry{Size: 2, SHA256: Hash256(h)})
 	// Also add a traversal path to the index so the server would try to serve it.
-	idx.setEntry("../escape.txt", FileEntry{Size: 7, SHA256: testHash("deadbeef")})
+	idx.Set("../escape.txt", FileEntry{Size: 7, SHA256: testHash("deadbeef")})
 
 	n := &Node{
 		cfg:      testCfg(dir, "127.0.0.1"),
@@ -5614,37 +5467,51 @@ func TestPersistFolder_Roundtrip(t *testing.T) {
 	idx := newFileIndex()
 	ignore := &ignoreMatcher{}
 	_, _, _, _ = idx.scan(context.Background(), folderDir, ignore)
+	idx.MarkAllDirty()
 
 	peers := map[string]PeerState{
 		"192.168.1.10:7756": {LastSeenSequence: 42, LastSync: time.Now().Truncate(time.Second)},
 	}
 
+	folderCacheDir := filepath.Join(dataDir, "docs")
+	if err := os.MkdirAll(folderCacheDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openFolderDB(folderCacheDir, "TESTDEVICE")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
 	n := &Node{
 		dataDir: dataDir,
 		folders: map[string]*folderState{
 			"docs": {
-				cfg:   config.FolderCfg{ID: "docs", Path: folderDir},
-				index: idx,
-				peers: peers,
+				cfg:        config.FolderCfg{ID: "docs", Path: folderDir},
+				index:      idx,
+				peers:      peers,
+				db:         db,
+				indexDirty: true,
+				peersDirty: true,
 			},
 		},
 	}
 
 	n.persistFolder("docs", true)
 
-	// Reload index.
-	loadedIdx, err := loadIndex(filepath.Join(dataDir, "docs", "index.yaml"))
+	// Reload via SQLite.
+	loadedIdx, err := loadIndexDB(db, "docs")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("loadIndexDB: %v", err)
 	}
 	if loadedIdx.Sequence != idx.Sequence {
 		t.Errorf("sequence: got %d, want %d", loadedIdx.Sequence, idx.Sequence)
 	}
-	if len(loadedIdx.Files) != len(idx.Files) {
-		t.Errorf("file count: got %d, want %d", len(loadedIdx.Files), len(idx.Files))
+	if loadedIdx.Len() != idx.Len() {
+		t.Errorf("file count: got %d, want %d", loadedIdx.Len(), idx.Len())
 	}
-	for path, entry := range idx.Files {
-		loaded, ok := loadedIdx.Files[path]
+	for path, entry := range idx.Range {
+		loaded, ok := loadedIdx.Get(path)
 		if !ok {
 			t.Errorf("missing file %q", path)
 			continue
@@ -5654,10 +5521,10 @@ func TestPersistFolder_Roundtrip(t *testing.T) {
 		}
 	}
 
-	// Reload peers.
-	loadedPeers, err := loadPeerStates(filepath.Join(dataDir, "docs", "peers.yaml"))
+	// Reload peers via SQLite.
+	loadedPeers, err := loadPeerStatesDB(db, "docs")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("loadPeerStatesDB: %v", err)
 	}
 	if len(loadedPeers) != 1 {
 		t.Fatalf("expected 1 peer, got %d", len(loadedPeers))
@@ -5677,36 +5544,21 @@ func TestPathChangePreservesIndex(t *testing.T) {
 	newDir := t.TempDir()
 	writeFile(t, oldDir, "file.txt", "content")
 
-	// Build an index at the old path and persist it.
 	idx := newFileIndex()
 	idx.Path = oldDir
 	ignore := &ignoreMatcher{}
 	_, _, _, _ = idx.scan(context.Background(), oldDir, ignore)
 
-	idxPath := filepath.Join(dataDir, "docs", "index.yaml")
-	if err := idx.save(idxPath); err != nil {
-		t.Fatal(err)
-	}
-
-	// Reload and simulate path change (same logic as Start()).
-	loaded, err := loadIndex(idxPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	loaded := testPersistAndReload(t, dataDir, "docs", idx)
 
 	if loaded.Path == newDir {
 		t.Fatal("path should differ before update")
 	}
-
-	// Path change just updates the stored path; index is preserved
-	// so the next scan can correctly reconcile (moved dir = no changes,
-	// different content = deletions propagate to peers).
 	loaded.Path = newDir
-
 	if loaded.Path != newDir {
 		t.Errorf("path = %q, want %q", loaded.Path, newDir)
 	}
-	if len(loaded.Files) == 0 {
+	if loaded.Len() == 0 {
 		t.Error("index should be preserved after path change")
 	}
 	if loaded.Sequence == 0 {
@@ -5725,20 +5577,12 @@ func TestIndexPersistsPath(t *testing.T) {
 	ignore := &ignoreMatcher{}
 	_, _, _, _ = idx.scan(context.Background(), dir, ignore)
 
-	idxPath := filepath.Join(dataDir, "test", "index.yaml")
-	if err := idx.save(idxPath); err != nil {
-		t.Fatal(err)
-	}
-
-	loaded, err := loadIndex(idxPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	loaded := testPersistAndReload(t, dataDir, "test", idx)
 
 	if loaded.Path != dir {
 		t.Errorf("persisted path = %q, want %q", loaded.Path, dir)
 	}
-	if len(loaded.Files) == 0 {
+	if loaded.Len() == 0 {
 		t.Error("expected preserved files on reload")
 	}
 }
@@ -5956,9 +5800,9 @@ func BenchmarkIndexClone(b *testing.B) {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			idx := newFileIndex()
 			for i := range n {
-				idx.Files[fmt.Sprintf("dir%03d/file%05d.dat", i/100, i)] = FileEntry{
+				idx.Set(fmt.Sprintf("dir%03d/file%05d.dat", i/100, i), FileEntry{
 					Size: int64(i), MtimeNS: int64(i) * 1000, Sequence: int64(i),
-				}
+				})
 			}
 			idx.recomputeCache()
 			b.ResetTimer()
@@ -5979,9 +5823,9 @@ func BenchmarkRecomputeCache(b *testing.B) {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			idx := newFileIndex()
 			for i := range n {
-				idx.Files[fmt.Sprintf("dir%03d/file%05d.dat", i/100, i)] = FileEntry{
+				idx.Set(fmt.Sprintf("dir%03d/file%05d.dat", i/100, i), FileEntry{
 					Size: int64(i), MtimeNS: int64(i) * 1000, Sequence: int64(i),
-				}
+				})
 			}
 			b.ResetTimer()
 			b.ReportAllocs()
@@ -6000,9 +5844,9 @@ func BenchmarkIndexCloneReused(b *testing.B) {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			idx := newFileIndex()
 			for i := range n {
-				idx.Files[fmt.Sprintf("dir%03d/file%05d.dat", i/100, i)] = FileEntry{
+				idx.Set(fmt.Sprintf("dir%03d/file%05d.dat", i/100, i), FileEntry{
 					Size: int64(i), MtimeNS: int64(i) * 1000, Sequence: int64(i),
-				}
+				})
 			}
 			idx.recomputeCache()
 			// Warm the recycled map to simulate steady state (first runScan
@@ -6012,7 +5856,7 @@ func BenchmarkIndexCloneReused(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				c := idx.cloneInto(recycled)
-				recycled = c.Files
+				recycled = c.Files()
 			}
 		})
 	}
@@ -6276,59 +6120,11 @@ func BenchmarkBlockSignatures(b *testing.B) {
 	}
 }
 
-// B15: verify that a corrupted index resets stale peer state so delta
-// filtering doesn't suppress the fresh index.
-func TestIndexResetClearsPeerState(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	folderDir := filepath.Join(dir, "test-folder")
-	if err := os.MkdirAll(folderDir, 0750); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write a corrupted index.
-	idxPath := filepath.Join(folderDir, "index.yaml")
-	if err := os.WriteFile(idxPath, []byte("{{invalid yaml"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write stale peer state with high LastSentSequence.
-	peersPath := filepath.Join(folderDir, "peers.yaml")
-	if err := os.WriteFile(peersPath, []byte("192.168.1.1:7756:\n  last_sent_sequence: 5000\n  last_seen_sequence: 3000\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Simulate Start()'s loading logic.
-	idx, err := loadIndex(idxPath)
-	indexReset := false
-	if err != nil {
-		idx = newFileIndex()
-		indexReset = true
-	}
-	peers, err := loadPeerStates(peersPath)
-	if err != nil {
-		t.Fatal("loadPeerStates should succeed:", err)
-	}
-
-	if !indexReset {
-		t.Fatal("expected indexReset=true for corrupted index")
-	}
-	if idx.Sequence != 0 {
-		t.Fatalf("fresh index should have Sequence=0, got %d", idx.Sequence)
-	}
-	if len(peers) == 0 {
-		t.Fatal("peers should have loaded from peers.yaml before reset")
-	}
-
-	// B15: apply the reset logic.
-	if indexReset && len(peers) > 0 {
-		peers = make(map[string]PeerState)
-	}
-
-	if len(peers) != 0 {
-		t.Fatalf("peers should be empty after index reset, got %d entries", len(peers))
-	}
-}
+// PERSISTENCE-AUDIT.md §2.2 R5: TestIndexResetClearsPeerState was the
+// B15 regression for "silent gob fallback gave us an empty index, so
+// reset peer state". With the gob path gone (commit 2) and
+// refuseLegacyIndex rejecting legacy sidecars at open, the failure
+// mode no longer exists; R5 disposition is `drop`.
 
 // --- Rate limiter tests ---
 
@@ -6692,7 +6488,7 @@ func TestDiffFirstSyncTombstone_RemoteOnly(t *testing.T) {
 	// No local entry for "gone.txt".
 
 	remote := newFileIndex()
-	remote.Files["gone.txt"] = FileEntry{Deleted: true, Sequence: 5}
+	remote.Set("gone.txt", FileEntry{Deleted: true, Sequence: 5})
 
 	// Even on first sync, if local doesn't have the file, no action expected
 	// (can't delete what doesn't exist locally).
@@ -6708,10 +6504,10 @@ func TestDiffTombstone_AfterFirstSync(t *testing.T) {
 	t.Parallel()
 	local := newFileIndex()
 	// C1: MtimeNS=500 <= lastSyncNS=1000 → local copy is unchanged.
-	local.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 1, MtimeNS: 500}
+	local.Set("a.txt", FileEntry{SHA256: testHash("aaa"), Sequence: 1, MtimeNS: 500})
 
 	remote := newFileIndex()
-	remote.Files["a.txt"] = FileEntry{Deleted: true, Sequence: 5}
+	remote.Set("a.txt", FileEntry{Deleted: true, Sequence: 5})
 
 	actions := local.diff(remote, 3, 1000, nil, "send-receive")
 	if len(actions) != 1 || actions[0].Action != ActionDelete {
@@ -6747,29 +6543,29 @@ func TestDeleteHandler_TombstoneCreation(t *testing.T) {
 	// Simulate: file existed on disk but had no index entry.
 	// After delete, handler should create a tombstone.
 	idx.Sequence++
-	entry := idx.Files["orphan.txt"] // zero value
+	entry, _ := idx.Get("orphan.txt") // zero value
 	entry.Deleted = true
 	entry.MtimeNS = time.Now().UnixNano()
 	entry.Sequence = idx.Sequence
-	idx.Files["orphan.txt"] = entry
+	idx.Set("orphan.txt", entry)
 
-	if !idx.Files["orphan.txt"].Deleted {
+	if !idx.Files()["orphan.txt"].Deleted {
 		t.Error("expected tombstone for orphan.txt")
 	}
-	if idx.Files["orphan.txt"].Sequence != 11 {
-		t.Errorf("expected sequence 11, got %d", idx.Files["orphan.txt"].Sequence)
+	if idx.Files()["orphan.txt"].Sequence != 11 {
+		t.Errorf("expected sequence 11, got %d", idx.Files()["orphan.txt"].Sequence)
 	}
 
 	// Second delete of already-tombstoned entry should NOT bump sequence (N12).
 	prevSeq := idx.Sequence
-	existing := idx.Files["orphan.txt"]
+	existing, _ := idx.Get("orphan.txt")
 	if existing.Deleted {
 		// N12 path: skip bump
 	} else {
 		idx.Sequence++
 		existing.Deleted = true
 		existing.Sequence = idx.Sequence
-		idx.Files["orphan.txt"] = existing
+		idx.Set("orphan.txt", existing)
 	}
 	if idx.Sequence != prevSeq {
 		t.Errorf("N12: sequence should not bump for already-tombstoned entry, was %d now %d", prevSeq, idx.Sequence)
@@ -7159,12 +6955,25 @@ func TestPersistFolder_Concurrent(t *testing.T) {
 	dir := t.TempDir()
 
 	idx := newFileIndex()
-	idx.Files["a.txt"] = FileEntry{SHA256: testHash("aaa"), Sequence: 1}
+	idx.Set("a.txt", FileEntry{SHA256: testHash("aaa"), Sequence: 1})
+
+	folderCacheDir := filepath.Join(dir, "test")
+	if err := os.MkdirAll(folderCacheDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openFolderDB(folderCacheDir, "TESTDEV")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
 
 	fs := &folderState{
-		index:    idx,
-		peers:    map[string]PeerState{"peer1": {LastSeenSequence: 5}},
-		inFlight: make(map[string]bool),
+		index:      idx,
+		peers:      map[string]PeerState{"peer1": {LastSeenSequence: 5}},
+		inFlight:   make(map[string]bool),
+		db:         db,
+		indexDirty: true,
+		peersDirty: true,
 	}
 
 	n := &Node{
@@ -7183,13 +6992,17 @@ func TestPersistFolder_Concurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Verify the persisted index is valid.
-	loaded, err := loadIndex(filepath.Join(dir, "test", "index.yaml"))
+	// Verify the persisted index is valid via SQLite.
+	loaded, err := loadIndexDB(db, "test")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("loadIndexDB: %v", err)
 	}
-	if loaded.Files["a.txt"].SHA256 != testHash("aaa") {
-		t.Errorf("expected SHA256=aaa, got %s", loaded.Files["a.txt"].SHA256)
+	got, ok := loaded.Get("a.txt")
+	if !ok {
+		t.Fatal("a.txt missing after persist")
+	}
+	if got.SHA256 != testHash("aaa") {
+		t.Errorf("expected SHA256=aaa, got %s", got.SHA256)
 	}
 }
 
@@ -7475,7 +7288,7 @@ func TestDownloadBundle_PreservesMtime(t *testing.T) {
 	// Build server index.
 	idx := newFileIndex()
 	for name, fd := range files {
-		idx.setEntry(name, FileEntry{
+		idx.Set(name, FileEntry{
 			Size:   int64(len(fd.content)),
 			SHA256: fd.hash,
 		})
@@ -7551,7 +7364,7 @@ func TestMtimePreservation_ScanFastPath(t *testing.T) {
 	// Build an index with matching mtime (as syncFolder would set after download).
 	idx := newFileIndex()
 	info, _ := os.Stat(filepath.Join(dir, "stable.txt"))
-	idx.setEntry("stable.txt", FileEntry{
+	idx.Set("stable.txt", FileEntry{
 		Size:    info.Size(),
 		MtimeNS: info.ModTime().UnixNano(),
 		SHA256:  h,
@@ -7674,16 +7487,7 @@ func TestDeviceIDGuard_PersistedInIndex(t *testing.T) {
 
 	originalDeviceID := idx.DeviceID
 
-	// Save and reload through the YAML persistence path.
-	idxPath := filepath.Join(t.TempDir(), "index.yaml")
-	if err := idx.save(idxPath); err != nil {
-		t.Fatal(err)
-	}
-
-	loaded, err := loadIndex(idxPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	loaded := testPersistAndReload(t, t.TempDir(), "device-id-guard", idx)
 
 	if loaded.DeviceID != originalDeviceID {
 		t.Errorf("DeviceID not preserved: got %d, want %d", loaded.DeviceID, originalDeviceID)

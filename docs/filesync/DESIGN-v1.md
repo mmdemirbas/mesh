@@ -185,15 +185,22 @@ model. Forcing build-time selection means the operator deploys
 **one** binary across all peers and the model question is
 settled at deploy.
 
-**Recorded decision (to be filled in at commit 2 of the cutover
-sequence):**
+**Recorded decision (commit 2, 2026-04-25):**
 
 ```
-Bench: BenchmarkLoadIndex_168kFiles
-Hardware: <build host model + arch>
-Result: <median> ms ± <stddev> ms across N runs
-Selected: FILESYNC_INDEX_MODEL = "<beta|hybrid>"
-Rationale: <reason — bench < 80 ms, ≥ 80 ms, or borderline default>
+Bench:    BenchmarkLoadIndex_168kFiles
+Hardware: Apple M1 Max (darwin/arm64), modernc.org/sqlite v1.x
+Runs:     -count=10 -benchtime=1x
+Result:   655.22 ms median, ±34.0 ms std-dev
+          min 624 ms, max 724 ms
+          alloc 210 MB / 4.98M allocs per load
+Selected: FILESYNC_INDEX_MODEL = "hybrid"
+Rationale: 655 ms median is 7.8× over the 80 ms gate; even the
+           fastest single run (624 ms) is 7.8× over. β would
+           regress every scan from cloneInto's 7 ms / 0 allocs
+           floor to 624+ ms / 210 MB. No ambiguity, no
+           borderline default — hybrid is the conservative AND
+           the correct choice here.
 ```
 
 Updated when the bench is re-run (e.g., after a modernc driver

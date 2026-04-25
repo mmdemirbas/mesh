@@ -326,7 +326,7 @@ func perfSnapshotEvent(folders map[string]*folderState) map[string]any {
 		fs.indexMu.RLock()
 		count, size := fs.index.activeCountAndSize()
 		seq := fs.index.Sequence
-		mapLen := len(fs.index.Files)
+		mapLen := fs.index.Len()
 		peerCount := len(fs.peers)
 		pendingCount := len(fs.pending)
 		fs.indexMu.RUnlock()

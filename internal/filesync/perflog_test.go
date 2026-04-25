@@ -305,8 +305,8 @@ func TestPerfSnapshot_EmitsFolderStats(t *testing.T) {
 	t.Parallel()
 	idx := newFileIndex()
 	idx.Sequence = 7
-	idx.setEntry("a", FileEntry{Size: 100})
-	idx.setEntry("b", FileEntry{Size: 250})
+	idx.Set("a", FileEntry{Size: 100})
+	idx.Set("b", FileEntry{Size: 250})
 	folders := map[string]*folderState{
 		"fid": {index: idx},
 	}

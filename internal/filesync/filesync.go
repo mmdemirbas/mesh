@@ -3,6 +3,7 @@ package filesync
 import (
 	"context"
 	"crypto/tls"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -445,11 +446,16 @@ type folderState struct {
 	peerRetries     peerRetryTracker // R3: per-peer backoff after consecutive sendIndex failures
 	// H3: inFlight tracks paths currently being downloaded so concurrent
 	// peer goroutines skip the same path. Protected by inFlightMu.
-	inFlightMu  sync.Mutex
-	inFlight    map[string]bool
-	persistMu   sync.Mutex        // N10: serializes persistFolder calls
-	indexDirty  bool              // P17a: true when file index changed since last persist
-	peersDirty  bool              // P17a: true when peer state changed since last persist
+	inFlightMu sync.Mutex
+	inFlight   map[string]bool
+	persistMu  sync.Mutex // N10: serializes persistFolder calls
+	indexDirty bool       // P17a: true when file index changed since last persist
+	peersDirty bool       // P17a: true when peer state changed since last persist
+	// db is the per-folder SQLite handle, opened by Node.Run via
+	// openFolderDB. PERSISTENCE-AUDIT.md §6 commit 2: this is the only
+	// on-disk store for the folder index and peer state. Closed at
+	// shutdown after wg.Wait so no goroutine still holds rows.
+	db          *sql.DB
 	isNetworkFS bool              // C2: true when folder root is on a network filesystem
 	metrics     FolderSyncMetrics // lock-free counters for Prometheus
 	// P18c: recycled scan-clone backing map. Stashed after swap, reused on
@@ -509,7 +515,7 @@ func (fs *folderState) applyHintRenames(ctx context.Context, folderID, peerAddr 
 		if !deletesInSet[a.RemotePrevPath] {
 			continue // stale hint — no matching delete
 		}
-		oldEntry, exists := fs.index.Files[a.RemotePrevPath]
+		oldEntry, exists := fs.index.Get(a.RemotePrevPath)
 		if !exists || oldEntry.Deleted {
 			continue // local already has no file at OldPath
 		}
@@ -544,7 +550,7 @@ func (fs *folderState) applyHintRenames(ctx context.Context, folderID, peerAddr 
 			continue
 		}
 		fs.indexMu.Lock()
-		oldEntry := fs.index.Files[oldPath]
+		oldEntry, _ := fs.index.Get(oldPath)
 		if !oldEntry.Deleted {
 			fs.index.Sequence++
 			oldEntry.Deleted = true
@@ -555,7 +561,7 @@ func (fs *folderState) applyHintRenames(ctx context.Context, folderID, peerAddr 
 			if fs.index.selfID != "" {
 				oldEntry.Version = oldEntry.Version.bump(fs.index.selfID)
 			}
-			fs.index.setEntry(oldPath, oldEntry)
+			fs.index.Set(oldPath, oldEntry)
 		}
 		fs.retries.clearAll(oldPath)
 		fs.indexMu.Unlock()
@@ -989,31 +995,51 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		// folder init.
 		cleanTempFiles(fcfg.Path, tempFileMaxAge)
 
-		// Load or create index.
-		idxPath := filepath.Join(dataDir, fcfg.ID, "index.yaml")
-		idx, err := loadIndex(idxPath)
-		indexReset := false
-		if err != nil {
-			slog.Warn("failed to load index, starting fresh", "folder", fcfg.ID, "error", err)
-			idx = newFileIndex()
-			indexReset = true
-		}
-		idx.recomputeCache()  // P18b: initialize cached counters from loaded data
-		idx.rebuildSeqIndex() // PG: build secondary sequence index
-
-		// Load peer states.
-		peersPath := filepath.Join(dataDir, fcfg.ID, "peers.yaml")
-		peers, err := loadPeerStates(peersPath)
-		if err != nil {
-			slog.Warn("failed to load peer states, starting fresh", "folder", fcfg.ID, "error", err)
-			peers = make(map[string]PeerState)
+		// PERSISTENCE-AUDIT.md §6 commit 2: SQLite is the only on-disk
+		// store. Refuse to start a folder whose cache directory carries
+		// any legacy gob/YAML sidecar — the v1 cold-swap posture
+		// (DESIGN-v1.md §0) makes those leftover dev files, not real
+		// state to migrate. Skip the folder on legacy-refusal so other
+		// folders and other mesh components keep running. Per R8 in
+		// PERSISTENCE-AUDIT.md, FolderDisabled wiring lands at commit 3;
+		// commit 2 logs and skips as a stub.
+		folderCacheDir := filepath.Join(dataDir, fcfg.ID)
+		if err := refuseLegacyIndex(folderCacheDir); err != nil {
+			slog.Error("legacy index files present — refusing to open folder",
+				"folder", fcfg.ID, "error", err)
+			state.Global.Update("filesync-folder", fcfg.ID, state.Failed,
+				"legacy index files present (delete them)")
+			continue
 		}
 
-		// B15: if index was recreated from scratch, reset peer state so stale
-		// LastSentSequence doesn't suppress the full index on outbound sync.
-		if indexReset && len(peers) > 0 {
-			slog.Warn("resetting peer state after index recreation", "folder", fcfg.ID)
-			peers = make(map[string]PeerState)
+		db, err := openFolderDB(folderCacheDir, n.deviceID)
+		if err != nil {
+			slog.Error("failed to open folder DB", "folder", fcfg.ID, "error", err)
+			state.Global.Update("filesync-folder", fcfg.ID, state.Failed,
+				"open SQLite: "+err.Error())
+			continue
+		}
+
+		idx, err := loadIndexDB(db, fcfg.ID)
+		if err != nil {
+			_ = db.Close()
+			slog.Error("failed to load index from SQLite",
+				"folder", fcfg.ID, "error", err)
+			state.Global.Update("filesync-folder", fcfg.ID, state.Failed,
+				"loadIndex: "+err.Error())
+			continue
+		}
+		// PG: secondary sequence index is rebuilt by loadIndexDB via
+		// recomputeCache; no separate rebuild needed here.
+
+		peers, err := loadPeerStatesDB(db, fcfg.ID)
+		if err != nil {
+			_ = db.Close()
+			slog.Error("failed to load peer states from SQLite",
+				"folder", fcfg.ID, "error", err)
+			state.Global.Update("filesync-folder", fcfg.ID, state.Failed,
+				"loadPeerStates: "+err.Error())
+			continue
 		}
 
 		// Detect path change and warn. The scan will handle the rest correctly:
@@ -1034,7 +1060,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		// shows conflict files immediately on restart without waiting
 		// for the first scan to walk the filesystem.
 		var initConflicts []string
-		for path, entry := range idx.Files {
+		for path, entry := range idx.Range {
 			if !entry.Deleted && isConflictFile(filepath.Base(path)) {
 				initConflicts = append(initConflicts, path)
 			}
@@ -1048,6 +1074,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			ignore:        ignore,
 			peers:         peers,
 			conflicts:     initConflicts,
+			db:            db,
 			pending:       make(map[string]PendingSummary),
 			peerLastError: make(map[string]string),
 			inFlight:      make(map[string]bool),
@@ -1216,10 +1243,15 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 
 	closePerfLog()
 
-	// L5: close os.Root handles.
+	// L5: close os.Root handles. PERSISTENCE-AUDIT.md §2.7 L2:
+	// also close the per-folder SQLite handles, AFTER wg.Wait so
+	// no goroutine still holds rows.
 	for _, fs := range n.folders {
 		if fs.root != nil {
 			_ = fs.root.Close()
+		}
+		if fs.db != nil {
+			_ = fs.db.Close()
 		}
 	}
 
@@ -1302,7 +1334,7 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		idxCopy := fs.index.cloneInto(recycled)
 		scanStartSeq := fs.index.Sequence
 		ignore := fs.ignore
-		existingFiles := len(fs.index.Files)
+		existingFiles := fs.index.Len()
 		peersCopy := make(map[string]PeerState, len(fs.peers))
 		for k, v := range fs.peers {
 			peersCopy[k] = v
@@ -1338,9 +1370,9 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		swapStart := time.Now()
 		fs.indexMu.Lock()
 		mergedBack := 0
-		for path, live := range fs.index.Files {
+		for path, live := range fs.index.Range {
 			if live.Sequence > scanStartSeq {
-				idxCopy.Files[path] = live
+				idxCopy.Set(path, live)
 				if live.Sequence > idxCopy.Sequence {
 					idxCopy.Sequence = live.Sequence
 				}
@@ -1354,7 +1386,7 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		// because no reader retains a reference across indexMu boundaries —
 		// every lookup re-reads fs.index.Files under the lock. The old index
 		// struct is discarded; only its map backing is recycled.
-		fs.reusableFiles = fs.index.Files
+		fs.reusableFiles = fs.index.files
 		fs.index = idxCopy
 		fs.index.recomputeCache()  // P18b: refresh after scan+merge
 		fs.index.rebuildSeqIndex() // PG: rebuild secondary sequence index
@@ -1696,7 +1728,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		n := 0
 		for _, a := range actions {
 			if a.Action == ActionDownload {
-				if le, ok := fs.index.Files[a.Path]; ok && le.Deleted {
+				if le, ok := fs.index.Get(a.Path); ok && le.Deleted {
 					filtered++
 					continue
 				}
@@ -1862,7 +1894,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 
 				fs.indexMu.Lock()
 				// Tombstone the old path.
-				oldEntry := fs.index.Files[rp.OldPath]
+				oldEntry, _ := fs.index.Get(rp.OldPath)
 				if !oldEntry.Deleted {
 					fs.index.Sequence++
 					oldEntry.Deleted = true
@@ -1880,7 +1912,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					} else if fs.index.selfID != "" {
 						oldEntry.Version = oldEntry.Version.bump(fs.index.selfID)
 					}
-					fs.index.setEntry(rp.OldPath, oldEntry)
+					fs.index.Set(rp.OldPath, oldEntry)
 				}
 				// Write the new-path entry with remote metadata.
 				fs.index.Sequence++
@@ -1888,8 +1920,8 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				// preserves any local components the peer did not carry,
 				// e.g., a pre-C6 peer sending an empty clock, or a local
 				// tombstone at rp.NewPath from an earlier delete.
-				newLocal := fs.index.Files[rp.NewPath]
-				fs.index.setEntry(rp.NewPath, FileEntry{
+				newLocal, _ := fs.index.Get(rp.NewPath)
+				fs.index.Set(rp.NewPath, FileEntry{
 					Size:     rp.RemoteSize,
 					MtimeNS:  rp.RemoteMtime,
 					SHA256:   rp.RemoteHash,
@@ -2007,8 +2039,8 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						// C6: merge clocks so any local component the peer
 						// did not carry (rolling upgrade, concurrent local
 						// write) survives the adopt.
-						localPrev := fs.index.Files[path]
-						fs.index.setEntry(path, FileEntry{
+						localPrev, _ := fs.index.Get(path)
+						fs.index.Set(path, FileEntry{
 							Size:     a.RemoteSize,
 							MtimeNS:  a.RemoteMtime,
 							SHA256:   a.RemoteHash,
@@ -2175,8 +2207,8 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				fs.index.Sequence++
 				// C6: merge clocks — adopt must not drop local components
 				// the peer did not carry.
-				localPrev := fs.index.Files[action.Path]
-				fs.index.setEntry(action.Path, FileEntry{
+				localPrev, _ := fs.index.Get(action.Path)
+				fs.index.Set(action.Path, FileEntry{
 					Size:     action.RemoteSize,
 					MtimeNS:  action.RemoteMtime,
 					SHA256:   action.RemoteHash,
@@ -2220,8 +2252,8 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						// C6: identical content — merge clocks so the
 						// path converges without losing local components
 						// the peer did not carry.
-						localPrev := fs.index.Files[action.Path]
-						fs.index.setEntry(action.Path, FileEntry{
+						localPrev, _ := fs.index.Get(action.Path)
+						fs.index.Set(action.Path, FileEntry{
 							Size:     action.RemoteSize,
 							MtimeNS:  action.RemoteMtime,
 							SHA256:   action.RemoteHash,
@@ -2351,8 +2383,8 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					fs.index.Sequence++
 					// C6: remote wins — merge clocks so local components
 					// the peer did not carry survive the adopt.
-					localPrev := fs.index.Files[action.Path]
-					fs.index.setEntry(action.Path, FileEntry{
+					localPrev, _ := fs.index.Get(action.Path)
+					fs.index.Set(action.Path, FileEntry{
 						Size:     action.RemoteSize,
 						MtimeNS:  action.RemoteMtime,
 						SHA256:   action.RemoteHash,
@@ -2384,7 +2416,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					// the clock and sequence advance to encode the
 					// "local-wins" decision.
 					fs.indexMu.Lock()
-					entry, exists := fs.index.Files[action.Path]
+					entry, exists := fs.index.Get(action.Path)
 					if exists && !entry.Deleted {
 						fs.index.Sequence++
 						entry.Sequence = fs.index.Sequence
@@ -2392,7 +2424,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						if fs.index.selfID != "" {
 							entry.Version = entry.Version.bump(fs.index.selfID)
 						}
-						fs.index.setEntry(action.Path, entry)
+						fs.index.Set(action.Path, entry)
 					}
 					fs.indexMu.Unlock()
 				}
@@ -2430,7 +2462,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				// N3: always write a tombstone, even if the file wasn't in the
 				// local index. Without a tombstone, the file can resurrect from
 				// a third peer that still has it in their index.
-				entry := fs.index.Files[action.Path] // zero value if absent
+				entry, _ := fs.index.Get(action.Path) // zero value if absent
 				if entry.Deleted {
 					// N12: already a tombstone — skip sequence bump, mtime reset, and metric.
 					fs.indexMu.Unlock()
@@ -2448,7 +2480,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					} else if fs.index.selfID != "" {
 						entry.Version = entry.Version.bump(fs.index.selfID)
 					}
-					fs.index.setEntry(action.Path, entry)
+					fs.index.Set(action.Path, entry)
 					fs.indexMu.Unlock()
 					fs.metrics.FilesDeleted.Add(1)
 				}
@@ -2574,7 +2606,7 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 		tail := fs.index.seqIndex[start:]
 		files := make([]*pb.FileInfo, 0, len(tail))
 		for _, se := range tail {
-			entry, ok := fs.index.Files[se.path]
+			entry, ok := fs.index.Get(se.path)
 			if !ok || entry.Sequence != se.seq {
 				continue // stale secondary index entry
 			}
@@ -2601,8 +2633,8 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 	}
 
 	// Full exchange (sinceSequence == 0 or empty seqIndex): iterate all entries.
-	files := make([]*pb.FileInfo, 0, len(fs.index.Files))
-	for path, entry := range fs.index.Files {
+	files := make([]*pb.FileInfo, 0, fs.index.Len())
+	for path, entry := range fs.index.Range {
 		if sinceSequence > 0 && entry.Sequence <= sinceSequence {
 			continue
 		}
@@ -2657,16 +2689,29 @@ func (n *Node) persistAll() {
 	}
 }
 
-// persistFolder saves a single folder's index and peer state.
+// persistFolder saves a single folder's index and peer state to
+// SQLite (PERSISTENCE-AUDIT.md §6 commit 2).
+//
 // N10: serialized via persistMu to prevent concurrent syncFolder
-// goroutines from racing on the same .tmp file.
-// P17a: skips unchanged components. The index file (~30 MB for large folders)
-// is only written when indexDirty is set. Peer state (~1 KB) is always cheap
-// to write but still gated by peersDirty. force=true bypasses both checks
-// (used at shutdown).
+// goroutines from racing on the same write transaction. P17a:
+// skips unchanged components — saveIndex is gated by indexDirty,
+// savePeerStatesDB is gated by peersDirty. force=true bypasses both
+// checks (used at shutdown).
+//
+// P2: saveIndex writes only the paths the FileIndex marks dirty
+// since the last successful persist; ClearDirty fires after a
+// commit succeeds. On commit failure the dirty/deleted sets stay
+// populated so the next cycle retries the same rows.
 func (n *Node) persistFolder(folderID string, force bool) {
 	fs, ok := n.folders[folderID]
 	if !ok {
+		return
+	}
+	if fs.db == nil {
+		// Folder failed to open SQLite at startup; skip silently —
+		// commit 3 (FolderDisabled scaffold) wires the proper status
+		// transition. For now, the in-memory fs.index is the only
+		// state and it lives until process exit.
 		return
 	}
 
@@ -2674,33 +2719,38 @@ func (n *Node) persistFolder(folderID string, force bool) {
 	defer fs.persistMu.Unlock()
 
 	fs.indexMu.Lock()
-	saveIndex := force || fs.indexDirty
-	savePeers := force || fs.peersDirty
-	if saveIndex {
+	shouldSaveIndex := force || fs.indexDirty
+	shouldSavePeers := force || fs.peersDirty
+	if shouldSaveIndex {
 		fs.indexDirty = false
 	}
-	if savePeers {
+	if shouldSavePeers {
 		fs.peersDirty = false
 	}
 	fs.indexMu.Unlock()
 
-	if !saveIndex && !savePeers {
+	if !shouldSaveIndex && !shouldSavePeers {
 		perfPersist(folderID, 0, 0, 0, true)
 		return
 	}
 
-	// F1: snapshot under RLock, then release and serialize outside the
-	// lock. This avoids holding indexMu.RLock across disk I/O (which
-	// blocks scan swap and download index updates for the full fsync
-	// duration) and eliminates the fragile RUnlock→Lock→Unlock→RLock
-	// dance on save failure.
+	// Snapshot under the index lock so the SQLite write does not
+	// hold the lock across the commit fsync. The clone is shallow —
+	// FileEntry values are immutable in practice (mutation paths
+	// allocate new VectorClock maps). The dirty/deleted sets ride
+	// with the clone.
 	var idxSnapshot *FileIndex
 	var peersSnapshot map[string]PeerState
 	fs.indexMu.RLock()
-	if saveIndex {
+	if shouldSaveIndex {
 		idxSnapshot = fs.index.clone()
+		// clone() does NOT copy the dirty/deleted sets; carry them
+		// explicitly so saveIndex sees what's pending.
+		dirty, deleted := fs.index.DirtyPaths()
+		idxSnapshot.dirty = dirty
+		idxSnapshot.deleted = deleted
 	}
-	if savePeers {
+	if shouldSavePeers {
 		peersSnapshot = make(map[string]PeerState, len(fs.peers))
 		for k, v := range fs.peers {
 			peersSnapshot[k] = v
@@ -2710,32 +2760,38 @@ func (n *Node) persistFolder(folderID string, force bool) {
 
 	var indexBytes int
 	var indexMs float64
-	if saveIndex {
+	if shouldSaveIndex {
 		idxStart := time.Now()
-		idxPath := filepath.Join(n.dataDir, folderID, "index.yaml")
-		if err := idxSnapshot.save(idxPath); err != nil {
-			slog.Warn("failed to save index", "folder", folderID, "error", err)
+		if err := saveIndex(fs.db, folderID, idxSnapshot); err != nil {
+			slog.Warn("failed to save index to SQLite",
+				"folder", folderID, "error", err)
 			fs.indexMu.Lock()
-			fs.indexDirty = true // retry next time
+			fs.indexDirty = true // retry next cycle
+			fs.indexMu.Unlock()
+		} else {
+			// Commit succeeded — clear the live index's dirty-set so
+			// the next cycle does not re-write the same rows.
+			fs.indexMu.Lock()
+			fs.index.ClearDirty()
 			fs.indexMu.Unlock()
 		}
 		indexMs = ms(time.Since(idxStart))
-		indexBytes = len(idxSnapshot.Files)
+		indexBytes = idxSnapshot.Len()
 	}
 
 	var peersMs float64
-	if savePeers {
+	if shouldSavePeers {
 		peersStart := time.Now()
-		peersPath := filepath.Join(n.dataDir, folderID, "peers.yaml")
-		if err := savePeerStates(peersPath, peersSnapshot); err != nil {
-			slog.Warn("failed to save peer states", "folder", folderID, "error", err)
+		if err := savePeerStatesDB(fs.db, folderID, peersSnapshot); err != nil {
+			slog.Warn("failed to save peer states to SQLite",
+				"folder", folderID, "error", err)
 			fs.indexMu.Lock()
-			fs.peersDirty = true // retry next time — mirror the index-save handling
+			fs.peersDirty = true // retry next cycle
 			fs.indexMu.Unlock()
 		}
 		peersMs = ms(time.Since(peersStart))
 	}
-	perfPersist(folderID, indexBytes, indexMs, peersMs, !saveIndex)
+	perfPersist(folderID, indexBytes, indexMs, peersMs, !shouldSaveIndex)
 }
 
 // protoToFileIndex converts a protobuf IndexExchange to our internal FileIndex.
@@ -2743,12 +2799,12 @@ func protoToFileIndex(idx *pb.IndexExchange) *FileIndex {
 	fi := &FileIndex{
 		Sequence: idx.GetSequence(),
 		Epoch:    idx.GetEpoch(),
-		Files:    make(map[string]FileEntry, len(idx.GetFiles())),
+		files:    make(map[string]FileEntry, len(idx.GetFiles())),
 	}
 	for _, f := range idx.GetFiles() {
 		// B17: normalize remote paths to NFC for cross-platform consistency.
 		path := norm.NFC.String(f.GetPath())
-		fi.Files[path] = FileEntry{
+		fi.Set(path, FileEntry{
 			Size:     f.GetSize(),
 			MtimeNS:  f.GetMtimeNs(),
 			SHA256:   hash256FromBytes(f.GetSha256()),
@@ -2757,7 +2813,7 @@ func protoToFileIndex(idx *pb.IndexExchange) *FileIndex {
 			Mode:     f.GetMode(),
 			PrevPath: norm.NFC.String(f.GetPrevPath()),
 			Version:  vectorClockFromProto(f.GetVersion()),
-		}
+		})
 	}
 	fi.recomputeCache() // P18b
 	return fi
@@ -2767,7 +2823,7 @@ func protoToFileIndex(idx *pb.IndexExchange) *FileIndex {
 func localMtime(fs *folderState, relPath string) int64 {
 	fs.indexMu.RLock()
 	defer fs.indexMu.RUnlock()
-	if entry, ok := fs.index.Files[relPath]; ok {
+	if entry, ok := fs.index.Get(relPath); ok {
 		return entry.MtimeNS
 	}
 	return 0
