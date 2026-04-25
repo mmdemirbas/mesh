@@ -73,6 +73,12 @@ section-byte partition on the byte side; the same rigor applies
 because the timing display is just as decision-critical and just
 as easy to ship wrong.
 
+**Partition rigor follows SPEC_PHASE1A.local.md §4.1's byte
+partition convention** — disjoint sections, exact sum-to-total
+invariant, an `other` bucket absorbing residual. The timing
+partition (six segments, sum equals total request duration) uses
+the same discipline.
+
 **T1. Partition (disjoint).** At any moment in a request's
 lifetime, time accumulates into exactly one of the six segments
 (or `other`).
@@ -236,6 +242,12 @@ Each pane is a scrollable code block. The grid headers carry
 same session, render coloured adds and removes. Diff scope:
 pane to matching pane only — no cross-pane diffing.
 
+**PLAN_UX cross-reference.** Workstream B2 absorbs
+PLAN_UX.local.md item #1 (remove the standalone sessions tab —
+the live session view at `/ui/gateway/sessions/<id>` replaces
+it) and item #11 (detail layout reorder — the four-pane 2×2
+grid in B2.3 is the layout that resolves it).
+
 ### B3 — Three view modes per session
 
 A toggle at the top of the session view selects the mode. The
@@ -288,6 +300,15 @@ time went.
 Summarization fires render as a dedicated event line:
 `summarize: removed 94200 → added 2100 bytes  turns_collapsed=8`.
 
+**Cross-reference.** B3 is partially adjacent to
+PLAN_GATEWAY_SEPARATION.local.md, which proposes a
+`response_model` config field for visually distinguishing
+gateway-routed sessions inside the LLM client itself. The
+`response_model` design lives in PLAN_GATEWAY_SEPARATION;
+Workstream B3 covers only the admin-UI rendering of the same
+sessions across three view modes. The two efforts are
+independent and can land in either order.
+
 ### B4 — Live request tail at top of admin UI
 
 A persistent strip above the navigation tabs:
@@ -308,6 +329,8 @@ and polled every two seconds.
 
 This replaces today's friction of "open requests tab, sort by
 time, click newest".
+
+**PLAN_UX cross-reference.** New surface; no PLAN_UX overlap.
 
 ### B5 — `cache_control` visibility
 
@@ -357,6 +380,8 @@ both cache-token counts (already present on `MessagesResponse`,
 just plumb through). The aggregate is computed at stats-fetch
 time in the existing audit-stats handler.
 
+**PLAN_UX cross-reference.** New surface; no PLAN_UX overlap.
+
 ### B6 — Per-request inspection actions
 
 Three buttons on the request detail header:
@@ -399,6 +424,24 @@ content show as no-change.
 The structural differ uses the existing section-byte boundaries
 as the section definition, then runs unified-diff inside each
 section.
+
+**PLAN_UX cross-reference.** Workstream B6 absorbs
+PLAN_UX.local.md item #4 (markdown TOC scroll fix), item #5
+(XML syntax highlighting in the markdown viewer), item #7 (TOC
+char-count badge styling), item #8 (collapsible client/upstream
+request/response panes), item #12 (consistent model colors
+across the UI), item #14 (human-readable elapsed time and
+visual cues), and item #15 (token-count formatting and color
+coding). All seven are inspection-action ergonomics that the B6
+button strip and detail card naturally subsume.
+
+**PLAN_UX items not absorbed by Workstream B.** Item #2
+(multi-select filters), item #3 (gateway column in the requests
+table), item #9 (URL-encoded filter state), item #13 (separate
+input/output token columns), and the author's observations A,
+B, and C remain in PLAN_UX.local.md as a separate UX-polish
+workstream that can run in parallel with Workstream B without
+conflict.
 
 ## 4. Audit row additions
 

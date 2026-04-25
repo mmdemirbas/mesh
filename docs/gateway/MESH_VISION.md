@@ -158,3 +158,23 @@ The point of pinning the framing before B1 is to preserve the
 "data decides" discipline of Phase 1a. Without it, the natural
 gravity of UI work is to ship features that look impressive
 rather than features the data validates as worth shipping.
+
+## 8. Related planning docs
+
+Several gitignored personal artifacts feed the substance of the
+tracked workstream plans. They are not committed to the
+repository (matching the personal-notes naming convention), but
+the tracked plans here distill their conclusions:
+
+- **SPEC_PHASE1A.local.md** — Phase 1a audit-row schema. The
+  load-bearing section is §4.1 (the byte-partition convention),
+  which PLAN_WORKSTREAM_B item B1 mirrors on the timing axis.
+- **PLAN_QUOTA.local.md** — upstream rate-limit header capture
+  and account-usage polling architecture. Informs
+  PLAN_WORKSTREAM_A items A1 and A3.
+- **PLAN_UX.local.md** — UI polish backlog. Informs
+  PLAN_WORKSTREAM_B items B2 through B6; specific item-level
+  cross-references appear in those item sections.
+- **PLAN_GATEWAY_SEPARATION.local.md** — visual
+  distinguishability of gateway-routed sessions. Informs
+  PLAN_WORKSTREAM_B item B3.

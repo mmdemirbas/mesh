@@ -106,6 +106,13 @@ Surface to admin UI: `GET /api/gateway/upstreams` returns the
 state map plus a `last_error` field with sensitive content
 redacted.
 
+**PLAN_QUOTA cross-reference.** PLAN_QUOTA.local.md item M1
+covers upstream rate-limit header capture with persistent
+per-gateway storage. A1's in-memory health map and PLAN_QUOTA's
+`~/.mesh/gateway/<name>.quota.json` persistence overlap at the
+capture step: a single header parser feeds both surfaces. Worth
+consolidating during implementation.
+
 ### A1b — Active probes
 
 Optional. Lands as a separate commit. Background goroutine per
@@ -204,6 +211,12 @@ upstream. Anthropic and OpenAI both treat their messages
 endpoints as idempotent at the protocol level — a duplicate
 upstream call costs tokens twice but produces no other side
 effects. Document this in the user-facing error message.
+
+**PLAN_QUOTA cross-reference.** A3's parsing requirements
+(`Retry-After`, Anthropic and OpenAI rate-limit families) are
+exactly the parser shape PLAN_QUOTA.local.md item M1 explores
+for quota display. Implement once, populate both: the rotation
+logic and the quota cache read the same response headers.
 
 ### A4 — Upstream chain in routing rules
 
@@ -304,6 +317,16 @@ because all three fields are optional additions.
 write time in the gateway dispatch path. They cannot be
 re-derived from request bodies alone — they record runtime
 choices. Persist on disk; no on-read recomputation.
+
+**PLAN_QUOTA cross-reference.** A5's
+`attempted_upstreams[].rate_limit_reset_at` records the same
+reset timestamps PLAN_QUOTA.local.md item M1 captures into
+`<gateway>.quota.json`. The audit row is sufficient as a
+write-time source for live quota display; PLAN_QUOTA's separate
+persistence becomes redundant once A5 lands. Consolidation
+opportunity: drop the `<gateway>.quota.json` write and have any
+quota endpoint derive its values from the most recent audit row
+per gateway.
 
 ## 4. Config shape — diff against today
 
