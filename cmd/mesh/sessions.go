@@ -30,6 +30,21 @@ import (
 // collision risk for any real session size (D1).
 const nodeIDHexLen = 16
 
+// dagCacheTTL drops cached per-session DAGs whose last access is
+// older than this. Re-derivation on the next request is fast for any
+// session that fits in audit retention (D9).
+const dagCacheTTL = 5 * time.Minute
+
+// dagCacheMax bounds the number of session DAGs kept in memory.
+// Loopback admin server, one operator typically — generous (D9).
+const dagCacheMax = 32
+
+// sessionPollInterval is the cadence at which the SSE handler
+// rescans the audit log for new rows in a session. Half-second hits
+// the design's "see new message immediately" feel without burning
+// CPU on idle sessions.
+const sessionPollInterval = 500 * time.Millisecond
+
 // sessionNode is one observed conversation state. Identified by
 // BodyHash (sha256 of the wire-byte request body, truncated to
 // nodeIDHexLen hex chars). CanonicalHash is the hash of the body's
@@ -693,4 +708,60 @@ func (c *sessionDAGCache) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.entries)
+}
+
+// loadSessionRowsFromDirs scans every audit JSONL file in every dir
+// and returns the rows belonging to sessionID — req rows that carry
+// the session id as session_id, and resp rows paired with those req
+// rows by (id, run).
+//
+// Resp rows do not carry session_id directly, so we collect req-side
+// pair keys first, then include any resp row matching a known pair
+// key. The returned slice is unsorted; buildSessionDAG handles
+// chronological sort.
+func loadSessionRowsFromDirs(dirs map[string]string, sessionID string) ([]json.RawMessage, error) {
+	type pairKey struct {
+		id  uint64
+		run string
+	}
+	sessionPairs := make(map[pairKey]struct{})
+	var reqRows []json.RawMessage
+	respByKey := make(map[pairKey]json.RawMessage)
+
+	for _, dir := range dirs {
+		files, err := listJSONLByMTimeDesc(dir)
+		if err != nil {
+			// Best-effort across dirs — skip unreadable ones.
+			continue
+		}
+		for _, e := range files {
+			path := dir + "/" + e.Name()
+			_ = scanFile(path, func(line []byte) bool {
+				row, ok := parseAuditRow(line)
+				if !ok {
+					return true
+				}
+				key := pairKey{row.id, row.run}
+				switch row.t {
+				case "req":
+					if row.sessionID == sessionID {
+						sessionPairs[key] = struct{}{}
+						reqRows = append(reqRows, append(json.RawMessage(nil), line...))
+					}
+				case "resp":
+					respByKey[key] = append(json.RawMessage(nil), line...)
+				}
+				return true
+			})
+		}
+	}
+
+	out := make([]json.RawMessage, 0, len(reqRows)+len(sessionPairs))
+	out = append(out, reqRows...)
+	for key := range sessionPairs {
+		if r, ok := respByKey[key]; ok {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }

@@ -730,6 +730,12 @@ func buildAdminMux(ring *logRing, logFilePath, perfLogPath string) *http.ServeMu
 		})
 	})
 
+	// GET /api/gateway/sessions/<sid>/events — Server-Sent Events
+	// stream for one session id. Sends dag_init at connection start
+	// then node_added events as new audit rows arrive. See
+	// DESIGN_B2_live_session.local.md §4.
+	mux.HandleFunc("GET /api/gateway/sessions/{sid}/events", handleSessionEvents)
+
 	// pprof endpoints for runtime profiling (CPU, memory, goroutines).
 	// Only accessible on localhost via the admin server.
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
