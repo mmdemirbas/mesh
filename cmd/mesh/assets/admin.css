@@ -781,3 +781,39 @@ select option { background: var(--bg-card); color: var(--text); }
 .diff-eq { color: var(--text-dim); }
 .diff-info { padding: 16px; }
 .diff-truncated { color: var(--yellow); font-size: 11px; padding: 8px 16px; border-top: 1px solid var(--border); }
+
+/* B2 live session view */
+.session-empty { padding: 32px 24px; color: var(--text-muted); text-align: center; font-size: 13px; line-height: 1.6; max-width: 540px; margin: 0 auto; }
+.session-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 8px 0; margin-bottom: 8px; }
+.session-header .sess-id { font-family: var(--mono); font-size: 12px; color: var(--text-dim); padding: 2px 8px; border: 1px solid var(--border); border-radius: 10px; }
+.session-header .sess-meta { font-size: 12px; color: var(--text-muted); }
+.session-status { font-size: 11px; color: var(--text-muted); margin: 4px 0 8px; min-height: 14px; }
+.session-status.live { color: var(--green); }
+.session-status.error { color: var(--red); }
+
+.branch-strip { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.branch-strip:empty { display: none; }
+.branch-chip { padding: 4px 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-card); cursor: pointer; font-size: 11px; color: var(--text-dim); white-space: nowrap; user-select: none; }
+.branch-chip:hover { background: var(--bg-hover); color: var(--text); }
+.branch-chip.active { border-color: var(--green); color: var(--green); background: var(--green-dim); }
+.branch-chip .chip-meta { color: var(--text-muted); margin-left: 6px; font-size: 10px; }
+.branch-chip.active .chip-meta { color: var(--green); }
+
+.bubble-list { display: flex; flex-direction: column; gap: 10px; padding: 8px 0 32px; }
+.chat-bubble { max-width: 88%; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--border); position: relative; }
+.chat-bubble.user { align-self: flex-end; background: var(--bg-input); }
+.chat-bubble.assistant { align-self: flex-start; background: var(--bg-card); }
+.chat-bubble.error { align-self: stretch; background: var(--red-dim); border-color: var(--red); max-width: none; }
+.chat-bubble.highlighted { box-shadow: 0 0 0 2px var(--green); }
+.bubble-role { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 4px; }
+.bubble-content { font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+.bubble-content .placeholder { color: var(--text-muted); font-style: italic; }
+.bubble-meta { font-size: 11px; color: var(--text-muted); margin-top: 6px; display: flex; gap: 12px; flex-wrap: wrap; }
+.bubble-actions { display: flex; gap: 10px; margin-top: 6px; font-size: 11px; }
+.bubble-actions a { color: var(--text-dim); cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
+.bubble-actions a:hover { color: var(--green); }
+.bubble-tools { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-dim); }
+.bubble-tools details { margin-top: 4px; }
+.bubble-tools summary { cursor: pointer; color: var(--text-dim); font-size: 11px; }
+.bubble-tools .tool-name { font-family: var(--mono); color: var(--cyan); }
+.bubble-tools pre { font-family: var(--mono); font-size: 11px; background: var(--bg-input); padding: 6px 8px; border-radius: 4px; margin-top: 4px; overflow-x: auto; max-height: 240px; }

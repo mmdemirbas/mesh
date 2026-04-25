@@ -3100,12 +3100,17 @@ function gwFresh() {
 // Caller is responsible for writeGwHash() afterwards when the state change
 // should be reflected in the URL.
 function setGwSub(sub) {
-  const valid = sub === 'overview' || sub === 'requests';
+  const valid = sub === 'overview' || sub === 'requests' || sub === 'sessions';
   if (!valid) sub = 'overview';
+  const prev = gwSubview;
   gwSubview = sub;
   document.querySelectorAll('.gw-sub-btn').forEach(x => x.classList.toggle('active', x.dataset.sub === sub));
   document.getElementById('gw-sub-overview').style.display = sub === 'overview' ? '' : 'none';
   document.getElementById('gw-sub-requests').style.display = sub === 'requests' ? '' : 'none';
+  document.getElementById('gw-sub-sessions').style.display = sub === 'sessions' ? '' : 'none';
+  // SSE lifecycle: connect when entering, disconnect when leaving.
+  if (sub === 'sessions' && prev !== 'sessions') enterSessionsView();
+  else if (sub !== 'sessions' && prev === 'sessions') leaveSessionsView();
 }
 
 // writeGwHash syncs the URL hash to the current gateway filter + sub-view +
@@ -3120,6 +3125,8 @@ function writeGwHash() {
   if (gwProjectSet.size > 0) params.push('proj='+[...gwProjectSet].map(encodeURIComponent).join(','));
   if (gwWindow && gwWindow !== '24h') params.push('window='+encodeURIComponent(gwWindow));
   if (gwSubview === 'requests' && gwDetailKey) params.push('detail='+encodeURIComponent(gwDetailKey));
+  if (gwSubview === 'sessions' && sessionView.currentBranchID) params.push('branch='+encodeURIComponent(sessionView.currentBranchID));
+  if (gwSubview === 'sessions' && sessionView.currentNodeID) params.push('node='+encodeURIComponent(sessionView.currentNodeID));
   let h = '#' + parts[0] + (params.length ? '?' + params.join('&') : '');
   if (location.hash === h) return;
   const full = location.pathname + h;
@@ -3146,6 +3153,8 @@ function parseGwHash() {
     proj: p.proj ? p.proj.split(',').map(decodeURIComponent) : [],
     window: p.window ? decodeURIComponent(p.window) : '',
     detail: p.detail ? decodeURIComponent(p.detail) : '',
+    branch: p.branch ? decodeURIComponent(p.branch) : '',
+    node: p.node ? decodeURIComponent(p.node) : '',
   };
 }
 
@@ -3163,6 +3172,11 @@ function applyGwHash() {
     gwWindow = parsed.window;
     const wSel = document.getElementById('gw-window');
     if (wSel) wSel.value = gwWindow;
+  }
+  // Restore session-view state (branch / node).
+  if (parsed.sub === 'sessions') {
+    if (parsed.branch) sessionView.pendingBranchID = parsed.branch;
+    if (parsed.node) sessionView.pendingNodeID = parsed.node;
   }
   if (!parsed.detail) {
     if (parsed.sub !== 'requests') gwDetailKey = '';
@@ -3621,9 +3635,489 @@ TF.reg('gw', {
   onUpdate: () => renderGateway()
 });
 
+// --- B2 Live Session View ---
+//
+// Linear-chat presentation of one session, fed by the SSE endpoint at
+// /api/gateway/sessions/<sid>/events. State lives in sessionView (one
+// object); SSE events mutate it; renderSessionView() repaints from
+// state.
+//
+// Per-bubble pair bodies are fetched on demand via the existing
+// /api/gateway/audit/pair endpoint and cached. Rendering shows a
+// placeholder while fetching.
+let sessionView = {
+  sid: '',                  // active session id, '' when none
+  dag: null,                // last-seen dag from SSE
+  nodesByID: new Map(),     // body_hash -> node
+  branchesByID: new Map(),  // branch_id -> branch
+  defaultBranchID: '',
+  currentBranchID: '',      // user-selected, persists in URL hash
+  currentNodeID: '',        // highlighted node, persists in URL hash
+  pendingBranchID: '',      // applied from URL on first dag_init
+  pendingNodeID: '',
+  pairCache: new Map(),     // body_hash -> {request, response}
+  pairFetching: new Set(),  // body_hashes with fetch in flight
+  sse: null,                // EventSource handle
+  reconnectTimer: 0,        // timeout id for backoff after error
+};
+
+// enterSessionsView opens the SSE connection if a single session is
+// selected and renders the empty state otherwise.
+function enterSessionsView() {
+  refreshSessionsView();
+}
+
+// leaveSessionsView closes any open SSE connection. Called on tab/sub
+// change away from sessions.
+function leaveSessionsView() {
+  closeSessionSSE();
+  sessionView.sid = '';
+}
+
+// refreshSessionsView is called on sub-view entry and whenever the
+// session-chip selection changes while the sessions sub-view is
+// visible. Connects (or reconnects) to the right session, or shows
+// the empty state.
+function refreshSessionsView() {
+  const sessIDs = [...gwSessionSet];
+  const empty = document.getElementById('sess-empty');
+  const content = document.getElementById('sess-content');
+  if (sessIDs.length !== 1) {
+    closeSessionSSE();
+    sessionView.sid = '';
+    if (empty) empty.style.display = '';
+    if (content) content.style.display = 'none';
+    return;
+  }
+  const sid = sessIDs[0];
+  if (empty) empty.style.display = 'none';
+  if (content) content.style.display = '';
+  if (sid !== sessionView.sid) {
+    openSessionSSE(sid);
+  }
+}
+
+// openSessionSSE replaces any existing connection with one targeting
+// /api/gateway/sessions/<sid>/events. The browser handles automatic
+// retry with Last-Event-ID; on connection error we add a small
+// frontend backoff to avoid hammering when offline.
+function openSessionSSE(sid) {
+  closeSessionSSE();
+  sessionView.sid = sid;
+  sessionView.dag = null;
+  sessionView.nodesByID = new Map();
+  sessionView.branchesByID = new Map();
+  sessionView.pairCache = new Map();
+  sessionView.pairFetching = new Set();
+  setSessStatus('connecting…', '');
+  const url = '/api/gateway/sessions/'+encodeURIComponent(sid)+'/events';
+  let es;
+  try {
+    es = new EventSource(url);
+  } catch (e) {
+    setSessStatus('connection failed: '+(e.message||e), 'error');
+    return;
+  }
+  sessionView.sse = es;
+  es.addEventListener('dag_init', (ev) => {
+    try {
+      const dag = JSON.parse(ev.data);
+      onSessionDagInit(dag);
+    } catch (e) { setSessStatus('bad dag_init: '+e.message, 'error'); }
+  });
+  es.addEventListener('node_added', (ev) => {
+    try {
+      const payload = JSON.parse(ev.data);
+      onSessionNodeAdded(payload);
+    } catch (e) { setSessStatus('bad node_added: '+e.message, 'error'); }
+  });
+  es.addEventListener('error', () => {
+    // Browsers auto-retry; just surface state.
+    setSessStatus('reconnecting…', '');
+  });
+}
+
+function closeSessionSSE() {
+  if (sessionView.sse) {
+    try { sessionView.sse.close(); } catch (_) {}
+    sessionView.sse = null;
+  }
+  if (sessionView.reconnectTimer) {
+    clearTimeout(sessionView.reconnectTimer);
+    sessionView.reconnectTimer = 0;
+  }
+}
+
+function setSessStatus(text, cls) {
+  const el = document.getElementById('sess-status');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'session-status' + (cls ? ' '+cls : '');
+}
+
+// onSessionDagInit populates state from the initial DAG. Resolves
+// pending URL-hash selections (branch, node) against the new state.
+function onSessionDagInit(dag) {
+  sessionView.dag = dag;
+  sessionView.nodesByID = new Map();
+  sessionView.branchesByID = new Map();
+  for (const n of (dag.nodes || [])) sessionView.nodesByID.set(n.id, n);
+  for (const b of (dag.branches || [])) sessionView.branchesByID.set(b.branch_id, b);
+  sessionView.defaultBranchID = dag.default_branch_id || '';
+  // Resolve current branch.
+  if (sessionView.pendingBranchID && sessionView.branchesByID.has(sessionView.pendingBranchID)) {
+    sessionView.currentBranchID = sessionView.pendingBranchID;
+  } else {
+    sessionView.currentBranchID = sessionView.defaultBranchID;
+  }
+  sessionView.pendingBranchID = '';
+  if (sessionView.pendingNodeID && sessionView.nodesByID.has(sessionView.pendingNodeID)) {
+    sessionView.currentNodeID = sessionView.pendingNodeID;
+  } else {
+    sessionView.currentNodeID = '';
+  }
+  sessionView.pendingNodeID = '';
+  setSessStatus(dag.nodes && dag.nodes.length ? 'live' : 'live (no nodes yet)', 'live');
+  renderSessionView();
+}
+
+// onSessionNodeAdded merges one new node into state and applies any
+// branch_changes payload. Branch metadata is re-derived from nodes
+// for renames (the rename event carries only ids).
+function onSessionNodeAdded(payload) {
+  if (!payload || !payload.node) return;
+  const n = payload.node;
+  sessionView.nodesByID.set(n.id, n);
+  for (const c of (payload.branch_changes || [])) {
+    if (c.kind === 'new_branch' && c.branch) {
+      sessionView.branchesByID.set(c.branch.branch_id, c.branch);
+    } else if (c.kind === 'branch_renamed' && c.old_branch_id && c.new_branch_id) {
+      const old = sessionView.branchesByID.get(c.old_branch_id);
+      if (old) {
+        sessionView.branchesByID.delete(c.old_branch_id);
+        old.branch_id = c.new_branch_id;
+        sessionView.branchesByID.set(c.new_branch_id, old);
+      }
+      if (sessionView.currentBranchID === c.old_branch_id) {
+        sessionView.currentBranchID = c.new_branch_id;
+        writeGwHash();
+      }
+    } else if (c.kind === 'tip_updated' && c.branch_id) {
+      const b = sessionView.branchesByID.get(c.branch_id);
+      if (b) {
+        b.tip_id = c.new_tip_id;
+        b.last_activity_at = n.ts || b.last_activity_at;
+        b.node_count = (b.node_count || 0) + 1;
+      }
+    }
+  }
+  renderSessionView();
+}
+
+// chainForBranch walks from the branch's tip up via parent_id until
+// it hits the branch root or runs out of parents. Returns the chain
+// in chronological order (root first, leaf last). For a tip not in
+// the local node map (race: dag_init lagged a tip_updated event)
+// returns whatever it could resolve.
+function chainForBranch(branchID) {
+  const b = sessionView.branchesByID.get(branchID);
+  if (!b) return [];
+  const chain = [];
+  let cur = b.tip_id;
+  let safety = 0;
+  while (cur && safety++ < 4096) {
+    const node = sessionView.nodesByID.get(cur);
+    if (!node) break;
+    chain.unshift(node);
+    if (node.id === b.root_id) break;
+    cur = node.parent_id;
+  }
+  return chain;
+}
+
+function renderSessionView() {
+  if (gwSubview !== 'sessions') return;
+  renderSessionHeader();
+  renderBranchStrip();
+  renderSessionBubbles();
+}
+
+function renderSessionHeader() {
+  const el = document.getElementById('sess-header');
+  if (!el) return;
+  const sid = sessionView.sid;
+  const total = sessionView.nodesByID.size;
+  const branches = sessionView.branchesByID.size;
+  el.innerHTML =
+    '<span class="sess-id" title="'+xa(sid)+'">'+x(sid.slice(0, 12))+(sid.length > 12 ? '…' : '')+'</span>' +
+    '<span class="sess-meta">'+total+' node'+(total===1?'':'s')+' · '+branches+' branch'+(branches===1?'':'es')+'</span>';
+}
+
+function renderBranchStrip() {
+  const el = document.getElementById('sess-branches');
+  if (!el) return;
+  const branches = [...sessionView.branchesByID.values()];
+  // Sort by last_activity_at descending so the most-recently-active
+  // branch stays leftmost (§6.2).
+  branches.sort((a, b) => (b.last_activity_at||'').localeCompare(a.last_activity_at||''));
+  if (branches.length === 0) { el.innerHTML = ''; return; }
+  el.innerHTML = branches.map(b => {
+    const active = b.branch_id === sessionView.currentBranchID;
+    const cls = 'branch-chip' + (active ? ' active' : '');
+    const label = b.branch_id === sessionView.defaultBranchID ? 'main' : b.branch_id.slice(0, 8);
+    const meta = (b.node_count||0)+' turn'+(b.node_count===1?'':'s');
+    const ago = b.last_activity_at ? ' · '+timeAgo(b.last_activity_at) : '';
+    return '<button type="button" class="'+cls+'" role="tab" aria-selected="'+active+
+           '" data-branch-id="'+xa(b.branch_id)+'" title="'+xa(b.branch_id)+'">' +
+           x(label) + '<span class="chip-meta">'+x(meta+ago)+'</span></button>';
+  }).join('');
+  el.querySelectorAll('button[data-branch-id]').forEach(btn => {
+    btn.onclick = () => {
+      const bid = btn.dataset.branchId;
+      if (bid === sessionView.currentBranchID) return;
+      sessionView.currentBranchID = bid;
+      sessionView.currentNodeID = '';
+      writeGwHash();
+      renderSessionView();
+    };
+  });
+}
+
+function renderSessionBubbles() {
+  const el = document.getElementById('sess-bubbles');
+  if (!el) return;
+  const chain = chainForBranch(sessionView.currentBranchID);
+  if (chain.length === 0) { setHTML(el, ''); return; }
+  // Track scroll-at-bottom so we auto-scroll on new messages.
+  const wasAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  const html = chain.map(n => bubbleHTMLForNode(n)).join('');
+  setHTML(el, html);
+  // Trigger pair fetches for any nodes still missing a body.
+  for (const n of chain) {
+    if (!sessionView.pairCache.has(n.id)) maybeFetchPair(n);
+  }
+  if (wasAtBottom) el.scrollTop = el.scrollHeight;
+}
+
+// bubbleHTMLForNode renders one node as a pair of bubbles (user +
+// assistant). When the pair body is not yet cached, shows a
+// placeholder. Errored responses render in a single error-styled
+// bubble.
+function bubbleHTMLForNode(n) {
+  const cached = sessionView.pairCache.get(n.id);
+  const highlight = n.id === sessionView.currentNodeID ? ' highlighted' : '';
+  const meta = bubbleMetaLine(n);
+  // User bubble — last user message in the request body.
+  let userText = '';
+  if (cached && cached.request) {
+    userText = extractLastUserMessage(cached.request) || '(no user message in request)';
+  } else {
+    userText = '<span class="placeholder">Loading turn…</span>';
+  }
+  let userHTML =
+    '<div class="chat-bubble user'+highlight+'" data-node-id="'+xa(n.id)+'">' +
+      '<div class="bubble-role">user</div>' +
+      '<div class="bubble-content">' + userText + '</div>' +
+      '<div class="bubble-meta">'+meta+'</div>' +
+      bubbleActions(n) +
+    '</div>';
+  // Assistant bubble.
+  if (!n.response_summary || !n.response_summary.has_response) {
+    return userHTML +
+      '<div class="chat-bubble assistant" data-node-id="'+xa(n.id)+'">' +
+        '<div class="bubble-role">assistant</div>' +
+        '<div class="bubble-content"><span class="placeholder">in flight…</span></div>' +
+      '</div>';
+  }
+  const status = n.response_summary.status || 0;
+  const ok = status >= 200 && status < 300;
+  if (!ok) {
+    let errBody = cached && cached.response ? truncateForBubble(rawJSONExtract(cached.response, 'body'), 800) : '';
+    return userHTML +
+      '<div class="chat-bubble error" data-node-id="'+xa(n.id)+'">' +
+        '<div class="bubble-role">error · status '+status+' · '+x(n.response_summary.outcome||'')+'</div>' +
+        '<div class="bubble-content">'+x(errBody||'(see detail card)')+'</div>' +
+        bubbleActions(n) +
+      '</div>';
+  }
+  let assistantText = '';
+  if (cached && cached.response) {
+    assistantText = extractAssistantText(cached.response, n) || '(no assistant text)';
+  } else {
+    assistantText = '<span class="placeholder">Loading reply…</span>';
+  }
+  let toolsHTML = '';
+  if (cached && cached.response) {
+    toolsHTML = renderToolUses(cached.response);
+  }
+  return userHTML +
+    '<div class="chat-bubble assistant'+highlight+'" data-node-id="'+xa(n.id)+'">' +
+      '<div class="bubble-role">assistant</div>' +
+      '<div class="bubble-content">' + assistantText + '</div>' +
+      toolsHTML +
+      '<div class="bubble-meta">' +
+        (n.response_summary.input_tokens ? n.response_summary.input_tokens+' in · ' : '') +
+        (n.response_summary.output_tokens ? n.response_summary.output_tokens+' out · ' : '') +
+        (n.response_summary.elapsed_ms ? n.response_summary.elapsed_ms+' ms' : '') +
+      '</div>' +
+      bubbleActions(n) +
+    '</div>';
+}
+
+function bubbleMetaLine(n) {
+  const rs = n.request_summary || {};
+  const parts = [];
+  if (rs.model) parts.push(x(rs.model));
+  if (rs.stream) parts.push('streaming');
+  if (n.ts) parts.push(x(timeAgo(n.ts)));
+  return parts.join(' · ');
+}
+
+function bubbleActions(n) {
+  const rs = n.request_summary || {};
+  if (!rs.gateway || !n.run || n.row_id == null) return '';
+  return '<div class="bubble-actions">' +
+    '<a onclick="openNodeDetail(\''+xj(n.run)+'\','+(+n.row_id)+',\''+xj(rs.gateway)+'\')">open in detail card</a>' +
+    '</div>';
+}
+
+// openNodeDetail switches to the requests sub-view and opens the
+// existing detail card for this pair (reuses jumpToPair, with the
+// pair's gateway resolved from the node summary so the user does not
+// need to have selected the gateway chip).
+function openNodeDetail(run, id, gw) {
+  if (gw && !gwSelectedSet.has(gw)) {
+    // Push the pair's gateway onto the active set so jumpToPair finds it.
+    gwSelectedSet.add(gw);
+  }
+  jumpToPair(run, id);
+}
+
+// maybeFetchPair starts a /api/gateway/audit/pair fetch for the
+// node, if not already cached or fetching. Result populates
+// sessionView.pairCache; rerenders on completion.
+function maybeFetchPair(n) {
+  const rs = n.request_summary || {};
+  if (!rs.gateway || !n.run || n.row_id == null) return;
+  if (sessionView.pairCache.has(n.id) || sessionView.pairFetching.has(n.id)) return;
+  sessionView.pairFetching.add(n.id);
+  const url = '/api/gateway/audit/pair?gateway='+encodeURIComponent(rs.gateway)+
+    '&run='+encodeURIComponent(n.run)+'&id='+encodeURIComponent(n.row_id);
+  fetch(url).then(r => r.ok ? r.json() : null).then(pair => {
+    sessionView.pairFetching.delete(n.id);
+    if (!pair) return;
+    sessionView.pairCache.set(n.id, pair);
+    if (gwSubview === 'sessions') renderSessionBubbles();
+  }).catch(() => { sessionView.pairFetching.delete(n.id); });
+}
+
+// extractLastUserMessage returns the text content of the last
+// role:"user" message in an audit pair's request body.
+function extractLastUserMessage(reqRow) {
+  if (!reqRow || !reqRow.body) return '';
+  const body = reqRow.body;
+  const msgs = Array.isArray(body.messages) ? body.messages : [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'user') return contentToText(msgs[i].content);
+  }
+  return '';
+}
+
+// extractAssistantText pulls the assistant's textual content from a
+// resp row. Streaming responses have a stream_summary with
+// reassembled content; non-streaming have body.content (Anthropic) or
+// body.choices[0].message.content (OpenAI).
+function extractAssistantText(respRow, n) {
+  if (!respRow) return '';
+  if (respRow.stream_summary && respRow.stream_summary.content) {
+    return truncateForBubble(respRow.stream_summary.content, 8000);
+  }
+  if (respRow.body) {
+    if (Array.isArray(respRow.body.content)) {
+      // Anthropic message format.
+      const texts = respRow.body.content.filter(b => b && b.type === 'text').map(b => b.text || '').join('');
+      if (texts) return truncateForBubble(texts, 8000);
+    }
+    if (Array.isArray(respRow.body.choices) && respRow.body.choices[0]) {
+      // OpenAI chat completion format.
+      const msg = respRow.body.choices[0].message || {};
+      if (typeof msg.content === 'string') return truncateForBubble(msg.content, 8000);
+    }
+  }
+  return '';
+}
+
+// renderToolUses inspects a response for tool_use blocks (Anthropic)
+// or tool_calls (OpenAI) and renders an expandable summary.
+function renderToolUses(respRow) {
+  if (!respRow) return '';
+  const calls = [];
+  if (respRow.stream_summary && Array.isArray(respRow.stream_summary.tool_calls)) {
+    for (const t of respRow.stream_summary.tool_calls) calls.push({name: t.name||'', args: t.args});
+  } else if (respRow.body && Array.isArray(respRow.body.content)) {
+    for (const b of respRow.body.content) {
+      if (b && b.type === 'tool_use') calls.push({name: b.name||'', args: b.input});
+    }
+  } else if (respRow.body && Array.isArray(respRow.body.choices)) {
+    const msg = (respRow.body.choices[0]||{}).message || {};
+    for (const t of (msg.tool_calls||[])) calls.push({name: (t.function||{}).name||'', args: (t.function||{}).arguments});
+  }
+  if (calls.length === 0) return '';
+  return '<div class="bubble-tools">' +
+    calls.map(c =>
+      '<details><summary><span class="tool-name">'+x(c.name||'(unnamed tool)')+'</span></summary>' +
+      '<pre>'+x(typeof c.args === 'string' ? c.args : JSON.stringify(c.args, null, 2))+'</pre></details>'
+    ).join('') +
+    '</div>';
+}
+
+// contentToText collapses Anthropic-style content arrays (which can
+// be a string or an array of blocks) into a plain string for display.
+function contentToText(c) {
+  if (typeof c === 'string') return truncateForBubble(c, 8000);
+  if (!Array.isArray(c)) return '';
+  const out = [];
+  for (const b of c) {
+    if (typeof b === 'string') out.push(b);
+    else if (b && b.type === 'text' && b.text) out.push(b.text);
+    else if (b && b.type === 'tool_result') out.push('[tool_result]');
+    else if (b && b.type === 'image') out.push('[image]');
+  }
+  return truncateForBubble(out.join('\n'), 8000);
+}
+
+function truncateForBubble(s, max) {
+  if (typeof s !== 'string') return '';
+  if (s.length <= max) return s;
+  return s.slice(0, max) + ' … (' + (s.length - max) + ' more chars)';
+}
+
+// rawJSONExtract reaches into a response row to pull a top-level
+// field as a string, used by the error-bubble fallback.
+function rawJSONExtract(row, field) {
+  if (!row) return '';
+  const v = row[field];
+  if (typeof v === 'string') return v;
+  try { return JSON.stringify(v); } catch (_) { return ''; }
+}
+
+// React to session-chip changes when the sessions sub-view is open.
+// The existing renderGateway path mutates gwSessionSet via chip
+// clicks; refreshSessionsView rechecks selection.
+const _origSetGwSub = setGwSub;
+// (no-op alias kept for clarity that we wrap the session lifecycle.)
+
 // --- Visibility-aware polling ---
 let tickTimer = null;
 function startPolling() { if (!tickTimer) { tick(); tickTimer = setInterval(tick, 1000); } }
 function stopPolling() { if (tickTimer) { clearInterval(tickTimer); tickTimer = null; } }
-document.addEventListener('visibilitychange', () => { document.hidden ? stopPolling() : startPolling(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    stopPolling();
+    closeSessionSSE();
+  } else {
+    startPolling();
+    if (gwSubview === 'sessions' && activeTab === 'gateway') refreshSessionsView();
+  }
+});
 startPolling();

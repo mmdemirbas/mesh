@@ -74,8 +74,11 @@ type sessionNode struct {
 }
 
 // nodeRequestSummary carries the per-node request fields the frontend
-// needs to render a chat bubble or DAG node label.
+// needs to render a chat bubble or DAG node label. Gateway is the
+// audit-dir gateway name; the frontend uses it with row_id and run to
+// fetch the full pair via /api/gateway/audit/pair.
 type nodeRequestSummary struct {
+	Gateway      string `json:"gateway,omitempty"`
 	Model        string `json:"model,omitempty"`
 	MappedModel  string `json:"mapped_model,omitempty"`
 	Direction    string `json:"direction,omitempty"`
@@ -240,6 +243,7 @@ type rawAuditRow struct {
 	ID          uint64          `json:"id"`
 	Run         string          `json:"run"`
 	TS          string          `json:"ts"`
+	Gateway     string          `json:"gateway"`
 	SessionID   string          `json:"session_id"`
 	Model       string          `json:"model"`
 	MappedModel string          `json:"mapped_model"`
@@ -339,6 +343,7 @@ func buildSessionDAG(sessionID string, rawRows []json.RawMessage) (*sessionDAG, 
 			prefixCanonicalHashes: prefixHashes,
 			messageCount:          msgCount,
 			RequestSummary: nodeRequestSummary{
+				Gateway:      req.Gateway,
 				Model:        req.Model,
 				MappedModel:  req.MappedModel,
 				Direction:    req.Direction,
