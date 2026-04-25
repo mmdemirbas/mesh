@@ -479,3 +479,135 @@ func TestTranslationAudit_O2A_StreamingUpstreamError(t *testing.T) {
 		t.Fatalf("upstream_resp missing from audit row: %+v", respRow)
 	}
 }
+
+// TestTranslationAudit_TopToolResultLandsInRow drives a request
+// containing two tool_result blocks of distinct sizes and asserts
+// the audit response row carries top_tool_result with the larger
+// block's metadata. End-to-end check that 7b₁ wiring populates the
+// row (not just the analyzeRequest function).
+func TestTranslationAudit_TopToolResultLandsInRow(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := ChatCompletionResponse{
+			ID: "x", Model: "glm-4.7",
+			Choices: []OpenAIChoice{{
+				Message:      OpenAIMsg{Role: "assistant", Content: json.RawMessage(`"ok"`)},
+				FinishReason: "stop",
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	base, gwName, logDir := startTranslationGateway(t, APIAnthropic, APIOpenAI, upstream.URL)
+
+	// 250-byte and 30-byte tool_results, with the assistant's
+	// tool_use blocks earlier so the linkage works.
+	smallContent := strings.Repeat("s", 30)
+	bigContent := strings.Repeat("B", 250)
+	body := `{"model":"claude-opus-4-6","max_tokens":10,"messages":[` +
+		`{"role":"user","content":"start"},` +
+		`{"role":"assistant","content":[` +
+		`{"type":"tool_use","id":"u_small","name":"Read","input":{"file_path":"/a"}},` +
+		`{"type":"tool_use","id":"u_big","name":"Grep","input":{"pattern":"x","path":"/b"}}` +
+		`]},` +
+		`{"role":"user","content":[` +
+		`{"type":"tool_result","tool_use_id":"u_small","content":"` + smallContent + `"},` +
+		`{"type":"tool_result","tool_use_id":"u_big","content":"` + bigContent + `"}` +
+		`]}` +
+		`]}`
+	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	dir := filepath.Join(logDir, gwName)
+	rows := waitForRows(t, func() []map[string]any { return readRows(t, dir) }, 2, 2*time.Second)
+	respRow := rows[1]
+
+	top, ok := respRow["top_tool_result"].(map[string]any)
+	if !ok {
+		t.Fatalf("top_tool_result missing from audit row: %+v", respRow)
+	}
+	if got := top["bytes"]; got != float64(len(bigContent)) {
+		t.Errorf("top_tool_result.bytes = %v, want %d", got, len(bigContent))
+	}
+	if got := top["tool_use_id"]; got != "u_big" {
+		t.Errorf("top_tool_result.tool_use_id = %v, want u_big", got)
+	}
+	if got := top["tool_name"]; got != "Grep" {
+		t.Errorf("top_tool_result.tool_name = %v, want Grep (linked via tool_use_id)", got)
+	}
+}
+
+// TestTranslationAudit_RepeatReadsLandsInRow drives two consecutive
+// gateway requests through Start() with identical session id and
+// identical Read(/foo) tool_use, verifying the second request's row
+// carries repeat_reads.
+func TestTranslationAudit_RepeatReadsLandsInRow(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := ChatCompletionResponse{
+			ID: "x", Model: "glm-4.7",
+			Choices: []OpenAIChoice{{
+				Message:      OpenAIMsg{Role: "assistant", Content: json.RawMessage(`"ok"`)},
+				FinishReason: "stop",
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	base, gwName, logDir := startTranslationGateway(t, APIAnthropic, APIOpenAI, upstream.URL)
+
+	body := `{"model":"claude-opus-4-6","max_tokens":10,"messages":[` +
+		`{"role":"assistant","content":[` +
+		`{"type":"tool_use","id":"u","name":"Read","input":{"file_path":"/foo"}}` +
+		`]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"u","content":"x"}]}` +
+		`]}`
+
+	doRequest := func() {
+		req, err := http.NewRequest("POST", base+"/v1/messages", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("new req: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Mesh-Session", "fixed-session-id")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("do: %v", err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	doRequest() // turn 1: no prior history.
+	doRequest() // turn 2: should see repeat_reads.
+
+	dir := filepath.Join(logDir, gwName)
+	rows := waitForRows(t, func() []map[string]any { return readRows(t, dir) }, 4, 2*time.Second)
+	// rows are interleaved req/resp/req/resp; resp rows are at
+	// indices 1 and 3.
+	if len(rows) != 4 {
+		t.Fatalf("rows = %d, want 4 (two pairs)", len(rows))
+	}
+	resp1 := rows[1]
+	resp2 := rows[3]
+
+	if _, present := resp1["repeat_reads"]; present {
+		t.Errorf("turn 1 row carries repeat_reads but should be omitted (no prior history): %+v", resp1["repeat_reads"])
+	}
+	rr, ok := resp2["repeat_reads"].(map[string]any)
+	if !ok {
+		t.Fatalf("turn 2 row missing repeat_reads: %+v", resp2)
+	}
+	if got := rr["count"]; got != float64(1) {
+		t.Errorf("repeat_reads.count = %v, want 1", got)
+	}
+	if got := rr["max_same_path"]; got != float64(2) {
+		t.Errorf("repeat_reads.max_same_path = %v, want 2", got)
+	}
+}

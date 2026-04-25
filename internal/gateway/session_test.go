@@ -106,6 +106,79 @@ func TestExtractSessionInfo_HeaderCapped(t *testing.T) {
 	}
 }
 
+// TestExtractSessionInfo_ResolutionPrecedence pins the §4.4 chain:
+// X-Mesh-Session > X-Claude-Code-Session-Id > Anthropic-Conversation-Id
+// > sha256(messages[0]). When multiple headers are set, the
+// override wins; otherwise we walk the chain in order.
+func TestExtractSessionInfo_ResolutionPrecedence(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+
+	t.Run("override beats claude-code id", func(t *testing.T) {
+		t.Parallel()
+		h := http.Header{}
+		h.Set(sessionHeader, "explicit-override")
+		h.Set(claudeCodeSessionHeader, "ignored-cc-id")
+		id, _ := extractSessionInfo(h, body)
+		if id != "explicit-override" {
+			t.Errorf("got %q, want explicit-override", id)
+		}
+	})
+
+	t.Run("claude-code id beats anthropic conversation id", func(t *testing.T) {
+		t.Parallel()
+		h := http.Header{}
+		h.Set(claudeCodeSessionHeader, "cc-uuid-aaaa")
+		h.Set(anthropicConversationHeader, "anth-conv-bbbb")
+		id, _ := extractSessionInfo(h, body)
+		if id != "cc-uuid-aaaa" {
+			t.Errorf("got %q, want cc-uuid-aaaa", id)
+		}
+	})
+
+	t.Run("anthropic conversation id beats body hash", func(t *testing.T) {
+		t.Parallel()
+		h := http.Header{}
+		h.Set(anthropicConversationHeader, "anth-conv-cccc")
+		id, _ := extractSessionInfo(h, body)
+		if id != "anth-conv-cccc" {
+			t.Errorf("got %q, want anth-conv-cccc", id)
+		}
+	})
+
+	t.Run("body hash is the last-resort fallback", func(t *testing.T) {
+		t.Parallel()
+		id, _ := extractSessionInfo(http.Header{}, body)
+		if id == "" {
+			t.Fatal("got empty session id; expected sha256(messages[0]) prefix")
+		}
+		if len(id) != sessionIDLen {
+			t.Errorf("body-hash id length = %d, want %d (sha256 prefix)", len(id), sessionIDLen)
+		}
+	})
+}
+
+// TestExtractSessionInfo_ClaudeCodeSessionMatchesLiveTraffic uses the
+// observed live-traffic shape: every Claude Code request carries
+// X-Claude-Code-Session-Id as a UUID. Two turns of the same session
+// must produce identical ids regardless of body content drift
+// (auto-compact would change messages[0] but the header survives).
+func TestExtractSessionInfo_ClaudeCodeSessionMatchesLiveTraffic(t *testing.T) {
+	t.Parallel()
+	const cid = "222c05da-5901-404f-b0ba-677b4b9d9c18"
+	h := http.Header{}
+	h.Set(claudeCodeSessionHeader, cid)
+
+	bodyEarly := []byte(`{"messages":[{"role":"user","content":"original first message"}]}`)
+	bodyAfterCompact := []byte(`{"messages":[{"role":"user","content":"<conversation summary> ...different bytes..."}]}`)
+
+	id1, _ := extractSessionInfo(h, bodyEarly)
+	id2, _ := extractSessionInfo(h, bodyAfterCompact)
+	if id1 != cid || id2 != cid {
+		t.Errorf("ids drifted despite stable header: %q, %q (want both = %q)", id1, id2, cid)
+	}
+}
+
 // TestExtractSessionInfo_MissingOrInvalid covers every case where audit must
 // gracefully omit the field instead of fabricating one.
 func TestExtractSessionInfo_MissingOrInvalid(t *testing.T) {

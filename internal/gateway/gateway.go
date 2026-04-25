@@ -214,7 +214,7 @@ func buildRoutingHandler(cfg GatewayCfg, cl ClientCfg, router *Router, recorder 
 			dispatchRequest(w, r, cfg, cl, upstream, dir, metrics, log)
 		}
 
-		wrappedHandler := wrapAuditing(cfg.Name, &upstream.Cfg, cl.API, recorder, http.HandlerFunc(innerHandler))
+		wrappedHandler := wrapAuditing(cfg.Name, &upstream.Cfg, cl.API, recorder, router.readIdx, http.HandlerFunc(innerHandler))
 		wrappedHandler.ServeHTTP(w, r)
 	}
 }

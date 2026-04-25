@@ -30,6 +30,11 @@ type Router struct {
 	// request. One instance per Router (= per gateway); see
 	// summarize_dedup.go for the semantics pin.
 	summarizerDedup *summarizerDedup
+
+	// readIdx tracks per-session canonical tool-arg occurrences to
+	// populate RepeatReadsInfo on every audited request. One
+	// instance per Router; see read_index.go for TTL/LRU semantics.
+	readIdx *readIndex
 }
 
 // ResolvedUpstream is a pre-resolved upstream with its HTTP client, API key, etc.
@@ -81,6 +86,7 @@ func NewRouter(cfg *GatewayCfg, log *slog.Logger) (*Router, error) {
 		rules:           cfg.Routing,
 		upstreams:       upstreams,
 		summarizerDedup: newSummarizerDedup(),
+		readIdx:         newReadIndex(),
 	}, nil
 }
 

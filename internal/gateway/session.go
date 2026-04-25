@@ -8,38 +8,56 @@ import (
 	"strings"
 )
 
-// sessionHeader, when present on a request, overrides the derived session id.
-// Lets clients that already have a stable session identifier (a wrapper, a
-// scripted harness) opt out of the heuristic.
-const sessionHeader = "X-Mesh-Session"
+// Header names checked by extractSessionInfo, in resolution order.
+// See §4.4 of SPEC_PHASE1A.local.md for the contract: explicit
+// override first, then the client-asserted ids most LLM tools send,
+// then a content-derived fallback.
+const (
+	// sessionHeader (X-Mesh-Session) is the explicit override —
+	// clients that already have a stable session id (a wrapper, a
+	// scripted harness) can opt out of the heuristics.
+	sessionHeader = "X-Mesh-Session"
+	// claudeCodeSessionHeader is what Claude Code sends today.
+	// Verified live (2026-04-17 audit log: 266 turns under one id).
+	claudeCodeSessionHeader = "X-Claude-Code-Session-Id"
+	// anthropicConversationHeader is a defensive forward-look for
+	// hosted Anthropic clients that may carry conversation
+	// identifiers; not seen in current traffic but cheap to honor.
+	anthropicConversationHeader = "Anthropic-Conversation-Id"
+)
 
 // sessionIDLen caps the hex-encoded session id length. 12 hex chars = 48 bits
 // of entropy from SHA-256, which is plenty for grouping rows in a single
 // audit log; full digests would just bloat the JSONL.
 const sessionIDLen = 12
 
-// extractSessionInfo derives a session id and turn index from a request body.
+// extractSessionInfo derives a session id and turn index from a request.
 //
-// The session id is a 12-char prefix of SHA-256(messages[0]), where the first
-// message is the byte-stable bootstrap of the conversation (Claude Code and
-// most LLM clients replay full history on every turn, so messages[0] is
-// identical across turns of the same chat). When the request carries an
-// explicit X-Mesh-Session header that value wins.
+// Resolution order (§4.4):
+//  1. X-Mesh-Session header (explicit override).
+//  2. X-Claude-Code-Session-Id header (Claude Code's native id).
+//  3. Anthropic-Conversation-Id header (defensive forward-look).
+//  4. SHA-256(messages[0]) prefix — content-derived fallback.
+//     Fragments on auto-compact and /clear; only used by clients
+//     that send none of the above.
 //
 // The turn index is the count of messages in the request — turn 1 has one
 // message, turn N has 2N-1 (alternating user/assistant) plus the new user
 // message. Stored verbatim so the UI can show prompt-growth deltas.
 //
-// Returns ("", 0) when the body is not parseable JSON or has no messages
-// array; the audit row will simply omit the fields.
+// Returns ("", 0) when neither a header nor a parseable body yields
+// a usable id; the audit row will simply omit the fields.
 func extractSessionInfo(headers http.Header, body []byte) (string, int) {
-	if h := strings.TrimSpace(headers.Get(sessionHeader)); h != "" {
-		// Already opaque from the client; pass through capped.
+	for _, name := range []string{sessionHeader, claudeCodeSessionHeader, anthropicConversationHeader} {
+		h := strings.TrimSpace(headers.Get(name))
+		if h == "" {
+			continue
+		}
+		// Cap header value length so a hostile client can't pad the
+		// id to balloon audit row size.
 		if len(h) > 64 {
 			h = h[:64]
 		}
-		// Still try to count messages for turn_index even when the id is
-		// supplied; a missing count is harmless but a present one is useful.
 		return h, peekMessageCount(body)
 	}
 	if len(body) == 0 || !json.Valid(body) {

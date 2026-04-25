@@ -77,6 +77,8 @@ type ResponseMeta struct {
 	ContextWindowTokens          int
 	OriginalInputTokensEstimate  int
 	EffectiveInputTokensEstimate int
+	TopToolResult                *TopToolResultInfo // largest tool_result block in this request, if any
+	RepeatReads                  *RepeatReadsInfo   // re-read activity this turn, if non-trivial
 	StartTime                    time.Time
 	EndTime                      time.Time
 	Headers                      map[string][]string
@@ -262,6 +264,12 @@ func (r *Recorder) Response(id RequestID, meta ResponseMeta, body []byte) {
 	}
 	if meta.EffectiveInputTokensEstimate > 0 {
 		row["effective_input_tokens_estimate"] = meta.EffectiveInputTokensEstimate
+	}
+	if meta.TopToolResult != nil {
+		row["top_tool_result"] = meta.TopToolResult
+	}
+	if meta.RepeatReads != nil {
+		row["repeat_reads"] = meta.RepeatReads
 	}
 	// Summary is cheap and highly useful — include it at metadata level too.
 	if meta.Summary != nil {
@@ -451,6 +459,8 @@ type AuditUpstream struct {
 	ContextWindowTokens          int
 	OriginalInputTokensEstimate  int
 	EffectiveInputTokensEstimate int
+	TopToolResult                *TopToolResultInfo
+	RepeatReads                  *RepeatReadsInfo
 }
 
 type auditUpstreamKey struct{}
@@ -528,7 +538,11 @@ func getRecorderFromContext(r *http.Request) *Recorder {
 // emits in the client's format).
 //
 // When recorder is nil the wrapper is a no-op — callers never need to branch.
-func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, recorder *Recorder, inner http.HandlerFunc) http.HandlerFunc {
+//
+// readIdx is the per-gateway readIndex used to compute repeat_reads;
+// pass nil to skip repeat-read tracking (e.g. unit tests of the audit
+// path itself).
+func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, recorder *Recorder, readIdx *readIndex, inner http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Stash recorder in context so passthrough handler can access it.
 		r = r.WithContext(context.WithValue(r.Context(), recorderKey{}, recorder))
@@ -576,6 +590,16 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 		r.ContentLength = int64(len(body))
 
 		upstream, r := WithAuditUpstream(r)
+
+		// Walk the request body once for top_tool_result and
+		// repeat_reads. analyzeRequest returns nil for branches that
+		// would be omitted from the row anyway (no tool_results, or
+		// trivial repeat-read activity). Stashing onto upstream keeps
+		// the result in scope for the post-handler row-write below.
+		topTR, repeatRR := analyzeRequest(body, clientAPI, sessionID, readIdx)
+		upstream.TopToolResult = topTR
+		upstream.RepeatReads = repeatRR
+
 		aw := &auditingWriter{ResponseWriter: w}
 		inner(aw, r)
 
@@ -623,6 +647,8 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 			ContextWindowTokens:          upstream.ContextWindowTokens,
 			OriginalInputTokensEstimate:  upstream.OriginalInputTokensEstimate,
 			EffectiveInputTokensEstimate: upstream.EffectiveInputTokensEstimate,
+			TopToolResult:                upstream.TopToolResult,
+			RepeatReads:                  upstream.RepeatReads,
 			StartTime:                    start,
 			EndTime:                      time.Now(),
 			Headers:                      aw.Header(),
