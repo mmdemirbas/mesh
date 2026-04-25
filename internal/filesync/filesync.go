@@ -473,6 +473,9 @@ type FolderSyncMetrics struct {
 	ScanCount          atomic.Int64 // scan cycles completed
 	ScanDurationNS     atomic.Int64 // last scan duration in nanoseconds
 	PeerSyncNS         atomic.Int64 // last peer sync duration in nanoseconds (last-writer-wins)
+	// F7 / commit 6.2 phase E: backup-protected installs.
+	BakRestoredOnCommitFail atomic.Int64 // .bak rolled back to original after SQLite commit failed
+	BakRestoreFailed        atomic.Int64 // .bak restore itself failed; manual recovery required
 }
 
 // folderState holds runtime state for a single synced folder.
@@ -1182,6 +1185,50 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		// sync/scan touches the corrupt rows.
 		if err := runQuickCheck(db); err != nil {
 			fs.disable(DisabledQuickCheck, err.Error(), "")
+			continue
+		}
+
+		// Audit §6 commit 6 phase I + J: F7 .bak sweep.
+		// Reconciles any leftover `.mesh-bak-<hash>` files against
+		// the SQLite row for the underlying path. Branch (a)
+		// unlinks stale .bak files left behind by a successful
+		// commit + crashed unlink; branch (b) restores the .bak
+		// when SQLite still carries the pre-download hash (commit
+		// failed, .bak holds the live local copy). Z1: SQLite
+		// query failure → leave every .bak intact, transition to
+		// FolderDisabled with the SQLite-derived reason. Z13:
+		// neither on-disk file nor .bak filename hash matches the
+		// SQLite row → FolderDisabled(unknown) with the divergent
+		// paths in the diagnostic payload. Runs AFTER quick_check
+		// so the structured branches can trust db.Query won't fail
+		// for the trivial-corruption reason.
+		sweepRes, sweepErr := runStartupBakSweep(ctx, db, folderRoot, fcfg.ID)
+		switch {
+		case sweepErr == nil:
+			if sweepRes.Scanned > 0 {
+				slog.Info("F7 sweep complete",
+					"folder", fcfg.ID,
+					"scanned", sweepRes.Scanned,
+					"unlinked", sweepRes.Unlinked,
+					"restored", sweepRes.Restored,
+					"orphans", len(sweepRes.Orphans))
+			}
+		case errors.Is(sweepErr, errSweepDBUnreadable):
+			// Z1: leave .bak files intact for restore-from-backup
+			// to encounter post-reopen.
+			fs.disable(DisabledIntegrityCheck, sweepErr.Error(), "")
+			continue
+		case errors.Is(sweepErr, errSweepNeitherMatches):
+			// Z13: divergent on-disk state. Diagnostic payload
+			// names the offending paths; runbook §4.8 covers the
+			// triage flow.
+			diag := fmt.Sprintf(
+				"sweep: neither disk file matches SQLite for path(s) %v",
+				sweepRes.NeitherMatches)
+			fs.disable(DisabledUnknown, diag, "")
+			continue
+		default:
+			fs.disable(DisabledUnknown, "sweep: "+sweepErr.Error(), "")
 			continue
 		}
 
@@ -2301,6 +2348,16 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			wg.Add(1)
 			action := action
 			go func() {
+				// Audit §6 commit 6 phase F (closes the C6 link with
+				// commit 5): claimPath was acquired above before this
+				// goroutine started; releasePath is deferred FIRST so
+				// it runs LAST, after installDownloadedFile's commit
+				// callback (which holds the SQLite write). The claim
+				// therefore spans the entire .bak window — rename
+				// original→bak, rename temp→original, SQLite commit,
+				// unlink bak — covering the new race the F7 lifecycle
+				// would otherwise open between rename and commit.
+				// Pinned by TestDownload_HoldsClaimUntilTxCommit.
 				defer wg.Done()
 				defer fs.releasePath(action.Path)
 				select {
@@ -2311,15 +2368,22 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				defer func() { <-sem }()
 
 				dlStart := time.Now()
-				// Observe whether a local copy exists *before* the download so
-				// perfDownload can report the likely transfer mode without
-				// plumbing stats through every call site. Same existence check
-				// as downloadFileDelta.
+				// Observe whether a local copy exists *before* the download
+				// so perfDownload can report the likely transfer mode and
+				// installDownloadedFile knows whether it'll write a .bak.
 				hadLocal := false
 				if _, statErr := fs.root.Stat(action.Path); statErr == nil {
 					hadLocal = true
 				}
-				err := downloadFromPeer(ctx, n.clientForPeer(peerAddr), peerAddr, folderID, action.Path, action.RemoteHash, fs.root, n.rateLimiter)
+
+				// Audit §6 commit 6 phase E: download to a verified temp
+				// without renaming, then install via the F7 lifecycle.
+				// installDownloadedFile owns the rename-original-to-bak,
+				// rename-temp-to-original, commit, and unlink/restore
+				// sequence. The commit callback runs the SQLite write +
+				// in-memory mutation; on failure the .bak is restored
+				// atomically.
+				tmpRelPath, err := downloadToVerifiedFinalTemp(ctx, n.clientForPeer(peerAddr), peerAddr, folderID, action.Path, action.RemoteHash, fs.root, n.rateLimiter)
 				dlDur := time.Since(dlStart)
 				if err != nil {
 					slog.Warn("download failed", "folder", folderID, "path", action.Path, "peer", peerAddr, "error", err)
@@ -2359,53 +2423,104 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					TotalMs:   ms(dlDur),
 				})
 
-				// C2: post-write verification on network filesystems.
-				if fs.isNetworkFS {
-					if err := verifyPostWrite(fs.root, action.Path, action.RemoteHash, folderID, peerAddr, &fs.retries, &fs.indexMu); err != nil {
-						failMu.Lock()
-						setFailReason("post-write verify: " + err.Error())
-						failedSeqs = append(failedSeqs, action.RemoteSequence)
-						failMu.Unlock()
-						fs.metrics.SyncErrors.Add(1)
-						return
+				commit := func() error {
+					// Best-effort metadata fixups on the freshly-installed
+					// content. These run between installDownloadedFile's
+					// step 2 (rename temp→original) and step 3 (this
+					// callback's SQLite write). The .bak is still in
+					// place so a Chtimes/Chmod failure doesn't break
+					// rollback semantics.
+					if action.RemoteMtime > 0 {
+						mt := time.Unix(0, action.RemoteMtime)
+						_ = fs.root.Chtimes(action.Path, mt, mt)
 					}
+					fileMode := os.FileMode(action.RemoteMode)
+					if fileMode == 0 {
+						fileMode = 0644
+					}
+					_ = fs.root.Chmod(action.Path, fileMode)
+
+					// C2: post-write verification on network filesystems.
+					// Returning an error here triggers the .bak restore
+					// path inside installDownloadedFile — exactly the
+					// rollback we want when write-back caching corrupted
+					// the new content.
+					if fs.isNetworkFS {
+						actualHash, hashErr := hashFileRoot(fs.root, action.Path)
+						if hashErr != nil {
+							return fmt.Errorf("post-write verify read: %w", hashErr)
+						}
+						if actualHash != action.RemoteHash {
+							slog.Error("C2: post-write verification failed: data corruption detected",
+								"folder", folderID, "path", action.Path, "peer", peerAddr,
+								"expected", action.RemoteHash, "actual", actualHash)
+							return fmt.Errorf("post-write verify hash mismatch: have %s, want %s",
+								actualHash, action.RemoteHash)
+						}
+					}
+
+					// Build the new entry and a single-path snapshot for
+					// SQLite. The Sequence bump and the in-memory Set are
+					// deferred until after saveIndex commits — a Sequence
+					// gap on commit failure is acceptable, but a stale
+					// in-memory entry paired with on-disk old content is
+					// the Gap 2' shape Phase D explicitly fences out.
+					fs.indexMu.RLock()
+					localPrev, _ := fs.index.Get(action.Path)
+					epoch := fs.index.Epoch
+					deviceID := fs.index.DeviceID
+					fs.indexMu.RUnlock()
+
+					fs.indexMu.Lock()
+					fs.index.Sequence++
+					seq := fs.index.Sequence
+					fs.indexMu.Unlock()
+
+					newEntry := FileEntry{
+						Size:     action.RemoteSize,
+						MtimeNS:  action.RemoteMtime,
+						SHA256:   action.RemoteHash,
+						Sequence: seq,
+						Mode:     action.RemoteMode,
+						Version:  localPrev.Version.merge(action.RemoteVersion),
+					}
+					snapshot := newFileIndex()
+					snapshot.Sequence = seq
+					snapshot.Epoch = epoch
+					snapshot.DeviceID = deviceID
+					snapshot.Set(action.Path, newEntry)
+
+					if err := saveIndex(fs.writerCtx, fs.db, folderID, snapshot); err != nil {
+						return fmt.Errorf("saveIndex: %w", err)
+					}
+
+					// SQLite committed — promote the new entry into the
+					// live in-memory FileIndex. Other goroutines in this
+					// sync cycle observe the post-download state.
+					fs.indexMu.Lock()
+					fs.index.Set(action.Path, newEntry)
+					fs.retries.clearAll(action.Path)
+					fs.indexMu.Unlock()
+
+					m := state.Global.GetMetrics("filesync", n.cfg.Bind)
+					m.BytesRx.Add(action.RemoteSize)
+					fs.metrics.FilesDownloaded.Add(1)
+					fs.metrics.BytesDownloaded.Add(action.RemoteSize)
+					return nil
 				}
 
-				// G1: preserve remote mtime so the next scan's fast-path skip works.
-				if action.RemoteMtime > 0 {
-					mt := time.Unix(0, action.RemoteMtime)
-					_ = fs.root.Chtimes(action.Path, mt, mt)
+				if err := installDownloadedFile(fs.root, action.Path, tmpRelPath, commit, &fs.metrics); err != nil {
+					slog.Warn("F7 install failed", "folder", folderID, "path", action.Path, "peer", peerAddr, "error", err)
+					fs.indexMu.Lock()
+					fs.retries.record(action.Path, peerAddr, action.RemoteHash)
+					fs.indexMu.Unlock()
+					failMu.Lock()
+					setFailReason("install: " + err.Error())
+					failedSeqs = append(failedSeqs, action.RemoteSequence)
+					failMu.Unlock()
+					fs.metrics.SyncErrors.Add(1)
+					return
 				}
-
-				// L1: apply file permissions from remote (default 0644).
-				fileMode := os.FileMode(action.RemoteMode)
-				if fileMode == 0 {
-					fileMode = 0644
-				}
-				_ = fs.root.Chmod(action.Path, fileMode)
-
-				// Update metrics.
-				m := state.Global.GetMetrics("filesync", n.cfg.Bind)
-				m.BytesRx.Add(action.RemoteSize)
-				fs.metrics.FilesDownloaded.Add(1)
-				fs.metrics.BytesDownloaded.Add(action.RemoteSize)
-
-				// Update local index and clear retry tracking on success.
-				fs.indexMu.Lock()
-				fs.index.Sequence++
-				// C6: merge clocks — adopt must not drop local components
-				// the peer did not carry.
-				localPrev, _ := fs.index.Get(action.Path)
-				fs.index.Set(action.Path, FileEntry{
-					Size:     action.RemoteSize,
-					MtimeNS:  action.RemoteMtime,
-					SHA256:   action.RemoteHash,
-					Sequence: fs.index.Sequence,
-					Mode:     action.RemoteMode,
-					Version:  localPrev.Version.merge(action.RemoteVersion),
-				})
-				fs.retries.clearAll(action.Path)
-				fs.indexMu.Unlock()
 
 				slog.Info("synced file", "folder", folderID, "path", action.Path, "peer", peerAddr)
 			}()
@@ -2622,6 +2737,15 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 		case ActionDelete:
 			// F10: run deletes through the semaphore like downloads so
 			// high-latency filesystems (NFS, FUSE) don't block dispatch.
+			//
+			// Audit §6 commit 6 phase G: the delete write path now
+			// goes through installDeletion, which renames the local
+			// file to a .mesh-bak-<hash> sidecar BEFORE running the
+			// SQLite tombstone commit. A crash between the rename
+			// and the commit leaves a sweep-recognized .bak that
+			// Phase I reconciles against the SQLite row at folder
+			// open. The claim spans the entire goroutine (Phase F),
+			// so commit 5's scan walker skip covers the .bak window.
 			wg.Add(1)
 			action := action
 			go func() {
@@ -2634,7 +2758,63 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				}
 				defer func() { <-sem }()
 
-				if err := deleteFile(fs.root, action.Path); err != nil {
+				commit := func() error {
+					// Build the tombstone entry and a single-path
+					// snapshot. The Sequence bump and in-memory Set
+					// are deferred until SQLite commits.
+					fs.indexMu.RLock()
+					prior, _ := fs.index.Get(action.Path)
+					epoch := fs.index.Epoch
+					deviceID := fs.index.DeviceID
+					selfID := fs.index.selfID
+					fs.indexMu.RUnlock()
+
+					if prior.Deleted {
+						// N12: already a tombstone on our side; nothing to
+						// commit. The .bak rename has already been done
+						// (since the file existed on disk, otherwise
+						// installDeletion's step 1 was a no-op and we
+						// land here with no rollback to perform).
+						return nil
+					}
+
+					fs.indexMu.Lock()
+					fs.index.Sequence++
+					seq := fs.index.Sequence
+					fs.indexMu.Unlock()
+
+					tomb := prior
+					tomb.Deleted = true
+					tomb.MtimeNS = time.Now().UnixNano()
+					tomb.Sequence = seq
+					// C6: merge the peer's tombstone clock with our
+					// own so any local component the peer did not
+					// carry survives. Fall back to a self-bump when
+					// the peer has no clock.
+					if len(action.RemoteVersion) > 0 {
+						tomb.Version = prior.Version.merge(action.RemoteVersion)
+					} else if selfID != "" {
+						tomb.Version = prior.Version.bump(selfID)
+					}
+
+					snapshot := newFileIndex()
+					snapshot.Sequence = seq
+					snapshot.Epoch = epoch
+					snapshot.DeviceID = deviceID
+					snapshot.Set(action.Path, tomb)
+
+					if err := saveIndex(fs.writerCtx, fs.db, folderID, snapshot); err != nil {
+						return fmt.Errorf("saveIndex (tombstone): %w", err)
+					}
+
+					fs.indexMu.Lock()
+					fs.index.Set(action.Path, tomb)
+					fs.indexMu.Unlock()
+					fs.metrics.FilesDeleted.Add(1)
+					return nil
+				}
+
+				if err := installDeletion(fs.root, action.Path, commit, &fs.metrics); err != nil {
 					slog.Warn("delete failed", "folder", folderID, "path", action.Path, "error", err)
 					fs.indexMu.Lock()
 					fs.retries.record(action.Path, peerAddr, action.RemoteHash)
@@ -2645,32 +2825,6 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					failMu.Unlock()
 					fs.metrics.SyncErrors.Add(1)
 					return
-				}
-				fs.indexMu.Lock()
-				// N3: always write a tombstone, even if the file wasn't in the
-				// local index. Without a tombstone, the file can resurrect from
-				// a third peer that still has it in their index.
-				entry, _ := fs.index.Get(action.Path) // zero value if absent
-				if entry.Deleted {
-					// N12: already a tombstone — skip sequence bump, mtime reset, and metric.
-					fs.indexMu.Unlock()
-				} else {
-					fs.index.Sequence++
-					entry.Deleted = true
-					entry.MtimeNS = time.Now().UnixNano()
-					entry.Sequence = fs.index.Sequence
-					// C6: merge the peer's tombstone clock with our own so
-					// any local component the peer did not carry survives.
-					// Fall back to a self-bump when the peer has no clock
-					// so the local entry still carries a non-empty vector.
-					if len(action.RemoteVersion) > 0 {
-						entry.Version = entry.Version.merge(action.RemoteVersion)
-					} else if fs.index.selfID != "" {
-						entry.Version = entry.Version.bump(fs.index.selfID)
-					}
-					fs.index.Set(action.Path, entry)
-					fs.indexMu.Unlock()
-					fs.metrics.FilesDeleted.Add(1)
 				}
 				slog.Info("deleted file", "folder", folderID, "path", action.Path, "peer", peerAddr)
 			}()

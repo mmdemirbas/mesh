@@ -162,14 +162,15 @@ type segEdge struct {
 	child *segNode
 }
 
-// builtinIgnores is a compile-time constant: the two patterns are baked
-// directly into shouldIgnore as an inlined HasPrefix / Contains check.
+// builtinIgnores is a compile-time constant: the patterns are baked
+// directly into shouldIgnore as inlined HasPrefix / Contains checks.
 // The strings below mirror the package-level builtinIgnores list in
 // ignore.go; keep them in sync. A guard test in ignore_behavior_test.go
 // verifies the hardcoded forms still cover those patterns.
 const (
 	builtinTmpPrefix     = ".mesh-tmp-"       // from ".mesh-tmp-*"
 	builtinDeltaContains = ".mesh-delta-tmp-" // from "*.mesh-delta-tmp-*"
+	builtinBakContains   = ".mesh-bak-"       // from "*.mesh-bak-*" (F7 / commit 6.2 phase E)
 )
 
 // newIgnoreMatcher builds the production matcher. Patterns are parsed
@@ -426,7 +427,8 @@ func (m *ignoreMatcher) shouldIgnore(relPath string, isDir bool) bool {
 	// generic pattern machinery entirely. Kept in sync with
 	// builtinIgnores in ignore.go; see the guard test.
 	if strings.HasPrefix(base, builtinTmpPrefix) ||
-		strings.Contains(base, builtinDeltaContains) {
+		strings.Contains(base, builtinDeltaContains) ||
+		strings.Contains(base, builtinBakContains) {
 		return true
 	}
 

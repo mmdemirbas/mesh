@@ -464,25 +464,57 @@ func safePath(folderRoot, relPath string) (string, error) {
 // It computes block signatures of the local file, sends them to the peer,
 // and reconstructs the file from unchanged local blocks + received delta blocks.
 // Falls back to full download if the local file doesn't exist.
+//
+// Returns the relative path of the installed file (post-rename) on
+// success. Callers that need to interpose between the verified temp
+// and the final rename — e.g. the F7 .bak install lifecycle (audit
+// §6 commit 6 phase E) — should use downloadToVerifiedFinalTemp
+// instead.
 func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folderID, relPath string, expectedHash Hash256, root *os.Root, limiter *rate.Limiter) (string, error) {
+	tmpRelPath, err := downloadToVerifiedFinalTemp(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
+	if err != nil {
+		return "", err
+	}
+	if err := renameReplaceRoot(root, tmpRelPath, relPath); err != nil {
+		_ = root.Remove(tmpRelPath)
+		return "", fmt.Errorf("rename delta result: %w", err)
+	}
+	return relPath, nil
+}
+
+// downloadToVerifiedFinalTemp downloads a file from a peer (full or
+// delta as appropriate) and returns the temp path containing the
+// hash-verified content WITHOUT renaming it onto the final relPath.
+// The caller is responsible for installing the temp via
+// installDownloadedFile so the F7 .mesh-bak-<hash> protection wraps
+// the rename + SQLite commit (audit §6 commit 6 phase E).
+//
+// Routing: when no local file exists at relPath, dispatches to
+// downloadToVerifiedTemp (full download). When a local file exists,
+// computes block signatures, performs the delta exchange, applies
+// the delta to a temp, hash-verifies, and returns the temp path.
+//
+// On any error the temp is removed before returning. The caller
+// must NOT retain the temp path after a non-nil error.
+func downloadToVerifiedFinalTemp(ctx context.Context, client *http.Client, peerAddr, folderID, relPath string, expectedHash Hash256, root *os.Root, limiter *rate.Limiter) (string, error) {
 	if err := validateRelPath(relPath); err != nil {
 		return "", err
 	}
 
 	// If local file doesn't exist, fall back to full download.
 	if _, err := root.Stat(relPath); os.IsNotExist(err) {
-		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
+		return downloadToVerifiedTemp(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
 	}
 
 	// Chunk the local file with FastCDC — its hashes tell the peer
 	// which chunks we already have.
 	localBlocks, err := signFileRoot(root, relPath)
 	if err != nil {
-		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
+		return downloadToVerifiedTemp(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
 	}
 	localInfo, err := root.Stat(relPath)
 	if err != nil {
-		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
+		return downloadToVerifiedTemp(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
 	}
 	pbLocal := make([]*pb.Block, len(localBlocks))
 	for i, b := range localBlocks {
@@ -520,7 +552,7 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-		return downloadFile(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
+		return downloadToVerifiedTemp(ctx, client, peerAddr, folderID, relPath, expectedHash, root, limiter)
 	}
 
 	// Cap delta response at 256 MB — delta transfers should be much smaller
@@ -603,13 +635,7 @@ func downloadFileDelta(ctx context.Context, client *http.Client, peerAddr, folde
 		return "", fmt.Errorf("delta hash mismatch for %s: expected %s, got %s", relPath, expectedHash, actualHash)
 	}
 
-	// Atomic rename.
-	if err := renameReplaceRoot(root, tmpRelPath, relPath); err != nil {
-		_ = root.Remove(tmpRelPath)
-		return "", fmt.Errorf("rename delta result: %w", err)
-	}
-
-	return relPath, nil
+	return tmpRelPath, nil
 }
 
 // bundleEntry describes one file expected from a bundle download.

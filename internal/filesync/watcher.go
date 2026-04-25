@@ -311,11 +311,15 @@ func (fw *folderWatcher) removeStaleWatches() {
 	}
 }
 
-// isTempFile returns true if the path is a filesync temp file that should
-// not trigger scan events.
+// isTempFile returns true if the path is a filesync temp file that
+// should not trigger scan events. Covers `.mesh-tmp-*` (download
+// staging), `*.mesh-delta-tmp-*` (delta reconstruction), and
+// `*.mesh-bak-*` (F7 download backup, audit §6 commit 6 phase E).
 func isTempFile(path string) bool {
 	base := filepath.Base(path)
-	return strings.HasPrefix(base, ".mesh-tmp-") || strings.Contains(base, ".mesh-delta-tmp-")
+	return strings.HasPrefix(base, ".mesh-tmp-") ||
+		strings.Contains(base, ".mesh-delta-tmp-") ||
+		strings.Contains(base, ".mesh-bak-")
 }
 
 // drainDirtyRoots returns the set of folder roots that received events since

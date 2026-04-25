@@ -584,7 +584,14 @@ func readDirEntries(ctx context.Context, job dirJob, ignore *ignoreMatcher, temp
 		isDir := d.IsDir()
 
 		// P8: Clean stale temp files inline.
-		if !isDir && (strings.HasPrefix(name, ".mesh-tmp-") || strings.Contains(name, ".mesh-delta-tmp-")) {
+		// `.mesh-bak-` is the F7 download backup (audit §6 commit 6
+		// phase E) — leftovers indicate a crash between the download
+		// rename and the SQLite commit. The age-gated cleanup here is
+		// the second line of defense; the structured sweep at folder
+		// open (Phase I) is the first.
+		if !isDir && (strings.HasPrefix(name, ".mesh-tmp-") ||
+			strings.Contains(name, ".mesh-delta-tmp-") ||
+			strings.Contains(name, ".mesh-bak-")) {
 			if info, infoErr := d.Info(); infoErr == nil && info.ModTime().Before(tempCutoff) {
 				if os.Remove(absPath) == nil {
 					res.tempCleaned++
@@ -1764,7 +1771,12 @@ func markRemovedPeers(peers map[string]PeerState, configuredAddrs []string) bool
 	return changed
 }
 
-// cleanTempFiles removes stale .mesh-tmp-* files from the entire folder tree.
+// cleanTempFiles removes stale .mesh-tmp-*, *.mesh-delta-tmp-*, and
+// *.mesh-bak-* files from the entire folder tree. The `.mesh-bak-`
+// arm carries F7 download backups (audit §6 commit 6 phase E); the
+// structured sweep at folder open (Phase I) handles fresh leftovers,
+// this age-gated walker removes ancient stragglers from runs whose
+// records are no longer in the DB.
 func cleanTempFiles(folderRoot string, maxAge time.Duration) {
 	cutoff := time.Now().Add(-maxAge)
 	_ = filepath.WalkDir(folderRoot, func(path string, d fs.DirEntry, err error) error {
@@ -1772,7 +1784,9 @@ func cleanTempFiles(folderRoot string, maxAge time.Duration) {
 			return nil
 		}
 		name := d.Name()
-		if !strings.HasPrefix(name, ".mesh-tmp-") && !strings.Contains(name, ".mesh-delta-tmp-") {
+		if !strings.HasPrefix(name, ".mesh-tmp-") &&
+			!strings.Contains(name, ".mesh-delta-tmp-") &&
+			!strings.Contains(name, ".mesh-bak-") {
 			return nil
 		}
 		info, infoErr := d.Info()

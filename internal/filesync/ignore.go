@@ -6,9 +6,17 @@ import (
 )
 
 // builtinIgnores are always excluded from sync and scanning.
+//
+// `*.mesh-bak-*` carries the F7 download-protection backup written
+// by installDownloadedFile (audit §6 commit 6 phase E). The contains-
+// pattern matches anywhere in the basename so both `.mesh-bak-<hash>`
+// (basename-prefixed style, future variants) and `<orig>.mesh-bak-<hash>`
+// (the production form, where the original path is preserved as the
+// prefix) are recognized as ephemeral artifacts.
 var builtinIgnores = []string{
 	".mesh-tmp-*",
 	"*.mesh-delta-tmp-*",
+	"*.mesh-bak-*",
 }
 
 // patternKind describes the fast-match strategy for a classified pattern.
