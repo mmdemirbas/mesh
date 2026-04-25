@@ -1,6 +1,7 @@
 package filesync
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -76,7 +77,10 @@ func TestOpenFolderDB_CreatesSchemaAndPragmas(t *testing.T) {
 		t.Fatalf("synchronous=%d want 2 (FULL)", sync)
 	}
 
-	wantTables := []string{"folder_meta", "files", "blocks", "peer_state"}
+	// Per audit decision §5 #7 / iter-3 A6 / commit 3, the `blocks`
+	// table is NOT in the v1 schema — block hashes compute on demand
+	// (see comment in applyFolderDBSchema).
+	wantTables := []string{"folder_meta", "files", "peer_state"}
 	for _, tbl := range wantTables {
 		var name string
 		err := db.QueryRow(
@@ -224,7 +228,7 @@ func TestSaveLoadIndex_RoundTrip(t *testing.T) {
 	})
 	idx.recomputeCache()
 
-	if err := saveIndex(db, "shared", idx); err != nil {
+	if err := saveIndex(context.Background(), db, "shared", idx); err != nil {
 		t.Fatalf("saveIndex: %v", err)
 	}
 
@@ -297,7 +301,7 @@ func TestSaveIndex_DeletePathRemovesRow(t *testing.T) {
 	first := newFileIndex()
 	first.Set("a.txt", FileEntry{Size: 1, SHA256: hash256FromBytes(bytes32('a'))})
 	first.Set("b.txt", FileEntry{Size: 2, SHA256: hash256FromBytes(bytes32('b'))})
-	if err := saveIndex(db, "shared", first); err != nil {
+	if err := saveIndex(context.Background(), db, "shared", first); err != nil {
 		t.Fatalf("first saveIndex: %v", err)
 	}
 	first.ClearDirty()
@@ -307,7 +311,7 @@ func TestSaveIndex_DeletePathRemovesRow(t *testing.T) {
 	// untouched (there are none here, but the contract is clear).
 	first.Set("a.txt", FileEntry{Size: 11, SHA256: hash256FromBytes(bytes32('a'))})
 	first.Delete("b.txt")
-	if err := saveIndex(db, "shared", first); err != nil {
+	if err := saveIndex(context.Background(), db, "shared", first); err != nil {
 		t.Fatalf("second saveIndex: %v", err)
 	}
 
@@ -417,7 +421,7 @@ func TestSaveLoadPeerStates_RoundTrip(t *testing.T) {
 		},
 	}
 
-	if err := savePeerStatesDB(db, "shared", peers); err != nil {
+	if err := savePeerStatesDB(context.Background(), db, "shared", peers); err != nil {
 		t.Fatalf("savePeerStatesDB: %v", err)
 	}
 	got, err := loadPeerStatesDB(db, "shared")
@@ -482,7 +486,7 @@ func TestSavePeerStates_ReplacesPriorRows(t *testing.T) {
 		},
 		"peer-b": {LastSeenSequence: 2},
 	}
-	if err := savePeerStatesDB(db, "shared", first); err != nil {
+	if err := savePeerStatesDB(context.Background(), db, "shared", first); err != nil {
 		t.Fatalf("first save: %v", err)
 	}
 
@@ -494,7 +498,7 @@ func TestSavePeerStates_ReplacesPriorRows(t *testing.T) {
 			},
 		},
 	}
-	if err := savePeerStatesDB(db, "shared", second); err != nil {
+	if err := savePeerStatesDB(context.Background(), db, "shared", second); err != nil {
 		t.Fatalf("second save: %v", err)
 	}
 

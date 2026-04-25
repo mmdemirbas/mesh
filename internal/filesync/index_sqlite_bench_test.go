@@ -1,6 +1,7 @@
 package filesync
 
 import (
+	"context"
 	"fmt"
 	"testing"
 )
@@ -64,7 +65,7 @@ func BenchmarkLoadIndex_168kFiles(b *testing.B) {
 	}
 	idx.recomputeCache()
 
-	if err := saveIndex(db, folderID, idx); err != nil {
+	if err := saveIndex(context.Background(), db, folderID, idx); err != nil {
 		b.Fatalf("saveIndex: %v", err)
 	}
 

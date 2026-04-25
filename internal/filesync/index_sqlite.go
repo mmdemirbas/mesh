@@ -1,6 +1,7 @@
 package filesync
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -188,14 +189,13 @@ CREATE INDEX IF NOT EXISTS files_by_inode
   ON files(folder_id, inode)
   WHERE inode IS NOT NULL;
 
-CREATE TABLE IF NOT EXISTS blocks (
-  folder_id TEXT    NOT NULL,
-  path      TEXT    NOT NULL,
-  offset    INTEGER NOT NULL,
-  length    INTEGER NOT NULL,
-  hash      BLOB    NOT NULL,
-  PRIMARY KEY (folder_id, path, offset)
-);
+-- The blocks table from DESIGN-v1 section 4 is intentionally absent.
+-- Per audit decision section 5 #7 (iter-3 A6), block hashes are
+-- computed on demand by handleBlockSigs from the open file;
+-- persisting them would bloat the DB on large media files (a 10 GB
+-- MP4 at 128 KB avg = ~80k rows per file) for no measured win.
+-- Reopen criterion: cold-cache /blocksigs latency under load, not
+-- speculation.
 
 CREATE TABLE IF NOT EXISTS peer_state (
   folder_id          TEXT    NOT NULL,
@@ -235,10 +235,97 @@ CREATE TABLE IF NOT EXISTS peer_base_hashes (
 	return nil
 }
 
-// seedFolderMeta writes the identity rows on first open. schema_version is
-// written once; subsequent opens verify it matches. device_id and epoch
-// are filled in if missing — useful when a fresh database inherits a
-// device_id from the node-level device-id file.
+// errSchemaVersionMismatch is returned when folder_meta.schema_version
+// is non-zero but does not match the binary's expected schemaVersion.
+// Maps to FolderDisabled reason `schema_version_mismatch`.
+var errSchemaVersionMismatch = fmt.Errorf("schema_version_mismatch")
+
+// errQuickCheckFailed is returned by runQuickCheck when PRAGMA
+// quick_check finds gross corruption. Maps to FolderDisabled reason
+// `quick_check_failed`. R2 / iter-3 audit §2.2.
+var errQuickCheckFailed = fmt.Errorf("quick_check_failed")
+
+// errIntegrityCheckFailed is returned by runIntegrityCheck when
+// PRAGMA integrity_check finds subtle corruption that quick_check
+// missed. Maps to FolderDisabled reason `integrity_check_failed`.
+// Iter-3 audit §2.2 / Gap 5 (iter-2): the two-phase split keeps
+// folder open fast (~ms) while still surfacing deep corruption
+// asynchronously (~10 MB/s scan, tens of seconds on large DBs).
+var errIntegrityCheckFailed = fmt.Errorf("integrity_check_failed")
+
+// runQuickCheck runs PRAGMA quick_check and returns errQuickCheckFailed
+// when it reports anything other than "ok". The check runs in
+// milliseconds even on large databases — it scans page headers and
+// btree structure but does not verify every row. Folder open blocks
+// on this; deeper integrity verification runs asynchronously via
+// runIntegrityCheck.
+func runQuickCheck(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA quick_check")
+	if err != nil {
+		return fmt.Errorf("%w: query: %w", errQuickCheckFailed, err)
+	}
+	defer rows.Close()
+	var results []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			return fmt.Errorf("%w: scan: %w", errQuickCheckFailed, err)
+		}
+		results = append(results, line)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("%w: iterate: %w", errQuickCheckFailed, err)
+	}
+	if len(results) == 1 && results[0] == "ok" {
+		return nil
+	}
+	return fmt.Errorf("%w: %v", errQuickCheckFailed, results)
+}
+
+// runIntegrityCheck runs the full PRAGMA integrity_check and returns
+// errIntegrityCheckFailed when it reports anything other than "ok".
+// The check is much slower than quick_check (~10 MB/s, tens of
+// seconds on a 200 MB DB) and is intended to run on a goroutine
+// after folder open. The ctx parameter lets the caller cancel the
+// check at shutdown.
+func runIntegrityCheck(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, "PRAGMA integrity_check")
+	if err != nil {
+		return fmt.Errorf("%w: query: %w", errIntegrityCheckFailed, err)
+	}
+	defer rows.Close()
+	var results []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			return fmt.Errorf("%w: scan: %w", errIntegrityCheckFailed, err)
+		}
+		results = append(results, line)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("%w: iterate: %w", errIntegrityCheckFailed, err)
+	}
+	if len(results) == 1 && results[0] == "ok" {
+		return nil
+	}
+	return fmt.Errorf("%w: %v", errIntegrityCheckFailed, results)
+}
+
+// errDeviceIDMismatch is returned by checkDeviceID when the folder's
+// stored device_id differs from the node-level identity. Maps to
+// FolderDisabled reason `device_id_mismatch`. Iter-3 review I7,
+// audit decision §5 #20.
+var errDeviceIDMismatch = fmt.Errorf("device_id_mismatch")
+
+// seedFolderMeta writes the identity rows on first open. schema_version
+// is written once and verified on subsequent opens; device_id and epoch
+// are inserted only when the row is missing (no silent backfill of an
+// empty value — I7 makes that an explicit mismatch on the next open).
+//
+// The function deliberately does NOT compare device_id; that check
+// lives in checkDeviceID and runs from the caller (Node.Start) so the
+// caller can route a mismatch to the FolderDisabled state machinery
+// instead of failing folder open outright.
 func seedFolderMeta(db *sql.DB, deviceID string) error {
 	var current sql.NullInt64
 	err := db.QueryRow(
@@ -263,19 +350,34 @@ func seedFolderMeta(db *sql.DB, deviceID string) error {
 		return fmt.Errorf("read schema_version: %w", err)
 	default:
 		if current.Int64 != int64(schemaVersion) {
-			return fmt.Errorf(
-				"folder db schema_version=%d, binary expects %d",
-				current.Int64, schemaVersion)
+			return fmt.Errorf("%w: db=%d binary=%d",
+				errSchemaVersionMismatch, current.Int64, schemaVersion)
 		}
 	}
-	// Backfill device_id if a prior open wrote it empty.
-	if _, err := db.Exec(
-		`UPDATE folder_meta SET value=? WHERE key='device_id' AND value=''`,
-		deviceID,
-	); err != nil {
-		return fmt.Errorf("backfill device_id: %w", err)
-	}
 	return nil
+}
+
+// checkDeviceID compares folder_meta.device_id against the node-level
+// identity. Returns errDeviceIDMismatch (wrapped with both values) if
+// they differ. Empty stored value is treated as first-run and accepted
+// — seedFolderMeta inserts the node identity on first open, so an
+// empty stored value can only occur if a previous open crashed
+// between schema creation and the seed insert (extremely rare; we
+// tolerate it rather than fail).
+//
+// I7 / audit decision §5 #20: route the mismatch through the
+// FolderDisabled state machinery instead of silently overwriting; the
+// pre-I7 backfill silently accepted a rotated identity and corrupted
+// every subsequent VectorClock bump.
+func checkDeviceID(db *sql.DB, expected string) error {
+	stored, err := folderMeta(db, "device_id")
+	if err != nil {
+		return fmt.Errorf("read device_id: %w", err)
+	}
+	if stored == "" || stored == expected {
+		return nil
+	}
+	return fmt.Errorf("%w: file=%q db=%q", errDeviceIDMismatch, expected, stored)
 }
 
 // folderMeta returns the raw folder_meta value for key. Returns "" with a
@@ -339,18 +441,31 @@ type sqlExecer interface {
 // dirty/deleted sets. On commit failure, the sets stay populated so
 // the next cycle retries the same rows. saveIndex itself does NOT
 // clear them — the caller decides based on commit success.
-func saveIndex(db *sql.DB, folderID string, idx *FileIndex) (err error) {
+//
+// The ctx parameter is the per-folder writer context. When the
+// folder transitions to FolderDisabled (iter-4 Z6 / decision §5 #25),
+// the ctx is cancelled and any in-flight tx rolls back. Pass
+// context.Background when no folder-level cancellation applies
+// (e.g., test setup that opens a DB directly).
+func saveIndex(ctx context.Context, db *sql.DB, folderID string, idx *FileIndex) (err error) {
 	if db == nil {
 		return fmt.Errorf("saveIndex: nil db")
 	}
 	if idx == nil {
 		return fmt.Errorf("saveIndex: nil index")
 	}
+	if ctx == nil {
+		// Tolerate a nil ctx — tests that build folderState directly
+		// without wiring writerCtx would otherwise panic inside
+		// db.BeginTx. Production callers always pass fs.writerCtx.
+		ctx = context.Background()
+	}
 	dirty, deleted := idx.DirtyPaths()
 	// Begin a writer tx. With ?_txlock=immediate (D3) this emits
 	// BEGIN IMMEDIATE so we hold the writer lock before any other
-	// connection can claim it.
-	tx, err := db.Begin()
+	// connection can claim it. The ctx propagates a folder-level
+	// cancellation (Z6) so disable() can roll back an in-flight tx.
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin save tx: %w", err)
 	}
@@ -538,11 +653,16 @@ func loadIndexDB(db *sql.DB, folderID string) (*FileIndex, error) {
 // savePeerStatesDB writes the full per-peer map into the v1 SQLite
 // schema. Runs in one transaction so a mid-write crash leaves either the
 // pre-update or post-update row set, never a hybrid.
-func savePeerStatesDB(db *sql.DB, folderID string, peers map[string]PeerState) (err error) {
+func savePeerStatesDB(ctx context.Context, db *sql.DB, folderID string, peers map[string]PeerState) (err error) {
 	if db == nil {
 		return fmt.Errorf("savePeerStatesDB: nil db")
 	}
-	tx, err := db.Begin()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Z6 / decision §5 #25: writer ctx propagates folder-level
+	// cancellation so disable() can roll back an in-flight tx.
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin peer save tx: %w", err)
 	}

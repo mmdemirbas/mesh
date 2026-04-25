@@ -405,6 +405,22 @@ func buildAdminMux(ring *logRing, logFilePath, perfLogPath string) *http.ServeMu
 			for _, m := range fsMetrics {
 				fmt.Fprintf(&b, "mesh_filesync_peer_sync_duration_seconds{folder=%q} %.6f\n", m.FolderID, float64(m.PeerSyncNS)/1e9)
 			}
+
+			// mesh_filesync_folder_disabled — 1 when the folder is in the
+			// FolderDisabled state. Reason is one of the closed-enum
+			// values from internal/filesync/disabled.go (audit decision
+			// §5 #18 + iter-4 O11 / Z10). Emit one line per folder so
+			// alert rules can group by reason without sum-by-label
+			// gymnastics.
+			b.WriteString("# HELP mesh_filesync_folder_disabled 1 when the folder is disabled (open or integrity failure); reason label carries the closed-enum cause.\n")
+			b.WriteString("# TYPE mesh_filesync_folder_disabled gauge\n")
+			for _, m := range fsMetrics {
+				reason := string(m.Reason)
+				if reason == "" {
+					reason = "none"
+				}
+				fmt.Fprintf(&b, "mesh_filesync_folder_disabled{folder=%q,reason=%q} %d\n", m.FolderID, reason, m.Disabled)
+			}
 		}
 
 		// mesh_process_goroutines

@@ -104,6 +104,23 @@ type FolderStatus struct {
 	// File counts and sizes may be stale (from the previous session's persisted
 	// index) or zero (first run). The UI should indicate incomplete data.
 	Scanning bool `json:"scanning,omitempty"`
+
+	// PERSISTENCE-AUDIT.md §2.2 R8 + iter-4 O11 / O8: when the folder
+	// has transitioned to FolderDisabled, Status="disabled", Reason
+	// names the closed-enum value, Action carries the operator's
+	// next sentence (matches OPERATOR-RUNBOOK.md §4 verbatim).
+	// ErrorText / StackTrace / RecentLog populate only for
+	// reason=unknown so the operator can triage inline. TxRolledBack
+	// records iter-4 Z6: any in-flight writer tx canceled by the
+	// disable() call.
+	Status       string         `json:"status,omitempty"` // "disabled" when disabled, empty otherwise
+	Reason       DisabledReason `json:"reason,omitempty"`
+	Action       string         `json:"action,omitempty"`
+	ErrorText    string         `json:"error_text,omitempty"`
+	StackTrace   string         `json:"stack_trace,omitempty"`
+	RecentLog    []string       `json:"recent_log,omitempty"`
+	TxRolledBack bool           `json:"tx_in_flight_rolled_back,omitempty"`
+	DisabledAtMs int64          `json:"disabled_at_ms,omitempty"` // Unix milliseconds; 0 when not disabled
 }
 
 // FolderPeer is a resolved peer entry for a folder: the configured nickname
@@ -213,6 +230,29 @@ func GetFolderStatuses() []FolderStatus {
 		sort.Strings(ids)
 		for _, id := range ids {
 			fs := n.folders[id]
+
+			// PERSISTENCE-AUDIT.md §6 commit 3: a disabled folder may
+			// have nil fs.index / fs.peers if it failed before the
+			// open path completed. Surface the disabled-state JSON
+			// without dereferencing the in-memory index.
+			if ds := fs.disabled.Load(); ds != nil {
+				fst := FolderStatus{
+					ID:           id,
+					Path:         fs.cfg.Path,
+					Direction:    fs.cfg.Direction,
+					Status:       "disabled",
+					Reason:       ds.Reason,
+					Action:       ds.Action,
+					ErrorText:    ds.ErrorText,
+					StackTrace:   ds.StackTrace,
+					RecentLog:    ds.RecentLog,
+					TxRolledBack: ds.TxRolledBack,
+					DisabledAtMs: ds.DisabledAt.UnixMilli(),
+				}
+				result = append(result, fst)
+				continue
+			}
+
 			fs.indexMu.RLock()
 			count, totalBytes := fs.index.activeCountAndSize() // P18b: O(1) cached
 			dirs := fs.dirCount
@@ -375,6 +415,14 @@ type FolderMetricsSnapshot struct {
 	ScanCount          int64
 	ScanDurationNS     int64
 	PeerSyncNS         int64
+
+	// Disabled is 1 when the folder is in the FolderDisabled state, 0
+	// otherwise. Reason carries the closed-enum reason when disabled
+	// (empty string when enabled). cmd/mesh/admin.go emits these as
+	// the mesh_filesync_folder_disabled{folder=..., reason=...} gauge
+	// (decision §5 #18 + iter-4 O11 / Z10).
+	Disabled int
+	Reason   DisabledReason
 }
 
 // GetFolderMetrics returns a snapshot of sync metrics for all active folders.
@@ -382,7 +430,7 @@ func GetFolderMetrics() []FolderMetricsSnapshot {
 	var result []FolderMetricsSnapshot
 	activeNodes.ForEach(func(n *Node) {
 		for id, fs := range n.folders {
-			result = append(result, FolderMetricsSnapshot{
+			snap := FolderMetricsSnapshot{
 				FolderID:           id,
 				PeerSyncs:          fs.metrics.PeerSyncs.Load(),
 				FilesDownloaded:    fs.metrics.FilesDownloaded.Load(),
@@ -397,7 +445,12 @@ func GetFolderMetrics() []FolderMetricsSnapshot {
 				ScanCount:          fs.metrics.ScanCount.Load(),
 				ScanDurationNS:     fs.metrics.ScanDurationNS.Load(),
 				PeerSyncNS:         fs.metrics.PeerSyncNS.Load(),
-			})
+			}
+			if ds := fs.disabled.Load(); ds != nil {
+				snap.Disabled = 1
+				snap.Reason = ds.Reason
+			}
+			result = append(result, snap)
 		}
 	})
 	sort.Slice(result, func(i, j int) bool { return result[i].FolderID < result[j].FolderID })
@@ -454,8 +507,16 @@ type folderState struct {
 	// db is the per-folder SQLite handle, opened by Node.Run via
 	// openFolderDB. PERSISTENCE-AUDIT.md §6 commit 2: this is the only
 	// on-disk store for the folder index and peer state. Closed at
-	// shutdown after wg.Wait so no goroutine still holds rows.
-	db          *sql.DB
+	// shutdown after wg.Wait so no goroutine still holds rows. Nil
+	// when the folder is in the FolderDisabled state because openFolderDB
+	// failed at startup; sync/scan loops check IsDisabled() and skip.
+	db *sql.DB
+
+	// folderDisabledFields carries the FolderDisabled-state machinery
+	// (decision §5 #25, iter-4 Z6 + Z10 + Z12). See disabled.go for
+	// the contract.
+	folderDisabledFields
+
 	isNetworkFS bool              // C2: true when folder root is on a network filesystem
 	metrics     FolderSyncMetrics // lock-free counters for Prometheus
 	// P18c: recycled scan-clone backing map. Stashed after swap, reused on
@@ -970,6 +1031,14 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			cfg.ResolvedFolders[i].ID, cfg.ResolvedFolders[i].Peers)
 	}
 
+	// integrityCheckTarget queues per-folder PRAGMA integrity_check
+	// goroutines spawned below the folder loop where wg is in scope.
+	type integrityCheckTarget struct {
+		fs *folderState
+		db *sql.DB
+	}
+	var integrityChecks []integrityCheckTarget
+
 	// Initialize folders.
 	for _, fcfg := range cfg.ResolvedFolders {
 		// L5: open an os.Root handle for TOCTOU-safe file operations.
@@ -995,50 +1064,64 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		// folder init.
 		cleanTempFiles(fcfg.Path, tempFileMaxAge)
 
-		// PERSISTENCE-AUDIT.md §6 commit 2: SQLite is the only on-disk
-		// store. Refuse to start a folder whose cache directory carries
-		// any legacy gob/YAML sidecar — the v1 cold-swap posture
-		// (DESIGN-v1.md §0) makes those leftover dev files, not real
-		// state to migrate. Skip the folder on legacy-refusal so other
-		// folders and other mesh components keep running. Per R8 in
-		// PERSISTENCE-AUDIT.md, FolderDisabled wiring lands at commit 3;
-		// commit 2 logs and skips as a stub.
+		// PERSISTENCE-AUDIT.md §6 commit 3: open path is wrapped in
+		// the FolderDisabled state machinery. Folder is registered in
+		// n.folders BEFORE openFolderDB so any failure routes through
+		// fs.disable() and surfaces on the dashboard with the audit's
+		// closed-enum reason + action string. Sync/scan loops check
+		// fs.IsDisabled() and skip; other folders and other mesh
+		// components are untouched.
 		folderCacheDir := filepath.Join(dataDir, fcfg.ID)
+		writerCtx, writerCancel := context.WithCancel(ctx)
+		fs := &folderState{
+			cfg:           fcfg,
+			root:          folderRoot,
+			pending:       make(map[string]PendingSummary),
+			peerLastError: make(map[string]string),
+			inFlight:      make(map[string]bool),
+		}
+		fs.writerCtx = writerCtx
+		fs.writerCancel = writerCancel
+		n.folders[fcfg.ID] = fs
+
 		if err := refuseLegacyIndex(folderCacheDir); err != nil {
-			slog.Error("legacy index files present — refusing to open folder",
-				"folder", fcfg.ID, "error", err)
-			state.Global.Update("filesync-folder", fcfg.ID, state.Failed,
-				"legacy index files present (delete them)")
+			fs.disable(DisabledLegacyIndex, err.Error(), "")
 			continue
 		}
 
 		db, err := openFolderDB(folderCacheDir, n.deviceID)
 		if err != nil {
-			slog.Error("failed to open folder DB", "folder", fcfg.ID, "error", err)
-			state.Global.Update("filesync-folder", fcfg.ID, state.Failed,
-				"open SQLite: "+err.Error())
+			fs.disable(classifyOpenError(err), err.Error(), "")
+			continue
+		}
+		fs.db = db
+
+		// I7 (audit decision §5 #20): compare folder_meta.device_id
+		// against the node-level identity. Mismatch → FolderDisabled
+		// with reason `device_id_mismatch`. Recovery: restore the
+		// device-id file (runbook §4.3 option 1) before re-running.
+		if err := checkDeviceID(db, n.deviceID); err != nil {
+			fs.disable(DisabledDeviceIDMismatch, err.Error(), "")
+			continue
+		}
+
+		// R2 quick_check: synchronous at folder open, ~ms even on
+		// large DBs. quick_check_failed → FolderDisabled before any
+		// sync/scan touches the corrupt rows.
+		if err := runQuickCheck(db); err != nil {
+			fs.disable(DisabledQuickCheck, err.Error(), "")
 			continue
 		}
 
 		idx, err := loadIndexDB(db, fcfg.ID)
 		if err != nil {
-			_ = db.Close()
-			slog.Error("failed to load index from SQLite",
-				"folder", fcfg.ID, "error", err)
-			state.Global.Update("filesync-folder", fcfg.ID, state.Failed,
-				"loadIndex: "+err.Error())
+			fs.disable(classifyMetaError(err), err.Error(), "")
 			continue
 		}
-		// PG: secondary sequence index is rebuilt by loadIndexDB via
-		// recomputeCache; no separate rebuild needed here.
 
 		peers, err := loadPeerStatesDB(db, fcfg.ID)
 		if err != nil {
-			_ = db.Close()
-			slog.Error("failed to load peer states from SQLite",
-				"folder", fcfg.ID, "error", err)
-			state.Global.Update("filesync-folder", fcfg.ID, state.Failed,
-				"loadPeerStates: "+err.Error())
+			fs.disable(classifyMetaError(err), err.Error(), "")
 			continue
 		}
 
@@ -1067,19 +1150,17 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		}
 		sort.Strings(initConflicts)
 
-		fs := &folderState{
-			cfg:           fcfg,
-			root:          folderRoot,
-			index:         idx,
-			ignore:        ignore,
-			peers:         peers,
-			conflicts:     initConflicts,
-			db:            db,
-			pending:       make(map[string]PendingSummary),
-			peerLastError: make(map[string]string),
-			inFlight:      make(map[string]bool),
-		}
-		n.folders[fcfg.ID] = fs
+		fs.index = idx
+		fs.ignore = ignore
+		fs.peers = peers
+		fs.conflicts = initConflicts
+
+		// R2 / Gap 5: integrity_check runs asynchronously after folder
+		// open completes — ~10 MB/s scan, tens of seconds on a large
+		// DB. The audit's wg-tracked spawn lives below the folder
+		// loop where wg is declared; we collect (fs, db) here and
+		// spawn after wg is in scope.
+		integrityChecks = append(integrityChecks, integrityCheckTarget{fs: fs, db: db})
 
 		// C2: detect network filesystem at startup.
 		if fsType, isNet := detectNetworkFS(fcfg.Path); isNet {
@@ -1133,6 +1214,24 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	state.Global.UpdateTLSFingerprint("filesync", cfg.Bind, serverFP)
 
 	var wg sync.WaitGroup
+
+	// R2 / Gap 5: spawn the asynchronous integrity_check goroutine
+	// for each folder that opened cleanly. A failure transitions the
+	// folder to FolderDisabled (Z6: any in-flight writer tx is
+	// canceled) but does not block the rest of Start. The goroutine
+	// is owned by the Run context; cancel propagates from shutdown.
+	for _, t := range integrityChecks {
+		wg.Add(1)
+		go func(fs *folderState, db *sql.DB) {
+			defer wg.Done()
+			if err := runIntegrityCheck(ctx, db); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return
+				}
+				fs.disable(DisabledIntegrityCheck, err.Error(), "")
+			}
+		}(t.fs, t.db)
+	}
 
 	// HTTP server.
 	wg.Add(1)
@@ -1309,6 +1408,13 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 			return
 		}
 		if fs.cfg.Direction == "disabled" {
+			continue
+		}
+		// PERSISTENCE-AUDIT.md §2.2 R8: skip folders that have
+		// transitioned to FolderDisabled (open failed, integrity
+		// check failed, etc.). Other folders and other mesh
+		// components keep running.
+		if fs.IsDisabled() {
 			continue
 		}
 		// When dirtyRoots is set, skip folders not affected by fsnotify events.
@@ -1541,6 +1647,11 @@ func (n *Node) syncAllPeers(ctx context.Context) {
 	var wg sync.WaitGroup
 	for _, fs := range n.folders {
 		if fs.cfg.Direction == "disabled" {
+			continue
+		}
+		// Skip folders that have transitioned to FolderDisabled —
+		// see §2.2 R8.
+		if fs.IsDisabled() {
 			continue
 		}
 		for _, peer := range fs.cfg.Peers {
@@ -2762,7 +2873,7 @@ func (n *Node) persistFolder(folderID string, force bool) {
 	var indexMs float64
 	if shouldSaveIndex {
 		idxStart := time.Now()
-		if err := saveIndex(fs.db, folderID, idxSnapshot); err != nil {
+		if err := saveIndex(fs.writerCtx, fs.db, folderID, idxSnapshot); err != nil {
 			slog.Warn("failed to save index to SQLite",
 				"folder", folderID, "error", err)
 			fs.indexMu.Lock()
@@ -2782,7 +2893,7 @@ func (n *Node) persistFolder(folderID string, force bool) {
 	var peersMs float64
 	if shouldSavePeers {
 		peersStart := time.Now()
-		if err := savePeerStatesDB(fs.db, folderID, peersSnapshot); err != nil {
+		if err := savePeerStatesDB(fs.writerCtx, fs.db, folderID, peersSnapshot); err != nil {
 			slog.Warn("failed to save peer states to SQLite",
 				"folder", folderID, "error", err)
 			fs.indexMu.Lock()

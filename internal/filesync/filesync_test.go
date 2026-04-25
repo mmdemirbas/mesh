@@ -45,7 +45,7 @@ func testPersistAndReload(t *testing.T, dataDir, folderID string, idx *FileIndex
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	idx.MarkAllDirty()
-	if err := saveIndex(db, folderID, idx); err != nil {
+	if err := saveIndex(context.Background(), db, folderID, idx); err != nil {
 		t.Fatalf("saveIndex: %v", err)
 	}
 	loaded, err := loadIndexDB(db, folderID)
@@ -670,7 +670,7 @@ func TestScanAndPersist(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	idx.MarkAllDirty()
-	if err := saveIndex(db, "f1", idx); err != nil {
+	if err := saveIndex(context.Background(), db, "f1", idx); err != nil {
 		t.Fatalf("saveIndex: %v", err)
 	}
 
@@ -6975,6 +6975,11 @@ func TestPersistFolder_Concurrent(t *testing.T) {
 		indexDirty: true,
 		peersDirty: true,
 	}
+	// Wire the writer context (commit 3 routes saveIndex through
+	// db.BeginTx(fs.writerCtx, ...) so disable() can cancel an
+	// in-flight tx; tests that build folderState directly must
+	// supply a non-nil ctx).
+	fs.writerCtx, fs.writerCancel = context.WithCancel(context.Background())
 
 	n := &Node{
 		dataDir: dir,

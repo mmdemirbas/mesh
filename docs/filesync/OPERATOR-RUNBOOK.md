@@ -266,19 +266,32 @@ shows, then expands the procedure.
 
 ### §4.1 `quick_check_failed`
 
-> Action string and procedure populated in audit commit 3.
-> Recovery requires backup restore (see §5).
+**Action:** restore from the most recent quick_check_ok backup; see runbook §4.1 + §5
+
+`PRAGMA quick_check` reports gross page-level corruption at folder
+open. The folder enters disabled before any sync touches the
+corrupt rows. Recovery requires backup restore (see §5). The DB
+file on disk is left intact for forensics — do not delete it
+until the restore lands cleanly.
 
 ### §4.2 `integrity_check_failed`
 
-> Action string and procedure populated in audit commit 3.
-> Recovery requires backup restore (see §5). Note: writes from
-> the live integrity-check window are still in the DB but will
-> be lost on restore; this is expected.
+**Action:** restore from the most recent quick_check_ok backup; writes after the failure are lost; see runbook §4.2 + §5
+
+`PRAGMA integrity_check` runs asynchronously after folder open
+and catches subtle corruption that `quick_check` misses (~10 MB/s,
+tens of seconds on a large DB). The folder was live during the
+window between open and the integrity_check completion; writes
+that committed in that window are in the DB but will be lost on
+restore — this is expected. The disabled-state JSON carries
+`tx_in_flight_rolled_back: true` if a writer transaction was
+running at integrity_check failure time (iter-4 Z6).
 
 ### §4.3 `device_id_mismatch`
 
-> Decision tree. Iter-4 O3 named option 1 as the default.
+**Action:** restore ~/.mesh/filesync/device-id from backup, restart node; see runbook §4.3
+
+Decision tree. Iter-4 O3 named option 1 as the default.
 
 **Option 1 (default) — restore the device-id file.** The
 node-level `~/.mesh/filesync/device-id` was rotated or replaced
@@ -315,34 +328,70 @@ state on those other peers, the re-sync is automatic.
 
 These are two different enum values (iter-4 O4 split them):
 
-- `schema_version_mismatch` — the binary expects a different
-  `folder_meta.schema_version` than the one stored. This means
-  a future binary opened a v1 DB or vice versa. Restore from
-  backup or upgrade/downgrade the binary.
-- `metadata_parse_failed` — `folder_meta.sequence` (or another
-  scalar) was unparseable. The DB is corrupt at the metadata
-  level. Restore from backup (§5).
+- `schema_version_mismatch` —
+  **Action:** binary version mismatch — run the binary that wrote this schema, or restore from backup; see runbook §4.4
+
+  The binary expects a different `folder_meta.schema_version`
+  than the one stored. This means a future binary opened a v1
+  DB or vice versa. Restore from backup or upgrade/downgrade
+  the binary.
+
+- `metadata_parse_failed` —
+  **Action:** folder_meta is corrupt — restore from the most recent quick_check_ok backup; see runbook §4.4 + §5
+
+  `folder_meta.sequence` (or another scalar) was unparseable.
+  The DB is corrupt at the metadata level. Restore from backup
+  (§5).
 
 ### §4.5 `read_only_fs`
 
-> Action string and procedure populated in audit commit 3.
-> Remount read-write, then reopen the folder via §7 endpoint
-> (when shipped) or restart the node.
+**Action:** remount the filesystem read-write, then POST /api/filesync/folders/<id>/reopen; see runbook §4.5
+
+The folder DB cannot accept writes because the filesystem is
+mounted read-only. Remount read-write at the OS level, then
+either POST `/api/filesync/folders/<id>/reopen` (preferred —
+keeps SSH / proxy / clipsync sessions alive) or restart the
+node.
 
 ### §4.6 `disk_full`
 
-> Action string and procedure populated in audit commit 3.
-> Free disk space, then reopen the folder via §7 endpoint
-> (when shipped) or restart the node.
+**Action:** free disk space, then POST /api/filesync/folders/<id>/reopen; see runbook §4.6
+
+A SQLite write returned `SQLITE_FULL`. Free disk space at the
+OS level, then either POST `/api/filesync/folders/<id>/reopen`
+(preferred) or restart the node.
 
 ### §4.7 `dirty_set_overflow` (always look upstream first)
+
+**Action:** triage upstream I/O failure (it is the cause), then POST /api/filesync/folders/<id>/reopen; see runbook §4.7
 
 This enum almost never fires in isolation. It is the symptom of
 a sustained `disk_full` or `read_only_fs` that exceeded the
 10 000-path dirty-set cap. **Triage the upstream cause first**:
 check the metric history, the log, and any earlier
 `FolderDisabled` events. Once the upstream cause is fixed,
-restart resolves both.
+POST `/api/filesync/folders/<id>/reopen` (or restart the node).
+
+### §4.7b `legacy_index_refused`
+
+**Action:** delete legacy gob/yaml sidecar files in the folder cache directory, restart node; see runbook §1.1
+
+The folder cache directory carries left-over `index.gob`,
+`index.yaml`, `peers.yaml` (or their `.prev` / `.tmp` siblings)
+from a pre-v1 dev build. The v1 binary refuses to open such a
+directory because there is no migration path — DESIGN-v1 §0
+ships as a cold swap. Delete the sidecars by hand:
+
+```sh
+mesh down
+rm -f ~/.mesh/filesync/<folder-id>/index.gob*
+rm -f ~/.mesh/filesync/<folder-id>/index.yaml*
+rm -f ~/.mesh/filesync/<folder-id>/peers.yaml*
+mesh up
+```
+
+The folder will rebuild its index from the on-disk file content
+on the next scan.
 
 ### §4.8 `unknown` (escalation path)
 
