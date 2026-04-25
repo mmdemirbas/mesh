@@ -560,6 +560,40 @@ func TestAuditStatsContentBreakdown(t *testing.T) {
 	}
 }
 
+// TestCachedSectionBytes_HitsAndMisses pins the §4.6 cache contract:
+// a cold lookup triggers gateway.SectionBytes and stores the result;
+// a warm lookup returns the cached value without re-parsing. Pairs
+// keyed on (run, id) so distinct rows don't collide.
+func TestCachedSectionBytes_HitsAndMisses(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	k1 := pairKey{id: 1, run: "r1"}
+	k2 := pairKey{id: 2, run: "r1"}
+
+	// Cold lookups for two distinct keys land independently.
+	sb1 := cachedSectionBytes(k1, body, gateway.APIAnthropic)
+	sb2 := cachedSectionBytes(k2, body, gateway.APIAnthropic)
+	if sb1.Total() != len(body) || sb2.Total() != len(body) {
+		t.Errorf("cold lookups: sb1.Total=%d sb2.Total=%d, want %d", sb1.Total(), sb2.Total(), len(body))
+	}
+
+	// Warm lookup reuses the entry. Mutate the body slice underneath
+	// to prove no re-parse: if cache was bypassed, sb3 would parse
+	// the mutated bytes and produce a different partition.
+	bodyMut := append([]byte(nil), body...)
+	bodyMut[len(bodyMut)-2] = 'X'
+	sb3 := cachedSectionBytes(k1, bodyMut, gateway.APIAnthropic)
+	if sb3 != sb1 {
+		t.Errorf("warm lookup did not reuse cached value (cache bypassed?): %+v vs %+v", sb3, sb1)
+	}
+
+	// Cleanup so package-level cache doesn't bleed into other tests.
+	t.Cleanup(func() {
+		sectionBytesCache.Delete(k1)
+		sectionBytesCache.Delete(k2)
+	})
+}
+
 // TestAuditStatsContentBreakdown_MetadataLevelEmits Zero verifies the
 // graceful-degrade path: at LogLevelMetadata the body is not
 // persisted, so SectionBytes has nothing to classify. ContentBreakdown

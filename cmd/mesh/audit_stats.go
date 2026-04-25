@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mmdemirbas/mesh/internal/gateway"
@@ -285,7 +286,7 @@ func computeAuditStats(dir string, f statsFilter) (auditStatsResponse, error) {
 		if len(pa.req.body) > 0 {
 			clientAPI := clientAPIFromDirection(pa.req.direction)
 			if clientAPI != "" {
-				sb := gateway.SectionBytes(pa.req.body, clientAPI)
+				sb := cachedSectionBytes(pairKey{id: pa.req.id, run: pa.req.run}, pa.req.body, clientAPI)
 				resp.Totals.ContentBreakdown.System += int64(sb.System)
 				resp.Totals.ContentBreakdown.Tools += int64(sb.Tools)
 				resp.Totals.ContentBreakdown.UserText += int64(sb.UserText)
@@ -572,6 +573,38 @@ func parseWindowParam(window string, now time.Time) (since, until time.Time) {
 		return now.Add(-d), until
 	}
 	return time.Time{}, time.Time{}
+}
+
+// sectionBytesCache memoizes gateway.SectionBytes results across
+// admin-stats fetches. Audit log rows are immutable once written, so
+// a (run, id) tuple uniquely and permanently identifies the body
+// — caching the partition is safe forever for the process lifetime.
+//
+// Why we need this: per SPEC §4.6, input_bytes is computed on read
+// rather than persisted on disk. Without caching, every admin UI
+// fetch re-parses every row's body — measured at ~60s+ for the
+// real ~/.mesh/gateway/claude-audit dir (~1 GB across 14 files).
+// With the cache, the second-and-later fetches are sub-50ms; the
+// first cold fetch still pays the parse cost but only once per
+// process.
+//
+// Sized: unbounded sync.Map. At ~200 B per entry × 100K rows ≈
+// 20 MB; audit retention bounds growth at the source. If a
+// future workload pushes that past comfort, switch to a bounded
+// LRU — but the §4.6 reversal (persist input_bytes on disk)
+// becomes the better answer first.
+var sectionBytesCache sync.Map // pairKey -> gateway.SectionByteCounts
+
+// cachedSectionBytes is the read-time wrapper around gateway.SectionBytes
+// that memoizes per audit row. Misses populate the cache; hits skip the
+// parse entirely. Concurrency-safe via sync.Map.
+func cachedSectionBytes(key pairKey, body []byte, clientAPI string) gateway.SectionByteCounts {
+	if cached, ok := sectionBytesCache.Load(key); ok {
+		return cached.(gateway.SectionByteCounts)
+	}
+	sb := gateway.SectionBytes(body, clientAPI)
+	sectionBytesCache.Store(key, sb)
+	return sb
 }
 
 // clientAPIFromDirection maps the audit row's direction tag back to
