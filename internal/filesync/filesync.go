@@ -2,16 +2,20 @@ package filesync
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -648,6 +652,518 @@ type folderState struct {
 	reusableFiles map[string]FileEntry
 }
 
+// openFolderInit runs the per-folder open path: opens os.Root,
+// creates folderState, registers in n.folders, opens SQLite
+// writer + reader, runs every open-time check (legacy sidecar
+// refusal, device-id, quick_check, F7 sweep, .tmp cleanup, load
+// index + peer states, network-FS detect, scanning state).
+// Audit §6 commit 9.2: extracted from the original Run loop body
+// so the /reopen and /restore admin endpoints can re-run the
+// same sequence without the closure capture.
+//
+// Returns a non-nil *integrityCheckTarget when the open succeeded
+// and the deferred PRAGMA integrity_check goroutine should fire.
+// Returns nil when the folder failed to open (in which case it
+// transitioned to FolderDisabled with the appropriate reason and
+// is registered in n.folders for the dashboard).
+//
+// Concurrency: caller must serialize concurrent invocations
+// against the same folderID — the Run init loop runs
+// sequentially; the admin endpoints (commit 9.2) take a
+// per-folder lock before calling.
+func (n *Node) openFolderInit(ctx context.Context, fcfg config.FolderCfg) *integrityCheckTarget {
+	// L5: open an os.Root handle for TOCTOU-safe file operations.
+	// A missing path (e.g. host-specific mount point not present on this
+	// machine) must not abort the whole node — record the folder as
+	// failed and return without an integrity check.
+	folderRoot, rootErr := os.OpenRoot(fcfg.Path)
+	if rootErr != nil {
+		slog.Warn("filesync folder path missing, skipping", "folder", fcfg.ID, "path", fcfg.Path, "error", rootErr)
+		state.Global.Update("filesync-folder", fcfg.ID, state.Failed, "path missing: "+rootErr.Error())
+		for _, peer := range fcfg.Peers {
+			state.Global.Update("filesync-peer", fcfg.ID+"|"+peer, state.Failed, "folder path missing")
+		}
+		return nil
+	}
+
+	// C3: remove abandoned download temp files from previous crashed
+	// runs. Recent temps (within tempFileMaxAge) are preserved so
+	// downloadWithBlockVerify can resume across a restart; older ones
+	// are stale and would otherwise accumulate forever.
+	cleanTempFiles(fcfg.Path, tempFileMaxAge)
+
+	// PERSISTENCE-AUDIT.md §6 commit 3: open path is wrapped in
+	// the FolderDisabled state machinery. Folder is registered in
+	// n.folders BEFORE openFolderDB so any failure routes through
+	// fs.disable() and surfaces on the dashboard with the audit's
+	// closed-enum reason + action string.
+	folderCacheDir := filepath.Join(n.dataDir, fcfg.ID)
+	writerCtx, writerCancel := context.WithCancel(ctx)
+	fs := &folderState{
+		cfg:           fcfg,
+		root:          folderRoot,
+		pending:       make(map[string]PendingSummary),
+		peerLastError: make(map[string]string),
+		inFlight:      make(map[string]bool),
+	}
+	fs.writerCtx = writerCtx
+	fs.writerCancel = writerCancel
+	n.folders[fcfg.ID] = fs
+
+	if err := refuseLegacyIndex(folderCacheDir); err != nil {
+		fs.disable(DisabledLegacyIndex, err.Error(), "")
+		return nil
+	}
+
+	db, err := openFolderDB(folderCacheDir, n.deviceID)
+	if err != nil {
+		fs.disable(classifyOpenError(err), err.Error(), "")
+		return nil
+	}
+	fs.db = db
+
+	// Audit §6 commit 4 / decision §5 #10: dedicated read-only
+	// handle for peer-facing reads. Sized for n_peers + 3 so
+	// concurrent index exchanges across all peers do not
+	// serialize behind the writer's MaxOpenConns=1.
+	dbReader, err := openFolderDBReader(folderCacheDir, len(fcfg.Peers)+3)
+	if err != nil {
+		_ = db.Close()
+		fs.db = nil
+		fs.disable(classifyOpenError(err), err.Error(), "")
+		return nil
+	}
+	fs.dbReader = dbReader
+
+	// I7 (audit decision §5 #20): compare folder_meta.device_id
+	// against the node-level identity.
+	if err := checkDeviceID(db, n.deviceID); err != nil {
+		fs.disable(DisabledDeviceIDMismatch, err.Error(), "")
+		return nil
+	}
+
+	// R2 quick_check: synchronous at folder open.
+	if err := runQuickCheck(db); err != nil {
+		fs.disable(DisabledQuickCheck, err.Error(), "")
+		return nil
+	}
+
+	// Audit §6 commit 6 phase I + J: F7 .bak sweep.
+	sweepRes, sweepErr := runStartupBakSweep(ctx, db, folderRoot, fcfg.ID)
+	switch {
+	case sweepErr == nil:
+		if sweepRes.Scanned > 0 {
+			slog.Info("F7 sweep complete",
+				"folder", fcfg.ID,
+				"scanned", sweepRes.Scanned,
+				"unlinked", sweepRes.Unlinked,
+				"restored", sweepRes.Restored,
+				"orphans", len(sweepRes.Orphans))
+		}
+		// Audit §6 commit 9a: clean any leftover *.sqlite.tmp
+		// strays under <folderCacheDir>/backups/.
+		cleanBackupTmp(folderCacheDir, fcfg.ID)
+	case errors.Is(sweepErr, errSweepDBUnreadable):
+		fs.disable(DisabledIntegrityCheck, sweepErr.Error(), "")
+		return nil
+	case errors.Is(sweepErr, errSweepNeitherMatches):
+		diag := fmt.Sprintf(
+			"sweep: neither disk file matches SQLite for path(s) %v",
+			sweepRes.NeitherMatches)
+		fs.disable(DisabledUnknown, diag, "")
+		return nil
+	default:
+		fs.disable(DisabledUnknown, "sweep: "+sweepErr.Error(), "")
+		return nil
+	}
+
+	idx, err := loadIndexDB(db, fcfg.ID)
+	if err != nil {
+		fs.disable(classifyMetaError(err), err.Error(), "")
+		return nil
+	}
+
+	peers, err := loadPeerStatesDB(db, fcfg.ID)
+	if err != nil {
+		fs.disable(classifyMetaError(err), err.Error(), "")
+		return nil
+	}
+
+	// Detect path change and warn.
+	if idx.Path != "" && idx.Path != fcfg.Path {
+		slog.Warn("folder path changed, next scan will reconcile",
+			"folder", fcfg.ID, "old_path", idx.Path, "new_path", fcfg.Path)
+	}
+	idx.Path = fcfg.Path
+	idx.selfID = n.deviceID
+
+	ignore := newIgnoreMatcher(fcfg.IgnorePatterns)
+
+	var initConflicts []string
+	for path, entry := range idx.Range {
+		if !entry.Deleted && isConflictFile(filepath.Base(path)) {
+			initConflicts = append(initConflicts, path)
+		}
+	}
+	sort.Strings(initConflicts)
+
+	fs.index = idx
+	fs.ignore = ignore
+	fs.peers = peers
+	fs.conflicts = initConflicts
+
+	// C2: detect network filesystem at startup.
+	if fsType, isNet := detectNetworkFS(fcfg.Path); isNet {
+		fs.isNetworkFS = true
+		slog.Warn("folder root is on a network filesystem — sync durability depends on mount options",
+			"folder", fcfg.ID, "path", fcfg.Path, "fstype", fsType)
+	}
+
+	if fcfg.Direction == "disabled" {
+		state.Global.Update("filesync-folder", fcfg.ID, state.Connected, "disabled")
+	} else {
+		state.Global.Update("filesync-folder", fcfg.ID, state.Scanning, "initial scan "+fcfg.Path)
+		for _, peer := range fcfg.Peers {
+			state.Global.Update("filesync-peer", fcfg.ID+"|"+peer, state.Connecting, "")
+		}
+	}
+
+	return &integrityCheckTarget{fs: fs, db: db}
+}
+
+// closeOneFolder shuts a folder down: cancels the writer ctx
+// (rolling back any in-flight tx), closes the SQLite handles,
+// closes the os.Root, removes the folder from n.folders. After
+// this returns, /reopen or /restore can call openFolderInit
+// against the same fcfg to bring the folder back. Audit §6
+// commit 9.2.
+//
+// Concurrency: caller must hold a serialization point against
+// other reopen / restore invocations on the same folderID.
+// In-flight scan / sync goroutines on this folder's writerCtx
+// observe ctx.Done from the writerCancel and exit.
+func (n *Node) closeOneFolder(folderID string) {
+	fs, ok := n.folders[folderID]
+	if !ok {
+		return
+	}
+	if fs.writerCancel != nil {
+		fs.writerCancel()
+	}
+	if fs.dbReader != nil {
+		_ = fs.dbReader.Close()
+		fs.dbReader = nil
+	}
+	if fs.db != nil {
+		// PRAGMA optimize on close (audit §6 commit 8 phase B —
+		// also fired on full shutdown; running it on per-folder
+		// reopen keeps fresh-stats parity).
+		if _, err := fs.db.Exec("PRAGMA optimize"); err != nil {
+			slog.Debug("PRAGMA optimize on reopen close failed (non-fatal)",
+				"folder", folderID, "error", err)
+		}
+		_ = fs.db.Close()
+		fs.db = nil
+	}
+	if fs.root != nil {
+		_ = fs.root.Close()
+		fs.root = nil
+	}
+	delete(n.folders, folderID)
+}
+
+// ReopenFolder is the package-public entry point for the
+// /api/filesync/folders/<id>/reopen admin endpoint. Audit §6
+// commit 9.2 / iter-4 O12. Looks up the folder on the active
+// node, runs the reopen flow, returns the disabled-state error
+// (or nil on success). Returns errUnknownFolder when no active
+// node knows the folder.
+//
+// The endpoint dispatcher in cmd/mesh/admin.go uses this
+// instead of directly calling Node methods to keep the public
+// API surface narrow.
+func ReopenFolder(ctx context.Context, folderID string) error {
+	var foundNode *Node
+	activeNodes.ForEach(func(n *Node) {
+		if foundNode != nil {
+			return
+		}
+		if _, ok := n.folders[folderID]; ok {
+			foundNode = n
+			return
+		}
+		// Folder may exist in cfg but not yet in n.folders if a
+		// previous open failed and the disabled state was
+		// cleared. Check cfg too.
+		if _, ok := n.folderConfig(folderID); ok {
+			foundNode = n
+		}
+	})
+	if foundNode == nil {
+		return errUnknownFolder
+	}
+	return foundNode.reopenFolder(ctx, folderID)
+}
+
+// RestoreFolderFromBackup is the package-public entry point for
+// the /api/filesync/folders/<id>/restore admin endpoint. Audit §6
+// commit 9.2 / iter-4 O10 / Z11. Validates the operator-supplied
+// backup path is under the folder's backups/ directory (defense
+// against path traversal in the JSON payload), then runs the
+// L5 restore lifecycle.
+func RestoreFolderFromBackup(ctx context.Context, folderID, backupPath string) error {
+	var foundNode *Node
+	activeNodes.ForEach(func(n *Node) {
+		if foundNode != nil {
+			return
+		}
+		if _, ok := n.folderConfig(folderID); ok {
+			foundNode = n
+		}
+	})
+	if foundNode == nil {
+		return errUnknownFolder
+	}
+
+	// Path-traversal guard: the operator supplies an absolute
+	// path via the JSON body; we require it to be inside the
+	// folder's backups/ directory. Otherwise an attacker with
+	// the admin endpoint reachable could swap in arbitrary file
+	// content as the new index.sqlite.
+	expected := backupDirFor(filepath.Join(foundNode.dataDir, folderID))
+	clean := filepath.Clean(backupPath)
+	if !strings.HasPrefix(clean, expected+string(filepath.Separator)) {
+		return fmt.Errorf("restore: backup path %q must be under %q",
+			clean, expected)
+	}
+
+	return foundNode.restoreFromBackup(ctx, folderID, clean)
+}
+
+// reopenLockMu serializes reopen / restore operations across
+// all folders. Audit §6 commit 9.2: while a folder is being
+// closed-and-re-opened, no other lifecycle operation against
+// any folder can race. The lock is package-global because the
+// admin endpoints are dispatched per-process; Node-level
+// granularity would not buy enough parallelism to justify the
+// extra locking surface for v1's three-folder topology.
+var reopenLockMu sync.Mutex
+
+// ErrUnknownFolder is returned when a /reopen or /restore
+// request names a folder ID that is not in cfg.ResolvedFolders.
+// The admin handler maps this to HTTP 404. The folder may have
+// been removed from config or never registered.
+var ErrUnknownFolder = errors.New("filesync: unknown folder")
+
+// errUnknownFolder is the package-internal alias for the
+// exported sentinel; the rename let the admin handler use
+// errors.Is via the public API while keeping the package's own
+// call sites short.
+var errUnknownFolder = ErrUnknownFolder
+
+// folderConfig returns the resolved FolderCfg for a folder ID
+// from the running Node's config. Used by the lifecycle endpoints
+// to fetch the same FolderCfg the init loop saw, so reopen
+// preserves the original peer list, ignore patterns, etc.
+func (n *Node) folderConfig(folderID string) (config.FolderCfg, bool) {
+	for _, fcfg := range n.cfg.ResolvedFolders {
+		if fcfg.ID == folderID {
+			return fcfg, true
+		}
+	}
+	return config.FolderCfg{}, false
+}
+
+// reopenFolder closes the named folder and re-opens it via
+// openFolderInit. Audit §6 commit 9.2 / iter-4 O12. Used by:
+//   - POST /api/filesync/folders/<id>/reopen (operator-driven
+//     recovery from disabled state).
+//   - restoreFromBackup's final step.
+//
+// Holds reopenLockMu for the duration so concurrent reopen /
+// restore calls serialize. The integrity-check goroutine for
+// the freshly-opened DB fires inline (caller's lifetime owns
+// it; no shared wg). Returns the final state of the folder —
+// nil when the open succeeded, errUnknownFolder when the folder
+// is unknown to config, or the disable error when the open
+// transitioned to FolderDisabled.
+func (n *Node) reopenFolder(ctx context.Context, folderID string) error {
+	reopenLockMu.Lock()
+	defer reopenLockMu.Unlock()
+
+	fcfg, ok := n.folderConfig(folderID)
+	if !ok {
+		return errUnknownFolder
+	}
+	n.closeOneFolder(folderID)
+
+	target := n.openFolderInit(ctx, fcfg)
+	if target == nil {
+		// openFolderInit registered the folder in n.folders with
+		// a disabled state. Surface the disabled reason as a
+		// returned error so the admin endpoint can include it in
+		// the response.
+		if fs, ok := n.folders[folderID]; ok {
+			if ds := fs.disabled.Load(); ds != nil {
+				return fmt.Errorf("folder reopened in disabled state: reason=%s message=%s",
+					ds.Reason, ds.ErrorText)
+			}
+		}
+		return fmt.Errorf("folder %s reopen failed", folderID)
+	}
+
+	// Fire the deferred integrity check inline; caller's lifetime
+	// is the admin endpoint's request, which already has its own
+	// goroutine in net/http's handler pool.
+	go func() {
+		if err := runIntegrityCheck(ctx, target.db); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			target.fs.disable(DisabledIntegrityCheck, err.Error(), "")
+		}
+	}()
+	return nil
+}
+
+// restoreFromBackup runs the L5 restore lifecycle: validate the
+// chosen backup with quick_check, stop the folder, swap the
+// SQLite file (and -wal / -shm sidecars), bump folder_meta.epoch
+// to a fresh value, and reopen via openFolderInit. Audit §6
+// commit 9.2 / iter-4 O10 / Z11.
+//
+// The epoch bump is the load-bearing step: peers running against
+// the pre-restore epoch see a fresh re-baseline on next exchange
+// (per the Phase 7B reset trigger). The pre-swap quick_check
+// closes the iter-4 Z11 between-list-and-swap corruption window.
+func (n *Node) restoreFromBackup(ctx context.Context, folderID, backupPath string) error {
+	reopenLockMu.Lock()
+	defer reopenLockMu.Unlock()
+
+	fcfg, ok := n.folderConfig(folderID)
+	if !ok {
+		return errUnknownFolder
+	}
+
+	// Step 0: Z11 — quick_check the chosen backup BEFORE we touch
+	// anything. If the backup is corrupt, abort with a typed
+	// error and leave the folder in its current state.
+	checkDB, err := sql.Open("sqlite", backupPath)
+	if err != nil {
+		return fmt.Errorf("restore: open backup %s: %w", backupPath, err)
+	}
+	checkErr := runQuickCheck(checkDB)
+	_ = checkDB.Close()
+	if checkErr != nil {
+		return fmt.Errorf("restore: backup quick_check failed: %w", checkErr)
+	}
+
+	// Step 1: stop the folder. closeOneFolder cancels the writer
+	// ctx (rolling back any in-flight tx) and closes the
+	// SQLite handles. After this, no goroutine holds rows
+	// against the folder's index.sqlite.
+	n.closeOneFolder(folderID)
+
+	folderCacheDir := filepath.Join(n.dataDir, fcfg.ID)
+	livePath := filepath.Join(folderCacheDir, folderDBFilename)
+
+	// Step 2: swap. Copy backup → livePath (replacing the
+	// existing index.sqlite). Sidecars (-wal, -shm) are removed
+	// because they belong to the OLD index and are stale against
+	// the restored content.
+	if err := copyFile(backupPath, livePath, 0o600); err != nil {
+		return fmt.Errorf("restore: copy backup → live: %w", err)
+	}
+	for _, sidecar := range []string{livePath + "-wal", livePath + "-shm"} {
+		_ = os.Remove(sidecar)
+	}
+
+	// Step 3: bump folder_meta.epoch to a fresh value so peers
+	// see a re-baselined source on next exchange. Open the
+	// restored DB just long enough to update the epoch row, then
+	// close so step 4's openFolderInit gets a clean handle.
+	bumpDB, err := sql.Open("sqlite", livePath)
+	if err != nil {
+		return fmt.Errorf("restore: reopen for epoch bump: %w", err)
+	}
+	newEpoch := newRandomEpoch()
+	if _, err := bumpDB.ExecContext(ctx,
+		`INSERT INTO folder_meta(key, value) VALUES('epoch', ?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		newEpoch); err != nil {
+		_ = bumpDB.Close()
+		return fmt.Errorf("restore: epoch bump: %w", err)
+	}
+	_ = bumpDB.Close()
+
+	// Step 4: restart via reopenFolder semantics. Drop the lock
+	// across the call to openFolderInit because reopenFolder also
+	// takes it; we hold it for the steps above so a concurrent
+	// /reopen against the same folder cannot race.
+	target := n.openFolderInit(ctx, fcfg)
+	if target == nil {
+		if fs, ok := n.folders[folderID]; ok {
+			if ds := fs.disabled.Load(); ds != nil {
+				return fmt.Errorf("restore: post-restore folder is disabled: reason=%s message=%s",
+					ds.Reason, ds.ErrorText)
+			}
+		}
+		return fmt.Errorf("restore: openFolderInit failed for %s", folderID)
+	}
+	go func() {
+		if err := runIntegrityCheck(ctx, target.db); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			target.fs.disable(DisabledIntegrityCheck, err.Error(), "")
+		}
+	}()
+	slog.Info("restore: folder restored from backup",
+		"folder", folderID, "backup", backupPath, "new_epoch", newEpoch)
+	return nil
+}
+
+// copyFile copies src to dst with the given mode. Used by the
+// restore path; isolated here so the unit test can call it
+// without spinning up SQLite. Streams via io.Copy so the size
+// is bounded by file size (no memory ceiling for huge backups).
+func copyFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src) //nolint:gosec // G304: src is operator-supplied via the restore endpoint
+	if err != nil {
+		return fmt.Errorf("open src: %w", err)
+	}
+	defer func() { _ = in.Close() }()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return fmt.Errorf("open dst: %w", err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("copy: %w", err)
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("sync: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close dst: %w", err)
+	}
+	return nil
+}
+
+// newRandomEpoch returns a fresh 16-character hex epoch. Audit
+// decision §5 #17 / iter-4 O10: the restore lifecycle bumps the
+// folder_meta.epoch so peers re-baseline rather than treat the
+// rewind as silent data loss. Hex-encoded 64-bit random value;
+// collision probability across the lifetime of the daemon is
+// negligible.
+func newRandomEpoch() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 // integrityCheckTarget pairs a folderState with its writer DB
 // handle so the deferred PRAGMA integrity_check goroutine can
 // route a failure through fs.disable() (audit §6 commit 3 / R2 /
@@ -1268,208 +1784,13 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	// goroutines spawned below the folder loop where wg is in scope.
 	var integrityChecks []integrityCheckTarget
 
-	// Initialize folders.
+	// Initialize folders. The per-folder open path is extracted to
+	// (*Node).openFolderInit so the /reopen and /restore admin
+	// endpoints can re-run the same logic post-init (audit §6
+	// commit 9.2 / iter-4 O12).
 	for _, fcfg := range cfg.ResolvedFolders {
-		// L5: open an os.Root handle for TOCTOU-safe file operations.
-		// A missing path (e.g. host-specific mount point not present on this
-		// machine) must not abort the whole node — record the folder as
-		// failed and continue so the listener and other folders come up.
-		folderRoot, rootErr := os.OpenRoot(fcfg.Path)
-		if rootErr != nil {
-			slog.Warn("filesync folder path missing, skipping", "folder", fcfg.ID, "path", fcfg.Path, "error", rootErr)
-			state.Global.Update("filesync-folder", fcfg.ID, state.Failed, "path missing: "+rootErr.Error())
-			for _, peer := range fcfg.Peers {
-				state.Global.Update("filesync-peer", fcfg.ID+"|"+peer, state.Failed, "folder path missing")
-			}
-			continue
-		}
-
-		// C3: remove abandoned download temp files from previous crashed
-		// runs. Recent temps (within tempFileMaxAge) are preserved so
-		// downloadWithBlockVerify can resume across a restart; older ones
-		// are either stale (the peer's file has moved on) or leftovers
-		// from an uninstall/config change and would otherwise accumulate
-		// forever. Runs off the hot path — a filesystem walk is fine at
-		// folder init.
-		cleanTempFiles(fcfg.Path, tempFileMaxAge)
-
-		// PERSISTENCE-AUDIT.md §6 commit 3: open path is wrapped in
-		// the FolderDisabled state machinery. Folder is registered in
-		// n.folders BEFORE openFolderDB so any failure routes through
-		// fs.disable() and surfaces on the dashboard with the audit's
-		// closed-enum reason + action string. Sync/scan loops check
-		// fs.IsDisabled() and skip; other folders and other mesh
-		// components are untouched.
-		folderCacheDir := filepath.Join(dataDir, fcfg.ID)
-		writerCtx, writerCancel := context.WithCancel(ctx)
-		fs := &folderState{
-			cfg:           fcfg,
-			root:          folderRoot,
-			pending:       make(map[string]PendingSummary),
-			peerLastError: make(map[string]string),
-			inFlight:      make(map[string]bool),
-		}
-		fs.writerCtx = writerCtx
-		fs.writerCancel = writerCancel
-		n.folders[fcfg.ID] = fs
-
-		if err := refuseLegacyIndex(folderCacheDir); err != nil {
-			fs.disable(DisabledLegacyIndex, err.Error(), "")
-			continue
-		}
-
-		db, err := openFolderDB(folderCacheDir, n.deviceID)
-		if err != nil {
-			fs.disable(classifyOpenError(err), err.Error(), "")
-			continue
-		}
-		fs.db = db
-
-		// Audit §6 commit 4 / decision §5 #10: dedicated read-only
-		// handle for peer-facing reads. Sized for n_peers + 3 so
-		// concurrent index exchanges across all peers do not
-		// serialize behind the writer's MaxOpenConns=1.
-		dbReader, err := openFolderDBReader(folderCacheDir, len(fcfg.Peers)+3)
-		if err != nil {
-			_ = db.Close()
-			fs.db = nil
-			fs.disable(classifyOpenError(err), err.Error(), "")
-			continue
-		}
-		fs.dbReader = dbReader
-
-		// I7 (audit decision §5 #20): compare folder_meta.device_id
-		// against the node-level identity. Mismatch → FolderDisabled
-		// with reason `device_id_mismatch`. Recovery: restore the
-		// device-id file (runbook §4.3 option 1) before re-running.
-		if err := checkDeviceID(db, n.deviceID); err != nil {
-			fs.disable(DisabledDeviceIDMismatch, err.Error(), "")
-			continue
-		}
-
-		// R2 quick_check: synchronous at folder open, ~ms even on
-		// large DBs. quick_check_failed → FolderDisabled before any
-		// sync/scan touches the corrupt rows.
-		if err := runQuickCheck(db); err != nil {
-			fs.disable(DisabledQuickCheck, err.Error(), "")
-			continue
-		}
-
-		// Audit §6 commit 6 phase I + J: F7 .bak sweep.
-		// Reconciles any leftover `.mesh-bak-<hash>` files against
-		// the SQLite row for the underlying path. Branch (a)
-		// unlinks stale .bak files left behind by a successful
-		// commit + crashed unlink; branch (b) restores the .bak
-		// when SQLite still carries the pre-download hash (commit
-		// failed, .bak holds the live local copy). Z1: SQLite
-		// query failure → leave every .bak intact, transition to
-		// FolderDisabled with the SQLite-derived reason. Z13:
-		// neither on-disk file nor .bak filename hash matches the
-		// SQLite row → FolderDisabled(unknown) with the divergent
-		// paths in the diagnostic payload. Runs AFTER quick_check
-		// so the structured branches can trust db.Query won't fail
-		// for the trivial-corruption reason.
-		sweepRes, sweepErr := runStartupBakSweep(ctx, db, folderRoot, fcfg.ID)
-		switch {
-		case sweepErr == nil:
-			if sweepRes.Scanned > 0 {
-				slog.Info("F7 sweep complete",
-					"folder", fcfg.ID,
-					"scanned", sweepRes.Scanned,
-					"unlinked", sweepRes.Unlinked,
-					"restored", sweepRes.Restored,
-					"orphans", len(sweepRes.Orphans))
-			}
-			// Audit §6 commit 9a: clean any leftover *.sqlite.tmp
-			// strays under <folderCacheDir>/backups/. Runs after
-			// the F7 sweep so a successful folder open always
-			// leaves a clean backup directory.
-			cleanBackupTmp(folderCacheDir, fcfg.ID)
-		case errors.Is(sweepErr, errSweepDBUnreadable):
-			// Z1: leave .bak files intact for restore-from-backup
-			// to encounter post-reopen.
-			fs.disable(DisabledIntegrityCheck, sweepErr.Error(), "")
-			continue
-		case errors.Is(sweepErr, errSweepNeitherMatches):
-			// Z13: divergent on-disk state. Diagnostic payload
-			// names the offending paths; runbook §4.8 covers the
-			// triage flow.
-			diag := fmt.Sprintf(
-				"sweep: neither disk file matches SQLite for path(s) %v",
-				sweepRes.NeitherMatches)
-			fs.disable(DisabledUnknown, diag, "")
-			continue
-		default:
-			fs.disable(DisabledUnknown, "sweep: "+sweepErr.Error(), "")
-			continue
-		}
-
-		idx, err := loadIndexDB(db, fcfg.ID)
-		if err != nil {
-			fs.disable(classifyMetaError(err), err.Error(), "")
-			continue
-		}
-
-		peers, err := loadPeerStatesDB(db, fcfg.ID)
-		if err != nil {
-			fs.disable(classifyMetaError(err), err.Error(), "")
-			continue
-		}
-
-		// Detect path change and warn. The scan will handle the rest correctly:
-		// moved dir → same files, no changes; different content → deletions
-		// propagate to peers, which is the correct behavior.
-		if idx.Path != "" && idx.Path != fcfg.Path {
-			slog.Warn("folder path changed, next scan will reconcile",
-				"folder", fcfg.ID, "old_path", idx.Path, "new_path", fcfg.Path)
-		}
-		idx.Path = fcfg.Path
-		// C6: pin the local device ID so scan can bump the per-file
-		// vector clock on local writes.
-		idx.selfID = n.deviceID
-
-		ignore := newIgnoreMatcher(fcfg.IgnorePatterns)
-
-		// Pre-populate conflicts from persisted index so the admin API
-		// shows conflict files immediately on restart without waiting
-		// for the first scan to walk the filesystem.
-		var initConflicts []string
-		for path, entry := range idx.Range {
-			if !entry.Deleted && isConflictFile(filepath.Base(path)) {
-				initConflicts = append(initConflicts, path)
-			}
-		}
-		sort.Strings(initConflicts)
-
-		fs.index = idx
-		fs.ignore = ignore
-		fs.peers = peers
-		fs.conflicts = initConflicts
-
-		// R2 / Gap 5: integrity_check runs asynchronously after folder
-		// open completes — ~10 MB/s scan, tens of seconds on a large
-		// DB. The audit's wg-tracked spawn lives below the folder
-		// loop where wg is declared; we collect (fs, db) here and
-		// spawn after wg is in scope.
-		integrityChecks = append(integrityChecks, integrityCheckTarget{fs: fs, db: db})
-
-		// C2: detect network filesystem at startup.
-		if fsType, isNet := detectNetworkFS(fcfg.Path); isNet {
-			fs.isNetworkFS = true
-			slog.Warn("folder root is on a network filesystem — sync durability depends on mount options",
-				"folder", fcfg.ID, "path", fcfg.Path, "fstype", fsType)
-		}
-
-		if fcfg.Direction == "disabled" {
-			state.Global.Update("filesync-folder", fcfg.ID, state.Connected, "disabled")
-		} else {
-			// Publish folder as Scanning immediately so the dashboard and
-			// admin UI show a "loading" state from the first paint — before
-			// the initial scan finishes walking the filesystem.
-			state.Global.Update("filesync-folder", fcfg.ID, state.Scanning, "initial scan "+fcfg.Path)
-			for _, peer := range fcfg.Peers {
-				state.Global.Update("filesync-peer", fcfg.ID+"|"+peer, state.Connecting, "")
-			}
+		if t := n.openFolderInit(ctx, fcfg); t != nil {
+			integrityChecks = append(integrityChecks, *t)
 		}
 	}
 

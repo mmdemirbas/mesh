@@ -16,8 +16,9 @@ import (
 // model that the cutover bench-disqualified at 655 ms full-write.
 //
 // Run with:
-//   go test -run NONE -bench BenchmarkPersist_168kFiles_3Dirty \
-//     -benchtime=1x -count=10 ./internal/filesync/
+//
+//	go test -run NONE -bench BenchmarkPersist_168kFiles_3Dirty \
+//	  -benchtime=1x -count=10 ./internal/filesync/
 func BenchmarkPersist_168kFiles_3Dirty(b *testing.B) {
 	const folderID = "bench-folder"
 	const n = 168_000
@@ -90,8 +91,9 @@ func BenchmarkPersist_168kFiles_3Dirty(b *testing.B) {
 // budget for that one-shot operation.
 //
 // Run with:
-//   go test -run NONE -bench BenchmarkPersist_168kFiles_FullWrite \
-//     -benchtime=1x -count=5 ./internal/filesync/
+//
+//	go test -run NONE -bench BenchmarkPersist_168kFiles_FullWrite \
+//	  -benchtime=1x -count=5 ./internal/filesync/
 func BenchmarkPersist_168kFiles_FullWrite(b *testing.B) {
 	const folderID = "bench-folder"
 	const n = 168_000

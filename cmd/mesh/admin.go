@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -497,6 +498,67 @@ func buildAdminMux(ring *logRing, logFilePath, perfLogPath string) *http.ServeMu
 			return
 		}
 		_ = json.NewEncoder(w).Encode(backups)
+	})
+
+	// POST /api/filesync/folders/<id>/reopen — per-folder reload.
+	// Audit §6 commit 9.2 / iter-4 O12. Re-runs the open path on
+	// a single folder without touching SSH / proxy / clipsync /
+	// gateway. Recovery from disk_full, read_only_fs,
+	// dirty_set_overflow uses this instead of a full process
+	// restart. Body: ignored. Response: 200 OK on success, 404
+	// on unknown folder, 500 with the disabled-state error
+	// message on a failed reopen.
+	mux.HandleFunc("POST /api/filesync/folders/{id}/reopen", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		folderID := r.PathValue("id")
+		err := filesync.ReopenFolder(r.Context(), folderID)
+		if err != nil {
+			if errors.Is(err, filesync.ErrUnknownFolder) {
+				http.Error(w, `{"error":"unknown folder"}`, http.StatusNotFound)
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "reopened", "folder": folderID})
+	})
+
+	// POST /api/filesync/folders/<id>/restore — restore a folder
+	// from a backup file. Audit §6 commit 9.2 / iter-4 O10 / Z11.
+	// Body: {"backup_path": "..."}. The path must point to a file
+	// inside the folder's backups/ directory (defense against
+	// path traversal). Five-step lifecycle: pre-check the backup
+	// with quick_check; stop the folder; swap the index; bump
+	// folder_meta.epoch; reopen via openFolderInit which re-runs
+	// the F7 sweep against the restored DB.
+	mux.HandleFunc("POST /api/filesync/folders/{id}/restore", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		folderID := r.PathValue("id")
+		var body struct {
+			BackupPath string `json:"backup_path"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
+			return
+		}
+		if body.BackupPath == "" {
+			http.Error(w, `{"error":"backup_path required"}`, http.StatusBadRequest)
+			return
+		}
+		err := filesync.RestoreFolderFromBackup(r.Context(), folderID, body.BackupPath)
+		if err != nil {
+			if errors.Is(err, filesync.ErrUnknownFolder) {
+				http.Error(w, `{"error":"unknown folder"}`, http.StatusNotFound)
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status": "restored", "folder": folderID, "from": body.BackupPath,
+		})
 	})
 
 	// GET /api/filesync/conflicts — list conflict files.
