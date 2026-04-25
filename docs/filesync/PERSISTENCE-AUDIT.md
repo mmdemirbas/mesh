@@ -74,6 +74,19 @@
 > "long-running production composition" — the failure model is
 > first-hour blast radius, not weeks of accumulated state.
 >
+> **Commit-2 bench landed (2026-04-25): hybrid locked, β
+> closed.** `BenchmarkLoadIndex_168kFiles` recorded 655 ms
+> median (min 624 ms, max 724 ms, std-dev 34 ms) on Apple
+> M1 Max with `modernc.org/sqlite v1.49.1` — 8× over the
+> 80 ms threshold and 94× over the `cloneInto` baseline.
+> β is not viable at this scale. INV-2, §5 #9, and §6
+> commit 7 are updated: hybrid is the v1 selection, not the
+> "conservative borderline default." β reopen criteria are
+> named in §6 commit 7 (CGO sqlite acceptable, modernc 5×
+> faster, or hybrid cold-load drops below 100 ms). Memory
+> budget table for hybrid lives in §6 commit 7: ~76 MB
+> resident for the realistic deployment, ~960 MB worst case.
+>
 > **Renumbering arithmetic (footnote).** β finish lives at the
 > same number (commit 7) before and after the rescope. This is
 > *coincidental*, not "unchanged." The arithmetic: iter-3 had
@@ -403,32 +416,26 @@ never consulted by peer-facing code paths.
 - Dashboard active-count / active-size → folderState cached counters
   (INV-4), not a FileIndex field.
 
-**INV-2 — `FileIndex` is scan-local (provisional pending bench).**
-The candidate model: at scan start the working copy is constructed
-via `SELECT` of the folder's rows and discarded after the scan's
-commit. Between scans there is no `FileIndex` — it does not exist,
-cannot be read, cannot drift. `setEntry` and `cloneInto` become
-internal to the scan path. Non-scan mutation paths (download,
-rename, delete) operate directly on SQLite via sync-persist.
+**INV-2 — `FileIndex` is hybrid (locked at commit 2 bench).**
+In-memory `FileIndex` is retained between scans as a
+scan-private working copy populated from SQLite at folder open.
+SQLite remains the sole peer-visible truth; INV-1, INV-3, INV-4
+are unchanged. The full-row `SELECT` runs once per folder open;
+subsequent scans diff against the in-memory copy and persist
+deltas via the dirty-set.
 
-The per-scan `SELECT` cost on `modernc.org/sqlite` (pure Go,
-typically 2–4× slower than CGo SQLite for row-decode-heavy queries
-on a 14-column row with two BLOBs) is not yet measured.
-**`BenchmarkLoadIndex_168kFiles` ships in commit 2 as the gate
-for INV-2:**
+The audit originally framed β (FileIndex discarded between
+scans) as the candidate model and hybrid as a fallback if the
+bench landed above 80 ms. **`BenchmarkLoadIndex_168kFiles`
+landed at 655 ms median across 10 runs on Apple M1 Max with
+modernc.org/sqlite v1.49.1.** That is 8× over the 80 ms
+threshold and 94× over the `cloneInto` baseline of 7 ms. β is
+not viable at this scale; hybrid is the only path that meets
+the latency bar.
 
-- `< 80 ms` → INV-2 stands; commits 4–7 proceed as planned.
-- `≥ 80 ms` → pivot to **hybrid**: in-memory `FileIndex` is
-  retained between scans as a private scan-only working copy.
-  INV-1, INV-3, INV-4 are unchanged — SQLite remains the sole
-  peer-visible truth, sequences are still assigned in tx,
-  BaseHashes are still committed atomically. Only the "discard
-  after scan" rule is relaxed.
-
-The 80 ms gate is deliberately tight: today's `cloneInto`
-recycling baseline is 7 ms / 0 allocations on the target
-hardware, so any value above ~10× that floor regresses
-watch-triggered hot-path scans materially.
+The full bench data and the recorded selection live in
+DESIGN-v1 §0; the locked decision and reopen criteria are in
+§6 commit 7.
 
 **INV-3 — Every write is sequence-conditioned, sequences assigned
 inside the commit transaction.** Two parts:
@@ -735,14 +742,23 @@ Iteration-3 calls (settled 2026-04-25):
    Receiver idempotency (already shipped — applying a hint twice
    is a no-op) is pinned by regression test, not new code.
    See §2.6 I8.
-9. **β architecture finality.** **Provisional pending bench.**
-   `BenchmarkLoadIndex_168kFiles` runs in commit 2.
-   `< 80 ms` → β proceeds. `≥ 80 ms` → pivot to hybrid (in-memory
-   `FileIndex` retained between scans as scan-private working
-   copy; SQLite remains the sole peer-visible truth). The 80 ms
-   gate is deliberately tight: `cloneInto` is 7 ms today, and a
-   ≥ 10× regression on watch-triggered scans is not acceptable.
-   See §2.8 INV-2.
+9. **β architecture finality.** **Hybrid locked at commit 2
+   bench.** `BenchmarkLoadIndex_168kFiles` ran 10 iterations on
+   Apple M1 Max with modernc.org/sqlite v1.49.1 and landed at
+   655 ms median (min 624 ms, max 724 ms, std-dev 34 ms,
+   210 MB / 4.98M allocs per load — transient GC churn, not
+   retained). That is 8× the 80 ms threshold and 94× the
+   `cloneInto` baseline. β is closed for v1; hybrid is the only
+   path that meets the latency bar. The 75–85 ms borderline
+   default is moot. **β reopen criteria** (any one):
+   (a) CGO sqlite acceptable in build target — off the table
+   under the current cross-compile constraint;
+   (b) `modernc.org/sqlite` ships ≥ 5× row-decode improvement
+   over v1.49.1 (re-bench needs to land under 150 ms);
+   (c) measured cold-load on the largest folder under hybrid
+   drops below 100 ms (deployment shrinks, schema slims, or
+   Go runtime decode improves). See §2.8 INV-2 and §6 commit 7
+   for the full memory budget table and locked-decision prose.
 10. **Reader handle.** **Two `*sql.DB` per folder, ship at
     commit 4.** Replaces the iter-2 "defer until measured
     regression" position. Writer handle stays at
@@ -954,24 +970,21 @@ consistent — never a "land now, fix later" intermediate state.
    2. Run the bench on the target hardware **with `-count=10`
       (or higher); record the median, the standard deviation,
       and the per-run numbers** in the commit message and in
-      `RESEARCH.md`. A single-run number is a coin flip, not a
-      decision artifact. Decision-grade form: "82 ms median,
-      ±3 ms std-dev across 10 runs"; reject "82 ms from one
-      run." If std-dev exceeds 10 ms, raise the run count or
-      stabilize the host (background load, CPU governor) before
-      recording — the 75–85 ms borderline band in commit 7 is
-      meaningful only when the variance is bounded.
-   3. **Decision recorded here, executed in commit 7:**
-      `< 80 ms` → β proceeds at commit 7 (FileIndex discarded
-      between scans). `≥ 80 ms` → hybrid pivot (in-memory
-      FileIndex retained between scans as scan-private). Commit
-      7's prose is the explicit decision tree.
+      `DESIGN-v1.md` §0. A single-run number is a coin flip,
+      not a decision artifact. Decision-grade form: "655 ms
+      median, ±34 ms std-dev across 10 runs"; reject "655 ms
+      from one run." If std-dev exceeds 10 % of the median,
+      raise the run count or stabilize the host (background
+      load, CPU governor) before recording.
+   3. **Decision recorded here, executed in commit 7.** The
+      bench landed at 655 ms median (8× over the 80 ms
+      threshold). β is closed for v1; hybrid is locked. Commit
+      7 ships the locked-decision prose plus the β reopen
+      criteria. The recorded decision lives in DESIGN-v1 §0.
    4. Storage swap (gob deletion + SQLite wiring) lands after
-      the decision is recorded. The decision is durable in the
-      commit message even though the gob path is gone — a
-      hybrid is always reachable from where commit 2 lands
-      because the in-memory `fs.index` lives until commit 7
-      explicitly discards it (β path) or keeps it (hybrid path).
+      the decision is recorded. The in-memory `fs.index` lives
+      between scans (the hybrid model that commit 7 finalizes);
+      commit 2 already operates under that assumption.
 
    Open-path failures temporarily log and skip the folder here
    — the `FolderDisabled` transition arrives in commit 3.
@@ -1106,13 +1119,15 @@ consistent — never a "land now, fix later" intermediate state.
    Gap 3 (write ordering), Gap 4' (`.bak` lifecycle), iter-4
    Z1 (DB-unreadable sweep branch), Z13 (neither-matches
    sweep branch).
-7. **β finish — sequence-in-tx + FileIndex disposition (INV-2,
-   INV-3) + build-time protocol selection (iter-4 O15) +
+7. **Scan finalization — sequence-in-tx + hybrid FileIndex
+   (INV-2, INV-3) + build-time protocol selection (iter-4 O15) +
    epoch-mismatch handshake invariant (iter-4 Z2) +
-   index-model-mismatch metric (iter-4 Z10).** Decision tree,
-   executed against the bench number recorded in commit 2.
+   index-model-mismatch metric (iter-4 Z10).** Hybrid is the
+   v1 selection. The β branch is closed; see "Locked decision"
+   and "Reopen criteria" below for the rationale.
+
    The choice between β and hybrid is **a build-time
-   constant** (`FILESYNC_INDEX_MODEL = "beta"` or `"hybrid"`)
+   constant** (`FILESYNC_INDEX_MODEL = "hybrid"` for v1)
    stamped on every `IndexExchange` like `protocol_version`;
    the index-exchange handshake rejects any peer with a
    different value and records
@@ -1140,24 +1155,24 @@ consistent — never a "land now, fix later" intermediate state.
    alongside `protocol_version`, `device_id`, and
    `FILESYNC_INDEX_MODEL`.
 
-   **Branch A — β path (`BenchmarkLoadIndex_168kFiles < 80 ms`).**
-   - Scan loads its working copy at start via `SELECT`; between
-     scans, nothing is in memory.
-   - `fs.index` field is removed; helpers that read it migrate
-     to SQLite-backed accessors or to scan-local arguments.
-   - `cloneInto` and `reusableFiles` (P18c recycling) are
-     deleted — there is no surviving in-memory map to recycle.
-   - Tests: `TestBetweenScans_NoInMemoryIndex` asserts that
-     after `runScan` returns, `fs.index` is nil and any peer
-     read goes through SQLite.
+   **Locked decision: hybrid.** Bench data lives in
+   DESIGN-v1 §0. Summary: 655 ms median across 10 runs on the
+   target hardware (Apple M1 Max, modernc.org/sqlite v1.49.1).
+   That is **8× over** the 80 ms threshold that the audit
+   originally framed as the hybrid pivot, and **94× over** the
+   `cloneInto` baseline of 7 ms. The gap is structural — pure
+   Go decode of a 14-column row × 168k rows dominates wall
+   time. β is not a viable v1 choice; the borderline default
+   language ("75–85 ms → hybrid") is moot at this measurement
+   and removed.
 
-   **Branch B — hybrid path (`BenchmarkLoadIndex_168kFiles ≥ 80 ms`).**
+   **Hybrid implementation.**
    - In-memory `FileIndex` is retained between scans as a
      scan-private working copy populated from SQLite at folder
      open. SQLite remains the sole peer-visible truth; INV-1,
      INV-3, INV-4 are unchanged.
    - `cloneInto` recycling stays — it is the perf floor that
-     made the hybrid the right call.
+     made hybrid the right call.
    - The 168k-file `SELECT` runs once per folder open, not once
      per scan; subsequent scans diff against the in-memory copy
      and persist deltas.
@@ -1165,7 +1180,63 @@ consistent — never a "land now, fix later" intermediate state.
      bench that asserts the per-scan cost stays at the
      `cloneInto` floor.
 
-   **Common to both branches:**
+   **Memory budget.** Hybrid retains the FileIndex between
+   scans, so the audit must name what that costs. Per-entry
+   sizing on the target build (Go 1.26, modernc):
+
+   | Component                                | Bytes / entry |
+   |------------------------------------------|--------------:|
+   | `FileEntry` struct (no slices)           |           ~96 |
+   | Path string body (avg)                   |           ~50 |
+   | Path string header                       |            16 |
+   | `VectorClock` map (2 entries typical)    |          ~120 |
+   | `HashState`/`PrefixCheck`/`PrevPath` headers |        64 |
+   | Map bucket overhead (Go runtime)         |           ~24 |
+   | `seqIndex` slice entry                   |           ~32 |
+   | **Total per entry**                      |        **~382** |
+
+   Deployment shapes:
+
+   | Profile                                              |   Resident |
+   |------------------------------------------------------|-----------:|
+   | Realistic (1 × 168k folder + 5 × 5k + 9 × 500)       |     ~76 MB |
+   | Worst case (15 × 168k folders)                       |    ~960 MB |
+
+   Bench's 210 MB allocation per load is **transient GC
+   churn** — short-lived `[]byte` and string copies that get
+   reclaimed. Steady-state retained is the table above.
+
+   The realistic deployment shape (the three-peer setup the
+   audit targets) lands at ~76 MB resident — comfortable on
+   desktops (MBP, Windows desktop) and the VPS bastion.
+   Operators provisioning 15 × 168k folders should plan for
+   ~1 GB resident; if that exceeds the host budget, the
+   reopen criteria below name the only escape paths.
+
+   **β reopen criteria.** β path is closed for v1. Reopen
+   only when **at least one** of these is true:
+
+   (a) A CGO sqlite driver becomes acceptable in the build
+       target. **Off the table** under the current
+       cross-compile constraint (DESIGN-v1 §4: pure Go,
+       `CGO_ENABLED=0` for Linux and Windows release
+       binaries).
+   (b) `modernc.org/sqlite` upstream ships a row-decode
+       improvement of **at least 5×** over the v1.49.1
+       baseline. Re-run `BenchmarkLoadIndex_168kFiles` on
+       the target hardware; if the median lands under
+       150 ms, β becomes a candidate again.
+   (c) Measured cold-load on the largest production folder
+       under hybrid drops below **100 ms** (e.g., the
+       deployment shrinks, or the row schema slims, or the
+       Go runtime decode path improves). At that point the
+       cost-asymmetry argument flips and β is worth
+       considering.
+
+   None of these are true today. Document any reopen attempt
+   with the bench numbers that justified the change.
+
+   **Common scan-finalization invariants:**
    - Every UPSERT carries
      `WHERE excluded.sequence > files.sequence`.
    - Sequence assignment moves *inside* `BEGIN IMMEDIATE` (no
@@ -1185,12 +1256,6 @@ consistent — never a "land now, fix later" intermediate state.
      because tombstone GC is a scan-discipline concern and
      commit 7 is where scan discipline finalizes.
    - H11, H14 land here.
-
-   **If the bench result is borderline (75–85 ms),** default to
-   the hybrid. The β path's only benefit is one in-memory map
-   eliminated; the cost of being wrong (chronic per-scan
-   regression on the 168k-file production folder) outweighs
-   the structural elegance.
 
    Closes: INV-2 (final), INV-3, INV-4 (scan path), P2 (per-path
    cost target), P6 (tombstone GC), R9 (atomic cap on `Set`,
@@ -1430,7 +1495,8 @@ Before any code from this audit lands beyond commit 1:
 - [x] §5 design calls resolved — iter-2 set (β, per-folder DB,
       drop `persistMu`, `synchronous=FULL`, fault-injection
       driver) plus iter-3 set (drop `blocks` table for v1,
-      `prev_path` clear-on-rescan, β provisional pending bench,
+      `prev_path` clear-on-rescan, β closed / hybrid locked
+      at commit 2 bench (655 ms median),
       two reader handles at commit 4, GFS backup retention,
       `mmap_size = 64 MiB`, `driverName` plumbed, dirty-set cap
       10k, tombstone GC every 10th scan).
