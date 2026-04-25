@@ -65,6 +65,17 @@ type cachedSummary struct {
 //     the leader walked away but the flight succeeded. Singleflight's
 //     own internal map auto-cleans on fn return; our cache keeps
 //     serving for the TTL window.
+//
+// TODO (multi-caller HTTP reality): the shared-cancel semantic above
+// punishes joined callers for the leader's disconnect. In a production
+// gateway where each caller has its own live HTTP request, caller A
+// hanging up would abort the flight and surface a cancel error to
+// caller B, who is still connected and still wanting an answer. The
+// intended behavior is to detach the flight's ctx from the leader —
+// flight runs under a gateway-owned ctx with only the 30s max-call
+// timeout, joined callers ride to completion regardless of who
+// connects or disconnects. Revisit when we have Phase 1a data on
+// actual fan-out patterns and real-world cancel rates.
 type summarizerDedup struct {
 	sf singleflight.Group
 
