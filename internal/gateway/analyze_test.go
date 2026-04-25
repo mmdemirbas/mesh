@@ -179,6 +179,40 @@ func TestAnalyzeRequest_OpenAIToolArgsUnwrapping(t *testing.T) {
 	}
 }
 
+// TestAnalyzeRequest_OpenAIToolArgsObjectShapeAlsoWorks pins the
+// non-OpenAI-canonical case: some OpenAI-compatible providers
+// (panshi has been observed; some Azure deployments, some local
+// runtime wrappers) emit tool_calls[].function.arguments as a JSON
+// OBJECT directly instead of a JSON-encoded string. unwrapOpenAIToolArgs
+// must pass those through unchanged so the per-tool struct decode
+// in CanonicalToolArg still works.
+//
+// Two consecutive turns with the same logical Read(/foo) — one
+// turn in object-shape arguments, one in string-shape — should
+// produce repeat_reads.max_same_path=2: the canonical key has to
+// match across both shapes.
+func TestAnalyzeRequest_OpenAIToolArgsObjectShapeAlsoWorks(t *testing.T) {
+	t.Parallel()
+	idx := newReadIndex()
+	stringShape := []byte(`{"model":"gpt-4o","messages":[` +
+		`{"role":"assistant","content":null,"tool_calls":[` +
+		`{"id":"call_x","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"/foo\"}"}}` +
+		`]}]}`)
+	objectShape := []byte(`{"model":"gpt-4o","messages":[` +
+		`{"role":"assistant","content":null,"tool_calls":[` +
+		`{"id":"call_y","type":"function","function":{"name":"Read","arguments":{"file_path":"/foo"}}}` +
+		`]}]}`)
+
+	_, r1 := analyzeRequest(stringShape, APIOpenAI, "sess", idx)
+	if r1 != nil {
+		t.Errorf("turn 1 repeat_reads = %+v, want nil", r1)
+	}
+	_, r2 := analyzeRequest(objectShape, APIOpenAI, "sess", idx)
+	if r2 == nil || r2.MaxSamePath != 2 {
+		t.Errorf("turn 2 (object-shape arguments): repeat_reads = %+v, want max_same_path=2 — canonical key must match across string vs object shape", r2)
+	}
+}
+
 // TestAnalyzeRequest_MalformedReturnsBothNil: garbage input doesn't
 // crash and produces nil/nil so the audit row's presence rules
 // trivially omit the fields.

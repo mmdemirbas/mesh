@@ -256,6 +256,33 @@ func analyzeOpenAI(body []byte, sessionID string, idx *readIndex) (*TopToolResul
 // hash the doubly-encoded string and never collide with the
 // equivalent Anthropic tool_use input. Unwrap once so canonical keys
 // are stable across translation directions.
+//
+// Format assumption: OpenAI Chat Completions API as of 2024-2026.
+// The wire shape for tool_calls[].function.arguments is a JSON
+// string. Verified against the upstream spec; stable on api.openai.com
+// across the gpt-4 / gpt-4o / o-series families. OpenAI-compatible
+// providers (Azure OpenAI, Huawei panshi, OneAPI, vLLM, LiteLLM, Ollama)
+// generally follow the contract, but variance has been observed:
+//   - Some providers emit arguments as an OBJECT directly
+//     (`"arguments": {"x": 1}`). Caught here by the first-byte
+//     check: raw[0] == '"' means string-encoded; anything else
+//     (`{`, `[`, `n` for null) is returned unchanged so
+//     CanonicalToolArg sees the value as-is.
+//   - Some providers emit pretty-printed strings with leading
+//     whitespace inside the encoded value. Surviving the
+//     `json.Unmarshal(&s)` decode covers that case; the inner
+//     spaces are preserved in the returned RawMessage and the
+//     downstream tool-specific parser (Read/Grep/Bash) ignores
+//     them via their own json.Unmarshal calls.
+//
+// If a provider ever sends arguments in some third shape (a
+// base64-encoded payload, a typed wrapper object, etc.), this
+// function silently returns the wrong canonical key for those
+// requests. The repeat_reads counter would under-report rather
+// than over-report — same logical input emits a different hash —
+// which is the safer failure direction. Worth revisiting if Phase
+// 1a telemetry shows a meaningful share of tool calls where
+// repeat_reads fails to detect re-reads on a non-OpenAI upstream.
 func unwrapOpenAIToolArgs(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 || raw[0] != '"' {
 		return raw
