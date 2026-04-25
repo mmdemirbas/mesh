@@ -817,3 +817,25 @@ select option { background: var(--bg-card); color: var(--text); }
 .bubble-tools summary { cursor: pointer; color: var(--text-dim); font-size: 11px; }
 .bubble-tools .tool-name { font-family: var(--mono); color: var(--cyan); }
 .bubble-tools pre { font-family: var(--mono); font-size: 11px; background: var(--bg-input); padding: 6px 8px; border-radius: 4px; margin-top: 4px; overflow-x: auto; max-height: 240px; }
+
+/* B2 graph view */
+.graph-view { position: relative; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); overflow: auto; max-height: 70vh; padding: 16px; }
+.graph-view svg { display: block; user-select: none; }
+.graph-empty { padding: 32px; color: var(--text-muted); text-align: center; font-size: 13px; }
+.graph-node-rect { fill: var(--bg-card); stroke: var(--border); stroke-width: 1px; cursor: pointer; transition: stroke-width 120ms ease; }
+.graph-node-rect:hover { stroke: var(--green); stroke-width: 2px; }
+.graph-node-rect.current-branch { stroke: var(--green); }
+.graph-node-rect.error { fill: var(--red-dim); stroke: var(--red); }
+.graph-node-rect.in-flight { stroke-dasharray: 4 3; }
+.graph-node-rect.highlighted { stroke: var(--cyan); stroke-width: 2.5px; filter: drop-shadow(0 0 4px var(--cyan)); }
+.graph-node-text { font-family: var(--mono); font-size: 11px; fill: var(--text); pointer-events: none; }
+.graph-node-text.muted { fill: var(--text-muted); font-size: 10px; }
+.graph-edge { fill: none; stroke: var(--text-muted); stroke-width: 1.4px; }
+.graph-edge.current-branch { stroke: var(--green); stroke-width: 2px; }
+.graph-edge:hover { stroke: var(--cyan); stroke-width: 2px; cursor: pointer; }
+.graph-tooltip { position: absolute; pointer-events: none; background: var(--bg-card); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; font-size: 11px; font-family: var(--mono); box-shadow: 0 4px 16px rgba(0,0,0,0.5); z-index: 10; max-width: 360px; line-height: 1.5; }
+.graph-tooltip .tip-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.graph-tooltip .tip-quote { color: var(--text-dim); margin-top: 4px; white-space: normal; }
+.graph-controls { position: sticky; top: 0; right: 0; display: flex; gap: 6px; justify-content: flex-end; padding-bottom: 8px; }
+.graph-fit-btn { padding: 4px 10px; font-size: 11px; background: var(--bg-input); color: var(--text-dim); border: 1px solid var(--border); border-radius: 4px; cursor: pointer; }
+.graph-fit-btn:hover { color: var(--green); border-color: var(--green); }

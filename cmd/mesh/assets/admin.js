@@ -3127,6 +3127,7 @@ function writeGwHash() {
   if (gwSubview === 'requests' && gwDetailKey) params.push('detail='+encodeURIComponent(gwDetailKey));
   if (gwSubview === 'sessions' && sessionView.currentBranchID) params.push('branch='+encodeURIComponent(sessionView.currentBranchID));
   if (gwSubview === 'sessions' && sessionView.currentNodeID) params.push('node='+encodeURIComponent(sessionView.currentNodeID));
+  if (gwSubview === 'sessions' && sessionView.currentView === 'graph') params.push('view=graph');
   let h = '#' + parts[0] + (params.length ? '?' + params.join('&') : '');
   if (location.hash === h) return;
   const full = location.pathname + h;
@@ -3155,6 +3156,7 @@ function parseGwHash() {
     detail: p.detail ? decodeURIComponent(p.detail) : '',
     branch: p.branch ? decodeURIComponent(p.branch) : '',
     node: p.node ? decodeURIComponent(p.node) : '',
+    view: p.view ? decodeURIComponent(p.view) : '',
   };
 }
 
@@ -3173,10 +3175,13 @@ function applyGwHash() {
     const wSel = document.getElementById('gw-window');
     if (wSel) wSel.value = gwWindow;
   }
-  // Restore session-view state (branch / node).
+  // Restore session-view state (branch / node / view).
   if (parsed.sub === 'sessions') {
     if (parsed.branch) sessionView.pendingBranchID = parsed.branch;
     if (parsed.node) sessionView.pendingNodeID = parsed.node;
+    if (parsed.view === 'graph' || parsed.view === 'linear') {
+      sessionView.pendingView = parsed.view;
+    }
   }
   if (!parsed.detail) {
     if (parsed.sub !== 'requests') gwDetailKey = '';
@@ -3653,8 +3658,10 @@ let sessionView = {
   defaultBranchID: '',
   currentBranchID: '',      // user-selected, persists in URL hash
   currentNodeID: '',        // highlighted node, persists in URL hash
+  currentView: 'linear',    // 'linear' | 'graph', persists in URL hash
   pendingBranchID: '',      // applied from URL on first dag_init
   pendingNodeID: '',
+  pendingView: '',
   pairCache: new Map(),     // body_hash -> {request, response}
   pairFetching: new Set(),  // body_hashes with fetch in flight
   sse: null,                // EventSource handle
@@ -3777,6 +3784,12 @@ function onSessionDagInit(dag) {
     sessionView.currentNodeID = '';
   }
   sessionView.pendingNodeID = '';
+  if (sessionView.pendingView === 'graph' || sessionView.pendingView === 'linear') {
+    setSessView(sessionView.pendingView);
+  } else {
+    setSessView(sessionView.currentView || 'linear');
+  }
+  sessionView.pendingView = '';
   setSessStatus(dag.nodes && dag.nodes.length ? 'live' : 'live (no nodes yet)', 'live');
   renderSessionView();
 }
@@ -3839,7 +3852,11 @@ function renderSessionView() {
   if (gwSubview !== 'sessions') return;
   renderSessionHeader();
   renderBranchStrip();
-  renderSessionBubbles();
+  if (sessionView.currentView === 'graph') {
+    renderSessionGraph();
+  } else {
+    renderSessionBubbles();
+  }
 }
 
 function renderSessionHeader() {
@@ -4106,6 +4123,202 @@ function rawJSONExtract(row, field) {
 // clicks; refreshSessionsView rechecks selection.
 const _origSetGwSub = setGwSub;
 // (no-op alias kept for clarity that we wrap the session lifecycle.)
+
+// --- Session view toggle (linear vs graph) ---
+
+function setSessView(view) {
+  if (view !== 'linear' && view !== 'graph') view = 'linear';
+  sessionView.currentView = view;
+  document.querySelectorAll('#sess-view-toggle .gw-sub-btn').forEach(el => {
+    el.classList.toggle('active', el.dataset.view === view);
+  });
+  const bubbles = document.getElementById('sess-bubbles');
+  const graph = document.getElementById('sess-graph');
+  if (bubbles) bubbles.style.display = view === 'linear' ? '' : 'none';
+  if (graph) graph.style.display = view === 'graph' ? '' : 'none';
+  if (view === 'graph') renderSessionGraph();
+}
+
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('#sess-view-toggle .gw-sub-btn');
+  if (!btn) return;
+  const v = btn.dataset.view;
+  if (v === sessionView.currentView) return;
+  setSessView(v);
+  writeGwHash();
+});
+
+// --- Session graph layout (hand-rolled tree) ---
+//
+// Layered top-to-bottom layout: rank = depth from root, slot = leaf
+// position within the subtree. No external graph library — for the
+// sizes mesh sees in real sessions (≤ low hundreds of nodes per
+// session) a simple recursive layout is more than fast enough.
+function layoutSessionGraph() {
+  const nodes = [...sessionView.nodesByID.values()];
+  if (nodes.length === 0) return { positions: new Map(), edges: [], width: 0, height: 0 };
+  // Build child map.
+  const children = new Map();
+  for (const n of nodes) children.set(n.id, []);
+  for (const n of nodes) {
+    if (n.parent_id && children.has(n.parent_id)) {
+      children.get(n.parent_id).push(n);
+    }
+  }
+  // Stable child order: oldest row_id first → leftmost branch.
+  for (const arr of children.values()) {
+    arr.sort((a, b) => (a.row_id || 0) - (b.row_id || 0));
+  }
+  // Roots: no parent_id, or parent missing from this DAG (audit-log
+  // rollover edge case §10.1).
+  const roots = nodes.filter(n => !n.parent_id || !sessionView.nodesByID.has(n.parent_id));
+  roots.sort((a, b) => (a.row_id || 0) - (b.row_id || 0));
+  // Subtree leaf-count = visual width in node-units. For a leaf the
+  // width is 1; for an internal node the sum of its children's widths.
+  const widthOf = new Map();
+  function computeWidth(id) {
+    if (widthOf.has(id)) return widthOf.get(id);
+    const kids = children.get(id) || [];
+    if (kids.length === 0) { widthOf.set(id, 1); return 1; }
+    let sum = 0;
+    for (const k of kids) sum += computeWidth(k.id);
+    widthOf.set(id, sum);
+    return sum;
+  }
+  let totalUnits = 0;
+  for (const r of roots) totalUnits += computeWidth(r.id);
+
+  // Position: each node centered over its subtree.
+  const nodeW = 200, nodeH = 64, hgap = 24, vgap = 36;
+  const colWidth = nodeW + hgap;
+  const rowHeight = nodeH + vgap;
+  const positions = new Map(); // id -> {x, y, w, h, node}
+  let xOffset = 0;
+  function place(id, depth, leftUnits) {
+    const w = widthOf.get(id) || 1;
+    const cx = (leftUnits + w / 2) * colWidth - hgap / 2;
+    const x = cx - nodeW / 2;
+    const y = depth * rowHeight;
+    const node = sessionView.nodesByID.get(id);
+    positions.set(id, { x, y, w: nodeW, h: nodeH, node });
+    let kx = leftUnits;
+    for (const k of children.get(id) || []) {
+      place(k.id, depth + 1, kx);
+      kx += widthOf.get(k.id) || 1;
+    }
+  }
+  for (const r of roots) {
+    place(r.id, 0, xOffset);
+    xOffset += widthOf.get(r.id) || 1;
+  }
+  // Bounds.
+  let maxX = 0, maxY = 0;
+  for (const p of positions.values()) {
+    maxX = Math.max(maxX, p.x + p.w);
+    maxY = Math.max(maxY, p.y + p.h);
+  }
+  // Edges: parent -> child orthogonal path (down, across, down).
+  const edges = [];
+  for (const n of nodes) {
+    if (!n.parent_id) continue;
+    const child = positions.get(n.id);
+    const parent = positions.get(n.parent_id);
+    if (!child || !parent) continue;
+    edges.push({ from: parent, to: child, fromNode: parent.node, toNode: child.node });
+  }
+  return { positions, edges, width: maxX + 16, height: maxY + 16 };
+}
+
+// renderSessionGraph paints the SVG. Called on view switch and
+// every state mutation while the graph is visible.
+function renderSessionGraph() {
+  const el = document.getElementById('sess-graph');
+  if (!el) return;
+  if (sessionView.nodesByID.size === 0) {
+    el.innerHTML = '<div class="graph-empty">No nodes in this session yet. Make a request to populate the graph.</div>';
+    return;
+  }
+  const layout = layoutSessionGraph();
+  const chainIDs = new Set(chainForBranch(sessionView.currentBranchID).map(n => n.id));
+  const w = Math.max(layout.width, 240);
+  const h = Math.max(layout.height, 120);
+  const parts = [];
+  parts.push('<div class="graph-controls"><button type="button" class="graph-fit-btn" id="sess-graph-fit">fit</button></div>');
+  parts.push('<svg viewBox="0 0 '+w+' '+h+'" width="'+w+'" height="'+h+'" xmlns="http://www.w3.org/2000/svg" id="sess-graph-svg">');
+  // Edges first (drawn under nodes).
+  parts.push('<g class="graph-edges">');
+  for (const e of layout.edges) {
+    const x1 = e.from.x + e.from.w / 2;
+    const y1 = e.from.y + e.from.h;
+    const x2 = e.to.x + e.to.w / 2;
+    const y2 = e.to.y;
+    const my = (y1 + y2) / 2;
+    const d = 'M'+x1+' '+y1+' V'+my+' H'+x2+' V'+y2;
+    const onChain = chainIDs.has(e.toNode.id) && chainIDs.has(e.fromNode.id);
+    parts.push('<path class="graph-edge'+(onChain ? ' current-branch' : '')+
+      '" d="'+d+'" data-from="'+xa(e.fromNode.id)+'" data-to="'+xa(e.toNode.id)+'"></path>');
+  }
+  parts.push('</g>');
+  // Nodes.
+  parts.push('<g class="graph-nodes">');
+  for (const p of layout.positions.values()) {
+    const n = p.node;
+    const onChain = chainIDs.has(n.id);
+    const status = (n.response_summary && n.response_summary.status) || 0;
+    const isErr = status > 0 && (status < 200 || status >= 300);
+    const inFlight = !(n.response_summary && n.response_summary.has_response);
+    const highlighted = n.id === sessionView.currentNodeID;
+    const cls = ['graph-node-rect'];
+    if (onChain) cls.push('current-branch');
+    if (isErr) cls.push('error');
+    if (inFlight) cls.push('in-flight');
+    if (highlighted) cls.push('highlighted');
+    parts.push('<g class="graph-node" data-node-id="'+xa(n.id)+'" transform="translate('+p.x+' '+p.y+')">');
+    parts.push('<rect class="'+cls.join(' ')+'" width="'+p.w+'" height="'+p.h+'" rx="6"></rect>');
+    const rs = n.request_summary || {};
+    const turn = (rs.message_count != null) ? Math.ceil((rs.message_count + 1) / 2) : 0;
+    const headline = (rs.model || '(no model)') + (turn ? ' · t' + turn : '');
+    const tokensIn = (n.response_summary && n.response_summary.input_tokens) || 0;
+    const tokensOut = (n.response_summary && n.response_summary.output_tokens) || 0;
+    const sub = inFlight ? 'in flight…' :
+      (isErr ? 'status '+status+' '+(n.response_summary.outcome||'') :
+       (tokensIn ? tokensIn+' → '+tokensOut+'t' : (n.response_summary.outcome||'ok')));
+    parts.push('<text class="graph-node-text" x="'+(p.w/2)+'" y="22" text-anchor="middle">'+x(truncForLabel(headline, 28))+'</text>');
+    parts.push('<text class="graph-node-text muted" x="'+(p.w/2)+'" y="40" text-anchor="middle">'+x(truncForLabel(sub, 32))+'</text>');
+    parts.push('</g>');
+  }
+  parts.push('</g>');
+  parts.push('</svg>');
+  el.innerHTML = parts.join('');
+  // Click → open detail card via existing jumpToPair, after pushing
+  // the node's gateway onto the active set so the request handler
+  // knows where to look.
+  el.querySelectorAll('.graph-node').forEach(g => {
+    g.addEventListener('click', () => {
+      const id = g.dataset.nodeId;
+      const n = sessionView.nodesByID.get(id);
+      if (!n) return;
+      sessionView.currentNodeID = id;
+      writeGwHash();
+      const rs = n.request_summary || {};
+      if (!rs.gateway || !n.run || n.row_id == null) return;
+      openNodeDetail(n.run, n.row_id, rs.gateway);
+    });
+  });
+  // Fit button: scroll the container so the graph is centered.
+  const fit = document.getElementById('sess-graph-fit');
+  if (fit) fit.onclick = () => {
+    el.scrollLeft = Math.max(0, (el.scrollWidth - el.clientWidth) / 2);
+    el.scrollTop = 0;
+  };
+}
+
+function truncForLabel(s, max) {
+  if (typeof s !== 'string') return '';
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + '…';
+}
+
 
 // --- Visibility-aware polling ---
 let tickTimer = null;
