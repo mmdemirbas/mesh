@@ -398,6 +398,50 @@ func GetFolderPath(folderID string) (string, bool) {
 	return path, found
 }
 
+// folderCacheDirFor returns the folder's SQLite cache directory
+// (where the index.sqlite, the F7 sweep, and the backups subtree
+// all live). Used by the admin endpoints that operate on a
+// folder's cache state without needing the full folderState.
+func folderCacheDirFor(folderID string) (string, bool) {
+	var dir string
+	var found bool
+	activeNodes.ForEach(func(n *Node) {
+		if found {
+			return
+		}
+		if _, ok := n.folders[folderID]; ok {
+			dir = filepath.Join(n.dataDir, folderID)
+			found = true
+		}
+	})
+	return dir, found
+}
+
+// ListFolderBackups returns the persisted backup files for a
+// folder, sorted by sequence descending. Audit §6 commit 9a /
+// iter-4 O9. Backed by listBackups against the folder's cache
+// directory; the admin endpoint at GET
+// /api/filesync/folders/<id>/backups consumes this.
+//
+// Returns (nil, false) when the folder is unknown to any active
+// node — the admin handler turns this into HTTP 404.
+func ListFolderBackups(folderID string) ([]BackupInfo, bool) {
+	dir, ok := folderCacheDirFor(folderID)
+	if !ok {
+		return nil, false
+	}
+	backups, err := listBackups(dir)
+	if err != nil {
+		slog.Warn("ListFolderBackups: listBackups failed",
+			"folder", folderID, "error", err)
+		return []BackupInfo{}, true
+	}
+	if backups == nil {
+		return []BackupInfo{}, true
+	}
+	return backups, true
+}
+
 // GetActivities returns the most recent sync activities across all active nodes.
 func GetActivities() []SyncActivity {
 	var result []SyncActivity
@@ -602,6 +646,17 @@ type folderState struct {
 	// the next runScan to avoid a ~30 MB/scan allocation on large folders.
 	// Accessed only under indexMu.
 	reusableFiles map[string]FileEntry
+}
+
+// integrityCheckTarget pairs a folderState with its writer DB
+// handle so the deferred PRAGMA integrity_check goroutine can
+// route a failure through fs.disable() (audit §6 commit 3 / R2 /
+// Gap 5). Promoted from a Run-local type so openOneFolder can
+// return it for both the initial open path and the restore /
+// reopen lifecycle (audit §6 commit 9b).
+type integrityCheckTarget struct {
+	fs *folderState
+	db *sql.DB
 }
 
 // classifyPeerResetTrigger names the reset-trigger condition that
@@ -1209,12 +1264,8 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			cfg.ResolvedFolders[i].ID, cfg.ResolvedFolders[i].Peers)
 	}
 
-	// integrityCheckTarget queues per-folder PRAGMA integrity_check
+	// integrityChecks queues per-folder PRAGMA integrity_check
 	// goroutines spawned below the folder loop where wg is in scope.
-	type integrityCheckTarget struct {
-		fs *folderState
-		db *sql.DB
-	}
 	var integrityChecks []integrityCheckTarget
 
 	// Initialize folders.
@@ -1329,6 +1380,11 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 					"restored", sweepRes.Restored,
 					"orphans", len(sweepRes.Orphans))
 			}
+			// Audit §6 commit 9a: clean any leftover *.sqlite.tmp
+			// strays under <folderCacheDir>/backups/. Runs after
+			// the F7 sweep so a successful folder open always
+			// leaves a clean backup directory.
+			cleanBackupTmp(folderCacheDir, fcfg.ID)
 		case errors.Is(sweepErr, errSweepDBUnreadable):
 			// Z1: leave .bak files intact for restore-from-backup
 			// to encounter post-reopen.

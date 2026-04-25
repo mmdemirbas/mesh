@@ -483,6 +483,22 @@ func buildAdminMux(ring *logRing, logFilePath, perfLogPath string) *http.ServeMu
 		_ = json.NewEncoder(w).Encode(folders)
 	})
 
+	// GET /api/filesync/folders/<id>/backups — list persisted
+	// backups for a folder, sorted by sequence descending.
+	// Audit §6 commit 9a / iter-4 O9. The handler accepts either
+	// the canonical path (.../<id>/backups) or the trailing slash
+	// variant for client-side flexibility.
+	mux.HandleFunc("GET /api/filesync/folders/{id}/backups", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		folderID := r.PathValue("id")
+		backups, ok := filesync.ListFolderBackups(folderID)
+		if !ok {
+			http.Error(w, `{"error":"unknown folder"}`, http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(backups)
+	})
+
 	// GET /api/filesync/conflicts — list conflict files.
 	mux.HandleFunc("/api/filesync/conflicts", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
