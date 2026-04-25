@@ -180,7 +180,17 @@ func summarizerCall(
 
 // summarizeMessages calls the summarizer upstream to condense old messages.
 // It preserves the most recent keepRecent messages verbatim and summarizes
-// everything before them. Returns a replacement message slice.
+// everything before them.
+//
+// Returns:
+//   - newMsgs: the replacement message slice (with the leading
+//     summary + optional ack + retained tail), or req.Messages
+//     unchanged if summarization was skipped.
+//   - cutoff: number of input messages that were folded into the
+//     summary (req.Messages[:cutoff]). Zero when summarization did
+//     not fire — caller can use this to populate
+//     summarize.turns_collapsed without re-deriving the boundary.
+//   - err: any failure from the summarizer call.
 //
 // When dedup is non-nil, concurrent calls with the same (summarizer,
 // prefix) inputs share a single upstream invocation via summarizerDedup;
@@ -194,12 +204,12 @@ func summarizeMessages(
 	keepRecent int,
 	log *slog.Logger,
 	dedup *summarizerDedup,
-) ([]AnthropicMsg, error) {
+) ([]AnthropicMsg, int, error) {
 	if keepRecent <= 0 {
 		keepRecent = defaultKeepRecent
 	}
 	if len(req.Messages) <= keepRecent {
-		return req.Messages, nil
+		return req.Messages, 0, nil
 	}
 
 	desiredCutoff := len(req.Messages) - keepRecent
@@ -211,7 +221,7 @@ func summarizeMessages(
 		// matching tool_use". Skip summarization; caller will retry or
 		// fail with a clear context-exceeded error.
 		log.Warn("summarizer skip: no tool-safe cutoff", "messages", len(req.Messages), "keep_recent", keepRecent)
-		return req.Messages, nil
+		return req.Messages, 0, nil
 	}
 	if cutoff != desiredCutoff {
 		log.Info("summarizer cutoff moved for tool-boundary safety",
@@ -228,7 +238,7 @@ func summarizeMessages(
 	if dedup != nil {
 		prefixJSON, mErr := json.Marshal(toSummarize)
 		if mErr != nil {
-			return nil, fmt.Errorf("marshal prefix for dedup key: %w", mErr)
+			return nil, 0, fmt.Errorf("marshal prefix for dedup key: %w", mErr)
 		}
 		key := dedupKey(summarizer.Cfg.Name, prefixJSON)
 		summaryText, err = dedup.do(ctx, key, func(ictx context.Context) (string, error) {
@@ -238,10 +248,10 @@ func summarizeMessages(
 		summaryText, err = summarizerCall(ctx, toSummarize, summarizer, log)
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if summaryText == "" {
-		return req.Messages, nil
+		return req.Messages, 0, nil
 	}
 
 	summaryContent := fmt.Sprintf("[Conversation summary — %d messages condensed]\n\n%s\n\n[End of summary. The conversation continues below.]",
@@ -270,7 +280,7 @@ func summarizeMessages(
 		"messages_after", len(result),
 		"summary_tokens", len(summaryText)/4,
 	)
-	return result, nil
+	return result, len(toSummarize), nil
 }
 
 // contextCheckResult describes what happened when checking context limits.
@@ -284,11 +294,21 @@ const (
 )
 
 // contextCheckInfo captures the estimated token counts seen during context
-// enforcement so audit rows can explain what happened.
+// enforcement so audit rows can explain what happened. The byte-delta
+// fields (BytesRemoved, BytesAdded, TurnsCollapsed) are populated only
+// when summarization actually fires; both byte numbers are computed at
+// the messages-array level (`len(json.Marshal(req.Messages))`), NOT the
+// full request body, so the §4 input_bytes partition stays orthogonal.
+// The pinned marshaller is encoding/json's default — the same call the
+// gateway uses to re-serialize for upstream, so the byte counts agree
+// with what actually went out.
 type contextCheckInfo struct {
 	OriginalTokens  int
 	EffectiveTokens int
 	Summarized      bool
+	BytesRemoved    int
+	BytesAdded      int
+	TurnsCollapsed  int
 }
 
 // checkAndSummarize checks if body exceeds the upstream's context window.
@@ -335,12 +355,29 @@ func checkAndSummarize(
 			"summarizer upstream %q not found", upstream.Cfg.Summarizer)
 	}
 
-	newMsgs, err := summarizeMessages(ctx, &req, sumUpstream, defaultKeepRecent, log, router.summarizerDedup)
+	// Capture pre-summarization messages bytes for the §4.5 delta.
+	// json.Marshal here matches the marshaller the upstream call uses
+	// below (json.Marshal(req)), so the per-messages-array byte count
+	// agrees with what actually went out.
+	originalMsgs := req.Messages
+	preMsgsBytes, _ := json.Marshal(originalMsgs)
+
+	newMsgs, turnsCollapsed, err := summarizeMessages(ctx, &req, sumUpstream, defaultKeepRecent, log, router.summarizerDedup)
 	if err != nil {
 		return body, contextError, info, fmt.Errorf("local summarization failed before forwarding upstream: %w", err)
 	}
 
 	req.Messages = newMsgs
+	postMsgsBytes, _ := json.Marshal(newMsgs)
+	preLen := len(preMsgsBytes)
+	postLen := len(postMsgsBytes)
+	if preLen > postLen {
+		info.BytesRemoved = preLen - postLen
+	} else {
+		info.BytesAdded = postLen - preLen
+	}
+	info.TurnsCollapsed = turnsCollapsed
+
 	newBody, err := json.Marshal(req)
 	if err != nil {
 		return body, contextError, info, fmt.Errorf("re-serialize failed: %w", err)

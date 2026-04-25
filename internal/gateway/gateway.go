@@ -192,6 +192,9 @@ func buildRoutingHandler(cfg GatewayCfg, cl ClientCfg, router *Router, recorder 
 					au.OriginalInputTokensEstimate = info.OriginalTokens
 					au.EffectiveInputTokensEstimate = info.EffectiveTokens
 					au.Summarized = info.Summarized
+					au.SummarizeBytesRemoved = info.BytesRemoved
+					au.SummarizeBytesAdded = info.BytesAdded
+					au.SummarizeTurnsCollapsed = info.TurnsCollapsed
 				}
 				switch result {
 				case contextExceeded:

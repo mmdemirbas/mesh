@@ -81,6 +81,7 @@ type ResponseMeta struct {
 	RepeatReads                  *RepeatReadsInfo    // re-read activity this turn, if non-trivial
 	ResponseBytes                *ResponseByteCounts // §4.3 partition of the decoded response body
 	Stream                       *StreamInfo         // §4.3 stream accounting; emitted on every audited response
+	Summarize                    *SummarizeInfo      // §4.5 summarize delta; emitted only when fired
 	StartTime                    time.Time
 	EndTime                      time.Time
 	Headers                      map[string][]string
@@ -90,13 +91,71 @@ type ResponseMeta struct {
 
 // StreamInfo is the §4.3 stream-accounting block. Always emitted on
 // audited responses (including non-streaming, where Terminated is
-// "normal" and timing fields collapse to first==total).
-//
-// Only Terminated lands in 9a; FirstTokenMs and TotalMs join in 9b.
+// "normal" and FirstTokenMs equals TotalMs).
 type StreamInfo struct {
+	// FirstTokenMs is wall-clock ms from request start to the first
+	// content delta — text_delta / thinking_delta / input_json_delta
+	// for Anthropic, delta.content / delta.reasoning_content /
+	// delta.tool_calls.* for OpenAI. NOT first wire byte: Anthropic's
+	// message_start prelude carries metadata, not user-meaningful
+	// payload. Translation handlers (a2o_stream / o2a_stream) set
+	// the timestamp on AuditUpstream when they emit the first such
+	// delta; passthrough falls back to first non-zero Write because
+	// it doesn't parse the upstream stream. For non-streaming
+	// responses and degenerate streams (empty / cancelled before
+	// any content), FirstTokenMs equals TotalMs by derivation in
+	// the row writer — never null.
+	FirstTokenMs int64 `json:"first_token_ms"`
+	// TotalMs is wall-clock ms from request start to inner-handler
+	// return (stream close for SSE, response write for JSON).
+	TotalMs int64 `json:"total_ms"`
 	// Terminated ∈ {"normal", "client", "upstream"}. See §4.3 for
 	// the decision tree the reassembler + wrapAuditing apply.
 	Terminated string `json:"terminated"`
+}
+
+// SummarizeInfo is the §4.5 summarize-delta block. Emitted only when
+// summarization actually fired during the request (audit row's
+// `summarize` key is omitted otherwise per §4.6 presence rule).
+//
+// Both byte counts measure the messages-array level — `pre` and
+// `post` slices marshalled to JSON via encoding/json's default —
+// not the full request body. The two numbers are messages-level
+// byte counts; partition with §4 input_bytes is not implied.
+type SummarizeInfo struct {
+	Fired          bool `json:"fired"`
+	TurnsCollapsed int  `json:"turns_collapsed,omitempty"`
+	BytesRemoved   int  `json:"bytes_removed,omitempty"`
+	BytesAdded     int  `json:"bytes_added,omitempty"`
+}
+
+// deriveFirstTokenMs implements §4.3 + reviewer's option C for
+// first_token_ms. Resolution order:
+//
+//  1. Translation handler set FirstContentDeltaAt — use it.
+//     Accurate "time to first content delta" semantic.
+//  2. auditingWriter saw a non-zero Write — use that. For
+//     non-streaming responses the whole body lands in one Write,
+//     so this matches "time to response" exactly. For passthrough
+//     streaming it's a heuristic (first byte is usually
+//     message_start metadata, close to but not exactly the first
+//     content delta).
+//  3. Neither was set — degenerate cases (empty stream, client
+//     cancellation before any byte). Fall back to TotalMs so the
+//     invariant first_token_ms <= total_ms always holds and the
+//     admin UI never sees null.
+//
+// Pure function so the resolution rules are unit-testable without
+// reaching into wrapAuditing's hot path.
+func deriveFirstTokenMs(start, end, contentDeltaAt, firstWriteAt time.Time) int64 {
+	switch {
+	case !contentDeltaAt.IsZero():
+		return contentDeltaAt.Sub(start).Milliseconds()
+	case !firstWriteAt.IsZero():
+		return firstWriteAt.Sub(start).Milliseconds()
+	default:
+		return end.Sub(start).Milliseconds()
+	}
 }
 
 // deriveStreamTerminated implements the §4.3 decision tree:
@@ -311,6 +370,9 @@ func (r *Recorder) Response(id RequestID, meta ResponseMeta, body []byte) {
 	if meta.Stream != nil {
 		row["stream"] = meta.Stream
 	}
+	if meta.Summarize != nil {
+		row["summarize"] = meta.Summarize
+	}
 	// Summary is cheap and highly useful — include it at metadata level too.
 	if meta.Summary != nil {
 		row["stream_summary"] = meta.Summary
@@ -501,6 +563,21 @@ type AuditUpstream struct {
 	EffectiveInputTokensEstimate int
 	TopToolResult                *TopToolResultInfo
 	RepeatReads                  *RepeatReadsInfo
+	// FirstContentDeltaAt is set by translation streaming handlers
+	// (a2o_stream / o2a_stream) when the first user-meaningful
+	// content delta is emitted to the client. Zero value means "not
+	// observed" — wrapAuditing falls back to the auditing writer's
+	// firstWriteAt heuristic, which is correct for passthrough
+	// (where the gateway doesn't parse the upstream stream) and
+	// approximately correct for translation paths if the translator
+	// didn't set it.
+	FirstContentDeltaAt time.Time
+	// SummarizeBytesRemoved / Added / TurnsCollapsed populated by
+	// checkAndSummarize when summarization fires; emitted via
+	// SummarizeInfo per §4.5.
+	SummarizeBytesRemoved   int
+	SummarizeBytesAdded     int
+	SummarizeTurnsCollapsed int
 }
 
 type auditUpstreamKey struct{}
@@ -526,6 +603,14 @@ type auditingWriter struct {
 	status int
 	buf    bytes.Buffer
 	capped bool
+	// firstWriteAt is the wall-clock of the first non-zero Write to
+	// the wrapper. Used as a fallback for stream.first_token_ms when
+	// the inner handler did not set FirstContentDeltaAt — accurate
+	// for non-streaming responses (where the whole body lands in one
+	// Write) and a heuristic for passthrough streaming (where the
+	// first byte is usually the upstream's tiny message_start
+	// metadata, close to "first token" within tens of milliseconds).
+	firstWriteAt time.Time
 }
 
 func (a *auditingWriter) WriteHeader(code int) {
@@ -538,6 +623,9 @@ func (a *auditingWriter) WriteHeader(code int) {
 func (a *auditingWriter) Write(p []byte) (int, error) {
 	if a.status == 0 {
 		a.status = http.StatusOK
+	}
+	if a.firstWriteAt.IsZero() && len(p) > 0 {
+		a.firstWriteAt = time.Now()
 	}
 	if !a.capped {
 		remain := int64(maxAuditBodyBytes) - int64(a.buf.Len())
@@ -657,10 +745,15 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 			outcome = OutcomeTruncated
 		}
 
+		end := time.Now()
 		var summary *SSESummary
 		var usage *Usage
 		var responseBytes *ResponseByteCounts
-		streamInfo := &StreamInfo{Terminated: "normal"}
+		streamInfo := &StreamInfo{
+			Terminated:   "normal",
+			TotalMs:      end.Sub(start).Milliseconds(),
+			FirstTokenMs: deriveFirstTokenMs(start, end, upstream.FirstContentDeltaAt, aw.firstWriteAt),
+		}
 		auditBody := decodeForAudit(aw.buf.Bytes(), aw.Header().Get("Content-Encoding"), nil)
 		ct := aw.Header().Get("Content-Type")
 		isStreaming := strings.HasPrefix(strings.ToLower(ct), "text/event-stream")
@@ -688,6 +781,15 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 			metrics.TokensReason.Add(int64(usage.ReasoningTokens))
 		}
 
+		var summarizeInfo *SummarizeInfo
+		if upstream.Summarized {
+			summarizeInfo = &SummarizeInfo{
+				Fired:          true,
+				TurnsCollapsed: upstream.SummarizeTurnsCollapsed,
+				BytesRemoved:   upstream.SummarizeBytesRemoved,
+				BytesAdded:     upstream.SummarizeBytesAdded,
+			}
+		}
 		recorder.Response(reqID, ResponseMeta{
 			Status:                       status,
 			Outcome:                      outcome,
@@ -701,8 +803,9 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 			RepeatReads:                  upstream.RepeatReads,
 			ResponseBytes:                responseBytes,
 			Stream:                       streamInfo,
+			Summarize:                    summarizeInfo,
 			StartTime:                    start,
-			EndTime:                      time.Now(),
+			EndTime:                      end,
 			Headers:                      aw.Header(),
 			UpstreamReq:                  upstream.ReqBody,
 			UpstreamResp:                 upstream.RespBody,

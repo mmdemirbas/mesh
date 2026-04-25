@@ -80,6 +80,7 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 		w:           w,
 		flusher:     flusher,
 		metrics:     metrics,
+		au:          getAuditUpstream(r),
 	}
 	st.jsonEnc = json.NewEncoder(&st.jsonBuf)
 	st.jsonEnc.SetEscapeHTML(false)
@@ -126,6 +127,11 @@ type a2oStreamState struct {
 	w           http.ResponseWriter
 	flusher     http.Flusher
 	metrics     *state.Metrics
+	// au is the per-request audit context. Used to record the
+	// wall-clock of the first user-meaningful content delta
+	// (text/thinking/input_json) for stream.first_token_ms per
+	// §4.3. nil-safe for tests that bypass wrapAuditing.
+	au *AuditUpstream
 
 	blockIndex      int
 	inTextBlock     bool
@@ -137,6 +143,18 @@ type a2oStreamState struct {
 	jsonBuf         bytes.Buffer  // reused across emit calls to avoid per-chunk allocation
 	jsonEnc         *json.Encoder // writes to jsonBuf, reuses internal encode state
 	thinkFilter     thinkTagFilter
+}
+
+// markFirstContentDelta sets au.FirstContentDeltaAt to now if it
+// hasn't been set yet. Safe under nil au and idempotent across the
+// many emit-foo helpers that may all race to be "first".
+func markFirstContentDelta(au *AuditUpstream) {
+	if au == nil {
+		return
+	}
+	if au.FirstContentDeltaAt.IsZero() {
+		au.FirstContentDeltaAt = time.Now()
+	}
 }
 
 // thinkTagFilter translates leading <think>...</think> XML wrappers in
@@ -364,6 +382,7 @@ func (s *a2oStreamState) startTextBlock() {
 }
 
 func (s *a2oStreamState) emitTextDelta(text string) {
+	markFirstContentDelta(s.au)
 	s.emit("content_block_delta", a2oBlockDelta{
 		Type:  "content_block_delta",
 		Index: s.blockIndex,
@@ -372,6 +391,7 @@ func (s *a2oStreamState) emitTextDelta(text string) {
 }
 
 func (s *a2oStreamState) emitThinking(thinking string) {
+	markFirstContentDelta(s.au)
 	if !s.inThinkingBlock {
 		s.closeCurrentBlock()
 		s.emit("content_block_start", a2oBlockStart{
@@ -405,6 +425,7 @@ func (s *a2oStreamState) startToolBlock(id, name string) {
 }
 
 func (s *a2oStreamState) emitInputJSONDelta(partial string) {
+	markFirstContentDelta(s.au)
 	s.emit("content_block_delta", a2oBlockDelta{
 		Type:  "content_block_delta",
 		Index: s.blockIndex,

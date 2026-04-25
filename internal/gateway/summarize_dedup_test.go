@@ -91,13 +91,13 @@ func TestSummarizerDedup_CollapsesConcurrentCallsSameKey(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		got1, err1 = summarizeMessages(context.Background(), req1, summarizer, 6, silentLogger(), dedup)
+		got1, _, err1 = summarizeMessages(context.Background(), req1, summarizer, 6, silentLogger(), dedup)
 	}()
 	go func() {
 		defer wg.Done()
 		// Small nudge so the second caller joins the flight in progress.
 		time.Sleep(10 * time.Millisecond)
-		got2, err2 = summarizeMessages(context.Background(), req2, summarizer, 6, silentLogger(), dedup)
+		got2, _, err2 = summarizeMessages(context.Background(), req2, summarizer, 6, silentLogger(), dedup)
 	}()
 	// Give both goroutines time to queue on the singleflight call.
 	time.Sleep(50 * time.Millisecond)
@@ -124,8 +124,8 @@ func TestSummarizerDedup_DifferentKeysDoNotCollapse(t *testing.T) {
 	_, summarizer := summarizerFixtureServer(t, fixedSummarizerHandler(&calls, "summary"))
 	dedup := newSummarizerDedup()
 
-	_, err1 := summarizeMessages(context.Background(), mkReqBody("A"), summarizer, 6, silentLogger(), dedup)
-	_, err2 := summarizeMessages(context.Background(), mkReqBody("B"), summarizer, 6, silentLogger(), dedup)
+	_, _, err1 := summarizeMessages(context.Background(), mkReqBody("A"), summarizer, 6, silentLogger(), dedup)
+	_, _, err2 := summarizeMessages(context.Background(), mkReqBody("B"), summarizer, 6, silentLogger(), dedup)
 
 	if err1 != nil || err2 != nil {
 		t.Fatalf("errors: %v %v", err1, err2)
@@ -145,7 +145,7 @@ func TestSummarizerDedup_PostCompletionCache(t *testing.T) {
 	_, summarizer := summarizerFixtureServer(t, fixedSummarizerHandler(&calls, "summary"))
 	dedup := newSummarizerDedup()
 
-	_, err := summarizeMessages(context.Background(), mkReqBody("same"), summarizer, 6, silentLogger(), dedup)
+	_, _, err := summarizeMessages(context.Background(), mkReqBody("same"), summarizer, 6, silentLogger(), dedup)
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestSummarizerDedup_PostCompletionCache(t *testing.T) {
 	}
 
 	// Second call within TTL — should hit cache.
-	_, err = summarizeMessages(context.Background(), mkReqBody("same"), summarizer, 6, silentLogger(), dedup)
+	_, _, err = summarizeMessages(context.Background(), mkReqBody("same"), summarizer, 6, silentLogger(), dedup)
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestSummarizerDedup_PostTTLExpiryRefires(t *testing.T) {
 	now := time.Now()
 	dedup.clock = func() time.Time { return now }
 
-	_, err := summarizeMessages(context.Background(), mkReqBody("same"), summarizer, 6, silentLogger(), dedup)
+	_, _, err := summarizeMessages(context.Background(), mkReqBody("same"), summarizer, 6, silentLogger(), dedup)
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestSummarizerDedup_PostTTLExpiryRefires(t *testing.T) {
 	// Advance past TTL.
 	now = now.Add(summarizerCacheTTL + time.Second)
 
-	_, err = summarizeMessages(context.Background(), mkReqBody("same"), summarizer, 6, silentLogger(), dedup)
+	_, _, err = summarizeMessages(context.Background(), mkReqBody("same"), summarizer, 6, silentLogger(), dedup)
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -214,12 +214,12 @@ func TestSummarizerDedup_ErrorPropagatesNoCache(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, err1 = summarizeMessages(context.Background(), mkReqBody("same"), summarizer, 6, silentLogger(), dedup)
+		_, _, err1 = summarizeMessages(context.Background(), mkReqBody("same"), summarizer, 6, silentLogger(), dedup)
 	}()
 	go func() {
 		defer wg.Done()
 		time.Sleep(10 * time.Millisecond)
-		_, err2 = summarizeMessages(context.Background(), mkReqBody("same"), summarizer, 6, silentLogger(), dedup)
+		_, _, err2 = summarizeMessages(context.Background(), mkReqBody("same"), summarizer, 6, silentLogger(), dedup)
 	}()
 	wg.Wait()
 
@@ -230,7 +230,7 @@ func TestSummarizerDedup_ErrorPropagatesNoCache(t *testing.T) {
 		t.Errorf("err1 = %v, want 500 upstream error", err1)
 	}
 	// Second call should NOT have been cached — a follow-up retry re-fires.
-	_, err3 := summarizeMessages(context.Background(), mkReqBody("same"), summarizer, 6, silentLogger(), dedup)
+	_, _, err3 := summarizeMessages(context.Background(), mkReqBody("same"), summarizer, 6, silentLogger(), dedup)
 	if err3 == nil {
 		t.Fatalf("expected third call to re-attempt and error again: %v", err3)
 	}
@@ -338,7 +338,7 @@ func TestSummarizerDedup_RaceSafety50Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			req := mkReqBody("same-50")
-			results[i], errs[i] = summarizeMessages(context.Background(), req, summarizer, 6, silentLogger(), dedup)
+			results[i], _, errs[i] = summarizeMessages(context.Background(), req, summarizer, 6, silentLogger(), dedup)
 		}()
 	}
 	wg.Wait()
@@ -396,7 +396,7 @@ func TestSummarizerDedup_CacheBoundedUnderMany(t *testing.T) {
 
 	for i := 0; i < summarizerCacheCap+32; i++ {
 		req := mkReqBody(fmt.Sprintf("key-%04d", i))
-		if _, err := summarizeMessages(context.Background(), req, summarizer, 6, silentLogger(), dedup); err != nil {
+		if _, _, err := summarizeMessages(context.Background(), req, summarizer, 6, silentLogger(), dedup); err != nil {
 			t.Fatalf("i=%d: %v", i, err)
 		}
 	}

@@ -76,6 +76,7 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 		metrics:      metrics,
 		includeUsage: includeUsage,
 		created:      nowUnix(),
+		au:           getAuditUpstream(r),
 	}
 	st.jsonEnc = json.NewEncoder(&st.jsonBuf)
 	st.jsonEnc.SetEscapeHTML(false)
@@ -123,6 +124,12 @@ type o2aStreamState struct {
 	flusher      http.Flusher
 	metrics      *state.Metrics
 	includeUsage bool
+	// au records the wall-clock of the first user-meaningful content
+	// chunk for stream.first_token_ms per §4.3. Set on the first
+	// tool_use / thinking / text/input_json/thinking delta — NOT on
+	// the message_start "role: assistant" prelude, which is gateway
+	// scaffolding and not a token. See markFirstContentDelta.
+	au *AuditUpstream
 
 	toolIndex       int
 	inToolBlock     bool
@@ -154,6 +161,7 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 			switch event.ContentBlock.Type {
 			case "tool_use":
 				s.inToolBlock = true
+				markFirstContentDelta(s.au)
 				// Emit tool call start.
 				s.emitChunk(OpenAIChunkChoice{
 					Index: 0,
@@ -174,6 +182,7 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 				// tags in text content so it round-trips correctly.
 				s.inThinkingBlock = true
 				s.inToolBlock = false
+				markFirstContentDelta(s.au)
 				s.emitChunk(OpenAIChunkChoice{
 					Index: 0,
 					Delta: OpenAIChunkDelta{Content: strPtr("<think>")},
@@ -189,12 +198,14 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 		}
 		switch event.Delta.Type {
 		case "text_delta":
+			markFirstContentDelta(s.au)
 			s.emitChunk(OpenAIChunkChoice{
 				Index: 0,
 				Delta: OpenAIChunkDelta{Content: &event.Delta.Text},
 			})
 
 		case "input_json_delta":
+			markFirstContentDelta(s.au)
 			s.emitChunk(OpenAIChunkChoice{
 				Index: 0,
 				Delta: OpenAIChunkDelta{
@@ -208,6 +219,7 @@ func (s *o2aStreamState) processEvent(eventType string, event *AnthropicStreamEv
 			})
 
 		case "thinking_delta":
+			markFirstContentDelta(s.au)
 			// Emit thinking content as text (inside <think> wrapper).
 			s.emitChunk(OpenAIChunkChoice{
 				Index: 0,
