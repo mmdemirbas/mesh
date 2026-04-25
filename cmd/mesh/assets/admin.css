@@ -839,3 +839,17 @@ select option { background: var(--bg-card); color: var(--text); }
 .graph-controls { position: sticky; top: 0; right: 0; display: flex; gap: 6px; justify-content: flex-end; padding-bottom: 8px; }
 .graph-fit-btn { padding: 4px 10px; font-size: 11px; background: var(--bg-input); color: var(--text-dim); border: 1px solid var(--border); border-radius: 4px; cursor: pointer; }
 .graph-fit-btn:hover { color: var(--green); border-color: var(--green); }
+
+/* B2 edge-diff modal */
+.sess-modal { position: fixed; inset: 0; z-index: 1000; }
+.sess-modal-bg { position: absolute; inset: 0; background: rgba(0,0,0,0.6); }
+.sess-modal-card { position: relative; max-width: 960px; max-height: 80vh; margin: 60px auto; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); display: flex; flex-direction: column; box-shadow: 0 12px 40px rgba(0,0,0,0.6); }
+.sess-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.sess-modal-body { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 16px; overflow-y: auto; }
+.diff-side { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; overflow: hidden; }
+.diff-msg { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.diff-msg:last-child { border-bottom: none; }
+.diff-msg-role { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 4px; }
+.diff-msg-content { font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.diff-msg.diff-child .diff-msg-content { color: var(--green); }
+.diff-msg.diff-parent .diff-msg-content { color: var(--text-dim); }

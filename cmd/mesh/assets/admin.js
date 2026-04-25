@@ -3666,6 +3666,10 @@ let sessionView = {
   pairFetching: new Set(),  // body_hashes with fetch in flight
   sse: null,                // EventSource handle
   reconnectTimer: 0,        // timeout id for backoff after error
+  // Graph view interactivity (B2.6).
+  graphViewBox: null,       // {x, y, w, h} or null = autofit on next paint
+  graphLayout: null,        // last-computed layout (for edge-click diff)
+  graphPan: null,           // {startX, startY, originX, originY} during drag
 };
 
 // enterSessionsView opens the SSE connection if a single session is
@@ -4239,12 +4243,22 @@ function renderSessionGraph() {
     return;
   }
   const layout = layoutSessionGraph();
+  sessionView.graphLayout = layout;
   const chainIDs = new Set(chainForBranch(sessionView.currentBranchID).map(n => n.id));
-  const w = Math.max(layout.width, 240);
-  const h = Math.max(layout.height, 120);
+  const intrinsicW = Math.max(layout.width, 240);
+  const intrinsicH = Math.max(layout.height, 120);
+  // Initialize viewBox on first paint or after layout reset.
+  if (!sessionView.graphViewBox) {
+    sessionView.graphViewBox = { x: 0, y: 0, w: intrinsicW, h: intrinsicH };
+  }
+  const vb = sessionView.graphViewBox;
   const parts = [];
-  parts.push('<div class="graph-controls"><button type="button" class="graph-fit-btn" id="sess-graph-fit">fit</button></div>');
-  parts.push('<svg viewBox="0 0 '+w+' '+h+'" width="'+w+'" height="'+h+'" xmlns="http://www.w3.org/2000/svg" id="sess-graph-svg">');
+  parts.push('<div class="graph-controls"><button type="button" class="graph-fit-btn" id="sess-graph-fit" title="Reset zoom and pan">fit</button></div>');
+  // Display SVG at intrinsic size; viewBox controls what we see.
+  // The container scrolls independently; pan/zoom adjusts viewBox so
+  // the same rendering surface shows different parts.
+  parts.push('<svg viewBox="'+vb.x+' '+vb.y+' '+vb.w+' '+vb.h+'" width="'+intrinsicW+'" height="'+intrinsicH+
+    '" xmlns="http://www.w3.org/2000/svg" id="sess-graph-svg" preserveAspectRatio="xMidYMid meet">');
   // Edges first (drawn under nodes).
   parts.push('<g class="graph-edges">');
   for (const e of layout.edges) {
@@ -4290,11 +4304,12 @@ function renderSessionGraph() {
   parts.push('</g>');
   parts.push('</svg>');
   el.innerHTML = parts.join('');
-  // Click → open detail card via existing jumpToPair, after pushing
-  // the node's gateway onto the active set so the request handler
-  // knows where to look.
+  // Click a node → open detail card. Touch a node (without a real
+  // drag in between) → also open. We discriminate by tracking whether
+  // a pan-drag occurred between mousedown and click.
   el.querySelectorAll('.graph-node').forEach(g => {
-    g.addEventListener('click', () => {
+    g.addEventListener('click', (e) => {
+      if (sessionView.graphPan && sessionView.graphPan.dragged) return;
       const id = g.dataset.nodeId;
       const n = sessionView.nodesByID.get(id);
       if (!n) return;
@@ -4304,13 +4319,284 @@ function renderSessionGraph() {
       if (!rs.gateway || !n.run || n.row_id == null) return;
       openNodeDetail(n.run, n.row_id, rs.gateway);
     });
+    g.addEventListener('mouseenter', (e) => showGraphTooltip(g.dataset.nodeId, e));
+    g.addEventListener('mousemove', (e) => moveGraphTooltip(e));
+    g.addEventListener('mouseleave', () => hideGraphTooltip());
   });
-  // Fit button: scroll the container so the graph is centered.
+  // Edge clicks open a diff modal showing the messages-array delta
+  // between parent and child (§7.6). Hover style is in CSS.
+  el.querySelectorAll('.graph-edge').forEach(p => {
+    p.addEventListener('click', () => {
+      if (sessionView.graphPan && sessionView.graphPan.dragged) return;
+      const fromID = p.getAttribute('data-from');
+      const toID = p.getAttribute('data-to');
+      openEdgeDiffModal(fromID, toID);
+    });
+  });
+  // Pan + zoom on the SVG.
+  const svg = document.getElementById('sess-graph-svg');
+  if (svg) {
+    svg.addEventListener('mousedown', graphMouseDown);
+    svg.addEventListener('wheel', graphWheel, { passive: false });
+  }
+  // Fit button: reset viewBox to the layout's natural extent so the
+  // whole graph is visible.
   const fit = document.getElementById('sess-graph-fit');
   if (fit) fit.onclick = () => {
-    el.scrollLeft = Math.max(0, (el.scrollWidth - el.clientWidth) / 2);
-    el.scrollTop = 0;
+    sessionView.graphViewBox = null; // forces autofit on next paint
+    renderSessionGraph();
   };
+}
+
+// --- Pan + zoom (hand-rolled, no third-party) ---
+
+const GRAPH_ZOOM_MIN = 0.25;
+const GRAPH_ZOOM_MAX = 4;
+
+function graphSVGCoordsFromEvent(e) {
+  const svg = document.getElementById('sess-graph-svg');
+  if (!svg) return { x: 0, y: 0 };
+  const rect = svg.getBoundingClientRect();
+  const px = (e.clientX - rect.left) / rect.width;
+  const py = (e.clientY - rect.top) / rect.height;
+  const vb = sessionView.graphViewBox;
+  return { x: vb.x + px * vb.w, y: vb.y + py * vb.h };
+}
+
+function graphMouseDown(e) {
+  // Left-button pan only; ignore clicks on interactive children
+  // (rects/paths handle their own click events; we still register
+  // the drag-start so a real drag suppresses the click).
+  if (e.button !== 0) return;
+  const svg = document.getElementById('sess-graph-svg');
+  if (!svg) return;
+  const rect = svg.getBoundingClientRect();
+  sessionView.graphPan = {
+    startClientX: e.clientX,
+    startClientY: e.clientY,
+    originX: sessionView.graphViewBox.x,
+    originY: sessionView.graphViewBox.y,
+    rectW: rect.width,
+    rectH: rect.height,
+    dragged: false,
+  };
+  window.addEventListener('mousemove', graphMouseMove);
+  window.addEventListener('mouseup', graphMouseUp);
+}
+
+function graphMouseMove(e) {
+  const pan = sessionView.graphPan;
+  if (!pan) return;
+  const dx = e.clientX - pan.startClientX;
+  const dy = e.clientY - pan.startClientY;
+  if (Math.hypot(dx, dy) > 4) pan.dragged = true;
+  const vb = sessionView.graphViewBox;
+  vb.x = pan.originX - dx * vb.w / pan.rectW;
+  vb.y = pan.originY - dy * vb.h / pan.rectH;
+  applyGraphViewBox();
+}
+
+function graphMouseUp() {
+  window.removeEventListener('mousemove', graphMouseMove);
+  window.removeEventListener('mouseup', graphMouseUp);
+  // Keep .dragged flag set briefly so the click handler that fires
+  // on mouseup can suppress its action when a real drag happened.
+  // The handler clears it on the next mousedown.
+  setTimeout(() => { if (sessionView.graphPan) sessionView.graphPan.dragged = false; }, 0);
+}
+
+function graphWheel(e) {
+  e.preventDefault();
+  const vb = sessionView.graphViewBox;
+  if (!vb) return;
+  const cursor = graphSVGCoordsFromEvent(e);
+  const factor = e.deltaY > 0 ? 1.1 : 0.9;
+  const layout = sessionView.graphLayout;
+  const intrinsicW = layout ? Math.max(layout.width, 240) : vb.w;
+  const intrinsicH = layout ? Math.max(layout.height, 120) : vb.h;
+  // Compute new dimensions, clamped to the zoom range.
+  const newW = vb.w * factor;
+  const newH = vb.h * factor;
+  // Effective zoom = intrinsic / viewBox-size (smaller viewBox = zoomed in).
+  const zoomBefore = intrinsicW / vb.w;
+  const zoomAfter = intrinsicW / newW;
+  if (zoomAfter < GRAPH_ZOOM_MIN || zoomAfter > GRAPH_ZOOM_MAX) return;
+  // Adjust origin so the cursor stays over the same SVG point.
+  vb.x = cursor.x - (cursor.x - vb.x) * (newW / vb.w);
+  vb.y = cursor.y - (cursor.y - vb.y) * (newH / vb.h);
+  vb.w = newW;
+  vb.h = newH;
+  applyGraphViewBox();
+}
+
+function applyGraphViewBox() {
+  const svg = document.getElementById('sess-graph-svg');
+  if (!svg) return;
+  const vb = sessionView.graphViewBox;
+  svg.setAttribute('viewBox', vb.x+' '+vb.y+' '+vb.w+' '+vb.h);
+}
+
+// --- Hover tooltip ---
+
+function showGraphTooltip(nodeID, e) {
+  const n = sessionView.nodesByID.get(nodeID);
+  if (!n) return;
+  const container = document.getElementById('sess-graph');
+  if (!container) return;
+  let tip = document.getElementById('sess-graph-tooltip');
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.id = 'sess-graph-tooltip';
+    tip.className = 'graph-tooltip';
+    container.appendChild(tip);
+  }
+  const rs = n.request_summary || {};
+  const ros = n.response_summary || {};
+  const cached = sessionView.pairCache.get(n.id);
+  const userMsg = cached ? extractLastUserMessage(cached.request) : '';
+  const lines = [];
+  const turn = rs.message_count != null ? Math.ceil((rs.message_count + 1) / 2) : 0;
+  lines.push('<div class="tip-line"><b>'+x(rs.model || '(unknown model)')+'</b>'+(turn ? ' · turn '+turn : '')+'</div>');
+  if (n.ts) lines.push('<div class="tip-line">'+x(n.ts)+'</div>');
+  if (ros.has_response) {
+    const tokIn = ros.input_tokens || 0;
+    const tokOut = ros.output_tokens || 0;
+    lines.push('<div class="tip-line">'+(tokIn||tokOut ? tokIn+' → '+tokOut+' tokens · ' : '') +
+      'status '+ros.status+' '+(ros.outcome||'')+(ros.elapsed_ms ? ' · '+ros.elapsed_ms+'ms' : '')+'</div>');
+  } else {
+    lines.push('<div class="tip-line">in flight</div>');
+  }
+  if (userMsg) lines.push('<div class="tip-quote">"'+x(truncForLabel(userMsg, 200))+'"</div>');
+  else if (!cached) {
+    // Schedule a fetch so subsequent hovers carry the snippet.
+    maybeFetchPair(n);
+    lines.push('<div class="tip-quote" style="color:var(--text-muted)">(loading turn…)</div>');
+  }
+  tip.innerHTML = lines.join('');
+  tip.style.display = 'block';
+  moveGraphTooltip(e);
+}
+
+function moveGraphTooltip(e) {
+  const tip = document.getElementById('sess-graph-tooltip');
+  const container = document.getElementById('sess-graph');
+  if (!tip || !container) return;
+  const rect = container.getBoundingClientRect();
+  let x = e.clientX - rect.left + container.scrollLeft + 12;
+  let y = e.clientY - rect.top + container.scrollTop + 12;
+  // Flip on right edge.
+  const tipRect = tip.getBoundingClientRect();
+  if (e.clientX + tipRect.width + 24 > rect.right) {
+    x = e.clientX - rect.left + container.scrollLeft - tipRect.width - 12;
+  }
+  tip.style.left = x + 'px';
+  tip.style.top = y + 'px';
+}
+
+function hideGraphTooltip() {
+  const tip = document.getElementById('sess-graph-tooltip');
+  if (tip) tip.style.display = 'none';
+}
+
+// --- Edge click → diff modal ---
+
+function openEdgeDiffModal(fromID, toID) {
+  const fromNode = sessionView.nodesByID.get(fromID);
+  const toNode = sessionView.nodesByID.get(toID);
+  if (!fromNode || !toNode) return;
+  // Ensure both pair bodies are loaded before computing the diff;
+  // schedule fetches and re-open when ready.
+  let pending = 0;
+  if (!sessionView.pairCache.has(fromID)) { maybeFetchPair(fromNode); pending++; }
+  if (!sessionView.pairCache.has(toID))   { maybeFetchPair(toNode);   pending++; }
+  if (pending > 0) {
+    setSessStatus('loading diff…', '');
+    // Poll the cache with a deadline.
+    const deadline = Date.now() + 4000;
+    const wait = () => {
+      if (sessionView.pairCache.has(fromID) && sessionView.pairCache.has(toID)) {
+        setSessStatus('live', 'live');
+        renderEdgeDiffModal(fromNode, toNode);
+        return;
+      }
+      if (Date.now() > deadline) {
+        setSessStatus('diff load timed out', 'error');
+        return;
+      }
+      setTimeout(wait, 100);
+    };
+    wait();
+    return;
+  }
+  renderEdgeDiffModal(fromNode, toNode);
+}
+
+function renderEdgeDiffModal(fromNode, toNode) {
+  let modal = document.getElementById('sess-edge-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'sess-edge-modal';
+    modal.className = 'sess-modal';
+    document.body.appendChild(modal);
+  }
+  const fromPair = sessionView.pairCache.get(fromNode.id);
+  const toPair = sessionView.pairCache.get(toNode.id);
+  const fromMsgs = (fromPair && fromPair.request && Array.isArray(fromPair.request.body && fromPair.request.body.messages)) ? fromPair.request.body.messages : [];
+  const toMsgs   = (toPair   && toPair.request   && Array.isArray(toPair.request.body   && toPair.request.body.messages))   ? toPair.request.body.messages   : [];
+  // Common-prefix length (LCP): how many leading messages match by
+  // role+content text. Mismatch in role or content → diverged at k.
+  let lcp = 0;
+  while (lcp < fromMsgs.length && lcp < toMsgs.length && messagesEqual(fromMsgs[lcp], toMsgs[lcp])) lcp++;
+  const fromTail = fromMsgs.slice(lcp);
+  const toTail   = toMsgs.slice(lcp);
+  const fromTurn = fromNode.request_summary && fromNode.request_summary.message_count != null ? Math.ceil((fromNode.request_summary.message_count + 1) / 2) : '?';
+  const toTurn   = toNode.request_summary   && toNode.request_summary.message_count   != null ? Math.ceil((toNode.request_summary.message_count   + 1) / 2) : '?';
+  const html = [
+    '<div class="sess-modal-bg"></div>',
+    '<div class="sess-modal-card">',
+      '<div class="sess-modal-header">',
+        '<span><b>messages diff</b> · turn '+fromTurn+' → turn '+toTurn+' · '+lcp+' shared message'+(lcp===1?'':'s')+'</span>',
+        '<button type="button" class="filter-btn" id="sess-modal-close">&#10005;</button>',
+      '</div>',
+      '<div class="sess-modal-body">',
+        diffSideHTML('parent (turn '+fromTurn+')', fromTail, 'parent'),
+        diffSideHTML('child (turn '+toTurn+')', toTail, 'child'),
+      '</div>',
+    '</div>',
+  ].join('');
+  modal.innerHTML = html;
+  modal.style.display = 'block';
+  document.getElementById('sess-modal-close').onclick = closeEdgeDiffModal;
+  modal.querySelector('.sess-modal-bg').onclick = closeEdgeDiffModal;
+  document.addEventListener('keydown', edgeDiffEscape);
+}
+
+function diffSideHTML(label, msgs, side) {
+  if (msgs.length === 0) {
+    return '<div class="diff-side"><div class="diff-meta-label">'+x(label)+'</div><div class="diff-info">(no new messages)</div></div>';
+  }
+  return '<div class="diff-side"><div class="diff-meta-label">'+x(label)+' — +'+msgs.length+' message'+(msgs.length===1?'':'s')+'</div>' +
+    msgs.map(m => {
+      const role = (m && m.role) || '?';
+      const txt = contentToText((m && m.content) || '');
+      return '<div class="diff-msg diff-'+side+'"><div class="diff-msg-role">'+x(role)+'</div><div class="diff-msg-content">'+x(truncForLabel(txt, 800))+'</div></div>';
+    }).join('') + '</div>';
+}
+
+function messagesEqual(a, b) {
+  if (!a || !b) return false;
+  if (a.role !== b.role) return false;
+  return contentToText(a.content) === contentToText(b.content);
+}
+
+function closeEdgeDiffModal() {
+  const modal = document.getElementById('sess-edge-modal');
+  if (modal) modal.style.display = 'none';
+  document.removeEventListener('keydown', edgeDiffEscape);
+}
+
+function edgeDiffEscape(e) {
+  if (e.key === 'Escape') closeEdgeDiffModal();
 }
 
 function truncForLabel(s, max) {
