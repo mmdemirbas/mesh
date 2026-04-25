@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F578;</text></svg>">
+<title>mesh __MESH_VERSION__</title>
+<style>
+__MESH_CSS__</style>
+</head>
+<body>
+
+<a class="skip-link" href="#main-content">Skip to content</a>
+<header class="header">
+  <div class="header-left">
+    <div class="logo">mesh<span>__MESH_VERSION__</span></div>
+  </div>
+  <div class="header-status" id="hdr-status" role="status" aria-live="polite">connecting...</div>
+</header>
+
+<nav class="tabs" id="tabs" role="tablist" aria-label="Main navigation">
+  <button class="tab active" role="tab" aria-selected="true" data-tab="dashboard" id="tab-dashboard" aria-controls="p-dashboard">Dashboard</button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="clipsync" id="tab-clipsync" aria-controls="p-clipsync">Clipsync</button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="filesync" id="tab-filesync" aria-controls="p-filesync">Filesync</button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="gateway" id="tab-gateway" aria-controls="p-gateway">Gateway</button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="perf" id="tab-perf" aria-controls="p-perf">Perf</button>
+  <div class="tab-sep" role="separator"></div>
+  <button class="tab" role="tab" aria-selected="false" data-tab="logs" id="tab-logs" aria-controls="p-logs">Logs</button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="metrics" id="tab-metrics" aria-controls="p-metrics">Metrics</button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="api" id="tab-api" aria-controls="p-api">API</button>
+  <button class="tab" role="tab" aria-selected="false" data-tab="debug" id="tab-debug" aria-controls="p-debug">Debug</button>
+</nav>
+
+<main class="content" id="main-content">
+
+  <!-- Dashboard panel -->
+  <div class="panel active" id="p-dashboard" role="tabpanel" aria-labelledby="tab-dashboard">
+    <div class="stats" id="dash-stats"></div>
+    <div class="card">
+      <div class="card-header">
+        <span>Components</span>
+        <div style="display:flex;gap:8px">
+          <input type="search" class="search-input" id="comp-search" placeholder="Filter components..." aria-label="Filter components" style="width:220px">
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="table-scroll">
+        <table>
+          <thead><tr>
+            <th>Status</th>
+            <th>Name</th>
+            <th>Detail</th>
+            <th>Metrics</th>
+          </tr></thead>
+          <tbody id="comp-body"><tr class="loading-row"><td colspan="4">Loading components…</td></tr></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span>Recent Logs</span></div>
+      <div class="card-body">
+        <div class="log-container" id="dash-logs" style="max-height:200px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Clipsync panel -->
+  <div class="panel" id="p-clipsync" role="tabpanel" aria-labelledby="tab-clipsync">
+    <div class="stats" id="cs-stats"></div>
+    <div class="card">
+      <div class="card-header"><span>Recent Activity</span></div>
+      <div class="card-body">
+        <div class="table-scroll">
+        <div id="cs-filter-bar" class="tf-active-bar"></div>
+        <table>
+          <thead id="cs-thead"><tr>
+            <th>Direction</th>
+            <th>Size</th>
+            <th>Content</th>
+            <th>Peer</th>
+            <th>Time</th>
+          </tr></thead>
+          <tbody id="cs-body"><tr class="loading-row"><td colspan="5">Loading clipsync activity…</td></tr></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Filesync panel -->
+  <div class="panel" id="p-filesync" role="tabpanel" aria-labelledby="tab-filesync">
+    <div class="stats" id="fs-stats"></div>
+    <div class="chart-grid" id="fs-charts">
+      <div class="chart-card" id="fstab-traffic-card" style="display:none">
+        <div class="chart-title">Sync Traffic</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--green)"><span id="fstab-dl-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">dl</span></div>
+          <div class="chart-value" style="color:var(--purple)"><span id="fstab-ul-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">ul</span></div>
+        </div>
+        <canvas class="chart-canvas" id="fstab-traffic" aria-label="Filesync traffic chart"></canvas>
+      </div>
+      <div class="chart-card" id="fstab-sync-card" style="display:none">
+        <div class="chart-title">Sync Cycles &amp; Errors</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--cyan)"><span id="fstab-cycles-val">0</span> <span style="font-size:11px;color:var(--text-muted)">syncs</span></div>
+          <div class="chart-value" style="color:var(--red)"><span id="fstab-errors-val">0</span> <span style="font-size:11px;color:var(--text-muted)">errors</span></div>
+        </div>
+        <canvas class="chart-canvas" id="fstab-sync" aria-label="Filesync sync chart"></canvas>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span>Folders</span>
+      </div>
+      <div class="card-body">
+        <div id="fs-filter-bar" class="tf-active-bar"></div>
+        <div class="table-scroll">
+        <table>
+          <thead id="fs-thead"><tr>
+            <th>ID</th><th>Path</th><th>Direction</th><th>Files</th><th>Dirs</th><th>Size</th><th>Last sync</th><th>Peers</th>
+          </tr></thead>
+          <tbody id="fs-body"><tr class="loading-row"><td colspan="8">Loading folders…</td></tr></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+    <div class="card" id="conflict-card">
+      <div class="card-header"><span>Conflicts</span><span class="badge badge-ok" id="conflict-count">0</span></div>
+      <div class="card-body">
+        <div class="table-scroll">
+        <div id="conflict-filter-bar" class="tf-active-bar"></div>
+        <table>
+          <thead id="conflict-thead"><tr><th>Folder</th><th>Conflict Path</th><th>Original</th></tr></thead>
+          <tbody id="conflict-body"><tr class="loading-row"><td colspan="3">Loading conflicts…</td></tr></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span>Recent Activity</span></div>
+      <div class="card-body">
+        <div class="table-scroll">
+        <div id="fsa-filter-bar" class="tf-active-bar"></div>
+        <table>
+          <thead id="fsa-thead"><tr><th>Direction</th><th>Folder</th><th>Peer</th><th>Files</th><th>Size</th><th>Time</th><th>Error</th></tr></thead>
+          <tbody id="fsa-body"><tr class="loading-row"><td colspan="6">Loading activity…</td></tr></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Performance panel -->
+  <div class="panel" id="p-perf" role="tabpanel" aria-labelledby="tab-perf">
+    <div class="stats" id="perf-stats"></div>
+    <div class="chart-grid" id="perf-charts">
+      <div class="chart-card">
+        <div class="chart-title">Scan Duration</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--cyan)"><span id="perf-scan-walk">0</span> <span style="font-size:11px;color:var(--text-muted)">walk ms</span></div>
+          <div class="chart-value" style="color:var(--green)"><span id="perf-scan-hash">0</span> <span style="font-size:11px;color:var(--text-muted)">hash ms</span></div>
+        </div>
+        <canvas class="chart-canvas" id="perf-chart-scan" aria-label="Scan duration chart"></canvas>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Sync Duration</div>
+        <div class="chart-value" id="perf-sync-dur" style="margin-bottom:8px">0 ms</div>
+        <canvas class="chart-canvas" id="perf-chart-sync" aria-label="Sync duration chart"></canvas>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Heap / Sys Memory</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--green)"><span id="perf-heap-val">0</span> <span style="font-size:11px;color:var(--text-muted)">heap MB</span></div>
+          <div class="chart-value" style="color:var(--purple)"><span id="perf-sys-val">0</span> <span style="font-size:11px;color:var(--text-muted)">sys MB</span></div>
+        </div>
+        <canvas class="chart-canvas" id="perf-chart-mem" aria-label="Memory chart"></canvas>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Goroutines / FDs</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--cyan)"><span id="perf-gor-val">0</span> <span style="font-size:11px;color:var(--text-muted)">goroutines</span></div>
+          <div class="chart-value" style="color:var(--yellow)"><span id="perf-fd-val">0</span> <span style="font-size:11px;color:var(--text-muted)">FDs</span></div>
+        </div>
+        <canvas class="chart-canvas" id="perf-chart-gor" aria-label="Goroutines chart"></canvas>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span>Recent Scans</span>
+        <select id="perf-scan-folder" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
+          <option value="">All folders</option>
+        </select>
+      </div>
+      <div class="card-body">
+        <div class="table-scroll">
+        <table>
+          <thead><tr><th>Time</th><th>Folder</th><th>Walk</th><th>Hash</th><th>Stat</th><th>Snap</th><th>Files</th><th>Hashed</th><th>Deleted</th><th>Changed</th></tr></thead>
+          <tbody id="perf-scan-body"><tr class="loading-row"><td colspan="10">Loading…</td></tr></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span>Recent Syncs</span></div>
+      <div class="card-body">
+        <div class="table-scroll">
+        <table>
+          <thead><tr><th>Time</th><th>Folder</th><th>Peer</th><th>Duration</th><th>Remote</th><th>DL</th><th>Conflicts</th><th>Deletes</th><th>Failed</th></tr></thead>
+          <tbody id="perf-sync-body"><tr class="loading-row"><td colspan="9">Loading…</td></tr></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span>Recent Persists</span></div>
+      <div class="card-body">
+        <div class="table-scroll">
+        <table>
+          <thead><tr><th>Time</th><th>Folder</th><th>Index ms</th><th>Peers ms</th><th>Entries</th><th>Skipped</th></tr></thead>
+          <tbody id="perf-persist-body"><tr class="loading-row"><td colspan="6">Loading…</td></tr></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span>Process Snapshots</span></div>
+      <div class="card-body">
+        <div class="table-scroll">
+        <table>
+          <thead><tr><th>Time</th><th>Heap MB</th><th>Sys MB</th><th>Goroutines</th><th>FDs</th><th>GC Pause</th><th>Folders</th></tr></thead>
+          <tbody id="perf-snap-body"><tr class="loading-row"><td colspan="7">Loading…</td></tr></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Gateway panel -->
+  <div class="panel" id="p-gateway" role="tabpanel" aria-labelledby="tab-gateway">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap">
+      <div id="gw-chips" style="display:inline-flex;gap:4px;flex-wrap:wrap"></div>
+      <select id="gw-window" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
+        <option value="24h" selected>last 24h</option>
+        <option value="1h">last 1h</option>
+        <option value="7d">last 7d</option>
+        <option value="30d">last 30d</option>
+        <option value="all">all time</option>
+      </select>
+      <div style="display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+        <div class="gw-sub-btn active" data-sub="overview">Overview</div>
+        <div class="gw-sub-btn" data-sub="requests">Requests</div>
+      </div>
+    </div>
+    <div id="gw-sess-chips" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px"></div>
+    <div id="gw-project-chips" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px"></div>
+
+    <!-- Overview sub-view -->
+    <div id="gw-sub-overview" class="gw-subview">
+      <div class="stats" id="gw-kpi"></div>
+      <div class="card">
+        <div class="card-header"><span>Token usage over time</span></div>
+        <div class="card-body padded">
+          <div id="gw-series-legend" class="token-legend" style="margin-bottom:8px"></div>
+          <div id="gw-series" style="height:160px"></div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div class="card">
+          <div class="card-header"><span>Top sessions by tokens</span></div>
+          <div class="card-body">
+            <table>
+              <thead><tr><th>Session</th><th>Model</th><th>Turns</th><th>Tokens (in/out)</th><th>Last seen</th></tr></thead>
+              <tbody id="gw-top-sessions"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span>Top models by tokens</span></div>
+          <div class="card-body">
+            <table>
+              <thead><tr><th>Model</th><th>Requests</th><th>Tokens (in/out)</th><th>Cache read</th></tr></thead>
+              <tbody id="gw-top-models"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span>By project</span></div>
+          <div class="card-body">
+            <table>
+              <thead><tr><th>Project / path</th><th>Requests</th><th>Tokens (in/out)</th></tr></thead>
+              <tbody id="gw-by-path"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span>By hour of day (UTC)</span></div>
+          <div class="card-body padded">
+            <div id="gw-by-hour" style="height:140px"></div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <span>Biggest single requests</span>
+          <span class="help" data-help="Highest-total-token pairs in the current window. Click any row to open its detail card.">?</span>
+        </div>
+        <div class="card-body">
+          <table>
+            <thead><tr><th>When</th><th>Session</th><th>Model</th><th>Path</th><th>Total tokens</th><th>In / Out</th></tr></thead>
+            <tbody id="gw-top-requests"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <span>Biggest preamble blocks</span>
+          <span class="help" data-help="Injected pseudo-XML blocks (system-reminder, command-*, task-notification, hooks) aggregated by tag + first 60 chars. Total chars tells you which recurring context is wasting the most tokens across the window.">?</span>
+        </div>
+        <div class="card-body">
+          <table>
+            <thead><tr><th>Tag + signature</th><th>Occurrences</th><th>Total chars</th></tr></thead>
+            <tbody id="gw-preamble-blocks"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Requests sub-view -->
+    <div id="gw-sub-requests" class="gw-subview" style="display:none">
+    <div class="card">
+      <div class="card-header">
+        <span>Requests</span>
+      </div>
+      <div class="card-body">
+        <div id="gw-meta" style="font-size:12px;color:var(--text-muted);margin-bottom:8px"></div>
+        <div id="gw-filter-bar" class="tf-active-bar"></div>
+        <div class="gw-scroll">
+          <table>
+            <thead id="gw-thead"><tr>
+              <th>Time</th><th>Gateway</th><th>Session</th><th>Dir</th>
+              <th>Client model</th><th>Upstream model</th><th>Status</th>
+              <th>Outcome</th><th>In</th><th>Out</th><th>Elapsed</th>
+              <th>Project</th><th>Summary</th>
+            </tr></thead>
+            <tbody id="gw-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    </div><!-- /#gw-sub-requests -->
+
+    <!-- Detail card is shared across sub-views -->
+    <div class="card" id="gw-detail-card" style="display:none">
+      <div class="card-header">
+        <span id="gw-detail-title">Detail</span>
+        <div style="display:flex;gap:8px">
+          <div class="filter-btn" onclick="document.getElementById('gw-detail-card').style.display='none';gwDetailKey='';writeGwHash()" style="font-size:12px">&#8592; Back to list</div>
+          <div class="filter-btn" onclick="document.getElementById('gw-detail-card').style.display='none';gwDetailKey='';writeGwHash()">&#10005;</div>
+        </div>
+      </div>
+      <div class="card-body padded">
+        <!-- Turn details: audit metadata, tokens, timing — at the top for immediate context -->
+        <div id="gw-turn-details" style="margin-bottom:12px"></div>
+        <div class="gw-detail-grid">
+          <!-- Row 1: requests (natural top-to-bottom flow: request then response) -->
+          <details class="gw-detail-pane sec" open>
+            <summary><h4 style="display:inline">
+              <span>Client request <span id="gw-req-len" class="sec-len" style="margin-left:6px"></span></span>
+              <span style="display:inline-flex;gap:6px;margin-left:auto">
+                <button class="copy-btn" onclick="event.stopPropagation();bulkSec('req', true)">expand all</button>
+                <button class="copy-btn" onclick="event.stopPropagation();bulkSec('req', false)">collapse all</button>
+                <button class="copy-btn" onclick="event.stopPropagation();copyDetail('req')">copy</button>
+              </span>
+            </h4></summary>
+            <details class="sec" id="gw-req-json-sec">
+              <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-req-json-len"></span></summary>
+              <div class="sec-body"><div class="gw-detail-raw" id="gw-req-raw"></div></div>
+            </details>
+            <div class="gw-detail-structured" id="gw-req-structured"></div>
+          </details>
+          <div id="gw-upstream-req-sec" style="display:none">
+            <details class="gw-detail-pane sec" open>
+              <summary><h4 style="display:inline">
+                <span>Upstream request <span id="gw-upstream-req-len" class="sec-len" style="margin-left:6px"></span></span>
+              </h4></summary>
+              <details class="sec">
+                <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-upstream-req-json-len"></span></summary>
+                <div class="sec-body"><div class="gw-detail-raw" id="gw-upstream-req-raw"></div></div>
+              </details>
+              <div class="gw-detail-structured" id="gw-upstream-req-structured"></div>
+            </details>
+          </div>
+          <!-- Row 2: responses -->
+          <details class="gw-detail-pane sec" open>
+            <summary><h4 style="display:inline">
+              <span>Client response <span id="gw-resp-len" class="sec-len" style="margin-left:6px"></span></span>
+              <span style="display:inline-flex;gap:6px;margin-left:auto">
+                <button class="copy-btn" onclick="event.stopPropagation();bulkSec('resp', true)">expand all</button>
+                <button class="copy-btn" onclick="event.stopPropagation();bulkSec('resp', false)">collapse all</button>
+                <button class="copy-btn" onclick="event.stopPropagation();copyDetail('resp')">copy</button>
+              </span>
+            </h4></summary>
+            <details class="sec" id="gw-resp-json-sec">
+              <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-resp-json-len"></span></summary>
+              <div class="sec-body"><div class="gw-detail-raw" id="gw-resp-raw"></div></div>
+            </details>
+            <div class="gw-detail-structured" id="gw-resp-structured"></div>
+          </details>
+          <div id="gw-upstream-resp-sec" style="display:none">
+            <details class="gw-detail-pane sec" open>
+              <summary><h4 style="display:inline">
+                <span>Upstream response <span id="gw-upstream-resp-len" class="sec-len" style="margin-left:6px"></span></span>
+              </h4></summary>
+              <details class="sec">
+                <summary><span class="sec-title">Raw JSON</span><span class="sec-len" id="gw-upstream-resp-json-len"></span></summary>
+                <div class="sec-body"><div class="gw-detail-raw" id="gw-upstream-resp-raw"></div></div>
+              </details>
+              <div class="gw-detail-structured" id="gw-upstream-resp-structured"></div>
+            </details>
+          </div>
+        </div>
+        <!-- (turn details moved above the grid) -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Logs panel -->
+  <div class="panel" id="p-logs" role="tabpanel" aria-labelledby="tab-logs">
+    <div class="card">
+      <div class="toolbar">
+        <input type="search" class="search-input" id="log-search" placeholder="Search logs..." aria-label="Search logs">
+        <div class="filter-btn active" data-level="all">All</div>
+        <div class="filter-btn" data-level="INF">Info</div>
+        <div class="filter-btn" data-level="WRN">Warn</div>
+        <div class="filter-btn" data-level="ERR">Error</div>
+        <div class="filter-btn" data-level="DBG">Debug</div>
+        <div style="flex:1"></div>
+        <div class="filter-btn active" id="log-mode-recent" onclick="setLogMode('recent')">Recent</div>
+        <div class="filter-btn" id="log-mode-file" onclick="setLogMode('file')">Full Log</div>
+      </div>
+      <div class="card-body">
+        <div class="log-container" id="log-lines" style="max-height:75vh"></div>
+        <div class="log-count" id="log-count"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Metrics panel -->
+  <div class="panel" id="p-metrics" role="tabpanel" aria-labelledby="tab-metrics">
+    <div class="stats" id="met-stats"></div>
+    <div class="chart-grid" id="met-charts">
+      <div class="chart-card">
+        <div class="chart-title">Network Traffic</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--green)"><span id="chart-tx-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">tx</span></div>
+          <div class="chart-value" style="color:var(--purple)"><span id="chart-rx-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">rx</span></div>
+        </div>
+        <canvas class="chart-canvas" id="chart-traffic" aria-label="Network traffic chart"></canvas>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Active Streams</div>
+        <div class="chart-value" id="chart-streams-val" style="margin-bottom:8px">0</div>
+        <canvas class="chart-canvas" id="chart-streams" aria-label="Active streams chart"></canvas>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Goroutines</div>
+        <div class="chart-value" id="chart-goroutines-val" style="margin-bottom:8px">0</div>
+        <canvas class="chart-canvas" id="chart-goroutines" aria-label="Goroutines chart"></canvas>
+      </div>
+      <div class="chart-card" id="chart-fds-card">
+        <div class="chart-title">Open File Descriptors</div>
+        <div class="chart-value" id="chart-fds-val" style="margin-bottom:8px">0</div>
+        <canvas class="chart-canvas" id="chart-fds" aria-label="Open file descriptors chart"></canvas>
+      </div>
+      <div class="chart-card" id="chart-tokens-card" style="display:none">
+        <div class="chart-title">Gateway Token Throughput</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--cyan)"><span id="chart-tokin-val">0</span> <span style="font-size:11px;color:var(--text-muted)">in/s</span></div>
+          <div class="chart-value" style="color:var(--yellow)"><span id="chart-tokout-val">0</span> <span style="font-size:11px;color:var(--text-muted)">out/s</span></div>
+        </div>
+        <canvas class="chart-canvas" id="chart-tokens" aria-label="Gateway token throughput chart"></canvas>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Component Health</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--green)"><span id="chart-health-up">0</span> <span style="font-size:11px;color:var(--text-muted)">up</span></div>
+          <div class="chart-value" style="color:var(--red)"><span id="chart-health-down">0</span> <span style="font-size:11px;color:var(--text-muted)">down</span></div>
+          <div class="chart-value" style="color:var(--yellow)"><span id="chart-health-pend">0</span> <span style="font-size:11px;color:var(--text-muted)">pending</span></div>
+        </div>
+        <canvas class="chart-canvas" id="chart-health" aria-label="Component health chart"></canvas>
+      </div>
+      <div class="chart-card" id="chart-fs-traffic-card" style="display:none">
+        <div class="chart-title">Filesync Traffic</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--green)"><span id="chart-fs-dl-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">dl</span></div>
+          <div class="chart-value" style="color:var(--purple)"><span id="chart-fs-ul-val">0 B/s</span> <span style="font-size:11px;color:var(--text-muted)">ul</span></div>
+        </div>
+        <canvas class="chart-canvas" id="chart-fs-traffic" aria-label="Filesync traffic chart"></canvas>
+      </div>
+      <div class="chart-card" id="chart-fs-sync-card" style="display:none">
+        <div class="chart-title">Filesync Activity</div>
+        <div class="chart-sub">
+          <div class="chart-value" style="color:var(--cyan)"><span id="chart-fs-cycles-val">0</span> <span style="font-size:11px;color:var(--text-muted)">syncs</span></div>
+          <div class="chart-value" style="color:var(--red)"><span id="chart-fs-errors-val">0</span> <span style="font-size:11px;color:var(--text-muted)">errors</span></div>
+        </div>
+        <canvas class="chart-canvas" id="chart-fs-sync" aria-label="Filesync activity chart"></canvas>
+      </div>
+    </div>
+    <div class="card" id="met-comp-card">
+      <div class="card-header">
+        <span>Per-Component Traffic</span>
+      </div>
+      <div class="card-body">
+        <div class="table-scroll">
+        <table>
+          <thead><tr>
+            <th>Type</th><th>ID</th><th>TX</th><th>RX</th><th>Streams</th><th>Uptime</th>
+          </tr></thead>
+          <tbody id="met-comp-body"></tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span>Prometheus Metrics</span>
+        <input type="search" class="search-input" id="met-search" placeholder="Filter metrics..." aria-label="Filter metrics" style="width:220px">
+      </div>
+      <div class="card-body" id="met-body" style="padding:0"></div>
+    </div>
+  </div>
+
+  <!-- API panel -->
+  <div class="panel" id="p-api" role="tabpanel" aria-labelledby="tab-api">
+    <div class="card">
+      <div class="card-header"><span>API Endpoints</span></div>
+      <div class="card-body" id="api-list"></div>
+    </div>
+  </div>
+
+  <!-- Debug panel -->
+  <div class="panel" id="p-debug" role="tabpanel" aria-labelledby="tab-debug">
+    <div class="stats" id="dbg-stats"></div>
+    <div class="card">
+      <div class="card-header">
+        <span>Profiling</span>
+      </div>
+      <div class="card-body padded" style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="endpoint-try" onclick="dbgProfile('goroutine')">Goroutine Dump</button>
+        <button class="endpoint-try" onclick="dbgProfile('heap')">Heap Profile</button>
+        <button class="endpoint-try" onclick="dbgProfile('allocs')">Allocs Profile</button>
+        <button class="endpoint-try" onclick="dbgProfile('threadcreate')">Thread Create</button>
+        <button class="endpoint-try" onclick="dbgProfile('block')">Block Profile</button>
+        <button class="endpoint-try" onclick="dbgProfile('mutex')">Mutex Profile</button>
+        <button class="endpoint-try" onclick="dbgCpuProfile()">CPU Profile (10s)</button>
+        <button class="endpoint-try" onclick="dbgTrace()">Trace (5s)</button>
+      </div>
+    </div>
+    <div class="card" id="dbg-result-card" style="display:none">
+      <div class="card-header">
+        <span id="dbg-result-title">Result</span>
+        <button class="endpoint-try" onclick="document.getElementById('dbg-result-card').style.display='none'">Close</button>
+      </div>
+      <div class="card-body">
+        <pre class="log-container" id="dbg-result" style="max-height:70vh;white-space:pre-wrap;word-break:break-all;padding:12px 16px"></pre>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+__MESH_JS__</script>
+</body>
+</html>
