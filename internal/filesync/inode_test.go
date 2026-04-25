@@ -341,7 +341,6 @@ func TestScanRenameIgnoresUnchangedPaths(t *testing.T) {
 // protoToFileIndex. This is the bridge between local detection and
 // peer-visible behaviour.
 func TestPrevPathRoundTripsThroughProto(t *testing.T) {
-	t.Parallel()
 	idx := &FileIndex{
 		Sequence: 2,
 		files: map[string]FileEntry{
@@ -352,18 +351,15 @@ func TestPrevPathRoundTripsThroughProto(t *testing.T) {
 			},
 		},
 	}
-	idx.rebuildSeqIndex()
+	fs := &folderState{index: idx}
+	attachSQLiteForTest(t, fs, "f")
 	n := &Node{
 		deviceID: "dev",
-		folders: map[string]*folderState{
-			"f": {index: idx},
-		},
+		folders:  map[string]*folderState{"f": fs},
 	}
 
-	// Both the delta path (seqIndex) and the full path must emit
-	// prev_path. The delta path goes through buildIndexExchange when
-	// sinceSequence>0 and seqIndex is non-empty; the full path is
-	// sinceSequence==0.
+	// Both the delta path and the full path must emit prev_path.
+	// Delta path: since>0; full path: since==0.
 	for _, since := range []int64{0, 1} {
 		exch := n.buildIndexExchange("f", since)
 		var newInfo *pb.FileInfo

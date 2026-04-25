@@ -133,18 +133,18 @@ type FileIndex struct {
 	cachedCount int   `yaml:"-"`
 	cachedSize  int64 `yaml:"-"`
 
-	// PG: secondary index sorted by Sequence for O(log N + delta) delta
-	// exchange. May contain stale entries (path updated with a newer
-	// sequence); consumers must verify against the files map. Rebuilt
-	// after scan swap and index load; appended to by Set.
-	seqIndex []seqEntry `yaml:"-"`
-
 	// C6: this node's device ID (10-char Crockford base32). Populated by
 	// folderState init from Node.deviceID. Used by scan to bump the
 	// per-file VectorClock on local writes. Empty in tests that build a
 	// FileIndex directly; bump is skipped in that case.
 	selfID string `yaml:"-"`
 }
+
+// PG: the in-memory secondary sequence index (seqIndex []seqEntry,
+// rebuildSeqIndex) was retired at audit §6 commit 4 (Q1 closes).
+// SQLite's `files_by_seq` index now powers the delta-exchange query
+// (see queryFilesSinceSeq in index_sqlite.go); the buildIndexExchange
+// path uses that index via the read-only handle (INV-1).
 
 // Get returns the entry for path and a presence flag. The zero
 // FileEntry is returned when the path is absent — callers that previously
@@ -179,9 +179,9 @@ func (idx *FileIndex) Set(path string, entry FileEntry) {
 		idx.cachedSize += entry.Size
 	}
 	idx.files[path] = entry
-	// PG: append to secondary index. Stale entries (same path, older seq)
-	// are tolerated and filtered at query time.
-	idx.seqIndex = append(idx.seqIndex, seqEntry{seq: entry.Sequence, path: path})
+	// PG: the in-memory secondary sequence index was retired at audit
+	// §6 commit 4 (Q1) — buildIndexExchange now uses SQLite's
+	// files_by_seq index via queryFilesSinceSeq.
 	if idx.dirty == nil {
 		idx.dirty = make(map[string]struct{})
 	}
@@ -292,11 +292,8 @@ func (idx *FileIndex) MarkAllDirty() {
 // Set, the method should be removed.
 func (idx *FileIndex) Files() map[string]FileEntry { return idx.files }
 
-// seqEntry maps a sequence number to a path for the secondary index.
-type seqEntry struct {
-	seq  int64
-	path string
-}
+// seqEntry was the in-memory secondary sequence index entry. Removed
+// at audit §6 commit 4 (Q1) — SQLite's files_by_seq index supplants it.
 
 // PeerState tracks per-peer sync progress.
 type PeerState struct {
@@ -398,17 +395,11 @@ func (idx *FileIndex) recomputeCache() {
 	idx.cachedSize = size
 }
 
-// rebuildSeqIndex reconstructs the secondary sequence index from the
-// files map. Called after scan swap and index load.
-func (idx *FileIndex) rebuildSeqIndex() {
-	idx.seqIndex = make([]seqEntry, 0, len(idx.files))
-	for path, entry := range idx.files {
-		idx.seqIndex = append(idx.seqIndex, seqEntry{seq: entry.Sequence, path: path})
-	}
-	sort.Slice(idx.seqIndex, func(i, j int) bool {
-		return idx.seqIndex[i].seq < idx.seqIndex[j].seq
-	})
-}
+// rebuildSeqIndex was the in-memory secondary sequence index
+// reconstruction. Removed at audit §6 commit 4 (Q1) — SQLite's
+// files_by_seq index supplants it. Callers that previously invoked
+// this method are now no-ops or have been deleted.
+func (idx *FileIndex) rebuildSeqIndex() {} // deprecated, retained as a no-op for transitional callers
 
 // ScanStats captures measurable work performed by a single scan pass so
 // callers can attribute wall time to concrete phases instead of guessing.

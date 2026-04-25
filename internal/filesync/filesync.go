@@ -504,13 +504,25 @@ type folderState struct {
 	persistMu  sync.Mutex // N10: serializes persistFolder calls
 	indexDirty bool       // P17a: true when file index changed since last persist
 	peersDirty bool       // P17a: true when peer state changed since last persist
-	// db is the per-folder SQLite handle, opened by Node.Run via
-	// openFolderDB. PERSISTENCE-AUDIT.md §6 commit 2: this is the only
+	// db is the per-folder SQLite writer handle, opened by Node.Run
+	// via openFolderDB (MaxOpenConns=1, _txlock=immediate). All write
+	// transactions go through this handle; SQLite serializes them
+	// internally. PERSISTENCE-AUDIT.md §6 commit 2: this is the only
 	// on-disk store for the folder index and peer state. Closed at
 	// shutdown after wg.Wait so no goroutine still holds rows. Nil
 	// when the folder is in the FolderDisabled state because openFolderDB
 	// failed at startup; sync/scan loops check IsDisabled() and skip.
 	db *sql.DB
+
+	// dbReader is the dedicated read-only handle for peer-facing
+	// queries (audit §6 commit 4 + decision §5 #10). Opened with
+	// query_only=true and mode=ro; MaxOpenConns sized for the peer
+	// count so concurrent buildIndexExchange / bundle / blocksigs
+	// calls do not serialize behind the writer's MaxOpenConns=1.
+	// Reads use WAL snapshot isolation — they never block the writer
+	// and never see a torn intermediate state. Nil if the writer
+	// open failed.
+	dbReader *sql.DB
 
 	// folderDisabledFields carries the FolderDisabled-state machinery
 	// (decision §5 #25, iter-4 Z6 + Z10 + Z12). See disabled.go for
@@ -1096,6 +1108,19 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		}
 		fs.db = db
 
+		// Audit §6 commit 4 / decision §5 #10: dedicated read-only
+		// handle for peer-facing reads. Sized for n_peers + 3 so
+		// concurrent index exchanges across all peers do not
+		// serialize behind the writer's MaxOpenConns=1.
+		dbReader, err := openFolderDBReader(folderCacheDir, len(fcfg.Peers)+3)
+		if err != nil {
+			_ = db.Close()
+			fs.db = nil
+			fs.disable(classifyOpenError(err), err.Error(), "")
+			continue
+		}
+		fs.dbReader = dbReader
+
 		// I7 (audit decision §5 #20): compare folder_meta.device_id
 		// against the node-level identity. Mismatch → FolderDisabled
 		// with reason `device_id_mismatch`. Recovery: restore the
@@ -1344,10 +1369,15 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 
 	// L5: close os.Root handles. PERSISTENCE-AUDIT.md §2.7 L2:
 	// also close the per-folder SQLite handles, AFTER wg.Wait so
-	// no goroutine still holds rows.
+	// no goroutine still holds rows. Close the reader before the
+	// writer so any straggling read tx releases its WAL snapshot
+	// before the writer's checkpoint flush.
 	for _, fs := range n.folders {
 		if fs.root != nil {
 			_ = fs.root.Close()
+		}
+		if fs.dbReader != nil {
+			_ = fs.dbReader.Close()
 		}
 		if fs.db != nil {
 			_ = fs.db.Close()
@@ -2695,78 +2725,81 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	})
 }
 
-// buildIndexExchange creates a protobuf IndexExchange from the local index.
-// If sinceSequence > 0, only entries with Sequence > sinceSequence are included (delta mode).
+// buildIndexExchange creates a protobuf IndexExchange from the local
+// index by querying SQLite (audit §6 commit 4 / INV-1). Reads go
+// through fs.dbReader so concurrent exchanges across peers do not
+// serialize behind the writer's MaxOpenConns=1; WAL snapshot
+// isolation guarantees a consistent view even if a write tx is in
+// flight (audit C4 + N4).
+//
+// If sinceSequence > 0, only entries with Sequence > sinceSequence
+// are included (delta mode); the files_by_seq index makes the query
+// O(log N + delta). Sequence==0 returns the full index.
+//
+// folder_meta scalars (Sequence, Epoch) and the device ID still come
+// from the in-memory state — they are folder-level singletons that
+// the writer keeps current and the indexMu RLock makes consistent.
+// The audit's INV-1 applies to per-row state; folder-level scalars
+// are an implementation detail of how a peer reads "what version of
+// this folder are you at right now."
 func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.IndexExchange {
 	fs, ok := n.folders[folderID]
 	if !ok {
 		return &pb.IndexExchange{ProtocolVersion: protocolVersion}
 	}
 
+	// Folder-level scalars under RLock. The dbReader query runs
+	// without indexMu so a concurrent write tx never blocks it.
 	fs.indexMu.RLock()
-	defer fs.indexMu.RUnlock()
+	currentSeq := fs.index.Sequence
+	currentEpoch := fs.index.Epoch
+	fs.indexMu.RUnlock()
 
-	// PG: for delta exchanges, use the secondary sequence index to avoid
-	// iterating the full Files map. Binary search to find the start position,
-	// then iterate only the tail. Stale entries (path updated with newer seq)
-	// are filtered by checking against the Files map.
-	if sinceSequence > 0 && len(fs.index.seqIndex) > 0 {
-		start := sort.Search(len(fs.index.seqIndex), func(i int) bool {
-			return fs.index.seqIndex[i].seq > sinceSequence
-		})
-		tail := fs.index.seqIndex[start:]
-		files := make([]*pb.FileInfo, 0, len(tail))
-		for _, se := range tail {
-			entry, ok := fs.index.Get(se.path)
-			if !ok || entry.Sequence != se.seq {
-				continue // stale secondary index entry
-			}
-			files = append(files, &pb.FileInfo{
-				Path:     se.path,
-				Size:     entry.Size,
-				MtimeNs:  entry.MtimeNS,
-				Sha256:   entry.SHA256[:],
-				Deleted:  entry.Deleted,
-				Sequence: entry.Sequence,
-				Mode:     entry.Mode,
-				PrevPath: entry.PrevPath,
-				Version:  entry.Version.toProto(),
-			})
-		}
+	// Disabled folders surface a minimal protocol-version-only
+	// response — the peer will see the empty Files list and try
+	// again on the next cycle. The handshake guards above will
+	// have already declined the request earlier, but defense in
+	// depth is cheap.
+	if fs.dbReader == nil {
 		return &pb.IndexExchange{
 			DeviceId:        n.deviceID,
 			FolderId:        folderID,
-			Sequence:        fs.index.Sequence,
-			Epoch:           fs.index.Epoch,
-			Files:           files,
+			Sequence:        currentSeq,
+			Epoch:           currentEpoch,
 			ProtocolVersion: protocolVersion,
 		}
 	}
 
-	// Full exchange (sinceSequence == 0 or empty seqIndex): iterate all entries.
-	files := make([]*pb.FileInfo, 0, fs.index.Len())
-	for path, entry := range fs.index.Range {
-		if sinceSequence > 0 && entry.Sequence <= sinceSequence {
-			continue
-		}
-		files = append(files, &pb.FileInfo{
-			Path:     path,
-			Size:     entry.Size,
-			MtimeNs:  entry.MtimeNS,
-			Sha256:   entry.SHA256[:],
-			Deleted:  entry.Deleted,
-			Sequence: entry.Sequence,
-			Mode:     entry.Mode,
-			PrevPath: entry.PrevPath,
-			Version:  entry.Version.toProto(),
-		})
+	files := make([]*pb.FileInfo, 0, 64)
+	err := queryFilesSinceSeq(context.Background(), fs.dbReader, folderID, sinceSequence,
+		func(path string, e FileEntry) bool {
+			files = append(files, &pb.FileInfo{
+				Path:     path,
+				Size:     e.Size,
+				MtimeNs:  e.MtimeNS,
+				Sha256:   append([]byte(nil), e.SHA256[:]...),
+				Deleted:  e.Deleted,
+				Sequence: e.Sequence,
+				Mode:     e.Mode,
+				PrevPath: e.PrevPath,
+				Version:  e.Version.toProto(),
+			})
+			return true
+		},
+	)
+	if err != nil {
+		// SQLite read errors should not crash the peer-facing
+		// handler. Log and serve an empty delta; the peer retries
+		// on the next cycle.
+		slog.Warn("buildIndexExchange: SQLite read failed",
+			"folder", folderID, "since", sinceSequence, "error", err)
 	}
 
 	return &pb.IndexExchange{
 		DeviceId:        n.deviceID,
 		FolderId:        folderID,
-		Sequence:        fs.index.Sequence,
-		Epoch:           fs.index.Epoch,
+		Sequence:        currentSeq,
+		Epoch:           currentEpoch,
 		Files:           files,
 		ProtocolVersion: protocolVersion,
 	}

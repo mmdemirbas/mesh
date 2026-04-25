@@ -112,6 +112,44 @@ func openFolderDB(dir, deviceID string) (*sql.DB, error) {
 	return db, nil
 }
 
+// openFolderDBReader opens the per-folder SQLite file as a read-only
+// handle for peer-facing reads (decision §5 #10 / iter-3 review §B2 /
+// audit §6 commit 4). The reader pool is sized for the expected
+// concurrency: maxConn callers can issue overlapping reads through
+// WAL snapshot isolation without serializing behind the writer's
+// MaxOpenConns=1.
+//
+// Must be called AFTER openFolderDB so the schema, pragmas, and
+// folder_meta rows already exist. Reader-side pragmas are minimal —
+// query_only=true forbids accidental writes; mode=ro is a SQLite-DSN
+// safety belt; _txlock=deferred avoids the IMMEDIATE writer-lock
+// acquisition reads do not need.
+//
+// maxConn = max(2, n_peers + 3) per the audit. Caller passes the
+// peer count; the floor of 2 is a safety belt for folders that have
+// not yet resolved peers.
+func openFolderDBReader(dir string, maxConn int) (*sql.DB, error) {
+	if maxConn < 2 {
+		maxConn = 2
+	}
+	path := filepath.Join(dir, folderDBFilename)
+	dsn := path + "?_pragma=query_only(true)&mode=ro&_txlock=deferred"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite reader %s: %w", path, err)
+	}
+	db.SetMaxOpenConns(maxConn)
+	db.SetMaxIdleConns(maxConn)
+	db.SetConnMaxLifetime(24 * time.Hour) // mirror the writer (D6)
+	// Smoke test: if the file is unreadable or the schema is wrong,
+	// fail at open rather than at the first peer read.
+	if _, err := db.Exec("PRAGMA query_only=true"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("pragma query_only on reader: %w", err)
+	}
+	return db, nil
+}
+
 // applyFolderDBPragmas sets the durability and concurrency knobs:
 //   - journal_mode=WAL for readers that do not block writers.
 //   - synchronous=FULL — one extra fsync per commit buys full power-loss
@@ -233,6 +271,124 @@ CREATE TABLE IF NOT EXISTS peer_base_hashes (
 		return fmt.Errorf("apply folder db schema: %w", err)
 	}
 	return nil
+}
+
+// queryFilesSinceSeq powers buildIndexExchange's delta path.
+// Returns rows ordered by sequence ascending, restricted to entries
+// whose sequence > sinceSeq. Uses the files_by_seq covering index
+// (audit Q1 closes when seqIndex retires; the SQL index supplants
+// the in-memory secondary index).
+//
+// The yield callback receives one row per entry; returning false
+// stops iteration. Caller must handle the SHA256 byte slice (it is
+// re-used between rows; the callback should copy it if it needs to
+// retain it).
+//
+// Use the read-only handle (fs.dbReader) for peer-facing calls so
+// concurrent exchanges do not serialize behind the writer.
+func queryFilesSinceSeq(ctx context.Context, db *sql.DB, folderID string, sinceSeq int64,
+	yield func(path string, e FileEntry) bool,
+) error {
+	if db == nil {
+		return fmt.Errorf("queryFilesSinceSeq: nil db")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	const q = `SELECT path, size, mtime_ns, hash, deleted, sequence,
+		mode, version, inode, prev_path
+		FROM files
+		WHERE folder_id=? AND sequence > ?
+		ORDER BY sequence`
+	rows, err := db.QueryContext(ctx, q, folderID, sinceSeq)
+	if err != nil {
+		return fmt.Errorf("query files by sequence: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			path        string
+			e           FileEntry
+			hashBytes   []byte
+			deletedInt  int64
+			modeInt     int64
+			versionBlob []byte
+			inode       sql.NullInt64
+			prevPath    sql.NullString
+		)
+		if err := rows.Scan(&path, &e.Size, &e.MtimeNS, &hashBytes, &deletedInt,
+			&e.Sequence, &modeInt, &versionBlob, &inode, &prevPath); err != nil {
+			return fmt.Errorf("scan files row: %w", err)
+		}
+		if len(hashBytes) != len(e.SHA256) {
+			return fmt.Errorf("hash row for %s is %d bytes, want %d",
+				path, len(hashBytes), len(e.SHA256))
+		}
+		copy(e.SHA256[:], hashBytes)
+		e.Deleted = deletedInt != 0
+		e.Mode = uint32(modeInt) //nolint:gosec // G115: stored from uint32 originally
+		e.Version = decodeVectorClock(versionBlob)
+		if inode.Valid {
+			e.Inode = uint64(inode.Int64) //nolint:gosec // G115: inode bits preserved
+		}
+		if prevPath.Valid {
+			e.PrevPath = prevPath.String
+		}
+		if !yield(path, e) {
+			return nil
+		}
+	}
+	return rows.Err()
+}
+
+// queryFilesByPaths powers the bundle handler's "is this path in the
+// index" check. Returns the subset of paths that are present and
+// not tombstoned (Deleted=false). Empty input returns empty output.
+//
+// The query uses an explicit ORD-by-path so result ordering is
+// deterministic for tests. Path count is capped at 1000 because
+// SQLite's IN-clause has implementation limits and the bundle
+// handler validates against maxPaths upstream.
+func queryFilesByPaths(ctx context.Context, db *sql.DB, folderID string, paths []string,
+) (map[string]struct{}, error) {
+	if db == nil {
+		return nil, fmt.Errorf("queryFilesByPaths: nil db")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(paths) == 0 {
+		return map[string]struct{}{}, nil
+	}
+	// Build a parameter list of N placeholders. SQLite's default
+	// max parameter count is 32766; the bundle handler caps at
+	// maxBundlePaths well below that.
+	args := make([]any, 0, len(paths)+1)
+	args = append(args, folderID)
+	placeholders := make([]byte, 0, len(paths)*2)
+	for i, p := range paths {
+		if i > 0 {
+			placeholders = append(placeholders, ',')
+		}
+		placeholders = append(placeholders, '?')
+		args = append(args, p)
+	}
+	q := `SELECT path FROM files WHERE folder_id=? AND deleted=0 AND path IN (` +
+		string(placeholders) + `)`
+	rows, err := db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query files by path list: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]struct{}, len(paths))
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, fmt.Errorf("scan files row: %w", err)
+		}
+		out[path] = struct{}{}
+	}
+	return out, rows.Err()
 }
 
 // errSchemaVersionMismatch is returned when folder_meta.schema_version

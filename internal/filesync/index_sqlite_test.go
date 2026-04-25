@@ -2,6 +2,7 @@ package filesync
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -542,5 +543,134 @@ func TestLoadPeerStates_Empty(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("fresh db returned %d peer states: %v", len(got), got)
+	}
+}
+
+// explainPlanRows runs `EXPLAIN QUERY PLAN <q>` and returns the
+// concatenated detail column. Used by the query-plan pinning tests
+// below; the format is `id parent notused detail` per SQLite docs.
+func explainPlanRows(t *testing.T, db *sql.DB, q string, args ...any) string {
+	t.Helper()
+	rows, err := db.Query("EXPLAIN QUERY PLAN "+q, args...)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	var b strings.Builder
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatalf("scan plan row: %v", err)
+		}
+		if b.Len() > 0 {
+			b.WriteString(" | ")
+		}
+		b.WriteString(detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+	return b.String()
+}
+
+// TestQueryPlans_NoFullTableScan pins audit Q1/Q2/INV-1: every hot
+// peer-facing read MUST use a SQLite index, not a full table scan.
+// The retired in-memory `seqIndex` was the previous safety net; now
+// the SQL-side `files_by_seq` and `files_by_inode` indexes carry the
+// invariant. EXPLAIN QUERY PLAN reports `SCAN` for table scans and
+// `SEARCH ... USING INDEX <name>` (or COVERING INDEX) for index seeks
+// — we assert the latter and reject the former.
+//
+// Coverage:
+//   - queryFilesSinceSeq → files_by_seq (Q1, INV-1).
+//   - queryFilesByPaths → PRIMARY KEY on (folder_id, path) (INV-1).
+//   - inode-by-folder lookup → files_by_inode (Q2, lands fully wired
+//     in commit 5; this test pins the index is queryable today so the
+//     subsequent commit cannot accidentally drop it).
+func TestQueryPlans_NoFullTableScan(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openFolderDB(dir, "ABCDE12345")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Seed enough rows that the planner will not fall back to a scan
+	// because the table is "tiny" — modernc.org/sqlite, like upstream
+	// SQLite, sometimes prefers a scan for very small tables.
+	idx := newFileIndex()
+	idx.Sequence = 1024
+	idx.Epoch = "deadbeefcafef00d"
+	idx.DeviceID = 0xABCDE12345
+	for i := 0; i < 1024; i++ {
+		idx.Set(syntheticPath(i), FileEntry{
+			Size:     int64(i),
+			MtimeNS:  int64(1_700_000_000_000_000_000) + int64(i)*1_000_000,
+			SHA256:   hash256FromBytes(syntheticHash(i)),
+			Sequence: int64(i + 1),
+			Mode:     0o644,
+			Inode:    uint64(1_000_000 + i),
+		})
+	}
+	idx.recomputeCache()
+	if err := saveIndex(context.Background(), db, "shared", idx); err != nil {
+		t.Fatalf("saveIndex: %v", err)
+	}
+	// ANALYZE so the planner has stats; without it SQLite may skip an
+	// index even when one exists. The schema applies it on every open
+	// in production via PRAGMA optimize at close, but the bench test
+	// is short-lived so we run it here.
+	if _, err := db.Exec("ANALYZE"); err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+
+	cases := []struct {
+		name     string
+		query    string
+		args     []any
+		wantIdx  string // substring required in the plan detail
+		rejectFS bool   // assert no full SCAN of files
+	}{
+		{
+			name: "queryFilesSinceSeq uses files_by_seq",
+			query: `SELECT path, size, mtime_ns, hash, deleted, sequence,
+				mode, version, inode, prev_path
+				FROM files
+				WHERE folder_id=? AND sequence > ?
+				ORDER BY sequence`,
+			args:     []any{"shared", int64(0)},
+			wantIdx:  "files_by_seq",
+			rejectFS: true,
+		},
+		{
+			name:  "queryFilesByPaths uses primary key index",
+			query: `SELECT path FROM files WHERE folder_id=? AND deleted=0 AND path IN (?,?,?)`,
+			args:  []any{"shared", syntheticPath(7), syntheticPath(101), syntheticPath(900)},
+			// SQLite materializes the PRIMARY KEY (folder_id, path) as
+			// the auto-index `sqlite_autoindex_files_1`; on this driver
+			// EXPLAIN QUERY PLAN reports the index by name.
+			wantIdx:  "sqlite_autoindex_files_1",
+			rejectFS: true,
+		},
+		{
+			name:     "inode lookup uses files_by_inode",
+			query:    `SELECT path FROM files WHERE folder_id=? AND inode=?`,
+			args:     []any{"shared", int64(1_000_500)},
+			wantIdx:  "files_by_inode",
+			rejectFS: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := explainPlanRows(t, db, tc.query, tc.args...)
+			if !strings.Contains(plan, tc.wantIdx) {
+				t.Errorf("plan does not mention %q\nplan: %s", tc.wantIdx, plan)
+			}
+			if tc.rejectFS && strings.Contains(plan, "SCAN files") {
+				t.Errorf("plan contains full table scan of files\nplan: %s", plan)
+			}
+		})
 	}
 }

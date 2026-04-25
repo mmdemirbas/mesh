@@ -62,6 +62,48 @@ func testHash(s string) Hash256 {
 	return Hash256(sha256.Sum256([]byte(s)))
 }
 
+// attachSQLiteForTest wires a fresh per-folder SQLite database (writer
+// + reader handles) onto the given folderState and seeds it from the
+// in-memory FileIndex. Required by any test whose code path goes
+// through queryFilesSinceSeq / queryFilesByPaths (i.e. anything that
+// calls buildIndexExchange or handleBundle), since after audit §6
+// commit 4 the peer-facing read path is SQLite-only and a folderState
+// constructed with only an in-memory FileIndex returns an empty
+// response.
+//
+// Cleanup of both handles is registered on t. The folder cache dir
+// lives under t.TempDir() so file artifacts disappear after the test.
+func attachSQLiteForTest(t *testing.T, fs *folderState, folderID string) {
+	t.Helper()
+	if fs == nil {
+		t.Fatalf("attachSQLiteForTest: nil folderState")
+	}
+	if fs.index == nil {
+		fs.index = newFileIndex()
+	}
+	cacheDir := t.TempDir()
+	db, err := openFolderDB(cacheDir, "TESTDEVICE")
+	if err != nil {
+		t.Fatalf("openFolderDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	reader, err := openFolderDBReader(cacheDir, 4)
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("openFolderDBReader: %v", err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	fs.db = db
+	fs.dbReader = reader
+	if fs.index.Len() > 0 {
+		fs.index.MarkAllDirty()
+		if err := saveIndex(context.Background(), db, folderID, fs.index); err != nil {
+			t.Fatalf("saveIndex seed: %v", err)
+		}
+		fs.index.ClearDirty()
+	}
+}
+
 // --- Ignore pattern tests ---
 
 func TestParseLine(t *testing.T) {
@@ -2909,6 +2951,7 @@ func TestHandleBundle_RoundTrip(t *testing.T) {
 		root:  openTestRoot(t, dir),
 		index: idx,
 	}
+	attachSQLiteForTest(t, n.folders["test"], "test")
 
 	srv := &server{node: n}
 	ts := httptest.NewServer(srv.handler())
@@ -3001,6 +3044,7 @@ func TestDownloadBundle_Integration(t *testing.T) {
 		root:  openTestRoot(t, serverDir),
 		index: idx,
 	}
+	attachSQLiteForTest(t, n.folders["test"], "test")
 
 	srv := &server{node: n}
 	ts := httptest.NewTLSServer(srv.handler())
@@ -3159,6 +3203,7 @@ func TestDownloadBundle_HashMismatch(t *testing.T) {
 		root:  openTestRoot(t, serverDir),
 		index: idx,
 	}
+	attachSQLiteForTest(t, n.folders["test"], "test")
 
 	srv := &server{node: n}
 	ts := httptest.NewTLSServer(srv.handler())
@@ -4053,6 +4098,7 @@ func TestHandleIndex_ExchangeRoundtrip(t *testing.T) {
 		index: idx,
 		peers: make(map[string]PeerState),
 	}
+	attachSQLiteForTest(t, n.folders["test"], "test")
 
 	srv := &server{node: n}
 	ts := httptest.NewServer(srv.handler())
@@ -4115,6 +4161,7 @@ func TestHandleIndex_DeltaMode(t *testing.T) {
 		index: idx,
 		peers: make(map[string]PeerState),
 	}
+	attachSQLiteForTest(t, n.folders["test"], "test")
 
 	srv := &server{node: n}
 	ts := httptest.NewServer(srv.handler())
@@ -4169,7 +4216,6 @@ func TestHandleIndex_DeltaMode(t *testing.T) {
 }
 
 func TestBuildIndexExchange_DeltaFiltering(t *testing.T) {
-	t.Parallel()
 	idx := &FileIndex{
 		Sequence: 10,
 		files: map[string]FileEntry{
@@ -4178,12 +4224,11 @@ func TestBuildIndexExchange_DeltaFiltering(t *testing.T) {
 			"new.txt": {SHA256: testHash("ccc"), Sequence: 9},
 		},
 	}
-	idx.rebuildSeqIndex() // PG: enable secondary index path
+	fs := &folderState{index: idx}
+	attachSQLiteForTest(t, fs, "docs")
 	n := &Node{
 		deviceID: "test",
-		folders: map[string]*folderState{
-			"docs": {index: idx},
-		},
+		folders:  map[string]*folderState{"docs": fs},
 	}
 
 	// Full exchange.
@@ -4205,77 +4250,13 @@ func TestBuildIndexExchange_DeltaFiltering(t *testing.T) {
 	}
 }
 
-func TestSeqIndex_SetEntryAppends(t *testing.T) {
-	t.Parallel()
-	idx := newFileIndex()
-
-	// Add entries via setEntry — should append to seqIndex.
-	idx.Sequence = 1
-	idx.Set("a.txt", FileEntry{SHA256: testHash("aaa"), Sequence: 1})
-	idx.Sequence = 2
-	idx.Set("b.txt", FileEntry{SHA256: testHash("bbb"), Sequence: 2})
-	idx.Sequence = 3
-	idx.Set("c.txt", FileEntry{SHA256: testHash("ccc"), Sequence: 3})
-
-	if len(idx.seqIndex) != 3 {
-		t.Fatalf("expected 3 seqIndex entries, got %d", len(idx.seqIndex))
-	}
-
-	// Update a.txt — should create a 4th entry (stale a.txt at seq=1 remains).
-	idx.Sequence = 4
-	idx.Set("a.txt", FileEntry{SHA256: testHash("aaa2"), Sequence: 4})
-
-	if len(idx.seqIndex) != 4 {
-		t.Fatalf("expected 4 seqIndex entries after update, got %d", len(idx.seqIndex))
-	}
-
-	// Rebuild should compact stale entries.
-	idx.rebuildSeqIndex()
-	if len(idx.seqIndex) != 3 {
-		t.Fatalf("expected 3 seqIndex entries after rebuild, got %d", len(idx.seqIndex))
-	}
-	// Verify sorted order.
-	for i := 1; i < len(idx.seqIndex); i++ {
-		if idx.seqIndex[i].seq <= idx.seqIndex[i-1].seq {
-			t.Errorf("seqIndex not sorted: [%d].seq=%d <= [%d].seq=%d",
-				i, idx.seqIndex[i].seq, i-1, idx.seqIndex[i-1].seq)
-		}
-	}
-}
-
-func TestSeqIndex_DeltaExchangeSkipsStale(t *testing.T) {
-	t.Parallel()
-	idx := &FileIndex{
-		Sequence: 5,
-		files: map[string]FileEntry{
-			"a.txt": {SHA256: testHash("v2"), Sequence: 5}, // updated from seq=1 to seq=5
-			"b.txt": {SHA256: testHash("bbb"), Sequence: 3},
-		},
-	}
-	// Simulate stale entry: seqIndex has a.txt at seq=1 (old) and seq=5 (current).
-	idx.seqIndex = []seqEntry{
-		{seq: 1, path: "a.txt"}, // stale
-		{seq: 3, path: "b.txt"},
-		{seq: 5, path: "a.txt"}, // current
-	}
-
-	n := &Node{
-		deviceID: "test",
-		folders:  map[string]*folderState{"f": {index: idx}},
-	}
-
-	// Delta since=2: should get b.txt(3) and a.txt(5), NOT stale a.txt(1).
-	delta := n.buildIndexExchange("f", 2)
-	if len(delta.GetFiles()) != 2 {
-		t.Errorf("expected 2 files, got %d", len(delta.GetFiles()))
-	}
-
-	// Delta since=0: full exchange, should get all 2 files.
-	full := n.buildIndexExchange("f", 0)
-	if len(full.GetFiles()) != 2 {
-		t.Errorf("full: expected 2 files, got %d", len(full.GetFiles()))
-	}
-}
+// PG / Q1: TestSeqIndex_SetEntryAppends and
+// TestSeqIndex_DeltaExchangeSkipsStale tested the in-memory secondary
+// sequence index. Removed at audit §6 commit 4 — the SQLite
+// files_by_seq index supplants the in-memory seqIndex. The
+// equivalent SQLite-side coverage lives in
+// TestQueryPlans_NoFullTableScan (EXPLAIN QUERY PLAN asserts the
+// index is used) and TestBuildIndexExchange_DeltaViaSQLite.
 
 func TestHandleStatus(t *testing.T) {
 	t.Parallel()
@@ -4411,6 +4392,7 @@ func TestPaginatedIndexExchange(t *testing.T) {
 		index: idx,
 		peers: make(map[string]PeerState),
 	}
+	attachSQLiteForTest(t, n.folders["bigfolder"], "bigfolder")
 
 	srv := &server{node: n}
 	ts := httptest.NewTLSServer(srv.handler())
@@ -4466,6 +4448,7 @@ func TestPaginatedIndexExchange_SmallIndex(t *testing.T) {
 		index: idx,
 		peers: make(map[string]PeerState),
 	}
+	attachSQLiteForTest(t, n.folders["test"], "test")
 
 	srv := &server{node: n}
 	ts := httptest.NewTLSServer(srv.handler())
@@ -4734,6 +4717,7 @@ func TestTwoNodeSync(t *testing.T) {
 		index: idxB,
 		peers: make(map[string]PeerState),
 	}
+	attachSQLiteForTest(t, nodeB.folders["test"], "test")
 	srvB := httptest.NewTLSServer((&server{node: nodeB}).handler())
 	defer srvB.Close()
 
@@ -4750,6 +4734,7 @@ func TestTwoNodeSync(t *testing.T) {
 		index: idxA,
 		peers: make(map[string]PeerState),
 	}
+	attachSQLiteForTest(t, nodeA.folders["test"], "test")
 	srvA := httptest.NewTLSServer((&server{node: nodeA}).handler())
 	defer srvA.Close()
 
@@ -7309,6 +7294,7 @@ func TestDownloadBundle_PreservesMtime(t *testing.T) {
 		root:  openTestRoot(t, serverDir),
 		index: idx,
 	}
+	attachSQLiteForTest(t, n.folders["test"], "test")
 	srv := httptest.NewTLSServer((&server{node: n}).handler())
 	defer srv.Close()
 

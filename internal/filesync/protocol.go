@@ -501,15 +501,24 @@ func (s *server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build set of indexed paths to prevent probing for arbitrary files.
-	folder.indexMu.RLock()
+	// Build set of indexed paths to prevent probing for arbitrary
+	// files. Per audit §6 commit 4 / INV-1: peer-facing reads go to
+	// SQLite via the dedicated read-only handle. WAL snapshot
+	// isolation means a concurrent writer never blocks or distorts
+	// the result. Disabled folders have nil dbReader; treat as empty.
 	indexedPaths := make(map[string]bool, len(req.Paths))
-	for _, p := range req.Paths {
-		if entry, ok := folder.index.Get(p); ok && !entry.Deleted {
+	if folder.dbReader != nil {
+		present, err := queryFilesByPaths(r.Context(), folder.dbReader, folder.cfg.ID, req.Paths)
+		if err != nil {
+			slog.Warn("handleBundle: SQLite path-list query failed",
+				"folder", folder.cfg.ID, "error", err)
+			// fall through with empty indexedPaths — bundle will be
+			// empty rather than expose unindexed files
+		}
+		for p := range present {
 			indexedPaths[p] = true
 		}
 	}
-	folder.indexMu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/x-tar")
 	w.Header().Set("Content-Encoding", "zstd")
