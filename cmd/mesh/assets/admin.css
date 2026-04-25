@@ -853,3 +853,45 @@ select option { background: var(--bg-card); color: var(--text); }
 .diff-msg-content { font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .diff-msg.diff-child .diff-msg-content { color: var(--green); }
 .diff-msg.diff-parent .diff-msg-content { color: var(--text-dim); }
+
+/* B2.7 polish */
+.graph-node { transition: transform 300ms ease; }
+.graph-node.fresh .graph-node-rect { animation: graphNodeFadeIn 360ms ease; }
+@keyframes graphNodeFadeIn {
+  from { opacity: 0; transform: scale(0.85); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.sess-new-msg-indicator {
+  position: sticky; bottom: 12px; align-self: center;
+  display: inline-flex; gap: 6px; align-items: center;
+  background: var(--green-dim); color: var(--green);
+  border: 1px solid var(--green); border-radius: 16px;
+  padding: 4px 12px; font-size: 12px; cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4); margin-top: -28px;
+  user-select: none;
+}
+.sess-new-msg-indicator:hover { background: var(--green); color: var(--bg); }
+
+.sess-toast-stack {
+  position: fixed; bottom: 24px; right: 24px; z-index: 900;
+  display: flex; flex-direction: column; gap: 8px;
+  pointer-events: none;
+}
+.sess-toast {
+  background: var(--bg-card); color: var(--text);
+  border: 1px solid var(--border); border-left: 3px solid var(--cyan);
+  border-radius: var(--radius); padding: 10px 14px;
+  font-size: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  pointer-events: auto; cursor: pointer; max-width: 320px;
+  animation: toastIn 220ms ease;
+}
+.sess-toast:hover { border-left-color: var(--green); }
+.sess-toast.fade-out { animation: toastOut 200ms ease forwards; }
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes toastOut {
+  to { opacity: 0; transform: translateX(20px); }
+}

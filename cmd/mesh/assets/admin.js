@@ -3670,6 +3670,9 @@ let sessionView = {
   graphViewBox: null,       // {x, y, w, h} or null = autofit on next paint
   graphLayout: null,        // last-computed layout (for edge-click diff)
   graphPan: null,           // {startX, startY, originX, originY} during drag
+  // Live-update polish (B2.7).
+  freshNodeIDs: new Set(),  // node ids to fade-in on next render; cleared after
+  pendingNewBubble: false,  // set when a new node lands on the current branch and the user is not at the bottom
 };
 
 // enterSessionsView opens the SSE connection if a single session is
@@ -3804,10 +3807,20 @@ function onSessionDagInit(dag) {
 function onSessionNodeAdded(payload) {
   if (!payload || !payload.node) return;
   const n = payload.node;
+  const isNew = !sessionView.nodesByID.has(n.id);
   sessionView.nodesByID.set(n.id, n);
+  if (isNew) sessionView.freshNodeIDs.add(n.id);
   for (const c of (payload.branch_changes || [])) {
     if (c.kind === 'new_branch' && c.branch) {
       sessionView.branchesByID.set(c.branch.branch_id, c.branch);
+      // Fork detected — surface as a toast (§7 polish, B2.7).
+      const label = c.branch.branch_id === sessionView.defaultBranchID ? 'main' : c.branch.branch_id.slice(0, 8);
+      pushSessionToast('New branch '+label+' diverged', () => {
+        sessionView.currentBranchID = c.branch.branch_id;
+        sessionView.currentNodeID = '';
+        writeGwHash();
+        renderSessionView();
+      });
     } else if (c.kind === 'branch_renamed' && c.old_branch_id && c.new_branch_id) {
       const old = sessionView.branchesByID.get(c.old_branch_id);
       if (old) {
@@ -3828,7 +3841,27 @@ function onSessionNodeAdded(payload) {
       }
     }
   }
+  // For the linear view: if the new node lands on the current branch
+  // and the user is not at the bottom, set the pending-indicator flag
+  // so renderSessionBubbles renders the "↓ new message" pill.
+  if (isNew && sessionView.currentView === 'linear' && gwSubview === 'sessions') {
+    const chain = chainForBranch(sessionView.currentBranchID);
+    if (chain.some(x => x.id === n.id)) {
+      const el = document.getElementById('sess-bubbles');
+      if (el) {
+        const wasAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+        if (!wasAtBottom) sessionView.pendingNewBubble = true;
+      }
+    }
+  }
   renderSessionView();
+  // Drop the fresh-set after the next animation frame so subsequent
+  // renders do not replay the fade-in.
+  if (sessionView.freshNodeIDs.size > 0) {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => { sessionView.freshNodeIDs.clear(); });
+    });
+  }
 }
 
 // chainForBranch walks from the branch's tip up via parent_id until
@@ -3911,13 +3944,53 @@ function renderSessionBubbles() {
   if (chain.length === 0) { setHTML(el, ''); return; }
   // Track scroll-at-bottom so we auto-scroll on new messages.
   const wasAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-  const html = chain.map(n => bubbleHTMLForNode(n)).join('');
+  let html = chain.map(n => bubbleHTMLForNode(n)).join('');
+  if (sessionView.pendingNewBubble) {
+    html += '<button type="button" id="sess-new-msg-pill" class="sess-new-msg-indicator" title="Scroll to the latest turn">↓ new message</button>';
+  }
   setHTML(el, html);
   // Trigger pair fetches for any nodes still missing a body.
   for (const n of chain) {
     if (!sessionView.pairCache.has(n.id)) maybeFetchPair(n);
   }
-  if (wasAtBottom) el.scrollTop = el.scrollHeight;
+  if (wasAtBottom) {
+    el.scrollTop = el.scrollHeight;
+    sessionView.pendingNewBubble = false;
+  }
+  const pill = document.getElementById('sess-new-msg-pill');
+  if (pill) pill.onclick = () => {
+    el.scrollTop = el.scrollHeight;
+    sessionView.pendingNewBubble = false;
+    pill.remove();
+  };
+}
+
+// pushSessionToast adds a transient notification card to the bottom-
+// right corner. Click invokes the action and dismisses; otherwise the
+// toast fades out after 6 s.
+function pushSessionToast(message, onClick) {
+  let stack = document.getElementById('sess-toast-stack');
+  if (!stack) {
+    stack = document.createElement('div');
+    stack.id = 'sess-toast-stack';
+    stack.className = 'sess-toast-stack';
+    document.body.appendChild(stack);
+  }
+  const t = document.createElement('div');
+  t.className = 'sess-toast';
+  t.textContent = message;
+  t.onclick = () => {
+    if (onClick) onClick();
+    dismissSessionToast(t);
+  };
+  stack.appendChild(t);
+  setTimeout(() => dismissSessionToast(t), 6000);
+}
+
+function dismissSessionToast(el) {
+  if (!el || !el.parentNode) return;
+  el.classList.add('fade-out');
+  setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 220);
 }
 
 // bubbleHTMLForNode renders one node as a pair of bubbles (user +
@@ -4287,7 +4360,10 @@ function renderSessionGraph() {
     if (isErr) cls.push('error');
     if (inFlight) cls.push('in-flight');
     if (highlighted) cls.push('highlighted');
-    parts.push('<g class="graph-node" data-node-id="'+xa(n.id)+'" transform="translate('+p.x+' '+p.y+')">');
+    const fresh = sessionView.freshNodeIDs && sessionView.freshNodeIDs.has(n.id);
+    parts.push('<g class="graph-node'+(fresh ? ' fresh' : '')+
+      '" data-node-id="'+xa(n.id)+
+      '" style="transform:translate('+p.x+'px,'+p.y+'px)">');
     parts.push('<rect class="'+cls.join(' ')+'" width="'+p.w+'" height="'+p.h+'" rx="6"></rect>');
     const rs = n.request_summary || {};
     const turn = (rs.message_count != null) ? Math.ceil((rs.message_count + 1) / 2) : 0;
