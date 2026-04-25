@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/mmdemirbas/mesh/internal/gateway"
 )
 
 // auditStatsResponse is the shape returned by GET /api/gateway/audit/stats.
@@ -60,6 +61,36 @@ type auditStatsTotals struct {
 	ReasoningTokens   int64   `json:"reasoning_tokens"`
 	CacheHitRatio     float64 `json:"cache_hit_ratio"`
 	ElapsedSumMs      int64   `json:"elapsed_sum_ms"`
+	// ContentBreakdown aggregates per-section input bytes across the
+	// window per SPEC §4.1. Computed on read by re-parsing each row's
+	// body via gateway.SectionBytes — see SPEC §4.6 persist-vs-compute
+	// pin. Only populated when the audit log is at "full" level
+	// (bodies present); zero values otherwise.
+	ContentBreakdown auditStatsContentBreakdown `json:"content_breakdown"`
+}
+
+// auditStatsContentBreakdown is the aggregated SectionByteCounts
+// across every request in the query window. The fields mirror
+// gateway.SectionByteCounts but use int64 for accumulation. Total
+// equals the sum of all named fields, matching the §4.1 partition
+// invariant in aggregate.
+type auditStatsContentBreakdown struct {
+	System      int64 `json:"system"`
+	Tools       int64 `json:"tools"`
+	UserText    int64 `json:"user_text"`
+	Preamble    int64 `json:"preamble"`
+	ToolResults int64 `json:"tool_results"`
+	Thinking    int64 `json:"thinking"`
+	ImagesWire  int64 `json:"images_wire"`
+	UserHistory int64 `json:"user_history"`
+	Other       int64 `json:"other"`
+	Total       int64 `json:"total"`
+	// Rows is the number of req rows that contributed to the
+	// breakdown — i.e., rows where the body was present and parsed
+	// into a non-zero partition. When this is 0 (metadata-level log,
+	// or no requests in window) the UI surfaces a "enable full
+	// logging for content breakdown" hint.
+	Rows int `json:"rows"`
 }
 
 // auditStatsRow groups counters by a single key (model name, session id, …).
@@ -239,10 +270,34 @@ func computeAuditStats(dir string, f statsFilter) (auditStatsResponse, error) {
 		// into one bucket so the UI reveals the biggest wasteful
 		// recurring block (e.g. "Skills available" dumped every turn).
 		for _, blk := range extractPreamblePayloads(pa.req.body) {
-			key := preambleSignature(blk.name, blk.body)
+			key := preambleSignature(blk.Name, blk.Body)
 			prow := upsertRow(preambles, key)
 			prow.Requests++
-			prow.InputTokens += int64(len(blk.body))
+			prow.InputTokens += int64(len(blk.Body))
+		}
+
+		// Content breakdown: re-parse the request body via
+		// gateway.SectionBytes and accumulate per-section bytes.
+		// This is the on-read path for input_bytes per SPEC §4.6.
+		// Skipped when the body is empty (metadata-level log) or
+		// when direction is missing — both signal "no body to
+		// classify".
+		if len(pa.req.body) > 0 {
+			clientAPI := clientAPIFromDirection(pa.req.direction)
+			if clientAPI != "" {
+				sb := gateway.SectionBytes(pa.req.body, clientAPI)
+				resp.Totals.ContentBreakdown.System += int64(sb.System)
+				resp.Totals.ContentBreakdown.Tools += int64(sb.Tools)
+				resp.Totals.ContentBreakdown.UserText += int64(sb.UserText)
+				resp.Totals.ContentBreakdown.Preamble += int64(sb.Preamble)
+				resp.Totals.ContentBreakdown.ToolResults += int64(sb.ToolResults)
+				resp.Totals.ContentBreakdown.Thinking += int64(sb.Thinking)
+				resp.Totals.ContentBreakdown.ImagesWire += int64(sb.ImagesWire)
+				resp.Totals.ContentBreakdown.UserHistory += int64(sb.UserHistory)
+				resp.Totals.ContentBreakdown.Other += int64(sb.Other)
+				resp.Totals.ContentBreakdown.Total += int64(sb.Total())
+				resp.Totals.ContentBreakdown.Rows++
+			}
 		}
 
 		if pa.haveResp {
@@ -342,6 +397,7 @@ type auditStatsRowSource struct {
 	elapsedMs         int64
 	path              string // only on req rows
 	body              []byte // only on req rows, for preamble block extraction
+	direction         string // only on req rows; "a2a"/"a2o"/"o2a"/"o2o"
 }
 
 func parseStatsRow(line []byte) (auditStatsRowSource, bool) {
@@ -351,6 +407,7 @@ func parseStatsRow(line []byte) (auditStatsRowSource, bool) {
 		Run       string          `json:"run"`
 		TS        string          `json:"ts"`
 		Path      string          `json:"path"`
+		Direction string          `json:"direction"`
 		Model     string          `json:"model"`
 		SessionID string          `json:"session_id"`
 		TurnIndex int             `json:"turn_index"`
@@ -390,6 +447,7 @@ func parseStatsRow(line []byte) (auditStatsRowSource, bool) {
 		elapsedMs: minimal.ElapsedMs,
 		path:      minimal.Path,
 		body:      minimal.Body,
+		direction: minimal.Direction,
 	}
 	if t, err := time.Parse(time.RFC3339Nano, minimal.TS); err == nil {
 		row.ts = t
@@ -516,30 +574,36 @@ func parseWindowParam(window string, now time.Time) (since, until time.Time) {
 	return time.Time{}, time.Time{}
 }
 
-// preambleBlock is one injected pseudo-XML block (<system-reminder>...) from
-// the messages array in a request body. We count characters, not tokens, so
-// the signature stays cheap to compute.
-type preambleBlock struct {
-	name string
-	body string
+// clientAPIFromDirection maps the audit row's direction tag back to
+// the client-side API name SectionBytes expects. Returns "" for
+// missing or unrecognized directions so callers skip the breakdown
+// rather than misclassify.
+func clientAPIFromDirection(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	switch dir[0] {
+	case 'a':
+		return gateway.APIAnthropic
+	case 'o':
+		return gateway.APIOpenAI
+	}
+	return ""
 }
 
 // extractPreamblePayloads walks the user-role messages in a request body
-// and returns every pseudo-XML block found at the leading/trailing edges.
-// Same heuristic as the UI's splitUserText: the typed-by-user span is in
-// the middle; everything outside is preamble/postamble context worth
-// aggregating so the observability view can answer "which injected block
-// is wasting the most tokens?".
+// and returns every pseudo-XML preamble block (`<system-reminder>`,
+// `<command-name>`, etc.) at the leading/trailing edges of typed
+// content. Delegates the per-string parsing to gateway.ExtractPreambleBlocks
+// — the canonical extractor used by the section-byte partition and
+// the admin-stats rollup. Drift between cmd/mesh and gateway-side
+// behavior is policed by internal/gateway/preamble_drift_test.go.
 //
-// Tolerates any number of input shapes (Anthropic string content, Anthropic
-// content-block array, OpenAI inline string). Non-user messages are skipped
-// because they are the assistant's or tools' output, not preamble.
-// customTagOpen finds opening tags like <system-reminder> or <command-name ...>.
-// RE2 has no backreferences, so we match the open tag, then search for the
-// matching close tag manually in scanPreambleTags.
-var customTagOpen = regexp.MustCompile(`(?i)<([a-z][a-z0-9-]{2,40})\b[^>]*>`)
-
-func extractPreamblePayloads(bodyJSON []byte) []preambleBlock {
+// Tolerates any input shape: Anthropic string content, Anthropic
+// content-block array, OpenAI inline string. Non-user messages are
+// skipped because they are the assistant's or tools' output, not
+// preamble.
+func extractPreamblePayloads(bodyJSON []byte) []gateway.PreambleBlock {
 	if len(bodyJSON) == 0 {
 		return nil
 	}
@@ -552,15 +616,14 @@ func extractPreamblePayloads(bodyJSON []byte) []preambleBlock {
 	if err := json.Unmarshal(bodyJSON, &shell); err != nil {
 		return nil
 	}
-	var out []preambleBlock
+	var out []gateway.PreambleBlock
 	for _, m := range shell.Messages {
 		if m.Role != "user" {
 			continue
 		}
-		// content may be a JSON string or an array of blocks.
 		var asStr string
 		if err := json.Unmarshal(m.Content, &asStr); err == nil {
-			out = append(out, scanPreambleTags(asStr)...)
+			out = append(out, gateway.ExtractPreambleBlocks(asStr)...)
 			continue
 		}
 		var asArr []struct {
@@ -570,79 +633,10 @@ func extractPreamblePayloads(bodyJSON []byte) []preambleBlock {
 		if err := json.Unmarshal(m.Content, &asArr); err == nil {
 			for _, b := range asArr {
 				if b.Type == "text" {
-					out = append(out, scanPreambleTags(b.Text)...)
+					out = append(out, gateway.ExtractPreambleBlocks(b.Text)...)
 				}
 			}
 		}
-	}
-	return out
-}
-
-// matchedTag records one opener + its paired closing tag position.
-type matchedTag struct {
-	name               string
-	start, end         int // full tag range in s
-	bodyStart, bodyEnd int
-}
-
-// scanPreambleTags finds every <name>...</name> pair in s. RE2 has no
-// backreferences, so we locate open tags with one regex and hand-scan for
-// the matching close tag. Blocks are kept when they sit before the first
-// typed char or after the last — blocks in the middle of typed prose are
-// treated as intentional user quotes and ignored.
-func scanPreambleTags(s string) []preambleBlock {
-	opens := customTagOpen.FindAllStringSubmatchIndex(s, -1)
-	if len(opens) == 0 {
-		return nil
-	}
-	var tags []matchedTag
-	for _, om := range opens {
-		name := strings.ToLower(s[om[2]:om[3]])
-		close := "</" + name + ">"
-		// Case-insensitive close scan.
-		tail := s[om[1]:]
-		idx := strings.Index(strings.ToLower(tail), close)
-		if idx < 0 {
-			continue
-		}
-		tags = append(tags, matchedTag{
-			name:      name,
-			start:     om[0],
-			end:       om[1] + idx + len(close),
-			bodyStart: om[1],
-			bodyEnd:   om[1] + idx,
-		})
-	}
-	if len(tags) == 0 {
-		return nil
-	}
-	inBlock := func(i int) bool {
-		for _, t := range tags {
-			if i >= t.start && i < t.end {
-				return true
-			}
-		}
-		return false
-	}
-	firstTyped, lastTyped := -1, -1
-	for i, r := range s {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
-			continue
-		}
-		if inBlock(i) {
-			continue
-		}
-		if firstTyped == -1 {
-			firstTyped = i
-		}
-		lastTyped = i
-	}
-	out := make([]preambleBlock, 0, len(tags))
-	for _, t := range tags {
-		if firstTyped != -1 && t.start >= firstTyped && t.end <= lastTyped+1 {
-			continue
-		}
-		out = append(out, preambleBlock{name: t.name, body: s[t.bodyStart:t.bodyEnd]})
 	}
 	return out
 }

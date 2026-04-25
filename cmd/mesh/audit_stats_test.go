@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -467,5 +468,171 @@ func TestParseWindowParam(t *testing.T) {
 				t.Errorf("%s: since unexpectedly set to %v", tc.input, s)
 			}
 		})
+	}
+}
+
+// TestAuditStatsContentBreakdown asserts the §4.6 on-read content
+// breakdown lands in the stats response. The fixture emits two
+// "full"-level Anthropic pairs with hand-known section sizes; the
+// rollup must aggregate them per-section and across rows.
+func TestAuditStatsContentBreakdown(t *testing.T) {
+	dir := t.TempDir()
+	name := "stats-content"
+	cfg := gateway.GatewayCfg{
+		Name: name,
+		Client: []gateway.ClientCfg{
+			{Bind: "127.0.0.1:0", API: gateway.APIAnthropic},
+		},
+		Upstream: []gateway.UpstreamCfg{
+			{Name: "default", Target: "https://api.anthropic.com", API: gateway.APIAnthropic},
+		},
+		Log: gateway.LogCfg{Level: gateway.LogLevelFull, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
+	}
+	rec, err := gateway.NewRecorder(cfg.Name, cfg.Log, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil || rec == nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+
+	// Two pairs with distinct, hand-known section sizes.
+	body1 := []byte(`{"model":"claude-opus-4-6","max_tokens":10,` +
+		`"system":"You are a helpful assistant.",` +
+		`"messages":[{"role":"user","content":"What is 2+2?"}]}`)
+	body2 := []byte(`{"model":"claude-opus-4-6","max_tokens":10,` +
+		`"system":"sys",` +
+		`"tools":[{"name":"Read","description":"r","input_schema":{}}],` +
+		`"messages":[{"role":"user","content":"more"}]}`)
+
+	id1 := rec.Request(gateway.RequestMeta{
+		Gateway: name, Direction: "a2a",
+		Model: "claude-opus-4-6", Method: "POST", Path: "/v1/messages",
+		SessionID: "sess-1", TurnIndex: 1, StartTime: time.Now(),
+	}, body1)
+	rec.Response(id1, gateway.ResponseMeta{
+		Status: 200, Outcome: gateway.OutcomeOK,
+		StartTime: time.Now(), EndTime: time.Now().Add(50 * time.Millisecond),
+	}, nil)
+
+	id2 := rec.Request(gateway.RequestMeta{
+		Gateway: name, Direction: "a2a",
+		Model: "claude-opus-4-6", Method: "POST", Path: "/v1/messages",
+		SessionID: "sess-1", TurnIndex: 3, StartTime: time.Now(),
+	}, body2)
+	rec.Response(id2, gateway.ResponseMeta{
+		Status: 200, Outcome: gateway.OutcomeOK,
+		StartTime: time.Now(), EndTime: time.Now().Add(50 * time.Millisecond),
+	}, nil)
+
+	stats, err := computeAuditStats(filepath.Join(dir, name), statsFilter{})
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+
+	// Expected per-row totals via direct gateway.SectionBytes call.
+	sb1 := gateway.SectionBytes(body1, gateway.APIAnthropic)
+	sb2 := gateway.SectionBytes(body2, gateway.APIAnthropic)
+	cb := stats.Totals.ContentBreakdown
+
+	if cb.Rows != 2 {
+		t.Errorf("ContentBreakdown.Rows = %d, want 2", cb.Rows)
+	}
+	if cb.System != int64(sb1.System+sb2.System) {
+		t.Errorf("System = %d, want %d", cb.System, sb1.System+sb2.System)
+	}
+	if cb.Tools != int64(sb1.Tools+sb2.Tools) {
+		t.Errorf("Tools = %d, want %d", cb.Tools, sb1.Tools+sb2.Tools)
+	}
+	if cb.UserText != int64(sb1.UserText+sb2.UserText) {
+		t.Errorf("UserText = %d, want %d", cb.UserText, sb1.UserText+sb2.UserText)
+	}
+	// Aggregate partition closure: Total should equal sum of all
+	// other section fields.
+	wantTotal := cb.System + cb.Tools + cb.UserText + cb.Preamble +
+		cb.ToolResults + cb.Thinking + cb.ImagesWire + cb.UserHistory + cb.Other
+	if cb.Total != wantTotal {
+		t.Errorf("Total = %d, want sum-of-sections %d", cb.Total, wantTotal)
+	}
+	// Sanity: aggregate Total equals sum of the two bodies' lengths
+	// (each row contributes len(body) to its own Total per
+	// SectionByteCounts.Total() invariant).
+	if cb.Total != int64(len(body1)+len(body2)) {
+		t.Errorf("Total = %d, want %d (sum of body lengths)", cb.Total, len(body1)+len(body2))
+	}
+}
+
+// TestAuditStatsContentBreakdown_MetadataLevelEmits Zero verifies the
+// graceful-degrade path: at LogLevelMetadata the body is not
+// persisted, so SectionBytes has nothing to classify. ContentBreakdown
+// stays zeroed (Rows=0) and the admin UI knows to surface the
+// "enable full logging" hint.
+func TestAuditStatsContentBreakdown_MetadataLevelEmitsZero(t *testing.T) {
+	auditDir := writeStatsFixture(t, t.TempDir(), "stats-content-meta")
+	stats, err := computeAuditStats(auditDir, statsFilter{})
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	cb := stats.Totals.ContentBreakdown
+	if cb.Rows != 0 {
+		t.Errorf("ContentBreakdown.Rows = %d under metadata-level fixture, want 0 (no bodies recorded)", cb.Rows)
+	}
+	if cb.Total != 0 {
+		t.Errorf("ContentBreakdown.Total = %d, want 0", cb.Total)
+	}
+}
+
+// TestAuditStatsPreambleBlocksFromConsolidatedExtractor ensures the
+// PreambleBlocks rollup still works after the consolidation moved
+// extractPreamblePayloads to delegate to gateway.ExtractPreambleBlocks.
+// Drives a body with a known preamble tag; the rollup must contain
+// it.
+func TestAuditStatsPreambleBlocksFromConsolidatedExtractor(t *testing.T) {
+	dir := t.TempDir()
+	name := "stats-preamble"
+	cfg := gateway.GatewayCfg{
+		Name: name,
+		Client: []gateway.ClientCfg{
+			{Bind: "127.0.0.1:0", API: gateway.APIAnthropic},
+		},
+		Upstream: []gateway.UpstreamCfg{
+			{Name: "default", Target: "https://api.anthropic.com", API: gateway.APIAnthropic},
+		},
+		Log: gateway.LogCfg{Level: gateway.LogLevelFull, Dir: dir, MaxFileSize: "10MB", MaxAge: "720h"},
+	}
+	rec, err := gateway.NewRecorder(cfg.Name, cfg.Log, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil || rec == nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+
+	body := []byte(`{"model":"claude-opus-4-6","max_tokens":10,"messages":[` +
+		`{"role":"user","content":"<system-reminder>be terse</system-reminder>list files"}` +
+		`]}`)
+
+	id := rec.Request(gateway.RequestMeta{
+		Gateway: name, Direction: "a2a",
+		Model: "claude-opus-4-6", Method: "POST", Path: "/v1/messages",
+		SessionID: "sess", TurnIndex: 1, StartTime: time.Now(),
+	}, body)
+	rec.Response(id, gateway.ResponseMeta{
+		Status: 200, Outcome: gateway.OutcomeOK,
+		StartTime: time.Now(), EndTime: time.Now().Add(50 * time.Millisecond),
+	}, nil)
+
+	stats, err := computeAuditStats(filepath.Join(dir, name), statsFilter{})
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	if len(stats.PreambleBlocks) == 0 {
+		t.Fatal("PreambleBlocks empty; consolidation broke the rollup")
+	}
+	found := false
+	for _, b := range stats.PreambleBlocks {
+		if strings.Contains(b.Key, "system-reminder") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a 'system-reminder' preamble block, got: %+v", stats.PreambleBlocks)
 	}
 }

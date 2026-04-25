@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"encoding/json"
-	"regexp"
 	"strings"
 )
 
@@ -428,74 +427,30 @@ func decodedStringLen(raw json.RawMessage) int {
 	return len(s)
 }
 
-// preambleTagOpen matches the opening of a pseudo-XML preamble block
-// like <system-reminder> or <command-name>. Mirrors the existing
-// audit_stats.go customTagOpen heuristic so this implementation stays
-// in step with the admin UI's view of "preamble" content. (Cross-
-// package consolidation lands in 7b.)
-var preambleTagOpen = regexp.MustCompile(`(?i)<([a-z][a-z0-9-]{2,40})\b[^>]*>`)
-
 // splitTextAndPreamble returns (textBytes, preambleBytes) for a piece
 // of user-message text. Preamble = pseudo-XML blocks at the leading or
 // trailing edge; user_text = whatever the user actually typed in
-// between. Mirrors scanPreambleTags from audit_stats.go.
+// between. Sum invariant: textBytes + preambleBytes == len(s) exactly
+// (whitespace between blocks counts as text).
 //
-// Sum invariant: textBytes + preambleBytes == len(s) exactly.
-// (Whitespace between blocks is counted as text.)
+// Implementation delegates to ExtractPreambleBlocks — the canonical
+// gateway-side preamble extractor used by both the section-byte
+// partition and the admin-stats rollup. Cross-impl drift is policed
+// by preamble_drift_test.go.
 func splitTextAndPreamble(s string) (textBytes, preambleBytes int) {
 	if s == "" {
 		return 0, 0
 	}
-	type span struct{ start, end int }
-	opens := preambleTagOpen.FindAllStringSubmatchIndex(s, -1)
-	if len(opens) == 0 {
+	tags := matchPreambleTags(s)
+	if len(tags) == 0 {
 		return len(s), 0
 	}
-	var spans []span
-	for _, om := range opens {
-		name := strings.ToLower(s[om[2]:om[3]])
-		closeTag := "</" + name + ">"
-		tail := s[om[1]:]
-		idx := strings.Index(strings.ToLower(tail), closeTag)
-		if idx < 0 {
-			continue
-		}
-		spans = append(spans, span{om[0], om[1] + idx + len(closeTag)})
-	}
-	if len(spans) == 0 {
-		return len(s), 0
-	}
-	// First-typed / last-typed positions: characters outside spans and
-	// outside whitespace. Mirrors scanPreambleTags so the preamble vs
-	// text boundary lands the same way the admin UI sees it today.
-	inSpan := func(i int) bool {
-		for _, sp := range spans {
-			if i >= sp.start && i < sp.end {
-				return true
-			}
-		}
-		return false
-	}
-	firstTyped, lastTyped := -1, -1
-	for i, r := range s {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
-			continue
-		}
-		if inSpan(i) {
-			continue
-		}
-		if firstTyped == -1 {
-			firstTyped = i
-		}
-		lastTyped = i
-	}
-	// Preamble counts only the spans at the leading/trailing edges (no
-	// typed content before/after them).
-	for _, sp := range spans {
-		isLeading := firstTyped == -1 || sp.end <= firstTyped
-		isTrailing := lastTyped == -1 || sp.start > lastTyped
+	firstTyped, lastTyped := typedSpan(s, tags)
+	for _, t := range tags {
+		isLeading := firstTyped == -1 || t.end <= firstTyped
+		isTrailing := lastTyped == -1 || t.start > lastTyped
 		if isLeading || isTrailing {
-			preambleBytes += sp.end - sp.start
+			preambleBytes += t.end - t.start
 		}
 	}
 	textBytes = len(s) - preambleBytes
