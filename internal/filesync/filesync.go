@@ -33,6 +33,17 @@ import (
 const (
 	tombstoneMaxAge = 30 * 24 * time.Hour // 30 days
 
+	// backupCadence is the interval between automatic backup
+	// runs. Audit §6 commit 9 / decision §5 #11: 24 hours is the
+	// natural anchor for a daily-tier retention policy. Each tick
+	// the scheduler walks every active folder, calls writeBackup,
+	// and runs gfsPrune. The first backup fires `backupCadence`
+	// after Run starts (no startup-time backup); operators who
+	// want an immediate snapshot can run a manual VACUUM INTO via
+	// the SQLite shell, but the daily cadence is the
+	// audit-prescribed contract.
+	backupCadence = 24 * time.Hour
+
 	// shutdownTxTimeout bounds how long the shutdown-time persist
 	// pass waits on a single writer transaction. Audit §6 commit 8
 	// / Gap 6: without a deadline, a stuck COMMIT (filesystem
@@ -870,6 +881,48 @@ func (n *Node) closeOneFolder(folderID string) {
 		fs.root = nil
 	}
 	delete(n.folders, folderID)
+}
+
+// runBackupSweep walks every folder on the node, calls
+// writeBackup, then gfsPrune. Audit §6 commit 9 backup scheduler
+// tie-in. Skips folders that are disabled (no live writer) or
+// whose db handle is nil. Errors per folder are logged at WARN
+// but never abort the sweep — one folder's backup failure must
+// not delay backups for others.
+//
+// Concurrency: holds reopenLockMu so a concurrent /reopen or
+// /restore cannot race the backup against a closing handle. The
+// ticker cadence (24h) makes contention rare in practice; the
+// lock is a defense-in-depth.
+func (n *Node) runBackupSweep(ctx context.Context) {
+	reopenLockMu.Lock()
+	defer reopenLockMu.Unlock()
+
+	for id, fs := range n.folders {
+		if fs.IsDisabled() || fs.db == nil {
+			continue
+		}
+		folderCacheDir := filepath.Join(n.dataDir, id)
+		info, err := writeBackup(ctx, fs.db, folderCacheDir)
+		if err != nil {
+			slog.Warn("backup write failed",
+				"folder", id, "error", err)
+			continue
+		}
+		slog.Info("backup written",
+			"folder", id, "path", info.Path,
+			"sequence", info.Sequence)
+		pruned, err := gfsPrune(folderCacheDir, id, defaultGFS, time.Now)
+		if err != nil {
+			slog.Warn("backup prune failed",
+				"folder", id, "error", err)
+			continue
+		}
+		if pruned > 0 {
+			slog.Info("backup retention pruned",
+				"folder", id, "pruned", pruned)
+		}
+	}
 }
 
 // ReopenFolder is the package-public entry point for the
@@ -1931,6 +1984,27 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 				return
 			case <-snapTicker.C:
 				perfSnapshot(n.folders)
+			}
+		}
+	}()
+
+	// Audit §6 commit 9 backup scheduler. Runs on a ticker
+	// (backupCadence) and walks every active folder, calling
+	// writeBackup on each, then gfsPrune to apply retention.
+	// Errors are logged but never abort the loop — backup is
+	// best-effort cleanup, not a correctness boundary. The
+	// goroutine exits on ctx.Done.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(backupCadence)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				n.runBackupSweep(ctx)
 			}
 		}
 	}()

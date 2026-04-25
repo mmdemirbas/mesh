@@ -290,6 +290,22 @@ func TestRetention_IdempotentOnExtraFile(t *testing.T) {
 	}
 }
 
+// TestBackupCadenceConstant pins the scheduler's interval —
+// must be positive (zero would tight-loop the goroutine) and
+// aligned with the GFS daily tier (24h matches the decision §5
+// #11 retention policy). Drift would surface as either a wedged
+// scheduler or a daily tier that no longer reliably has 24h
+// between snapshots.
+func TestBackupCadenceConstant(t *testing.T) {
+	t.Parallel()
+	if backupCadence <= 0 {
+		t.Errorf("backupCadence=%v, want positive", backupCadence)
+	}
+	if backupCadence != 24*time.Hour {
+		t.Errorf("backupCadence=%v, want 24h (audit decision §5 #11 daily anchor)", backupCadence)
+	}
+}
+
 // TestRestore_RejectsPathTraversal pins audit §6 commit 9.2 /
 // the security guard on the public restore entry point: an
 // operator who supplies a backup_path outside the folder's
