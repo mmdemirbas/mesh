@@ -112,7 +112,6 @@ type trieRec struct {
 	negation bool
 	dirOnly  bool
 	kind     patternKind
-	fixed    string
 	dsPrefix string
 	dsSuffix string
 	ordinal  uint32
