@@ -668,6 +668,11 @@ type AuditUpstream struct {
 	// records. Surfaced into the audit row by A.6 (the row writer
 	// reads this field after the handler returns).
 	Attempts []Attempt
+	// Chain is the routing rule's resolved chain of upstreams
+	// (A.5). The handler walks it left-to-right via
+	// dispatchAcrossChain when it has multiple elements; single-
+	// element chains short-circuit to the legacy dispatch.
+	Chain []*ResolvedUpstream
 }
 
 type auditUpstreamKey struct{}

@@ -132,10 +132,34 @@ func NewRouter(cfg *GatewayCfg, log *slog.Logger) (*Router, error) {
 // Rules are evaluated in order; for each rule, patterns are checked using
 // the same glob matching as MapModel: exact → glob (longest first) → "*" catch-all.
 // Returns nil if no routing rule matches.
+//
+// For chain-aware routing (A.5), use RouteChain — Route returns
+// only the first chain element for backward-compat with single-
+// upstream callers (passthrough, summarizer).
 func (r *Router) Route(model string) *ResolvedUpstream {
+	chain := r.RouteChain(model)
+	if len(chain) == 0 {
+		return nil
+	}
+	return chain[0]
+}
+
+// RouteChain returns the ordered list of resolved upstreams for
+// the given model name. Returns nil when no routing rule matches.
+// For rules with `upstream_name` set, the chain is one element;
+// for `upstream_chain`, every element is resolved in declared
+// order.
+func (r *Router) RouteChain(model string) []*ResolvedUpstream {
 	for _, rule := range r.rules {
 		if matchesAnyPattern(model, rule.ClientModel) {
-			return r.upstreams[rule.UpstreamName]
+			names := rule.resolvedUpstreamChain()
+			out := make([]*ResolvedUpstream, 0, len(names))
+			for _, n := range names {
+				if up := r.upstreams[n]; up != nil {
+					out = append(out, up)
+				}
+			}
+			return out
 		}
 	}
 	return nil

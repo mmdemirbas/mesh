@@ -33,14 +33,43 @@ type ClientCfg struct {
 	API string `yaml:"api"`
 }
 
-// RoutingRule maps client model patterns to an upstream name.
-// Rules are evaluated in order; first match wins.
+// RoutingRule maps client model patterns to an upstream name (or
+// an ordered chain of upstream names for fallback). Rules are
+// evaluated in order; first match wins.
 type RoutingRule struct {
-	// Name of the upstream to route matching requests to.
-	UpstreamName string `yaml:"upstream_name"`
+	// Name of the upstream to route matching requests to. Use this
+	// for the common single-upstream case. Mutually exclusive with
+	// UpstreamChain.
+	UpstreamName string `yaml:"upstream_name,omitempty"`
+	// UpstreamChain is the multi-upstream form: an ordered list of
+	// upstream names. Mesh tries each in order, advancing on
+	// per-upstream "all keys exhausted" / 5xx / network failure.
+	// Single-element chains are equivalent to UpstreamName.
+	// Mutually exclusive with UpstreamName.
+	//
+	// v1 constraint: all chain elements must share the same `api`
+	// value (mesh translates the request once per rule, not per
+	// chain step). Cross-API chains are out of scope until a
+	// future workstream adds per-step translation.
+	UpstreamChain []string `yaml:"upstream_chain,omitempty"`
 	// Glob patterns for client model names. "*" matches all models.
 	// Uses path.Match semantics (* matches any sequence, ? matches one char, [...] brackets).
 	ClientModel []string `yaml:"client_model"`
+}
+
+// resolvedUpstreamChain returns the ordered list of upstream names
+// for this rule, treating UpstreamName as a one-element chain.
+// Caller owns the returned slice (a defensive copy).
+func (r RoutingRule) resolvedUpstreamChain() []string {
+	if len(r.UpstreamChain) > 0 {
+		out := make([]string, len(r.UpstreamChain))
+		copy(out, r.UpstreamChain)
+		return out
+	}
+	if r.UpstreamName != "" {
+		return []string{r.UpstreamName}
+	}
+	return nil
 }
 
 // UpstreamCfg defines a single upstream target.
@@ -302,11 +331,45 @@ func (c *GatewayCfg) Validate() error {
 		return fmt.Errorf("at least one routing rule is required")
 	}
 	for i, r := range c.Routing {
-		if r.UpstreamName == "" {
-			return fmt.Errorf("routing[%d]: upstream_name is required", i)
+		// Workstream A.5: upstream_name and upstream_chain are
+		// mutually exclusive forms of the same field. Either one
+		// must be set.
+		hasName := r.UpstreamName != ""
+		hasChain := len(r.UpstreamChain) > 0
+		if hasName && hasChain {
+			return fmt.Errorf("routing[%d]: upstream_name and upstream_chain are mutually exclusive; use one form", i)
 		}
-		if _, ok := upstreamNames[r.UpstreamName]; !ok {
-			return fmt.Errorf("routing[%d]: upstream_name %q does not match any upstream", i, r.UpstreamName)
+		if !hasName && !hasChain {
+			return fmt.Errorf("routing[%d]: one of upstream_name or upstream_chain is required", i)
+		}
+		// Resolve the chain (single-name or list).
+		chain := r.resolvedUpstreamChain()
+		seenInChain := make(map[string]int, len(chain))
+		var chainAPI string
+		for j, name := range chain {
+			if name == "" {
+				return fmt.Errorf("routing[%d]: upstream_chain[%d] is empty", i, j)
+			}
+			idx, ok := upstreamNames[name]
+			if !ok {
+				if hasChain {
+					return fmt.Errorf("routing[%d]: upstream_chain[%d] %q does not match any upstream", i, j, name)
+				}
+				return fmt.Errorf("routing[%d]: upstream_name %q does not match any upstream", i, name)
+			}
+			if prev, dup := seenInChain[name]; dup {
+				return fmt.Errorf("routing[%d]: upstream_chain[%d] duplicates upstream_chain[%d] %q", i, j, prev, name)
+			}
+			seenInChain[name] = j
+			// All chain elements must share the same api shape
+			// (v1 limitation; cross-API chains require per-step
+			// translation which is a future workstream).
+			api := c.Upstream[idx].API
+			if chainAPI == "" {
+				chainAPI = api
+			} else if api != chainAPI {
+				return fmt.Errorf("routing[%d]: upstream_chain mixes APIs (%q has api=%q but earlier elements have api=%q); v1 chains require homogeneous APIs", i, name, api, chainAPI)
+			}
 		}
 		if len(r.ClientModel) == 0 {
 			return fmt.Errorf("routing[%d]: at least one client_model pattern is required", i)

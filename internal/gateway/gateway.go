@@ -168,14 +168,21 @@ func buildRoutingHandler(cfg GatewayCfg, cl ClientCfg, router *Router, recorder 
 		}
 		_ = json.Unmarshal(body, &peek)
 
-		upstream := router.Route(peek.Model)
-		if upstream == nil {
-			upstream = router.DefaultUpstream()
+		// A.5 — resolve to a chain instead of a single upstream.
+		// The first chain element is the "primary"; later
+		// elements are fallbacks the dispatch wrapper walks on
+		// per-upstream failure.
+		chain := router.RouteChain(peek.Model)
+		if len(chain) == 0 {
+			if def := router.DefaultUpstream(); def != nil {
+				chain = []*ResolvedUpstream{def}
+			}
 		}
-		if upstream == nil {
+		if len(chain) == 0 {
 			writeClientError(cl.API, w, 404, "no upstream found for model: "+peek.Model)
 			return
 		}
+		upstream := chain[0]
 
 		// Replay the body for the inner handler.
 		r.Body = io.NopCloser(bytes.NewReader(body))
@@ -187,6 +194,12 @@ func buildRoutingHandler(cfg GatewayCfg, cl ClientCfg, router *Router, recorder 
 		// The inner handler runs after wrapAuditing has captured the original
 		// body, so summarization here does not affect what the audit log records.
 		innerHandler := func(w http.ResponseWriter, r *http.Request) {
+			// A.5: stash the chain on the audit upstream so
+			// handleA2O / handleO2A can walk it via
+			// dispatchAcrossChain.
+			if au := getAuditUpstream(r); au != nil {
+				au.Chain = chain
+			}
 			// Context window check — only for Anthropic client API where we
 			// can parse and reconstruct the message array.
 			if cl.API == APIAnthropic && upstream.Cfg.HasContextLimit() {
@@ -324,16 +337,20 @@ func handleA2O(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 	ctx := r.Context()
 	au := getAuditUpstream(r)
 	sessionID := ""
+	chain := []*ResolvedUpstream{upstream}
 	if au != nil {
 		ctx = attachTimingTrace(ctx, au.Timer, au.ReqID)
 		sessionID = au.SessionID
+		if len(au.Chain) > 0 {
+			chain = au.Chain
+		}
 	}
-	// A.4 — dispatch with multi-key rotation. For single-key /
-	// passthrough upstreams the wrapper makes a single attempt
-	// equivalent to the legacy doUpstreamRequest call.
-	res := dispatchWithKeyRotation(ctx, upstream, oaiBody, dispatchOpts{
-		UpstreamName: upstream.Cfg.Name,
-		SessionID:    sessionID,
+	// A.4/A.5 — dispatch with multi-key rotation across the
+	// configured chain. For single-key single-upstream configs
+	// the wrapper makes a single attempt equivalent to the
+	// legacy doUpstreamRequest call.
+	res := dispatchAcrossChain(ctx, chain, oaiBody, dispatchOpts{
+		SessionID: sessionID,
 	}, log)
 	if au != nil {
 		au.Attempts = res.Attempts
@@ -427,13 +444,16 @@ func handleO2A(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 	ctx := r.Context()
 	au := getAuditUpstream(r)
 	sessionID := ""
+	chain := []*ResolvedUpstream{upstream}
 	if au != nil {
 		ctx = attachTimingTrace(ctx, au.Timer, au.ReqID)
 		sessionID = au.SessionID
+		if len(au.Chain) > 0 {
+			chain = au.Chain
+		}
 	}
-	res := dispatchWithKeyRotation(ctx, upstream, anthBody, dispatchOpts{
-		UpstreamName: upstream.Cfg.Name,
-		SessionID:    sessionID,
+	res := dispatchAcrossChain(ctx, chain, anthBody, dispatchOpts{
+		SessionID: sessionID,
 	}, log)
 	if au != nil {
 		au.Attempts = res.Attempts

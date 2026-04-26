@@ -173,3 +173,77 @@ func applyAuthHeaders(h map[string]string, api, key string) {
 		h["Authorization"] = "Bearer " + key
 	}
 }
+
+// dispatchAcrossChain walks an ordered list of upstreams, calling
+// dispatchWithKeyRotation on each until one returns success or the
+// chain is exhausted. Per-attempt records from every upstream are
+// concatenated into the returned dispatchResult.Attempts so the
+// audit row (A.6) sees the full forensics — "panshi/key1: 429,
+// panshi/key2: 429, claude/default: 200".
+//
+// Advance rules (DESIGN_WORKSTREAM_A §4):
+//   - AttemptOK: return immediately. Final result.
+//   - AttemptRateLimited (after key rotation exhausted): advance
+//     to next chain step.
+//   - AttemptUpstreamError (5xx) / AttemptNetworkError /
+//     AttemptTimeout: advance to next chain step.
+//   - AttemptClientError (4xx other than 429): return immediately.
+//     The request is malformed; trying another upstream won't fix
+//     it.
+//
+// The last attempt in the chain has its FallbackReason left empty
+// (no advance happened). Earlier attempts have FallbackReason set
+// to "chain_advance" or whatever the per-attempt loop already
+// set ("rate_limited_rotate_key", "all_keys_rate_limited").
+func dispatchAcrossChain(ctx context.Context, chain []*ResolvedUpstream, body []byte, opts dispatchOpts, log *slog.Logger) dispatchResult {
+	if len(chain) == 0 {
+		return dispatchResult{Err: errNilUpstream}
+	}
+	var allAttempts []Attempt
+	var lastResult dispatchResult
+	for chainIdx, up := range chain {
+		stepOpts := opts
+		stepOpts.UpstreamName = up.Cfg.Name
+		stepResult := dispatchWithKeyRotation(ctx, up, body, stepOpts, log)
+		// Stitch this step's attempts onto the running list.
+		stepAttempts := stepResult.Attempts
+		// Mark the last attempt of this step with the chain
+		// advance reason (if we're going to advance).
+		if len(stepAttempts) > 0 && chainIdx < len(chain)-1 {
+			outcome := stepAttempts[len(stepAttempts)-1].Outcome
+			if shouldAdvanceChain(outcome) && stepAttempts[len(stepAttempts)-1].FallbackReason == "" {
+				stepAttempts[len(stepAttempts)-1].FallbackReason = "chain_advance:" + string(outcome)
+			} else if stepAttempts[len(stepAttempts)-1].FallbackReason != "" {
+				// Existing reason ("all_keys_rate_limited") plus
+				// chain advance — concatenate so the audit row
+				// captures both decisions.
+				stepAttempts[len(stepAttempts)-1].FallbackReason += "+chain_advance"
+			}
+		}
+		allAttempts = append(allAttempts, stepAttempts...)
+		lastResult = stepResult
+		// Decide whether to advance.
+		if len(stepAttempts) == 0 {
+			// Edge case: dispatchWithKeyRotation returned no
+			// attempts (nil-upstream guard). Treat as
+			// non-advancing failure.
+			break
+		}
+		finalOutcome := stepAttempts[len(stepAttempts)-1].Outcome
+		if !shouldAdvanceChain(finalOutcome) {
+			break
+		}
+	}
+	lastResult.Attempts = allAttempts
+	return lastResult
+}
+
+// shouldAdvanceChain reports whether the chain dispatcher should
+// move to the next upstream after observing the given outcome.
+func shouldAdvanceChain(o AttemptOutcome) bool {
+	switch o {
+	case AttemptRateLimited, AttemptUpstreamError, AttemptNetworkError, AttemptTimeout:
+		return true
+	}
+	return false
+}
