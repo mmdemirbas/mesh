@@ -28,11 +28,11 @@ import (
 // request body. Total > 0 means "cache_control is being used"; the
 // sub-counts indicate where (per design §1.1).
 type CacheMarkers struct {
-	OnSystem        bool `json:"on_system"`
-	OnToolCount     int  `json:"on_tool_count"`
-	ToolTotalCount  int  `json:"tool_total_count"`
-	OnMessageCount  int  `json:"on_message_count"`
-	Total           int  `json:"total"`
+	OnSystem       bool `json:"on_system"`
+	OnToolCount    int  `json:"on_tool_count"`
+	ToolTotalCount int  `json:"tool_total_count"`
+	OnMessageCount int  `json:"on_message_count"`
+	Total          int  `json:"total"`
 }
 
 // CacheUsage is the per-row cache token accounting derived from the
@@ -254,16 +254,16 @@ func CacheSummaryFrom(markers *CacheMarkers, usage *CacheUsage) *CacheSummary {
 // AggregateCacheStats is the overview-card payload — totals and
 // counts across a window of rows.
 type AggregateCacheStats struct {
-	HitRate                float64 `json:"hit_rate"` // -1 when no cache data in window
-	TotalCacheRead         int     `json:"total_cache_read_tokens"`
-	TotalCacheCreation     int     `json:"total_cache_creation_tokens"`
-	TotalStandardInput     int     `json:"total_standard_input_tokens"`
-	RowsWithCacheData      int     `json:"rows_with_cache_data"`
-	RowsTotal              int     `json:"rows_total"`
-	RowsWithMarkers        int     `json:"rows_with_markers"`
-	RowsWithSystemMarker   int     `json:"rows_with_system_marker"`
-	RowsWithToolMarker     int     `json:"rows_with_tool_marker"`
-	RowsWithMessageMarker  int     `json:"rows_with_message_marker"`
+	HitRate               float64 `json:"hit_rate"` // -1 when no cache data in window
+	TotalCacheRead        int     `json:"total_cache_read_tokens"`
+	TotalCacheCreation    int     `json:"total_cache_creation_tokens"`
+	TotalStandardInput    int     `json:"total_standard_input_tokens"`
+	RowsWithCacheData     int     `json:"rows_with_cache_data"`
+	RowsTotal             int     `json:"rows_total"`
+	RowsWithMarkers       int     `json:"rows_with_markers"`
+	RowsWithSystemMarker  int     `json:"rows_with_system_marker"`
+	RowsWithToolMarker    int     `json:"rows_with_tool_marker"`
+	RowsWithMessageMarker int     `json:"rows_with_message_marker"`
 }
 
 // cacheAccumulator is the streaming aggregator used during a row
