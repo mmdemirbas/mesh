@@ -13,11 +13,15 @@
 > deferred.** v1 stays on SHA-256. See `HASH-ALGORITHM.md` for the
 > benchmark data and the reopen criteria.
 >
-> Status: **in progress** · last updated 2026-04-22.
-> §0 Identity, §1 C6, §2 D1, and §3 D6 have landed. §4 D4 is the
-> remaining v1 item. See the *Implementation status* table below for
-> per-section commits. The banner flips to **implemented** once D4
-> lands and the bundle-level tests are green.
+> Status: **implemented** · last updated 2026-04-26.
+> All four v1 items have landed: §0 Identity, §1 C6, §2 D1, §3 D6,
+> and §4 D4. The audit's commit sequence (PERSISTENCE-AUDIT.md §6)
+> shipped commits 1-13 with two splits (6.1/6.2, 9.1/9.2) — see
+> the per-section verification table below. The runbook §1-§7 is
+> v1-ship-ready (commit 13). What remains as named follow-ups
+> after first real-data deploy: §8 build-time decisions for
+> operators, §9 known limits, §10 escalation. Those do not gate
+> v1 ship.
 >
 > C7 (end-to-end transfer integrity trailer) is deliberately out of
 > scope for v1. See `PLAN.md` §C7 for the reopen triggers.
@@ -85,7 +89,7 @@ up it becomes its own protocol bump, not a v1 dialect.
 | §1 C6 per-file vector clocks | ✅ | `vclock.go` (`VectorClock`, `compareClocks`, `Bump`, proto round-trip); `index.go` diff classifier; `filesync.go` local-bump on write, adopt-on-receive, tombstone-clock propagation through rename plan. Tests: `vclock_test.go` (classifier, dominated, concurrent, tombstone cases), `TestFileEntry_VersionYAMLRoundTrip`, `TestFileInfo_VersionWireRoundTrip`. |
 | §2 D1 FastCDC | ✅ | `fastcdc.go` in-tree chunker (`fastCDCMin/Avg/Max = 32/128/512 KiB`); `transfer.go` delta path keyed by block hash; DeltaBlock count capped. Tests: `fastcdc_test.go`, block-verify tests under `transfer_c3_test.go`. |
 | §3 D6 zstd everywhere | ✅ | `internal/zstdutil` (pooled encode/decode, decode-size cap); index exchange and bundle stream on `Content-Encoding: zstd`; DeltaBlock compresses per-block with incompressible skip via `compress_probe.go`. Tests: `compress_probe_test.go`, bundle stream caps. |
-| §4 D4 SQLite-backed index | ⏳ | not started. |
+| §4 D4 SQLite-backed index | ✅ | `internal/filesync/index_sqlite.go` (writer pool MaxOpenConns=1 + `_txlock=immediate`, reader pool MaxOpenConns=n_peers+3 + `query_only(true) mode=ro`); `applyFolderDBSchema` with `folder_meta`, `files`, `peer_state`, `peer_base_hashes` (no `blocks` table per audit §5 #7); `applyFolderDBPragmas` sets `journal_mode=WAL`, `synchronous=FULL`, `mmap_size=64MiB`, `foreign_keys=ON`; `applyIndexToTx` UPSERTs with `WHERE excluded.sequence > files.sequence` (commit 7 phase E); `applyPeerStatesToTx` rewrites peer_state + peer_base_hashes in one tx; `savePeerSyncOutcome` bundles file + peer rows in one BEGIN IMMEDIATE...COMMIT (commit 6.1 phase C); `encodeVectorClock` carries CRC32 trailer (commit 6.1 phase A); `migrateSchema` no-op stub at v1→v1 (commit 12); `runQuickCheck` synchronous + `runIntegrityCheck` async (commit 3) or synchronous on Z8 SIGKILL recovery (commit 10). `internal/filesync/install.go` ships F7 .mesh-bak-<hash> protection for downloads + deletes (commit 6.2 phases E/G). `internal/filesync/sweep.go` reconciles .bak files at folder open against the SQLite row, with Z1 (DB unreadable) and Z13 (neither matches) safety branches (commit 6.2 phases I/J). `internal/filesync/backup.go` ships VACUUM INTO atomic backup + GFS retention + listing endpoint (commit 9.1) + 24h scheduler (scheduler commit). `RestoreFolderFromBackup` runs the 5-step lifecycle with pre-swap quick_check, epoch bump, and post-reopen sweep (commit 9.2). Tests: `index_sqlite_test.go` (round-trip, schema, pragmas, CRC trailer, query plans, sequence-conditioned UPSERT, migration), `install_test.go` + `sweep_test.go` (F7 lifecycle), `backup_test.go` (backup machinery, GFS retention, restore-runs-sweep E2E), `index_sqlite_bench_test.go` (load + persist baselines), `faulty_driver_test.go` (sqlite_faulty wrapper, Z8 detection). |
 
 Review Checklist progress (full text at the bottom of this document):
 
@@ -94,10 +98,10 @@ Review Checklist progress (full text at the bottom of this document):
 - [x] Hash stays SHA-256; D2 deferred per `HASH-ALGORITHM.md`.
 - [x] FastCDC parameters (32/128/512 KiB).
 - [x] zstd level 3, magic-byte probe list, no config knob.
-- [ ] SQLite schema and WAL + FULL durability choice (revised from
+- [x] SQLite schema and WAL + FULL durability choice (revised from
       the draft's NORMAL; see §Durability).
-- [ ] `modernc.org/sqlite` dependency approval.
-- [x] Commit order so far (ID/version → C6 → D1 → D6); D4 still to land.
+- [x] `modernc.org/sqlite` dependency approval.
+- [x] Commit order: ID/version → C6 → D1 → D6 → D4 (commits 1-13).
 
 ---
 
