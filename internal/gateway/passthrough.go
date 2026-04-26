@@ -85,6 +85,11 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request, gwName, responseM
 	}
 	defer func() { _ = uresp.Body.Close() }()
 
+	// PLAN_QUOTA M1: capture rate-limit headers from the upstream
+	// response. Hits before any header stripping so the snapshot
+	// reflects what the upstream actually emitted.
+	captureQuota(gwName, upstream, uresp.Header, time.Now())
+
 	copyPassthroughResponseHeaders(w.Header(), uresp.Header)
 
 	if isSSEResponse(uresp) {

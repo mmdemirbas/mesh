@@ -848,6 +848,14 @@ func buildAdminMux(ring *logRing, logFilePath, perfLogPath string) *http.ServeMu
 	// Polled at the existing 1s admin-UI tick. Per
 	// DESIGN_B4_live_tail.local.md §2.
 	mux.HandleFunc("GET /api/gateway/active", handleActiveSnapshot)
+
+	// GET /api/gateway/quota — upstream-authoritative rate-limit
+	// snapshots, one entry per gateway. PLAN_QUOTA M2. Consumed
+	// by the external claude-quota statusline plugin.
+	mux.HandleFunc("GET /api/gateway/quota", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(gateway.Quota.Snapshot())
+	})
 	// GET /api/gateway/active/<id>/events — per-request SSE stream
 	// of phase + byte-counter changes; throttled at 4 Hz server-side.
 	mux.HandleFunc("GET /api/gateway/active/{id}/events", handleActiveEvents)

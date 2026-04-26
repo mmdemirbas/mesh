@@ -54,6 +54,15 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 	}
 	defer func() { _ = recorder.Close() }()
 
+	// PLAN_QUOTA M1: configure on-disk persistence for upstream
+	// rate-limit snapshots. ~/.mesh/gateway/<name>/ matches the
+	// audit-log dir convention. Loaded on first startup so the
+	// admin endpoint returns the last-known state immediately
+	// after a restart, before any new upstream traffic arrives.
+	quotaDir := expandHome("~/.mesh/gateway")
+	Quota.SetPersistDir(quotaDir)
+	_ = Quota.LoadPersistedQuotas(quotaDir)
+
 	var wg sync.WaitGroup
 	var firstErr error
 	var errMu sync.Mutex
@@ -337,7 +346,7 @@ func handleA2O(w http.ResponseWriter, r *http.Request, gwName, responseModel str
 	}
 
 	if req.Stream {
-		handleA2OStream(w, r, oaiReq, upstream, clientModel, metrics, log)
+		handleA2OStream(w, r, oaiReq, upstream, gwName, clientModel, metrics, log)
 		return
 	}
 
@@ -376,6 +385,10 @@ func handleA2O(w http.ResponseWriter, r *http.Request, gwName, responseModel str
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
 		return
 	}
+	// PLAN_QUOTA M1: capture rate-limit headers from the final
+	// upstream response. Empty snapshots short-circuit; the dispatch
+	// path always pays the IsEmpty() check, never the disk write.
+	captureQuota(gwName, upstream, res.Headers, time.Now())
 
 	// Record the raw upstream response body for the audit log.
 	if au != nil {
@@ -451,7 +464,7 @@ func handleO2A(w http.ResponseWriter, r *http.Request, gwName, responseModel str
 	}
 
 	if req.Stream {
-		handleO2AStream(w, r, anthReq, upstream, clientModel, &req, metrics, log)
+		handleO2AStream(w, r, anthReq, upstream, gwName, clientModel, &req, metrics, log)
 		return
 	}
 
@@ -486,6 +499,9 @@ func handleO2A(w http.ResponseWriter, r *http.Request, gwName, responseModel str
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
 		return
 	}
+	// PLAN_QUOTA M1: capture rate-limit headers from the final
+	// upstream response.
+	captureQuota(gwName, upstream, res.Headers, time.Now())
 
 	// Record the raw upstream response body for the audit log.
 	if au != nil {

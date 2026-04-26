@@ -15,8 +15,9 @@ import (
 
 // handleO2AStream handles Direction B streaming: client expects OpenAI SSE,
 // upstream returns Anthropic SSE. Reads Anthropic SSE events from upstream and
-// translates each to OpenAI SSE chunks.
-func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRequest, upstream *ResolvedUpstream, clientModel string, oaiReq *ChatCompletionRequest, metrics *state.Metrics, log *slog.Logger) {
+// translates each to OpenAI SSE chunks. gwName feeds the
+// PLAN_QUOTA M1 header capture.
+func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRequest, upstream *ResolvedUpstream, gwName, clientModel string, oaiReq *ChatCompletionRequest, metrics *state.Metrics, log *slog.Logger) {
 	start := time.Now()
 
 	anthBody, _ := json.Marshal(anthReq)
@@ -87,6 +88,9 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 			streamKey = key
 			attemptStart = stepStart
 			upstreamResp = resp
+			// PLAN_QUOTA M1: capture quota headers from the
+			// successful upstream before SSE consumption begins.
+			captureQuota(gwName, up, resp.Header, time.Now())
 			break
 		}
 

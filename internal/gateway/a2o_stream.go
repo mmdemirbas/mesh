@@ -24,8 +24,10 @@ func generateMsgID() string {
 
 // handleA2OStream handles Direction A streaming: client expects Anthropic SSE,
 // upstream returns OpenAI SSE. Reads OpenAI SSE chunks from upstream and
-// translates each to Anthropic SSE events.
-func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatCompletionRequest, upstream *ResolvedUpstream, clientModel string, metrics *state.Metrics, log *slog.Logger) {
+// translates each to Anthropic SSE events. gwName feeds the
+// PLAN_QUOTA M1 header capture so the upstream's rate-limit snapshot
+// surfaces in the per-gateway quota cache.
+func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatCompletionRequest, upstream *ResolvedUpstream, gwName, clientModel string, metrics *state.Metrics, log *slog.Logger) {
 	start := time.Now()
 
 	oaiBody, _ := json.Marshal(oaiReq)
@@ -117,6 +119,11 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 			streamKey = key
 			attemptStart = stepStart
 			upstreamResp = resp
+			// PLAN_QUOTA M1: capture quota headers from the
+			// successful upstream BEFORE we start consuming the SSE
+			// body — otherwise the headers map is still populated
+			// but we'd be racing the body close in the defer below.
+			captureQuota(gwName, up, resp.Header, time.Now())
 			break
 		}
 
