@@ -279,6 +279,15 @@ __MESH_CSS__</style>
           <div id="gw-series" style="height:160px"></div>
         </div>
       </div>
+      <!-- PLAN_GATEWAY_SEPARATION Part 2: per-section input bytes
+           breakdown across the window. Backed by the §4.1 byte
+           partition computed on read in audit_stats.go. -->
+      <div class="card" id="gw-content-breakdown-card">
+        <div class="card-header"><span>Content breakdown (input bytes)</span></div>
+        <div class="card-body padded">
+          <div id="gw-content-breakdown" style="font-size:12px"></div>
+        </div>
+      </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
         <div class="card">
           <div class="card-header"><span>Top sessions by tokens</span></div>

@@ -2313,6 +2313,62 @@ function renderTokenBar(u) {
     '</div>';
 }
 
+// renderContentBreakdown paints the PLAN_GATEWAY_SEPARATION Part 2
+// content breakdown card. Backend computes per-section input bytes
+// across the window in auditStatsContentBreakdown (audit_stats.go);
+// this turns the eight-section partition into a stacked horizontal
+// bar plus a per-section table. When the breakdown is empty (zero
+// rows contributed because the audit log is at metadata level), the
+// card renders a hint instead.
+function renderContentBreakdown(cb) {
+  if (!cb || !cb.total || cb.total === 0) {
+    return '<div style="color:var(--text-muted);padding:8px 0">' +
+      'Enable <code>log.level: full</code> on a gateway to see per-section input-byte breakdown. ' +
+      'At <code>metadata</code> level the audit row carries no body, so the partition cannot be computed.' +
+      '</div>';
+  }
+  const sections = [
+    {key: 'system',       label: 'System prompt',         color: 'var(--purple)',    hint: 'system: top-level system field. CLAUDE.md, rules, conventions.'},
+    {key: 'preamble',     label: 'Preamble',              color: 'var(--red)',       hint: 'preamble: pseudo-XML blocks injected into user messages by Claude Code (system-reminder, command-*, hooks).'},
+    {key: 'tool_results', label: 'Tool results',          color: 'var(--orange, #ff9f43)', hint: 'tool_result blocks in user messages — file contents, grep output, etc.'},
+    {key: 'user_text',    label: 'User text',             color: 'var(--cyan)',      hint: 'Latest user-turn text after preamble removal.'},
+    {key: 'thinking',     label: 'Thinking',              color: 'var(--yellow)',    hint: 'extended-thinking blocks in assistant history.'},
+    {key: 'tools',        label: 'Tools schema',          color: 'var(--blue, #4c8bf5)', hint: 'tools / functions schema definitions.'},
+    {key: 'user_history', label: 'User history',          color: 'var(--green)',     hint: 'user-role messages prior to the latest turn.'},
+    {key: 'images_wire',  label: 'Images (wire bytes)',   color: 'var(--pink, #d670d6)', hint: 'base64 image content blocks measured at on-the-wire size.'},
+    {key: 'other',        label: 'Other',                 color: 'var(--text-muted)',hint: 'residual the partition could not attribute. Should stay <5%.'},
+  ];
+  const total = cb.total || 0;
+  const pct = n => total === 0 ? 0 : (n / total * 100).toFixed(1);
+  const segHTML = sections.map(s => {
+    const v = cb[s.key] || 0;
+    if (v === 0) return '';
+    return '<div style="flex:' + v + ';background:' + s.color + ';display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--bg);font-weight:600;min-width:0" title="' + s.label + ': ' + v.toLocaleString() + ' bytes (' + pct(v) + '%)">' +
+      (v / total > 0.10 ? fmtTokens(v) : '') + '</div>';
+  }).join('');
+  const legendHTML = sections.map(s => {
+    const v = cb[s.key] || 0;
+    return '<span><i style="background:' + s.color + '"></i>' + s.label + ' ' + fmtTokens(v) + info(s.hint) + '</span>';
+  }).join('');
+  const tableRows = sections.map(s => {
+    const v = cb[s.key] || 0;
+    return '<tr>' +
+      '<td><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:' + s.color + ';margin-right:6px"></i>' + s.label + '</td>' +
+      '<td style="text-align:right">' + v.toLocaleString() + '</td>' +
+      '<td style="text-align:right;color:var(--text-muted)">' + pct(v) + '%</td>' +
+      '<td style="text-align:right;color:var(--text-muted)">' + (cb.rows > 0 ? Math.round(v / cb.rows).toLocaleString() : '-') + '</td>' +
+      '</tr>';
+  }).join('');
+  return '<div style="margin-bottom:6px"><strong>' + total.toLocaleString() + '</strong> bytes across <strong>' + (cb.rows || 0) + '</strong> requests' +
+    info('Per-section input-byte partition aggregated across every request in the window. The eight named sections plus Other partition the request body with no overlap; sum == total.') + '</div>' +
+    '<div class="token-legend" style="margin-bottom:4px">' + legendHTML + '</div>' +
+    '<div class="token-bar" style="margin-bottom:8px">' + segHTML + '</div>' +
+    '<table style="width:100%;font-size:12px">' +
+      '<thead><tr><th style="text-align:left">Section</th><th style="text-align:right">Bytes</th><th style="text-align:right">% of total</th><th style="text-align:right">Avg per req</th></tr></thead>' +
+      '<tbody>' + tableRows + '</tbody>' +
+    '</table>';
+}
+
 // renderTimingBar draws the B1.4 seven-segment horizontal timing
 // stack. Segments partition the request's wall-clock with no gap and
 // no overlap (Other absorbs residual). Colors group by domain:
@@ -3772,6 +3828,10 @@ function renderGatewayOverview() {
     '<span><i style="background:var(--purple)"></i>cache write</span>' +
     '<span><i style="background:var(--cyan)"></i>fresh input</span>' +
     '<span><i style="background:var(--yellow)"></i>output</span>';
+
+  // PLAN_GATEWAY_SEPARATION Part 2: content breakdown card.
+  const cb = document.getElementById('gw-content-breakdown');
+  if (cb) cb.innerHTML = renderContentBreakdown(t.content_breakdown);
 
   // Top sessions and top models (by_session and by_model are sorted by token total server-side).
   const sessions = (gwStats.by_session || []).slice(0, 10);
