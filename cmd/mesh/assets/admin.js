@@ -3096,6 +3096,119 @@ function closeRawJSONLModal() {
 }
 function jsonlModalEscape(e) { if (e.key === 'Escape') closeRawJSONLModal(); }
 
+// copyAsCurl generates a curl invocation that replays the audited
+// request. The audit row's headers, method, path, and body are
+// woven into a multi-line curl command. Sensitive headers
+// (Authorization, x-api-key, Cookie) are written as placeholders
+// the operator fills in from their secret store. Host/URL is also
+// a placeholder because the audit row doesn't carry the gateway
+// bind address — pick the right base URL for replay context.
+//
+// Click also copies the resulting command to the clipboard and
+// surfaces it in a modal so the operator can review and edit
+// before paste.
+function copyAsCurl() {
+  const req = gwDetailCache && gwDetailCache.req;
+  if (!req) return;
+  const cmd = buildCurlCommand(req);
+  navigator.clipboard.writeText(cmd).catch(()=>{});
+  // Show in a modal too so the operator can inspect what was
+  // produced — clipboard alone can be jarring when secrets need
+  // substituting.
+  let modal = document.getElementById('curl-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'curl-modal';
+    modal.className = 'sess-modal';
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML =
+    '<div class="sess-modal-bg"></div>' +
+    '<div class="sess-modal-card" style="max-width:1100px">' +
+      '<div class="sess-modal-header">' +
+        '<span><b>curl replay</b> — already on your clipboard. Substitute the URL host and any "YOUR_*" placeholders before running.</span>' +
+        '<span style="display:flex;gap:6px">' +
+          '<button class="copy-btn" id="curl-copy-again">copy</button>' +
+          '<button class="filter-btn" id="curl-modal-close">&#10005;</button>' +
+        '</span>' +
+      '</div>' +
+      '<div class="sess-modal-body" style="grid-template-columns:1fr">' +
+        '<pre style="font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-all;overflow:auto;max-height:64vh;padding:10px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px">' +
+        x(cmd) +
+        '</pre>' +
+      '</div>' +
+    '</div>';
+  modal.style.display = 'block';
+  document.getElementById('curl-modal-close').onclick = closeCurlModal;
+  modal.querySelector('.sess-modal-bg').onclick = closeCurlModal;
+  document.getElementById('curl-copy-again').onclick = () => {
+    navigator.clipboard.writeText(cmd).catch(()=>{});
+  };
+  document.addEventListener('keydown', curlModalEscape);
+}
+
+function closeCurlModal() {
+  const modal = document.getElementById('curl-modal');
+  if (modal) modal.style.display = 'none';
+  document.removeEventListener('keydown', curlModalEscape);
+}
+function curlModalEscape(e) { if (e.key === 'Escape') closeCurlModal(); }
+
+// buildCurlCommand assembles a multi-line curl invocation from a
+// req audit row. Output is shell-safe single-quoted; headers are
+// emitted with -H flags. Body is passed via --data-binary @- with
+// a heredoc so embedded quotes survive paste.
+function buildCurlCommand(req) {
+  const method = req.method || 'POST';
+  const path = req.path || '/';
+  const url = 'YOUR_GATEWAY_BASE_URL' + path;
+  const lines = ['curl -sS -X ' + shellQuote(method) + ' \\', '  ' + shellQuote(url) + ' \\'];
+  // Sensitive headers we always replace with placeholders, even
+  // when the audit row already redacted them — operator sees the
+  // intent unambiguously.
+  const sensitive = new Set(['authorization', 'x-api-key', 'cookie', 'x-claude-code-session-id']);
+  const headers = req.headers || {};
+  const headerNames = Object.keys(headers).sort();
+  for (const name of headerNames) {
+    const lc = name.toLowerCase();
+    const vals = Array.isArray(headers[name]) ? headers[name] : [headers[name]];
+    for (const v0 of vals) {
+      let v = String(v0);
+      if (sensitive.has(lc)) v = lc === 'authorization' ? 'Bearer YOUR_TOKEN'
+                              : lc === 'x-api-key' ? 'YOUR_API_KEY'
+                              : 'YOUR_' + lc.toUpperCase().replace(/-/g, '_');
+      lines.push('  -H ' + shellQuote(name + ': ' + v) + ' \\');
+    }
+  }
+  // Body: prefer the parsed JSON body re-stringified compactly;
+  // fall back to a literal string body if that's what the row
+  // carries.
+  let body = '';
+  if (req.body !== undefined && req.body !== null) {
+    body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+  }
+  if (body) {
+    // Use heredoc form so single quotes inside the body don't need
+    // escape-juggling.
+    lines.push("  --data-binary @- <<'__MESH_BODY_EOF__'");
+    lines.push(body);
+    lines.push("__MESH_BODY_EOF__");
+  } else {
+    // Trailing backslash on the previous line is a problem when
+    // there's no body — drop it.
+    const last = lines[lines.length - 1];
+    if (last.endsWith(' \\')) lines[lines.length - 1] = last.slice(0, -2);
+  }
+  return lines.join('\n');
+}
+
+// shellQuote wraps s in single quotes and escapes embedded
+// single quotes via the standard '\'' bash idiom. Safe for any
+// string, including ones with backticks, $vars, or newlines.
+function shellQuote(s) {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
 // highlightJSON returns syntax-highlighted HTML for any JSON-compatible value.
 // Walks the structure once, emitting span-classed tokens. Strings are escaped
 // against XSS at the leaf. Objects/arrays past collapseAt entries fold by
