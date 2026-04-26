@@ -3042,6 +3042,60 @@ function copyDetail(which) {
   navigator.clipboard.writeText(JSON.stringify(v, null, 2)).catch(()=>{});
 }
 
+// viewRawJSONL opens a modal showing the literal JSONL row — the
+// audit log line as it would appear on disk. The frontend has the
+// parsed object, not the original bytes; JSON.stringify reproduces
+// a faithful single-line JSONL form (key order may differ from the
+// original because go's encoding/json writes map keys alphabetically
+// and the parsed-then-restringified path mirrors that).
+function viewRawJSONL(which) {
+  const v = gwDetailCache && gwDetailCache[which];
+  if (!v) return;
+  const jsonl = JSON.stringify(v);
+  const pretty = JSON.stringify(v, null, 2);
+  let modal = document.getElementById('jsonl-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'jsonl-modal';
+    modal.className = 'sess-modal';
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML =
+    '<div class="sess-modal-bg"></div>' +
+    '<div class="sess-modal-card" style="max-width:1100px">' +
+      '<div class="sess-modal-header">' +
+        '<span><b>JSONL row</b> · ' + x(which) + ' · ' + fmtBytes(jsonl.length) + '</span>' +
+        '<span style="display:flex;gap:6px">' +
+          '<button class="copy-btn" id="jsonl-copy-line">copy line</button>' +
+          '<button class="copy-btn" id="jsonl-copy-pretty">copy pretty</button>' +
+          '<button class="filter-btn" id="jsonl-modal-close">&#10005;</button>' +
+        '</span>' +
+      '</div>' +
+      '<div class="sess-modal-body" style="grid-template-columns:1fr">' +
+        '<pre style="font-family:var(--mono);font-size:11px;white-space:pre;overflow:auto;max-height:64vh;padding:10px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px">' +
+        x(pretty) +
+        '</pre>' +
+      '</div>' +
+    '</div>';
+  modal.style.display = 'block';
+  document.getElementById('jsonl-modal-close').onclick = closeRawJSONLModal;
+  modal.querySelector('.sess-modal-bg').onclick = closeRawJSONLModal;
+  document.getElementById('jsonl-copy-line').onclick = () => {
+    navigator.clipboard.writeText(jsonl).catch(()=>{});
+  };
+  document.getElementById('jsonl-copy-pretty').onclick = () => {
+    navigator.clipboard.writeText(pretty).catch(()=>{});
+  };
+  document.addEventListener('keydown', jsonlModalEscape);
+}
+
+function closeRawJSONLModal() {
+  const modal = document.getElementById('jsonl-modal');
+  if (modal) modal.style.display = 'none';
+  document.removeEventListener('keydown', jsonlModalEscape);
+}
+function jsonlModalEscape(e) { if (e.key === 'Escape') closeRawJSONLModal(); }
+
 // highlightJSON returns syntax-highlighted HTML for any JSON-compatible value.
 // Walks the structure once, emitting span-classed tokens. Strings are escaped
 // against XSS at the leaf. Objects/arrays past collapseAt entries fold by
