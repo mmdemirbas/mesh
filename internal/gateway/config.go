@@ -23,6 +23,18 @@ type GatewayCfg struct {
 	Routing []RoutingRule `yaml:"routing"`
 	// Upstream targets.
 	Upstream []UpstreamCfg `yaml:"upstream"`
+	// ResponseModel, when non-empty, replaces the model name in every
+	// client-facing response (non-streaming buffered, SSE, passthrough)
+	// before the gateway forwards it. Empty (default) preserves the
+	// existing behavior of echoing the original client model name.
+	//
+	// Operators set this so two Claude Code sessions that hit different
+	// gateway routes (one direct to Anthropic, one routed through an
+	// internal LLM) display visibly distinct model names. The audit row
+	// records the override for forensics.
+	//
+	// See PLAN_GATEWAY_SEPARATION Part 1.
+	ResponseModel string `yaml:"response_model,omitempty"`
 }
 
 // ClientCfg defines a local listener for incoming requests.

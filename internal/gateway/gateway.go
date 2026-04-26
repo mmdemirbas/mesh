@@ -249,11 +249,11 @@ func buildRoutingHandler(cfg GatewayCfg, cl ClientCfg, router *Router, recorder 
 func dispatchRequest(w http.ResponseWriter, r *http.Request, cfg GatewayCfg, cl ClientCfg, upstream *ResolvedUpstream, dir Direction, metrics *state.Metrics, log *slog.Logger) {
 	switch dir {
 	case DirA2O:
-		handleA2O(w, r, cfg.Name, upstream, metrics, log)
+		handleA2O(w, r, cfg.Name, cfg.ResponseModel, upstream, metrics, log)
 	case DirO2A:
-		handleO2A(w, r, cfg.Name, upstream, metrics, log)
+		handleO2A(w, r, cfg.Name, cfg.ResponseModel, upstream, metrics, log)
 	case DirA2A, DirO2O:
-		handlePassthrough(w, r, cfg.Name, cl.API, upstream, dir, metrics, log)
+		handlePassthrough(w, r, cfg.Name, cfg.ResponseModel, cl.API, upstream, dir, metrics, log)
 	}
 }
 
@@ -304,7 +304,9 @@ func doUpstreamRequestFull(ctx context.Context, client *http.Client, upstreamURL
 }
 
 // handleA2O handles client=Anthropic, upstream=OpenAI translation.
-func handleA2O(w http.ResponseWriter, r *http.Request, gwName string, upstream *ResolvedUpstream, metrics *state.Metrics, log *slog.Logger) {
+// responseModel overrides the model name in the client-facing
+// response when non-empty (PLAN_GATEWAY_SEPARATION Part 1).
+func handleA2O(w http.ResponseWriter, r *http.Request, gwName, responseModel string, upstream *ResolvedUpstream, metrics *state.Metrics, log *slog.Logger) {
 	start := time.Now()
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
@@ -320,6 +322,13 @@ func handleA2O(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 	}
 
 	clientModel := req.Model
+	// PLAN_GATEWAY_SEPARATION Part 1: response_model override.
+	// Replaces the model name echoed back to the client; empty leaves
+	// the request's model verbatim. The audit-row request side keeps
+	// the original; the override surfaces only on the response side.
+	if responseModel != "" {
+		clientModel = responseModel
+	}
 
 	oaiReq, err := translateAnthropicRequest(&req, &upstream.Cfg)
 	if err != nil {
@@ -412,7 +421,9 @@ func handleA2O(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 }
 
 // handleO2A handles client=OpenAI, upstream=Anthropic translation.
-func handleO2A(w http.ResponseWriter, r *http.Request, gwName string, upstream *ResolvedUpstream, metrics *state.Metrics, log *slog.Logger) {
+// responseModel overrides the model name in the client-facing
+// response when non-empty (PLAN_GATEWAY_SEPARATION Part 1).
+func handleO2A(w http.ResponseWriter, r *http.Request, gwName, responseModel string, upstream *ResolvedUpstream, metrics *state.Metrics, log *slog.Logger) {
 	start := time.Now()
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
@@ -428,6 +439,10 @@ func handleO2A(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 	}
 
 	clientModel := req.Model
+	// PLAN_GATEWAY_SEPARATION Part 1: response_model override.
+	if responseModel != "" {
+		clientModel = responseModel
+	}
 
 	anthReq, err := translateOpenAIRequest(&req, &upstream.Cfg)
 	if err != nil {

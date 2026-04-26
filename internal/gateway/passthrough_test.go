@@ -155,6 +155,68 @@ func TestPassthrough_NonStreamingRoundtrip(t *testing.T) {
 	}
 }
 
+// TestPassthrough_ResponseModelOverridesNonStreaming pins
+// PLAN_GATEWAY_SEPARATION Part 1 on the buffered passthrough path.
+// The client sends "claude-opus-4-6"; the upstream replies with
+// "claude-opus-4-6" in the body; the gateway has response_model:
+// "internal-claude" so the client should see "internal-claude".
+func TestPassthrough_ResponseModelOverridesNonStreaming(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		_, _ = fmt.Fprintf(w, `{"id":"msg_x","type":"message","model":"claude-opus-4-6","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	base := startPassthroughGateway(t, upstream.URL, func(c *GatewayCfg) {
+		c.ResponseModel = "internal-claude"
+	})
+
+	body := `{"model":"claude-opus-4-6","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`
+	resp, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	out, _ := io.ReadAll(resp.Body)
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("parse response: %v; body=%s", err, out)
+	}
+	if payload["model"] != "internal-claude" {
+		t.Errorf("response model = %v, want internal-claude (response_model override should rewrite the buffered body)", payload["model"])
+	}
+}
+
+// TestRewriteModelInJSON_NestedAnthropicMessage pins the Anthropic
+// SSE shape (`{"message":{"model":"..."}}`) for response_model.
+func TestRewriteModelInJSON_NestedAnthropicMessage(t *testing.T) {
+	t.Parallel()
+	in := []byte(`{"type":"message_start","message":{"id":"m","model":"claude-x","usage":{"input_tokens":1}}}`)
+	out := rewriteModelInJSON(in, "internal-claude")
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	msg := got["message"].(map[string]any)
+	if msg["model"] != "internal-claude" {
+		t.Errorf("nested message.model = %v, want internal-claude", msg["model"])
+	}
+}
+
+// TestRewriteModelInJSON_NoModelFieldUnchanged pins that JSON
+// without a model field passes through unchanged (e.g.,
+// content_block_delta SSE events that don't carry a model).
+func TestRewriteModelInJSON_NoModelFieldUnchanged(t *testing.T) {
+	t.Parallel()
+	in := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`)
+	out := rewriteModelInJSON(in, "internal-claude")
+	if !bytes.Equal(in, out) {
+		t.Errorf("expected unchanged passthrough; got %s", out)
+	}
+}
+
 func TestPassthrough_PreservesClientAuthWhenAPIKeyEnvUnset(t *testing.T) {
 	t.Parallel()
 	var gotAuth string

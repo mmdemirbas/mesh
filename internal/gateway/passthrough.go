@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
@@ -44,7 +45,7 @@ type peekRequest struct {
 // overwrites the client's Authorization/x-api-key with the configured key.
 // When apiKey is empty, client auth headers are preserved verbatim — this is
 // required for OAuth-authenticated clients such as Claude Code.
-func handlePassthrough(w http.ResponseWriter, r *http.Request, gwName, clientAPI string, upstream *ResolvedUpstream, dir Direction, metrics *state.Metrics, log *slog.Logger) {
+func handlePassthrough(w http.ResponseWriter, r *http.Request, gwName, responseModel, clientAPI string, upstream *ResolvedUpstream, dir Direction, metrics *state.Metrics, log *slog.Logger) {
 	start := time.Now()
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
@@ -87,7 +88,7 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request, gwName, clientAPI
 	copyPassthroughResponseHeaders(w.Header(), uresp.Header)
 
 	if isSSEResponse(uresp) {
-		streamPassthroughResponse(w, r, uresp, metrics, start, log)
+		streamPassthroughResponse(w, r, uresp, responseModel, metrics, start, log)
 		return
 	}
 
@@ -96,6 +97,15 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request, gwName, clientAPI
 	if err != nil {
 		log.Warn("Upstream body read failed", "error", err)
 		return
+	}
+	// PLAN_GATEWAY_SEPARATION Part 1: response_model override on
+	// buffered JSON. Replaces the top-level "model" field (and the
+	// nested message.model field for Anthropic shape) so the client
+	// sees the configured backend label instead of the upstream's
+	// real model name. No-op when responseModel is empty or when the
+	// body is not JSON.
+	if responseModel != "" {
+		respBody = rewriteModelInJSON(respBody, responseModel)
 	}
 	n, _ := w.Write(respBody)
 	metrics.BytesTx.Add(int64(n))
@@ -108,9 +118,13 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request, gwName, clientAPI
 	)
 }
 
-// streamPassthroughResponse forwards an SSE upstream response to the client
-// byte-for-byte, flushing after every read.
-func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *http.Response, metrics *state.Metrics, start time.Time, log *slog.Logger) {
+// streamPassthroughResponse forwards an SSE upstream response to the client.
+// When responseModel is empty the forwarder is byte-for-byte, flushing after
+// every read. When non-empty (PLAN_GATEWAY_SEPARATION Part 1) it scans the
+// stream line-by-line and rewrites the model field in each `data:` JSON
+// payload before flushing — a small per-event parse/marshal cost in exchange
+// for visible backend separation in the streaming case.
+func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *http.Response, responseModel string, metrics *state.Metrics, start time.Time, log *slog.Logger) {
 	// Ensure no buffering-in-front-of-client middleware kicks in.
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Del("Content-Length")
@@ -132,32 +146,80 @@ func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *ht
 		reqID = au.ReqID
 	}
 
-	tmp := make([]byte, 32*1024)
 	var totalBytes int64
 
-	for {
-		readStart := time.Now()
-		n, err := uresp.Body.Read(tmp)
-		if timer != nil {
-			timer.Add(segUpstreamProcessing, time.Since(readStart))
+	if responseModel == "" {
+		// Fast path: byte-for-byte forwarding, no JSON inspection.
+		tmp := make([]byte, 32*1024)
+		for {
+			readStart := time.Now()
+			n, err := uresp.Body.Read(tmp)
+			if timer != nil {
+				timer.Add(segUpstreamProcessing, time.Since(readStart))
+			}
+			if n > 0 {
+				Active.AddBytesDownstream(reqID, int64(n))
+				if _, werr := w.Write(tmp[:n]); werr != nil {
+					log.Debug("Client write failed mid-stream", "error", werr)
+					break
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+				totalBytes += int64(n)
+			}
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				log.Debug("Upstream read stopped", "error", err)
+				break
+			}
 		}
-		if n > 0 {
-			Active.AddBytesDownstream(reqID, int64(n))
-			if _, werr := w.Write(tmp[:n]); werr != nil {
+	} else {
+		// Slow path: line-scan, rewrite the model field on each
+		// `data:` JSON payload, forward. Bytes outside `data:` lines
+		// (event:, comments, blank separators) pass through verbatim.
+		scanner := bufio.NewScanner(uresp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), maxSSELineSize)
+		for {
+			readStart := time.Now()
+			ok := scanner.Scan()
+			if timer != nil {
+				timer.Add(segUpstreamProcessing, time.Since(readStart))
+			}
+			if !ok {
+				break
+			}
+			line := scanner.Bytes()
+			Active.AddBytesDownstream(reqID, int64(len(line)+1))
+			out := line
+			if bytes.HasPrefix(line, []byte("data: ")) {
+				payload := line[6:]
+				if len(payload) > 0 && payload[0] == '{' {
+					rewritten := rewriteModelInJSON(payload, responseModel)
+					if !bytes.Equal(rewritten, payload) {
+						buf := make([]byte, 0, 6+len(rewritten))
+						buf = append(buf, "data: "...)
+						buf = append(buf, rewritten...)
+						out = buf
+					}
+				}
+			}
+			if _, werr := w.Write(out); werr != nil {
 				log.Debug("Client write failed mid-stream", "error", werr)
+				break
+			}
+			if _, werr := w.Write([]byte("\n")); werr != nil {
 				break
 			}
 			if flusher != nil {
 				flusher.Flush()
 			}
-			totalBytes += int64(n)
+			totalBytes += int64(len(out)) + 1
 		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
+		if err := scanner.Err(); err != nil {
 			log.Debug("Upstream read stopped", "error", err)
-			break
 		}
 	}
 	metrics.BytesTx.Add(totalBytes)
@@ -167,6 +229,40 @@ func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *ht
 		"bytes", totalBytes,
 		"elapsed", time.Since(start),
 	)
+}
+
+// rewriteModelInJSON parses data as JSON and rewrites the top-level
+// `model` field (and the nested `message.model` field used by the
+// Anthropic SSE shape) to newModel. Returns data unchanged when it
+// is not JSON, has no model field, or already matches.
+//
+// Used by the response_model override (PLAN_GATEWAY_SEPARATION
+// Part 1) on passthrough responses where the gateway does not
+// translate but does need to rebrand the model name.
+func rewriteModelInJSON(data []byte, newModel string) []byte {
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return data
+	}
+	mutated := false
+	if v, ok := obj["model"].(string); ok && v != newModel {
+		obj["model"] = newModel
+		mutated = true
+	}
+	if msg, ok := obj["message"].(map[string]any); ok {
+		if v, ok := msg["model"].(string); ok && v != newModel {
+			msg["model"] = newModel
+			mutated = true
+		}
+	}
+	if !mutated {
+		return data
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return data
+	}
+	return out
 }
 
 // buildUpstreamURL combines the configured upstream base with the client's
