@@ -2888,18 +2888,42 @@ function highlightMarkdown(s) {
     (m, pre, body) => pre + hold('<span class="md-italic">*' + body + '*</span>'));
   out = out.replace(/(^|[^_\w])_([^_\n]+)_(?=[^_\w]|$)/g,
     (m, pre, body) => pre + hold('<span class="md-italic">_' + body + '_</span>'));
-  // XML/HTML tags (escaped as &lt;tagname&gt;). Color tag names and delimiters.
+  // XML/HTML tags (escaped as &lt;tagname&gt;). Color tag names,
+  // delimiters, and attribute name/value pairs separately so nested
+  // pseudo-XML in prompts (system-reminder, command-name, etc.)
+  // reads as scannable structure instead of a monochrome line.
   // Closing tags: &lt;/tagname&gt;
   out = out.replace(/&lt;\/([a-zA-Z][a-zA-Z0-9_-]*)&gt;/g,
     (m, tag) => hold('<span class="md-xml">&lt;/<span class="md-xml-tag">' + tag + '</span>&gt;</span>'));
-  // Self-closing: &lt;tagname/&gt; or &lt;tagname /&gt;
-  out = out.replace(/&lt;([a-zA-Z][a-zA-Z0-9_-]*)\s*\/&gt;/g,
-    (m, tag) => hold('<span class="md-xml">&lt;<span class="md-xml-tag">' + tag + '</span>/&gt;</span>'));
-  // Opening tags: &lt;tagname&gt; or &lt;tagname attr...&gt;
+  // Self-closing: &lt;tagname/&gt; or &lt;tagname attrs.../&gt;
+  out = out.replace(/&lt;([a-zA-Z][a-zA-Z0-9_-]*)(\s[^&]*?)?\s*\/&gt;/g,
+    (m, tag, attrs) => hold('<span class="md-xml">&lt;<span class="md-xml-tag">' + tag + '</span>' + highlightXMLAttrs(attrs) + '/&gt;</span>'));
+  // Opening tags: &lt;tagname&gt; or &lt;tagname attr=&quot;val&quot;...&gt;
   out = out.replace(/&lt;([a-zA-Z][a-zA-Z0-9_-]*)(\s[^&]*?)?&gt;/g,
-    (m, tag, attrs) => hold('<span class="md-xml">&lt;<span class="md-xml-tag">' + tag + '</span>' + (attrs||'') + '&gt;</span>'));
+    (m, tag, attrs) => hold('<span class="md-xml">&lt;<span class="md-xml-tag">' + tag + '</span>' + highlightXMLAttrs(attrs) + '&gt;</span>'));
   // Restore placeholders.
   return out.replace(/\u0001MD(\d+)\u0002/g, (m, i) => holds[+i]);
+}
+
+// highlightXMLAttrs walks an escaped attribute substring (the
+// "(\s[^&]*?)?" capture from the tag regexes — text between the
+// tag name and the closing &gt;) and wraps name=&quot;value&quot;
+// pairs in their own spans so an attribute-laden tag reads as
+// scannable structure instead of a monochrome line. Input is
+// already HTML-escaped; this only inserts span markup.
+function highlightXMLAttrs(attrs) {
+  if (!attrs) return '';
+  return attrs.replace(
+    /(\s+)([a-zA-Z_][a-zA-Z0-9_-]*)(?:=(?:&(?:quot|#34);([^&]*?)&(?:quot|#34);|&(?:apos|#39);([^&]*?)&(?:apos|#39);|([^\s&]+)))?/g,
+    function(m, ws, name, dq, sq, raw) {
+      const valSpan = (v, q) =>
+        '<span class="md-xml-eq">=</span><span class="md-xml-val">' + (q ? q + v + q : v) + '</span>';
+      let out = ws + '<span class="md-xml-attr">' + name + '</span>';
+      if (dq !== undefined)      out += valSpan(dq, '&quot;');
+      else if (sq !== undefined) out += valSpan(sq, '&#39;');
+      else if (raw !== undefined) out += valSpan(raw, '');
+      return out;
+    });
 }
 
 // splitCustomBlocks scans s for pseudo-XML wrappers and returns an ordered

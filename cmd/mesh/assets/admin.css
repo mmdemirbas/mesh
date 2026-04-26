@@ -296,6 +296,9 @@ select option { background: var(--bg-card); color: var(--text); }
 .md-hr       { color: var(--text-muted); }
 .md-xml      { color: var(--text-dim); }
 .md-xml-tag  { color: var(--cyan); font-weight: 600; }
+.md-xml-attr { color: var(--yellow); }
+.md-xml-eq   { color: var(--text-muted); }
+.md-xml-val  { color: var(--green); }
 /* Scrollable markdown viewer with optional TOC sidebar */
 .md-viewer { display: flex; gap: 0; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); }
 .md-viewer .md-body {
