@@ -874,14 +874,16 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 		// after the audit row writes below, so the snapshot lifetime
 		// is "in-flight" from any operator's perspective.
 		Active.Register(&ActiveRequest{
-			ID:            uint64(reqID),
-			Gateway:       gwName,
-			SessionID:     sessionID,
-			ClientModel:   peek.Model,
-			UpstreamModel: mapped,
-			Streaming:     peek.Stream,
-			StartedAt:     start,
+			ID:          uint64(reqID),
+			Gateway:     gwName,
+			SessionID:   sessionID,
+			ClientModel: peek.Model,
+			Streaming:   peek.Stream,
+			StartedAt:   start,
 		})
+		// upstreamModel is set under phaseMu via SetUpstreamModel;
+		// see active_registry.go's note on the field's lock coverage.
+		Active.SetUpstreamModel(uint64(reqID), mapped)
 		defer Active.Unregister(uint64(reqID))
 		// Bytes upstream is the request body size — fully buffered
 		// before the inner handler dispatches it.

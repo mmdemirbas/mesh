@@ -106,6 +106,44 @@ func TestActiveRegistry_SnapshotIsCopy(t *testing.T) {
 	}
 }
 
+// TestActiveRegistry_SetUpstreamModelRace is the deep-review B2
+// regression. Pre-fix: SetUpstreamModel wrote entry.UpstreamModel
+// without holding any per-entry lock; snapshotOf read the same field
+// also without holding it. Concurrent calls under -race tripped the
+// detector. Now both read and write happen under phaseMu. This test
+// stresses both paths simultaneously and asserts -race stays quiet.
+func TestActiveRegistry_SetUpstreamModelRace(t *testing.T) {
+	t.Parallel()
+	r := newActiveRegistry()
+	r.Register(&ActiveRequest{ID: 9, Gateway: "gw"})
+	const goroutines = 32
+	const iters = 200
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iters; j++ {
+				if i%2 == 0 {
+					r.SetUpstreamModel(9, "model-write")
+				} else {
+					_, _ = r.SnapshotByID(9)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	// Final value should be the writer's last write.
+	snap, ok := r.SnapshotByID(9)
+	if !ok {
+		t.Fatal("entry missing")
+	}
+	if snap.UpstreamModel != "model-write" {
+		t.Errorf("UpstreamModel = %q, want model-write", snap.UpstreamModel)
+	}
+}
+
 func TestActiveRegistry_NilReceiverNoPanic(t *testing.T) {
 	t.Parallel()
 	defer func() {

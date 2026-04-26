@@ -31,16 +31,21 @@ import (
 // methods (mutex-protected for non-atomic fields, atomic for byte
 // counters).
 type ActiveRequest struct {
-	ID            uint64
-	Gateway       string
-	SessionID     string
-	ClientModel   string
-	UpstreamModel string
-	Streaming     bool
-	StartedAt     time.Time
+	ID          uint64
+	Gateway     string
+	SessionID   string
+	ClientModel string
+	Streaming   bool
+	StartedAt   time.Time
 
-	// Phase fields — protected by phaseMu.
+	// Phase fields and UpstreamModel — protected by phaseMu.
+	// UpstreamModel is mutable post-Register (resolved when routing
+	// lands), unlike the other identity fields which are write-once
+	// before Register, so it shares phaseMu's coverage. Without this
+	// the SetUpstreamModel writer would race with snapshotOf readers
+	// (deep-review B2).
 	phaseMu          sync.Mutex
+	upstreamModel    string
 	currentSegment   string
 	segmentStartedAt time.Time
 
@@ -165,10 +170,13 @@ func (r *ActiveRegistry) AddBytesToClient(reqID uint64, n int64) {
 
 // SetUpstreamModel records the resolved upstream model name once
 // the routing decision lands. Optional — wrapAuditing sets it
-// alongside Register if the mapping is known.
+// alongside Register if the mapping is known. Mutates under
+// phaseMu so concurrent snapshot readers see a consistent value.
 func (r *ActiveRegistry) SetUpstreamModel(reqID uint64, model string) {
 	if entry := r.entryFor(reqID); entry != nil {
-		entry.UpstreamModel = model
+		entry.phaseMu.Lock()
+		entry.upstreamModel = model
+		entry.phaseMu.Unlock()
 	}
 }
 
@@ -251,6 +259,7 @@ func snapshotOf(e *ActiveRequest) ActiveRequestSnapshot {
 		return ActiveRequestSnapshot{}
 	}
 	e.phaseMu.Lock()
+	model := e.upstreamModel
 	seg := e.currentSegment
 	segAt := e.segmentStartedAt
 	e.phaseMu.Unlock()
@@ -259,7 +268,7 @@ func snapshotOf(e *ActiveRequest) ActiveRequestSnapshot {
 		Gateway:          e.Gateway,
 		SessionID:        e.SessionID,
 		ClientModel:      e.ClientModel,
-		UpstreamModel:    e.UpstreamModel,
+		UpstreamModel:    model,
 		Streaming:        e.Streaming,
 		StartedAt:        e.StartedAt,
 		CurrentSegment:   seg,
