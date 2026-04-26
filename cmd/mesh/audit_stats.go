@@ -27,6 +27,13 @@ type auditStatsResponse struct {
 	TopRequests    []auditStatsTopRequest `json:"top_requests"`
 	PreambleBlocks []auditStatsRow        `json:"preamble_blocks"`
 	Series         []auditStatsBucket     `json:"series"`
+	// CacheStats is the B5 cache_control visibility aggregate over
+	// the same window. Computed on read by parsing each pair's
+	// request body for cache_control markers and response body for
+	// usage. Hit rate uses the design's denominator (input + cache
+	// read + cache creation). Empty AggregateCacheStats with
+	// HitRate = -1 means "no cache data in this window."
+	CacheStats AggregateCacheStats `json:"cache_stats"`
 }
 
 // auditStatsHourRow is a sparse hour-of-day bucket (0..23). Used so the
@@ -194,6 +201,8 @@ func computeAuditStats(dir string, f statsFilter) (auditStatsResponse, error) {
 	hours := map[int]*auditStatsHourRow{}
 	series := map[time.Time]*auditStatsBucket{}
 	var topCandidates []auditStatsTopRequest
+	// B5 cache_control aggregator.
+	var cacheAcc cacheAccumulator
 
 	for _, pa := range pairs {
 		if !pa.haveReq {
@@ -218,6 +227,21 @@ func computeAuditStats(dir string, f statsFilter) (auditStatsResponse, error) {
 			resp.Totals.ReasoningTokens += int64(pa.resp.reasoningTokens)
 			resp.Totals.ElapsedSumMs += pa.resp.elapsedMs
 		}
+
+		// B5: extract cache markers and usage per pair, fold into the
+		// window aggregate. Same per-(run,id) cache as elsewhere; the
+		// first scan over a row populates it, subsequent scans hit
+		// memory.
+		key := pairKey{id: pa.req.id, run: pa.req.run}
+		var markers *CacheMarkers
+		if len(pa.req.body) > 0 {
+			markers = cachedCacheMarkers(key, pa.req.body)
+		}
+		var usage *CacheUsage
+		if pa.haveResp && len(pa.resp.body) > 0 {
+			usage = cachedCacheUsage(key, pa.resp.body, directionToSource(pa.req.direction))
+		}
+		cacheAcc.AddRow(markers, usage)
 
 		mrow := upsertRow(models, pa.req.model)
 		applyPair(mrow, pa)
@@ -367,6 +391,8 @@ func computeAuditStats(dir string, f statsFilter) (auditStatsResponse, error) {
 	sort.Slice(resp.Series, func(i, j int) bool {
 		return resp.Series[i].T < resp.Series[j].T
 	})
+
+	resp.CacheStats = cacheAcc.Finish()
 
 	return resp, nil
 }

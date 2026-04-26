@@ -61,6 +61,7 @@ type sessionNode struct {
 
 	RequestSummary  nodeRequestSummary  `json:"request_summary"`
 	ResponseSummary nodeResponseSummary `json:"response_summary"`
+	CacheSummary    *CacheSummary       `json:"cache_summary,omitempty"`
 
 	// prefixCanonicalHashes[k] is the canonical hash of this node's
 	// body with messages truncated to the first k items. Cached at
@@ -284,11 +285,9 @@ type usageWire struct {
 // resp rows enrich the node sharing the same (id, run) pair. A req
 // without a resp produces a node with HasResponse=false.
 func buildSessionDAG(sessionID string, rawRows []json.RawMessage) (*sessionDAG, error) {
-	type pairKey struct {
-		id  uint64
-		run string
-	}
-	// Parse rows once; group req and resp by (id, run).
+	// Parse rows once; group req and resp by (id, run). Uses the
+	// package-level pairKey from audit_query.go so the same key
+	// value can index the per-row cache_stats caches (B5).
 	type parsedRow struct {
 		raw rawAuditRow
 	}
@@ -367,6 +366,17 @@ func buildSessionDAG(sessionID string, rawRows []json.RawMessage) (*sessionDAG, 
 				n.ResponseSummary.OutputTokens = resp.raw.StreamSum.Usage.OutputTokens
 			}
 		}
+		// B5: cache_control marker + usage extraction. Markers come
+		// from the request body (Anthropic-only concept; OpenAI bodies
+		// give zero markers gracefully). Usage comes from the response
+		// body via the source picked from the row's direction.
+		key := pairKey{id: req.ID, run: req.Run}
+		markers := cachedCacheMarkers(key, body)
+		var usage *CacheUsage
+		if resp, ok := respRows[k]; ok && len(resp.raw.Body) > 0 {
+			usage = cachedCacheUsage(key, []byte(resp.raw.Body), directionToSource(req.Direction))
+		}
+		n.CacheSummary = CacheSummaryFrom(markers, usage)
 		nodes = append(nodes, n)
 	}
 
@@ -725,10 +735,6 @@ func (c *sessionDAGCache) Len() int {
 // key. The returned slice is unsorted; buildSessionDAG handles
 // chronological sort.
 func loadSessionRowsFromDirs(dirs map[string]string, sessionID string) ([]json.RawMessage, error) {
-	type pairKey struct {
-		id  uint64
-		run string
-	}
 	sessionPairs := make(map[pairKey]struct{})
 	var reqRows []json.RawMessage
 	respByKey := make(map[pairKey]json.RawMessage)
