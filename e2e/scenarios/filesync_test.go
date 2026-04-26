@@ -5,6 +5,8 @@ package scenarios
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -62,24 +64,27 @@ func TestFilesyncTwoPeer(t *testing.T) {
 	// wait on peer1's admin API manually below.
 	noopWait := wait.ForExec([]string{"true"}).WithStartupTimeout(10 * time.Second)
 
+	// Phase 4 stops and starts peer2; Docker's overlay rootfs gets a new
+	// filesystem device id on restart, which trips the G3 device-id guard
+	// and makes peer2 refuse to scan after restart. Bind-mount /root/sync
+	// from t.TempDir() so the device id stays stable across Stop/Start.
+	peer1Sync := t.TempDir()
+	peer2Sync := t.TempDir()
+
 	peer1 := harness.StartNode(ctx, t, net, harness.NodeOptions{
 		Alias:      "peer1",
 		Config:     peer1Cfg,
 		Entrypoint: []string{"/bin/sh"},
 		Cmd:        wrap("peer1", "peer2", "PEER2_IP")[1:],
 		WaitFor:    noopWait,
-		Files: []harness.File{
-			{Path: "/root/sync/.keep", Content: []byte{}, Mode: 0o600},
-		},
+		Binds:      []string{peer1Sync + ":/root/sync"},
 	})
 	peer2 := harness.StartNode(ctx, t, net, harness.NodeOptions{
 		Alias:      "peer2",
 		Config:     peer2Cfg,
 		Entrypoint: []string{"/bin/sh"},
 		Cmd:        wrap("peer2", "peer1", "PEER1_IP")[1:],
-		Files: []harness.File{
-			{Path: "/root/sync/.keep", Content: []byte{}, Mode: 0o600},
-		},
+		Binds:      []string{peer2Sync + ":/root/sync"},
 	})
 	// Now that peer2 is up (its admin API passed), peer1's getent loop
 	// will resolve and mesh will start. Wait for peer1's admin API too.
@@ -224,7 +229,13 @@ func TestFilesyncTwoPeer(t *testing.T) {
 	if err := peer2.Stop(ctx, 5*time.Second); err != nil {
 		t.Fatalf("stop peer2 (phase 5): %v", err)
 	}
-	if err := peer1.WriteFile(ctx, "/root/sync/late.txt", []byte("after peer2 down\n"), 0o600); err != nil {
+	// Write directly to peer1's bind mount. CopyToContainer + touch leaves
+	// a brief window where peer1's scan can index the file with the tar
+	// header's epoch mtime; a host-side os.WriteFile gives the file its
+	// final mtime in one syscall, eliminating the post-restart sync race
+	// when this whole test runs on a Docker daemon under load (the failure
+	// mode after MeshC6 has consumed bridge-network and ryuk resources).
+	if err := os.WriteFile(filepath.Join(peer1Sync, "late.txt"), []byte("after peer2 down\n"), 0o600); err != nil {
 		t.Fatalf("late write on peer1: %v", err)
 	}
 	startCtx5, startCancel5 := context.WithTimeout(ctx, 60*time.Second)
@@ -232,7 +243,10 @@ func TestFilesyncTwoPeer(t *testing.T) {
 	if err := peer2.Start(startCtx5); err != nil {
 		t.Fatalf("start peer2 (phase 5): %v", err)
 	}
-	harness.Eventually(ctx, t, 60*time.Second, 1*time.Second, "late file reaches peer2 after restart",
+	// peer2's sync ticker is 30s; the immediate post-restart tick races
+	// with peer1's own scan picking up late.txt. Allow two ticker cycles
+	// plus scan slack so a slow Docker doesn't fail this leg.
+	harness.Eventually(ctx, t, 90*time.Second, 1*time.Second, "late file reaches peer2 after restart",
 		func() (bool, string) {
 			code, _, _ := peer2.Exec(ctx, "test", "-f", "/root/sync/late.txt")
 			if code == 0 {

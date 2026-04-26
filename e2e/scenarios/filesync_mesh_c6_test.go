@@ -5,6 +5,8 @@ package scenarios
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -70,7 +72,20 @@ func TestFilesyncMeshC6(t *testing.T) {
 	}
 
 	noopWait := wait.ForExec([]string{"true"}).WithStartupTimeout(10 * time.Second)
-	seed := []harness.File{{Path: "/root/sync/.keep", Content: []byte{}, Mode: 0o600}}
+
+	// Bind /root/sync from t.TempDir() on each peer so:
+	//   - the filesystem device id is stable across peer3.Stop / peer3.Start
+	//     (Docker's overlay rootfs gets a new device id on restart and the
+	//      G3 guard refuses to scan when it changes); and
+	//   - phase 2 can pre-write peer3's divergent content to the bind dir
+	//     while peer3 is offline, so peer3's first scan after restart
+	//     captures it BEFORE syncLoop's immediate-on-startup tick fires.
+	//     Without this, the test races: peer3's first sync sends an empty
+	//     index, peer1's "peer1 concurrent" arrives before the local edit
+	//     is scanned, and the divergent vector clock is silently lost.
+	peer1Sync := t.TempDir()
+	peer2Sync := t.TempDir()
+	peer3Sync := t.TempDir()
 
 	peer1 := harness.StartNode(ctx, t, net, harness.NodeOptions{
 		Alias:      "peer1",
@@ -81,7 +96,7 @@ func TestFilesyncMeshC6(t *testing.T) {
 			{"peer3", "PEER3_IP"},
 		})[1:],
 		WaitFor: noopWait,
-		Files:   seed,
+		Binds:   []string{peer1Sync + ":/root/sync"},
 	})
 	peer2 := harness.StartNode(ctx, t, net, harness.NodeOptions{
 		Alias:      "peer2",
@@ -92,7 +107,7 @@ func TestFilesyncMeshC6(t *testing.T) {
 			{"peer3", "PEER3_IP"},
 		})[1:],
 		WaitFor: noopWait,
-		Files:   seed,
+		Binds:   []string{peer2Sync + ":/root/sync"},
 	})
 	peer3 := harness.StartNode(ctx, t, net, harness.NodeOptions{
 		Alias:      "peer3",
@@ -102,7 +117,7 @@ func TestFilesyncMeshC6(t *testing.T) {
 			{"peer1", "PEER1_IP"},
 			{"peer2", "PEER2_IP"},
 		})[1:],
-		Files: seed,
+		Binds: []string{peer3Sync + ":/root/sync"},
 	})
 	harness.DumpOnFailure(t, peer1, peer2, peer3)
 
@@ -234,6 +249,15 @@ func TestFilesyncMeshC6(t *testing.T) {
 	if err := peer1.WriteFile(ctx, concurrent, []byte("peer1 concurrent\n"), 0o600); err != nil {
 		t.Fatalf("peer1 concurrent write: %v", err)
 	}
+	// Seed peer3's divergent content directly into the bind mount BEFORE
+	// peer3 starts, so peer3's first scan-after-restart captures it. If we
+	// instead exec'd the write after Start, peer3's syncLoop's immediate-
+	// on-startup tick can race with the scan: an empty index gets sent
+	// to peer1, peer1's "peer1 concurrent" arrives as a plain download,
+	// and peer3's divergent local copy is silently overwritten.
+	if err := os.WriteFile(filepath.Join(peer3Sync, filepath.Base(concurrent)), []byte("peer3 concurrent\n"), 0o600); err != nil {
+		t.Fatalf("peer3 concurrent seed: %v", err)
+	}
 	startCtx2, startCancel2 := context.WithTimeout(ctx, 60*time.Second)
 	defer startCancel2()
 	if err := peer3.Start(startCtx2); err != nil {
@@ -247,10 +271,6 @@ func TestFilesyncMeshC6(t *testing.T) {
 			}
 			return true, ""
 		})
-	if _, _, err := peer3.Exec(ctx, "sh", "-c",
-		"echo 'peer3 concurrent' > "+concurrent); err != nil {
-		t.Fatalf("peer3 concurrent write: %v", err)
-	}
 
 	harness.Eventually(ctx, t, 75*time.Second, 1*time.Second,
 		".sync-conflict-* appears on some peer",
