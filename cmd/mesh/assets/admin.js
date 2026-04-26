@@ -2198,7 +2198,7 @@ function renderTurnDetails(req, resp) {
     (resp.status ? '<tr><td class="mk">status</td><td class="mv"'+statusCls+'>'+x(String(resp.status))+'</td></tr>' : '') +
     (resp.outcome ? '<tr><td class="mk">outcome</td><td class="mv"'+outcomeCls+'>'+x(resp.outcome)+'</td></tr>' : '') +
     metaRow('stop_reason '+info(tokenHelp.stopReason), summary.stop_reason) +
-    metaRow('elapsed', resp.elapsed_ms ? fmtElapsed(resp.elapsed_ms) : '') +
+    (resp.elapsed_ms ? '<tr><td class="mk">elapsed</td><td class="mv">'+fmtElapsedHtml(resp.elapsed_ms)+'</td></tr>' : '') +
     metaRow('events', summary.events) +
     metaRow('message_id', summary.message_id) +
     metaRow('upstream_model', summary.model, '', summary.model ? 'color:'+modelColor(summary.model) : '') +
