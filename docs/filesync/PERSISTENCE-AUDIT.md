@@ -440,26 +440,33 @@ DESIGN-v1 §0; the locked decision and reopen criteria are in
 **INV-3 — Every write is sequence-conditioned, sequences assigned
 inside the commit transaction.** Two parts:
 
-- *Assignment.* No mutation path increments `folder_meta.sequence`
-  outside a `BEGIN IMMEDIATE` ... `COMMIT` window. Inside the tx,
-  the writer reads the current sequence `S`, assigns `S+1..S+N` to
-  the rows it is about to write (deterministic order), updates
-  `folder_meta.sequence = S+N`, and commits. A scan or download
-  that runs concurrently waits for the writer lock — there is no
-  read-then-increment-then-write window during which two writers
-  can pick the same next sequence. During scan, paths in the
-  in-memory working copy carry a "pending" marker rather than a
-  pre-assigned sequence; the sequence is stamped on each row only
-  at commit time.
-
 - *Conditional UPSERT.* Every `INSERT OR REPLACE` runs with
   `WHERE excluded.sequence > files.sequence` (or equivalent for
   other tables). A concurrent download with a newer sequence
   cannot be overwritten by a stale-sequence write that lost the
-  ordering race; the conditional UPSERT skips it.
+  ordering race; the conditional UPSERT skips it. **Shipped in
+  commit 7 phase E.** Pinned by
+  `TestSequenceConditionedUpsert_OldSequenceLoses`.
 
-Closes Gap 1 (concurrent scan + download write race) and
-Gap 1' (sequence collision across concurrent writers).
+- *Assignment (refactor follow-up).* The audit's original spec
+  also called for moving the per-row sequence stamping inside
+  `BEGIN IMMEDIATE` (in-memory entries carry a "pending" marker
+  rather than a pre-assigned sequence; the tx assigns
+  `S+1..S+N` deterministically and updates `folder_meta.sequence`
+  in the same commit). With `MaxOpenConns=1` and the writer
+  pinning `?_txlock=immediate`, the within-process race the
+  audit was guarding against is impossible by construction —
+  the conditional UPSERT alone is sufficient defense for v1
+  against any future code path that opens a parallel writer.
+  The pending-marker shift remains a code-quality refactor
+  (DRY sequence assignment, removes caller-side `idx.Sequence++`
+  discipline) but **is not a v1 correctness blocker**.
+  Reclassified from "open invariant" to "code-quality follow-up"
+  in commit 10.
+
+INV-3 is **closed for v1** with the conditional UPSERT shipped
+in commit 7. Closes Gap 1 (concurrent scan + download write
+race) and Gap 1' (sequence collision across concurrent writers).
 
 **INV-4 — Commit precedes observability, always.**
 
@@ -614,13 +621,15 @@ they survive a future storage change.
 | P2 per-path persist | `TestPersist_WritesOnlyDirtyRows` — scan changes 3 of 1000; assert only 3 INSERT/REPLACE statements run. |
 | R6 no `.prev` files | `TestPersist_LeavesNoSidecarFiles` — only `index.sqlite`, `-wal`, `-shm` exist after a persist cycle. |
 | L2 clean shutdown | `TestShutdown_ClosesDB` — after `Run` returns, open the DB from a separate handle and confirm it opens cleanly (no residual locks). |
-| INV-3 sequence-guarded write | `TestSequenceConditionedUpsert_OldSequenceLoses` — write a row at sequence=10, attempt overwrite at sequence=5, assert the row body and sequence are unchanged; verify a sequence=20 overwrite DOES land. Pins the `WHERE excluded.sequence > files.sequence` clause from commit 7 phase E. The H11 plan name `TestConcurrentScanDownload_NewerWins` (concurrent-mode race) is deferred until the pending-marker shift lands; today's MaxOpenConns=1 writer makes within-process races impossible by construction. |
+| INV-3 sequence-guarded write | `TestSequenceConditionedUpsert_OldSequenceLoses` — write a row at sequence=10, attempt overwrite at sequence=5, assert the row body and sequence are unchanged; verify a sequence=20 overwrite DOES land. Pins the `WHERE excluded.sequence > files.sequence` clause from commit 7 phase E. **INV-3 is closed for v1** with this UPSERT condition; the H11 plan name `TestConcurrentScanDownload_NewerWins` is moot under MaxOpenConns=1 — within-process races are impossible by construction. The pending-marker shift is a code-quality refactor (commit 10 reclassification), not a correctness blocker. |
 | INV-4 BaseHash durability | `TestCrashBeforeBaseHashCommit_ClassifiesAsConflict` — inject commit failure after in-memory BaseHash update; restart; drive another sync; assert path is classified conflict, not "only they modified." (H12) |
 | Hybrid retain-between-scans | `TestHybrid_InMemoryRetainedBetweenScans` — populate in-memory FileIndex from SQLite at folder open, apply a scan-equivalent commit, assert the FileIndex pointer is unchanged and the row count matches across the cycle. Pins the hybrid contract (audit §6 commit 7 phase G / decision §5 #16) — a refactor that adds a per-scan loadIndexDB call (the β path the audit closed) fails this test. |
 | INV-4 first-sync gate | `TestFirstSync_ThreePeers_NoSpuriousConflicts` — three-peer fresh-state round; assert zero spurious conflicts on agreed-content paths and zero spurious downloads, then drive a second round with a stranded BaseHash and assert the missing-ancestor path classifies conflict (proves the `last_sync_ns == 0` gate flipped correctly). Closes the COMMIT-6-SCOPE.md §3.3 gap surfaced before commit 6.1 opened. |
 | INV-4 download atomic rollback | `TestDownloadCommitFails_RestoresOriginal` — inject `SQLITE_FULL` after temp→final rename; assert .bak is restored, temp unlinked, metric incremented, no row written. (H13 — lands in commit 6.2) |
 | β reload correctness | `TestScanReloadFromSQLite_StateConsistent` — post-scan, drop in-memory state, reload via SQLite; assert dashboard, peer exchange, next scan all see identical state. (H14) |
 | Two-phase integrity | `TestIntegrityCheck_QuickSyncFullAsync` — corrupt DB after folder open; assert quick_check passed, folder goes live, background integrity_check fails, folder transitions to disabled without taking the node down. (H15) |
+| Z8 SIGKILL recovery | `TestSIGKILLDetection_FlagsUncheckpointedWAL` — pin `detectSIGKILLLeftover`'s contract: no `-wal` ⇒ false (clean shutdown), empty `-wal` ⇒ false, non-zero `-wal` ⇒ true (un-checkpointed frames present). The open path uses this signal to switch from async to synchronous integrity_check (closes the silent live-but-corrupt window). The full open-path integration is exercised through the production code: `openFolderInit` runs synchronous `runIntegrityCheck` after `runQuickCheck` when `sigKillLeftover` is true and skips the async deferred check. Lands in commit 10. |
+| F7 sweep post-reopen | `TestRestore_RunsSweepAfterReopen` — end-to-end Z1 pin: seed a folder with original content, take a backup, mutate live state to a divergent hash, drop a `.mesh-bak-<originalHash>` sidecar in the folder root, call `RestoreFolderFromBackup`. The reopened DB carries the original hash; the F7 sweep's branch (b) restores the `.bak` to the original path and unlinks the sidecar. Pins iter-4 Z1's contract that the sweep runs against the RESTORED DB after reopen. Folded from commit 6.2's deferred list into commit 10 (E2E scope). |
 | Shutdown deadline | `TestShutdown_DeadlinePreemptsScanCommit` — start a scan-reset tx (large row count); signal shutdown with 1 s deadline; assert the tx rolls back cleanly, DB is at the last durable state, shutdown completes before deadline × 2. |
 | Backup schedule | `TestBackup_CommitCountAndMaxAge` — drive 200 commits; assert two backups written; let 24 h of frozen-clock pass; assert the max-age sweeper wrote one more. |
 

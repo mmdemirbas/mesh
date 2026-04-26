@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"hash/crc32"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -337,6 +338,44 @@ func TestSaveIndex_DeletePathRemovesRow(t *testing.T) {
 	}
 	if got := reloaded.Files()["a.txt"].Size; got != 11 {
 		t.Fatalf("a.txt Size=%d want 11", got)
+	}
+}
+
+// TestSIGKILLDetection_FlagsUncheckpointedWAL pins audit §6
+// commit 10 / iter-4 Z8: detectSIGKILLLeftover returns true when
+// the folder's `-wal` file exists with non-zero size at the
+// moment of open. This is the load-bearing signal the open path
+// uses to choose the synchronous integrity_check arm over the
+// async one.
+//
+// Three cases:
+//  1. No -wal file at all → false (clean shutdown truncates WAL).
+//  2. Empty -wal file → false (a normal open creates it sized 0).
+//  3. Non-zero -wal file → true (un-checkpointed frames present).
+func TestSIGKILLDetection_FlagsUncheckpointedWAL(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// Case 1: no -wal — clean shutdown.
+	if got := detectSIGKILLLeftover(dir); got {
+		t.Errorf("no -wal: detectSIGKILLLeftover=true, want false")
+	}
+
+	// Case 2: empty -wal.
+	walPath := filepath.Join(dir, folderDBFilename+"-wal")
+	if err := os.WriteFile(walPath, []byte{}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectSIGKILLLeftover(dir); got {
+		t.Errorf("empty -wal: detectSIGKILLLeftover=true, want false")
+	}
+
+	// Case 3: non-zero -wal.
+	if err := os.WriteFile(walPath, []byte("uncheckpointed frame data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectSIGKILLLeftover(dir); !got {
+		t.Errorf("non-zero -wal: detectSIGKILLLeftover=false, want true")
 	}
 }
 

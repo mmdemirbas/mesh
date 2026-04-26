@@ -28,6 +28,13 @@ const (
 	Failed     Status = "failed"
 	Retrying   Status = "retrying"
 	Scanning   Status = "scanning"
+	// Recovering is the transient state surfaced by filesync at
+	// folder open when an un-checkpointed WAL is detected (audit
+	// §6 commit 10 / iter-4 Z8). The synchronous integrity_check
+	// runs in this state; the folder transitions to Connected /
+	// Scanning when integrity_check passes, or to Failed (with
+	// the disabled reason) on integrity failure.
+	Recovering Status = "recovering"
 )
 
 // Metrics tracks live connection activity using lock-free atomic counters.

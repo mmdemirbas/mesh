@@ -709,6 +709,18 @@ func (n *Node) openFolderInit(ctx context.Context, fcfg config.FolderCfg) *integ
 	// fs.disable() and surfaces on the dashboard with the audit's
 	// closed-enum reason + action string.
 	folderCacheDir := filepath.Join(n.dataDir, fcfg.ID)
+	// Audit §6 commit 10 / iter-4 Z8: detect un-checkpointed WAL
+	// BEFORE openFolderDB writes anything. A non-zero -wal at
+	// this point means the previous run did not shut down
+	// cleanly; we run a synchronous integrity_check below
+	// (after quick_check) instead of the async path.
+	sigKillLeftover := detectSIGKILLLeftover(folderCacheDir)
+	if sigKillLeftover {
+		state.Global.Update("filesync-folder", fcfg.ID, state.Recovering,
+			"un-checkpointed WAL detected; running integrity_check synchronously")
+		slog.Info("Z8: SIGKILL recovery detected; integrity_check will run synchronously",
+			"folder", fcfg.ID, "cache_dir", folderCacheDir)
+	}
 	writerCtx, writerCancel := context.WithCancel(ctx)
 	fs := &folderState{
 		cfg:           fcfg,
@@ -757,6 +769,21 @@ func (n *Node) openFolderInit(ctx context.Context, fcfg config.FolderCfg) *integ
 	if err := runQuickCheck(db); err != nil {
 		fs.disable(DisabledQuickCheck, err.Error(), "")
 		return nil
+	}
+
+	// Audit §6 commit 10 / iter-4 Z8: when SIGKILL recovery is
+	// in flight, run integrity_check SYNCHRONOUSLY before going
+	// live. The ~10 MB/s scan takes tens of seconds on a large
+	// DB but closes the silent live-but-corrupt window between
+	// quick_check and the async integrity_check that would
+	// otherwise let peers read pre-corruption rows during the
+	// recovery window. The state-Global Recovering pin set
+	// above remains until the check completes.
+	if sigKillLeftover {
+		if err := runIntegrityCheck(ctx, db); err != nil {
+			fs.disable(DisabledIntegrityCheck, err.Error(), "")
+			return nil
+		}
 	}
 
 	// Audit §6 commit 6 phase I + J: F7 .bak sweep.
@@ -837,6 +864,16 @@ func (n *Node) openFolderInit(ctx context.Context, fcfg config.FolderCfg) *integ
 		for _, peer := range fcfg.Peers {
 			state.Global.Update("filesync-peer", fcfg.ID+"|"+peer, state.Connecting, "")
 		}
+	}
+
+	// Z8: when SIGKILL recovery already ran integrity_check
+	// synchronously above, we do NOT need to queue the deferred
+	// async run. Returning nil here means the Run loop's
+	// integrityChecks slice doesn't get a target for this folder
+	// (no double-check); the folder is already in Scanning
+	// state ready for the initial scan.
+	if sigKillLeftover {
+		return nil
 	}
 
 	return &integrityCheckTarget{fs: fs, db: db}

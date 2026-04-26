@@ -15,6 +15,39 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// detectSIGKILLLeftover reports whether the folder's SQLite
+// `-wal` file exists with non-zero size at the moment of open,
+// indicating a previous run did not checkpoint cleanly. Audit
+// §6 commit 10 / iter-4 Z8: a SIGKILL'd process leaves WAL
+// frames un-checkpointed; on the next open we run a synchronous
+// `integrity_check` before going live to close the silent
+// live-but-corrupt window between `quick_check` and the async
+// `integrity_check`.
+//
+// Called BEFORE openFolderDB so the writer's setup writes
+// (WAL pragma, schema check) don't make the result
+// indistinguishable from a normal startup. Returns false on any
+// stat error (no WAL file ⇒ clean shutdown; permission denied ⇒
+// caller's open will fail loudly anyway).
+func detectSIGKILLLeftover(folderCacheDir string) bool {
+	walPath := filepath.Join(folderCacheDir, folderDBFilename+"-wal")
+	info, err := os.Stat(walPath)
+	if err != nil {
+		return false
+	}
+	return info.Size() > 0
+}
+
+// folderDBDriver is the database/sql driver name used by
+// openFolderDB. Defaults to "sqlite" (modernc.org/sqlite, the
+// pure-Go driver pinned at v1.49.1). Tests override this to
+// "sqlite_faulty" to exercise SQL error paths via the wrapper
+// in faulty_driver_test.go. Audit §6 commit 10 / decision §5
+// #13: plumbing the driver name lets the H-series tests inject
+// SQLITE_FULL / SQLITE_IOERR_FSYNC etc. without changing the
+// production code path.
+var folderDBDriver = "sqlite"
+
 // schemaVersion is the on-disk schema generation for the v1 SQLite index.
 // Any future schema change bumps this integer and writes a migration.
 const schemaVersion = 1
@@ -85,7 +118,11 @@ func openFolderDB(dir, deviceID string) (*sql.DB, error) {
 	// other connection can claim it; this replaces the prior pattern of
 	// running tx.Exec("BEGIN IMMEDIATE") after sql.Begin (which is a
 	// no-op or error in many drivers).
-	db, err := sql.Open("sqlite", path+"?_txlock=immediate")
+	//
+	// folderDBDriver is "sqlite" in production; tests can override
+	// to "sqlite_faulty" via TestMain or per-test setup to exercise
+	// the SQL error paths (audit §6 commit 10 / decision §5 #13).
+	db, err := sql.Open(folderDBDriver, path+"?_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %s: %w", path, err)
 	}
@@ -148,7 +185,7 @@ func openFolderDBReader(dir string, maxConn int) (*sql.DB, error) {
 	}
 	path := filepath.Join(dir, folderDBFilename)
 	dsn := path + "?_pragma=query_only(true)&mode=ro&_txlock=deferred"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open(folderDBDriver, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite reader %s: %w", path, err)
 	}

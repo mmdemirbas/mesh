@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mmdemirbas/mesh/internal/config"
 )
 
 // backupTestDB seeds a folder DB with one row so the backup has
@@ -303,6 +305,170 @@ func TestBackupCadenceConstant(t *testing.T) {
 	}
 	if backupCadence != 24*time.Hour {
 		t.Errorf("backupCadence=%v, want 24h (audit decision §5 #11 daily anchor)", backupCadence)
+	}
+}
+
+// TestRestore_RunsSweepAfterReopen pins audit iter-4 Z1 / commit
+// 6 phase J (Z1 sweep contract) end-to-end through the restore
+// lifecycle. Without this test, Z1's fix is pinned at unit
+// level only — the sweep helper has its own test, and the
+// restore endpoint has its own path-validation test, but the
+// audit contract that the sweep RE-RUNS against the restored DB
+// after reopen is not pinned.
+//
+// Test shape:
+//  1. Set up a Node + folder with one file in the index.
+//  2. Capture the original hash of that file.
+//  3. Take a backup (writeBackup → backup file in
+//     <cacheDir>/backups/).
+//  4. Mutate the live SQLite: change the file's hash row to a
+//     DIFFERENT value, simulating divergent state.
+//  5. Place a `.mesh-bak-<originalHash>` file in the folder
+//     root with content matching the original hash. The sweep's
+//     branch (b) (SQLite carries the original-hash → restore the
+//     .bak) will fire IF the sweep runs against a DB whose hash
+//     matches the .bak's filename.
+//  6. Call RestoreFolderFromBackup. The restored DB carries
+//     the ORIGINAL hash (matching the .bak's filename); the
+//     sweep should fire branch (b) and rename the .bak to the
+//     original path.
+//  7. Assert: the original-content file is at the original path
+//     (sweep's restore happened), the .bak is gone (sweep
+//     unlinked or restored it), and the live SQLite reflects
+//     the restored sequence.
+func TestRestore_RunsSweepAfterReopen(t *testing.T) {
+	// Cannot use t.Parallel — registers a Node in activeNodes.
+	dataDir := t.TempDir()
+	folderRoot := t.TempDir()
+	const folderID = "test-restore-sweep"
+	const filePath = "doc.txt"
+	const originalContent = "original content from backup"
+	const livenContent = "live content that should be replaced"
+
+	originalHash := testHash(originalContent)
+	livenHash := testHash(livenContent)
+
+	// Seed the folder root with the original content.
+	if err := os.WriteFile(filepath.Join(folderRoot, filePath), []byte(originalContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build the Node + register so the package-public restore
+	// entry point can find it.
+	cfg := config.FilesyncCfg{
+		ResolvedFolders: []config.FolderCfg{{
+			ID:        folderID,
+			Path:      folderRoot,
+			Direction: "send-receive",
+		}},
+	}
+	n := &Node{
+		cfg:      cfg,
+		dataDir:  dataDir,
+		folders:  make(map[string]*folderState),
+		deviceID: "TESTDEVICE",
+	}
+	activeNodes.Register(n)
+	t.Cleanup(func() { activeNodes.Unregister(n) })
+
+	// Open the folder via the production path.
+	target := n.openFolderInit(t.Context(), cfg.ResolvedFolders[0])
+	if target == nil {
+		t.Fatal("openFolderInit returned nil — folder failed to open")
+	}
+	t.Cleanup(func() { n.closeOneFolder(folderID) })
+
+	// Step 2: write the original-content row into the index.
+	fs := n.folders[folderID]
+	fs.indexMu.Lock()
+	fs.index.Sequence = 1
+	if err := fs.index.Set(filePath, FileEntry{
+		Size: int64(len(originalContent)), MtimeNS: 1,
+		SHA256: originalHash, Sequence: 1, Mode: 0o644,
+	}); err != nil {
+		fs.indexMu.Unlock()
+		t.Fatalf("index.Set: %v", err)
+	}
+	fs.indexMu.Unlock()
+	if err := saveIndex(t.Context(), fs.db, folderID, fs.index); err != nil {
+		t.Fatalf("seed saveIndex: %v", err)
+	}
+	fs.index.ClearDirty()
+
+	// Step 3: take a backup. The backup carries originalHash.
+	folderCacheDir := filepath.Join(dataDir, folderID)
+	backupInfo, err := writeBackup(t.Context(), fs.db, folderCacheDir)
+	if err != nil {
+		t.Fatalf("writeBackup: %v", err)
+	}
+
+	// Step 4: mutate the live SQLite to a different hash.
+	fs.indexMu.Lock()
+	fs.index.Sequence = 2
+	if err := fs.index.Set(filePath, FileEntry{
+		Size: int64(len(livenContent)), MtimeNS: 2,
+		SHA256: livenHash, Sequence: 2, Mode: 0o644,
+	}); err != nil {
+		fs.indexMu.Unlock()
+		t.Fatalf("mutation index.Set: %v", err)
+	}
+	fs.indexMu.Unlock()
+	if err := saveIndex(t.Context(), fs.db, folderID, fs.index); err != nil {
+		t.Fatalf("mutation saveIndex: %v", err)
+	}
+	fs.index.ClearDirty()
+
+	// Step 5: place a .mesh-bak-<originalHash> file in the folder
+	// root. The sweep at restore time should see SQLite (after
+	// restore = originalHash) matching the .bak's filename hash
+	// → branch (b) restore.
+	bakName := bakRelPath(filePath, originalHash)
+	bakAbs := filepath.Join(folderRoot, bakName)
+	if err := os.WriteFile(bakAbs, []byte(originalContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Replace the live file with the (live-hash) content so the
+	// sweep's branch decision is unambiguous. After step 5 the
+	// folder root has: doc.txt (live content) + doc.txt.mesh-bak-<originalHash>.
+	if err := os.WriteFile(filepath.Join(folderRoot, filePath), []byte(livenContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Step 6: restore from the backup.
+	if err := RestoreFolderFromBackup(t.Context(), folderID, backupInfo.Path); err != nil {
+		t.Fatalf("RestoreFolderFromBackup: %v", err)
+	}
+
+	// Step 7: assert the sweep restored the .bak. After restore:
+	//  - SQLite has the original sequence=1 with originalHash.
+	//  - The folder root's doc.txt should match originalContent
+	//    (sweep renamed .bak → doc.txt because SQLite hash
+	//    matched .bak's filename).
+	//  - The .bak file is gone.
+	got, err := os.ReadFile(filepath.Join(folderRoot, filePath))
+	if err != nil {
+		t.Fatalf("read %s: %v", filePath, err)
+	}
+	if string(got) != originalContent {
+		t.Errorf("post-restore doc.txt=%q, want %q (sweep should have restored .bak)",
+			got, originalContent)
+	}
+	if _, err := os.Stat(bakAbs); !os.IsNotExist(err) {
+		t.Errorf(".bak still present after restore-then-sweep: %v", err)
+	}
+
+	// And SQLite carries the restored sequence + original hash.
+	fsAfter := n.folders[folderID]
+	if fsAfter == nil {
+		t.Fatal("folderState missing after restore — folder did not reopen cleanly")
+	}
+	gotEntry, ok := fsAfter.index.Get(filePath)
+	if !ok {
+		t.Fatal("doc.txt missing from in-memory index after restore")
+	}
+	if gotEntry.SHA256 != originalHash {
+		t.Errorf("restored entry SHA256=%v, want %v (the backup's hash)",
+			gotEntry.SHA256, originalHash)
 	}
 }
 
