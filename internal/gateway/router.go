@@ -76,25 +76,35 @@ func NewRouter(cfg *GatewayCfg, log *slog.Logger) (*Router, error) {
 			transport.Proxy = http.ProxyURL(proxyURL)
 		}
 
-		apiKey := ""
-		if u.APIKeyEnv != "" {
-			apiKey = os.Getenv(u.APIKeyEnv)
-		}
-
-		// Build the key pool. For the single-key (or zero-key
-		// passthrough) case, the pool is a one- or zero-element
-		// wrapper around the legacy APIKey/APIKeyEnv pair —
-		// behaviorally identical to the pre-A world. A.1 wires
-		// multi-key configs in here.
+		// Resolve the key list. APIKeyEnvs (multi) takes precedence
+		// over APIKeyEnv (single); validation enforces they are not
+		// both set. The legacy APIKey field on ResolvedUpstream
+		// stays populated with the first resolved key so existing
+		// dispatch sites (handleA2O, handleA2OStream, handleO2A,
+		// handleO2AStream, summarize) keep working unchanged.
+		// A.4+ will switch the dispatch sites to pick from the
+		// pool per attempt.
 		envVars := []string{}
 		values := []string{}
-		if u.APIKeyEnv != "" {
+		switch {
+		case len(u.APIKeyEnvs) > 0:
+			for _, ev := range u.APIKeyEnvs {
+				envVars = append(envVars, ev)
+				values = append(values, os.Getenv(ev))
+			}
+		case u.APIKeyEnv != "":
 			envVars = append(envVars, u.APIKeyEnv)
-			values = append(values, apiKey)
+			values = append(values, os.Getenv(u.APIKeyEnv))
 		}
-		keys, err := NewKeyPool(envVars, values, "")
+		keys, err := NewKeyPool(envVars, values, u.RotationPolicy)
 		if err != nil {
 			return nil, fmt.Errorf("upstream %q: build key pool: %w", u.Name, err)
+		}
+		// First resolved key remains accessible via APIKey for
+		// backward-compat with the existing dispatch path.
+		apiKey := ""
+		if len(values) > 0 {
+			apiKey = values[0]
 		}
 
 		upstreams[u.Name] = &ResolvedUpstream{

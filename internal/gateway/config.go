@@ -56,7 +56,22 @@ type UpstreamCfg struct {
 	// Name of the environment variable holding the upstream API key.
 	// When unset, the gateway preserves the client's auth headers verbatim
 	// (required for OAuth-authenticated clients such as Claude Code).
+	// Mutually exclusive with APIKeyEnvs; use one form or the other.
 	APIKeyEnv string `yaml:"api_key_env,omitempty"`
+	// APIKeyEnvs is the multi-key form of APIKeyEnv. Each entry names
+	// an environment variable; at startup mesh resolves all of them
+	// into a key pool. Per-request key selection is governed by
+	// RotationPolicy. Mutually exclusive with APIKeyEnv.
+	//
+	// Single-element lists are equivalent to APIKeyEnv with the same
+	// value (the rotation policy short-circuits to "single" for any
+	// pool of size ≤ 1).
+	APIKeyEnvs []string `yaml:"api_key_envs,omitempty"`
+	// RotationPolicy picks the key for each request out of the
+	// multi-key pool. Valid: "round_robin" (default for multi-key
+	// configs), "lru", "sticky_session". Ignored for single-key
+	// pools. See DESIGN_WORKSTREAM_A.local.md §2.
+	RotationPolicy string `yaml:"rotation_policy,omitempty"`
 	// Optional outbound proxy for upstream requests (e.g., "socks5://127.0.0.1:1081").
 	Proxy string `yaml:"proxy,omitempty"`
 	// Upstream request timeout (e.g., "600s"). Default: "600s".
@@ -217,6 +232,37 @@ func (c *GatewayCfg) Validate() error {
 		}
 		if u.Summarizer != "" && u.Summarizer == u.Name {
 			return fmt.Errorf("upstream[%d] %q: summarizer must not reference itself", i, u.Name)
+		}
+		// Workstream A.1: multi-key + rotation policy.
+		if u.APIKeyEnv != "" && len(u.APIKeyEnvs) > 0 {
+			return fmt.Errorf("upstream[%d] %q: api_key_env and api_key_envs are mutually exclusive; use one form", i, u.Name)
+		}
+		for j, ev := range u.APIKeyEnvs {
+			if ev == "" {
+				return fmt.Errorf("upstream[%d] %q: api_key_envs[%d] is empty", i, u.Name, j)
+			}
+		}
+		// Detect duplicate env var names within the same pool —
+		// they would be indistinguishable at runtime and indicate
+		// a config typo.
+		if len(u.APIKeyEnvs) > 1 {
+			seen := make(map[string]int, len(u.APIKeyEnvs))
+			for j, ev := range u.APIKeyEnvs {
+				if prev, ok := seen[ev]; ok {
+					return fmt.Errorf("upstream[%d] %q: api_key_envs[%d] duplicates api_key_envs[%d] %q", i, u.Name, j, prev, ev)
+				}
+				seen[ev] = j
+			}
+		}
+		if !IsValidRotationPolicy(u.RotationPolicy) {
+			return fmt.Errorf("upstream[%d] %q: invalid rotation_policy %q (valid: round_robin, lru, sticky_session)", i, u.Name, u.RotationPolicy)
+		}
+		if u.RotationPolicy != "" && len(u.APIKeyEnvs) == 0 && u.APIKeyEnv != "" {
+			// Configured policy on a single-key pool is silently
+			// ignored at runtime (single-key pools always use
+			// "single"). Reject at config-time so the operator
+			// notices the unused field.
+			return fmt.Errorf("upstream[%d] %q: rotation_policy is set but api_key_envs is not (rotation only applies to multi-key pools; remove the policy or add a second key)", i, u.Name)
 		}
 		for pattern := range u.ModelMap {
 			if strings.ContainsAny(pattern, "*?[") && pattern != "*" {

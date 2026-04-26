@@ -76,6 +76,42 @@ func TestGatewayCfg_Validate(t *testing.T) {
 			c.Upstream[0].ContextWindow = 196000
 			c.Upstream[0].Summarizer = "sum"
 		}, "summarizer \"sum\" must use api \"openai\""},
+
+		// Workstream A.1: multi-key + rotation policy.
+		{"multi_key_envs", func(c *GatewayCfg) {
+			c.Upstream[0].APIKeyEnvs = []string{"K1", "K2", "K3"}
+			c.Upstream[0].RotationPolicy = "round_robin"
+		}, ""},
+		{"both_key_forms", func(c *GatewayCfg) {
+			c.Upstream[0].APIKeyEnv = "OLD"
+			c.Upstream[0].APIKeyEnvs = []string{"K1"}
+		}, "mutually exclusive"},
+		{"empty_key_env_in_list", func(c *GatewayCfg) {
+			c.Upstream[0].APIKeyEnvs = []string{"K1", "", "K3"}
+		}, "api_key_envs[1] is empty"},
+		{"duplicate_key_env_in_list", func(c *GatewayCfg) {
+			c.Upstream[0].APIKeyEnvs = []string{"K1", "K2", "K1"}
+		}, "duplicates"},
+		{"unknown_rotation_policy", func(c *GatewayCfg) {
+			c.Upstream[0].APIKeyEnvs = []string{"K1", "K2"}
+			c.Upstream[0].RotationPolicy = "magic"
+		}, "invalid rotation_policy"},
+		{"rotation_policy_without_multi_key", func(c *GatewayCfg) {
+			c.Upstream[0].APIKeyEnv = "K1"
+			c.Upstream[0].RotationPolicy = "round_robin"
+		}, "rotation_policy is set but api_key_envs is not"},
+		{"valid_lru", func(c *GatewayCfg) {
+			c.Upstream[0].APIKeyEnvs = []string{"K1", "K2"}
+			c.Upstream[0].RotationPolicy = "lru"
+		}, ""},
+		{"valid_sticky_session", func(c *GatewayCfg) {
+			c.Upstream[0].APIKeyEnvs = []string{"K1", "K2"}
+			c.Upstream[0].RotationPolicy = "sticky_session"
+		}, ""},
+		{"valid_default_rotation_policy", func(c *GatewayCfg) {
+			c.Upstream[0].APIKeyEnvs = []string{"K1", "K2"}
+			// no rotation_policy set — defaults to round_robin
+		}, ""},
 	}
 
 	for _, tt := range tests {
