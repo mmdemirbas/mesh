@@ -247,6 +247,7 @@ func (s *SSHServer) Run(ctx context.Context) error {
 
 	// Periodically evict stale rate limiter entries to prevent unbounded memory growth.
 	go func() {
+		defer nodeutil.RecoverPanic("ssh.evictOldLimiters loop")
 		ticker := time.NewTicker(limiterEvictInterval)
 		defer ticker.Stop()
 		for {
@@ -415,6 +416,7 @@ func (s *SSHServer) handleConn(ctx context.Context, conn net.Conn, cfg *ssh.Serv
 
 	// Handle global requests (tcpip-forward, mesh identity, keepalive)
 	go func() {
+		defer nodeutil.RecoverPanic("ssh.global-request loop")
 		for req := range reqs {
 			switch req.Type {
 			case "mesh-node-name@mesh":
@@ -497,6 +499,7 @@ func (c *SSHClient) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer nodeutil.RecoverPanic("ssh.runForwardSet")
 			c.runForwardSet(ctx, &fset)
 		}()
 	}
@@ -512,6 +515,7 @@ func (c *SSHClient) runMultiplex(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer nodeutil.RecoverPanic("ssh.runMultiplexTarget")
 			c.runMultiplexTarget(ctx, target)
 		}()
 	}
@@ -532,6 +536,7 @@ func (c *SSHClient) runMultiplexTarget(ctx context.Context, target string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer nodeutil.RecoverPanic("ssh.runForwardSetForTarget")
 			c.runForwardSetForTarget(ctx, &fset, target)
 		}()
 	}
@@ -964,6 +969,7 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer nodeutil.RecoverPanic("ssh.client keepalive loop")
 		ticker := time.NewTicker(aliveInterval)
 		defer ticker.Stop()
 		failCount := 0
@@ -1010,6 +1016,7 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer nodeutil.RecoverPanic("ssh.runRemoteForward/runRemoteProxy")
 			var err error
 			if fwd.Type == "forward" {
 				err = c.runRemoteForward(sCtx, client, fset.Name, fwd, log)
@@ -1028,6 +1035,7 @@ func (c *SSHClient) runSession(ctx context.Context, client *ssh.Client, fset *co
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer nodeutil.RecoverPanic("ssh.runLocalForward/runLocalProxy")
 			var err error
 			if fwd.Type == "forward" {
 				err = c.runLocalForward(sCtx, client, fset.Name, fwd, log)

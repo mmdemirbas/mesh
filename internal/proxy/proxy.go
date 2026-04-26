@@ -10,6 +10,7 @@ import (
 
 	"github.com/mmdemirbas/mesh/internal/config"
 	"github.com/mmdemirbas/mesh/internal/netutil"
+	"github.com/mmdemirbas/mesh/internal/nodeutil"
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
@@ -32,6 +33,7 @@ func RunStandaloneProxies(ctx context.Context, proxies []config.Listener, log *s
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer nodeutil.RecoverPanic("proxy.RunStandaloneProxies listener")
 			pLog := log.With("component", "proxy", "type", p.Type, "bind", p.Bind)
 
 			state.Global.Update("proxy", p.Bind, state.Starting, "")
@@ -73,6 +75,7 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Listener, log *slo
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer nodeutil.RecoverPanic("proxy.RunStandaloneRelays listener")
 			rLog := log.With("component", "relay", "bind", r.Bind, "target", r.Target)
 
 			state.Global.Update("relay", r.Bind, state.Starting, "")
@@ -121,6 +124,7 @@ func RunStandaloneRelays(ctx context.Context, relays []config.Listener, log *slo
 				go func(c net.Conn) {
 					defer func() { <-sem }()
 					defer func() { _ = c.Close() }()
+					defer nodeutil.RecoverPanic("proxy.relay connection")
 					targetConn, err := net.DialTimeout("tcp", r.Target, 10*time.Second)
 					if err != nil {
 						rLog.Debug("Relay dial failed", "error", err)
