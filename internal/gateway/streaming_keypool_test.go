@@ -27,8 +27,15 @@ func pickListenerAddr(t *testing.T) string {
 
 func waitForListenerReady(t *testing.T, bind string) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
+	// Polling backoff via ticker channel, not time.Sleep, to satisfy
+	// CLAUDE.md "What NOT to Do: Don't use time.Sleep in tests."
+	// First attempt fires immediately; subsequent attempts wait on
+	// the ticker. The 3-second deadline bounds the loop.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
 		resp, err := http.Get("http://" + bind + "/health")
 		if err == nil {
 			_ = resp.Body.Close()
@@ -36,9 +43,12 @@ func waitForListenerReady(t *testing.T, bind string) {
 				return
 			}
 		}
-		time.Sleep(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			t.Fatalf("gateway at %s did not start in time", bind)
+		case <-tick.C:
+		}
 	}
-	t.Fatalf("gateway at %s did not start in time", bind)
 }
 
 // TestRecordStreamAttempt_DegradesKeyOn429 is a unit-level regression
