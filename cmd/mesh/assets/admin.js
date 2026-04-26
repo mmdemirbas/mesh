@@ -202,6 +202,13 @@ function tick() {
   if (activeTab === 'perf') {
     fetch('/api/perf?limit=2000').then(r=>ok(r)).then(r=>r.json()).then(v => { perfEvents = v; renderPerf(); }).catch(fail('perf'));
   }
+  // B4 active-request indicator: chrome on every tab, polled at the
+  // existing 1s tick.
+  fetch('/api/gateway/active').then(r=>ok(r)).then(r=>r.json()).then(v => {
+    activeState = v;
+    renderActiveIndicator();
+    if (activePanelOpen) renderActivePanel();
+  }).catch(fail('active'));
 }
 
 function setLogMode(mode) {
@@ -4951,6 +4958,253 @@ function truncForLabel(s, max) {
 }
 
 
+// --- B4 Live Request Tail ---
+//
+// Three surfaces from one /api/gateway/active poll plus per-request
+// SSE on demand:
+//   - Indicator in the header (`#active-indicator`).
+//   - Slide-in panel listing in-flight requests (`#active-panel`).
+//   - Modal showing one request's live state (`#active-modal`),
+//     fed by /api/gateway/active/<id>/events.
+let activeState = null;     // last /api/gateway/active response
+let activePanelOpen = false;
+let activeModal = {
+  id: 0,
+  sse: null,
+  state: null,             // last received SSE state event
+  completed: false,
+};
+
+// Map B1's seven raw segments to the §3.2 three-pill labels for the
+// header indicator.
+function activePhaseLabel(seg) {
+  switch (seg) {
+    case 'client_to_mesh': case 'mesh_translation_in': return 'dispatching';
+    case 'mesh_to_upstream': case 'upstream_processing': return 'upstream';
+    case 'mesh_translation_out': case 'mesh_to_client': return 'streaming';
+    default: return '';
+  }
+}
+
+function renderActiveIndicator() {
+  const el = document.getElementById('active-indicator');
+  if (!el) return;
+  const total = (activeState && activeState.total) || 0;
+  document.getElementById('active-count').textContent = total;
+  if (total === 0) {
+    el.classList.add('idle');
+    el.setAttribute('aria-disabled', 'true');
+    document.getElementById('active-phases').innerHTML = '';
+    return;
+  }
+  el.classList.remove('idle');
+  el.removeAttribute('aria-disabled');
+  // Pivot by_phase into the three operator-meaningful labels.
+  const counts = { dispatching: 0, upstream: 0, streaming: 0 };
+  const byPhase = activeState.by_phase || {};
+  for (const seg of Object.keys(byPhase)) {
+    const lbl = activePhaseLabel(seg);
+    if (lbl) counts[lbl] += byPhase[seg];
+  }
+  const parts = [];
+  for (const lbl of ['dispatching', 'upstream', 'streaming']) {
+    if (counts[lbl] > 0) parts.push('<span class="ai-phase '+lbl+'">'+counts[lbl]+' '+lbl+'</span>');
+  }
+  document.getElementById('active-phases').innerHTML = parts.join('');
+}
+
+function toggleActivePanel(open) {
+  activePanelOpen = open;
+  const panel = document.getElementById('active-panel');
+  if (!panel) return;
+  panel.classList.toggle('open', open);
+  panel.setAttribute('aria-hidden', open ? 'false' : 'true');
+  const btn = document.getElementById('active-indicator');
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) renderActivePanel();
+}
+
+function renderActivePanel() {
+  const body = document.getElementById('active-panel-body');
+  const title = document.getElementById('active-panel-title');
+  if (!body || !title) return;
+  const reqs = (activeState && activeState.requests) || [];
+  title.textContent = 'Active requests (' + reqs.length + ')';
+  if (reqs.length === 0) {
+    body.innerHTML = '<div class="active-empty">No requests in flight.</div>';
+    return;
+  }
+  // Sort newest first so the most recent dispatch appears at the top.
+  const sorted = [...reqs].sort((a, b) => (b.started_at||'').localeCompare(a.started_at||''));
+  body.innerHTML = sorted.map(r => {
+    const lbl = activePhaseLabel(r.current_segment) || 'other';
+    const sid = (r.session_id || '').slice(0, 8);
+    const elapsed = r.started_at ? fmtDuration(Date.now() - new Date(r.started_at).getTime()) : '';
+    const segElapsed = r.segment_started_at ? fmtDuration(Date.now() - new Date(r.segment_started_at).getTime()) : '';
+    return '<button type="button" class="active-row '+lbl+'" data-id="'+r.id+'">' +
+      '<div class="ar-line1">[' + x(r.gateway || '?') + ']' + (sid ? ' · session ' + x(sid) : '') + ' · ' + x(elapsed) + ' total</div>' +
+      '<div class="ar-line2"><span class="ar-phase">' + x(lbl) + '</span> · ' + x(r.current_segment || '?') + ' · ' + x(segElapsed) + ' in this phase</div>' +
+      '<div class="ar-line3">' + (r.bytes_upstream ? fmtBytes(r.bytes_upstream)+' upstream' : '') +
+      (r.bytes_downstream ? ' · '+fmtBytes(r.bytes_downstream)+' downstream' : '') +
+      (r.bytes_to_client ? ' · '+fmtBytes(r.bytes_to_client)+' to client' : '') +
+      '</div>' +
+      '</button>';
+  }).join('');
+  body.querySelectorAll('.active-row').forEach(el => {
+    el.onclick = () => openActiveLiveView(parseInt(el.dataset.id, 10));
+  });
+}
+
+function fmtDuration(ms) {
+  if (!ms || ms < 0) return '0ms';
+  if (ms < 1000) return ms + 'ms';
+  if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+  return Math.floor(ms / 60000) + 'm' + Math.floor((ms % 60000) / 1000) + 's';
+}
+
+function openActiveLiveView(id) {
+  if (!id) return;
+  closeActiveLiveSSE();
+  activeModal.id = id;
+  activeModal.state = null;
+  activeModal.completed = false;
+  const modal = document.getElementById('active-modal');
+  modal.innerHTML = '<div class="active-modal-card">' +
+    '<div class="active-modal-header"><span><b>Live request ' + id + '</b></span>' +
+    '<span style="display:flex;gap:8px"><button type="button" class="filter-btn" id="active-modal-back">&larr; back</button>' +
+    '<button type="button" class="filter-btn" id="active-modal-close">&#10005;</button></span></div>' +
+    '<div class="active-modal-body" id="active-modal-body">connecting&hellip;</div></div>';
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
+  document.getElementById('active-modal-close').onclick = closeActiveLiveView;
+  document.getElementById('active-modal-back').onclick = () => { closeActiveLiveView(); toggleActivePanel(true); };
+  document.addEventListener('keydown', activeModalEscape);
+  // Open SSE.
+  let es;
+  try {
+    es = new EventSource('/api/gateway/active/' + id + '/events');
+  } catch (e) {
+    document.getElementById('active-modal-body').textContent = 'connection failed: ' + (e.message || e);
+    return;
+  }
+  activeModal.sse = es;
+  es.addEventListener('state', (ev) => {
+    try {
+      activeModal.state = JSON.parse(ev.data);
+      renderActiveLiveModal();
+    } catch (_) {}
+  });
+  es.addEventListener('completed', () => {
+    activeModal.completed = true;
+    closeActiveLiveSSE();
+    renderActiveLiveCompleted();
+  });
+  es.addEventListener('error', () => {
+    // Browser auto-retries unless we close. Modal stays open showing
+    // last known state; the next reconnect will refresh it.
+  });
+}
+
+function closeActiveLiveView() {
+  closeActiveLiveSSE();
+  const modal = document.getElementById('active-modal');
+  if (modal) {
+    modal.classList.remove('open');
+    modal.setAttribute('aria-hidden', 'true');
+    modal.innerHTML = '';
+  }
+  document.removeEventListener('keydown', activeModalEscape);
+  activeModal.id = 0;
+  activeModal.state = null;
+  activeModal.completed = false;
+}
+
+function closeActiveLiveSSE() {
+  if (activeModal.sse) {
+    try { activeModal.sse.close(); } catch (_) {}
+    activeModal.sse = null;
+  }
+}
+
+function activeModalEscape(e) {
+  if (e.key === 'Escape') closeActiveLiveView();
+}
+
+const ACTIVE_SEGMENTS = [
+  'client_to_mesh','mesh_translation_in','mesh_to_upstream',
+  'upstream_processing','mesh_translation_out','mesh_to_client','other'
+];
+
+function renderActiveLiveModal() {
+  const body = document.getElementById('active-modal-body');
+  if (!body) return;
+  const s = activeModal.state;
+  if (!s) { body.innerHTML = 'connecting&hellip;'; return; }
+  // Phase strip: cells before current = done, current = pulsing,
+  // future = neutral.
+  const curIdx = Math.max(0, ACTIVE_SEGMENTS.indexOf(s.current_segment));
+  const cells = ACTIVE_SEGMENTS.map((seg, i) => {
+    const cls = i < curIdx ? 'done' : (i === curIdx ? 'current' : 'zero');
+    return '<div class="live-phase-cell '+cls+'" title="'+xa(seg)+'"></div>';
+  }).join('');
+  const phaseLbl = activePhaseLabel(s.current_segment) || 'other';
+  const segElapsed = s.segment_started_at ? fmtDuration(Date.now() - new Date(s.segment_started_at).getTime()) : '';
+  const totalElapsed = s.started_at ? fmtDuration(Date.now() - new Date(s.started_at).getTime()) : '';
+  body.innerHTML =
+    '<div class="live-meta">' +
+      '<span class="lm-key">gateway</span><span class="lm-val">'+x(s.gateway||'?')+'</span>' +
+      (s.session_id ? '<span class="lm-key">session</span><span class="lm-val">'+x(s.session_id)+'</span>' : '') +
+      (s.client_model ? '<span class="lm-key">client model</span><span class="lm-val">'+x(s.client_model)+'</span>' : '') +
+      (s.upstream_model && s.upstream_model !== s.client_model ? '<span class="lm-key">upstream model</span><span class="lm-val">'+x(s.upstream_model)+'</span>' : '') +
+      '<span class="lm-key">started</span><span class="lm-val">'+x(s.started_at||'')+' ('+x(totalElapsed)+' ago)</span>' +
+      '<span class="lm-key">streaming</span><span class="lm-val">'+(s.streaming?'yes':'no')+'</span>' +
+    '</div>' +
+    '<div class="live-phase-strip">'+cells+'</div>' +
+    '<div class="live-phase-label">phase: <b class="ar-phase '+phaseLbl+'">'+x(phaseLbl)+'</b> · '+x(s.current_segment||'?')+' · '+x(segElapsed)+' in this phase</div>' +
+    '<div class="live-bytes">' +
+      '<div class="live-byte-card"><div class="lb-label">bytes upstream</div><div class="lb-val">'+fmtBytes(s.bytes_upstream||0)+'</div></div>' +
+      '<div class="live-byte-card"><div class="lb-label">bytes downstream</div><div class="lb-val">'+fmtBytes(s.bytes_downstream||0)+'</div></div>' +
+      '<div class="live-byte-card"><div class="lb-label">bytes to client</div><div class="lb-val">'+fmtBytes(s.bytes_to_client||0)+'</div></div>' +
+    '</div>';
+}
+
+function renderActiveLiveCompleted() {
+  const body = document.getElementById('active-modal-body');
+  if (!body) return;
+  const id = activeModal.id;
+  body.innerHTML = '<div class="live-completed">request ' + id + ' has completed.<br/><br/>' +
+    '<a id="active-jump-detail">open the audit row →</a></div>';
+  const a = document.getElementById('active-jump-detail');
+  if (a) a.onclick = () => {
+    closeActiveLiveView();
+    // Best-effort: switch to gateway tab + requests sub-view; jumpToPair
+    // requires the run id which we don't have, so we just navigate the
+    // user to the place they can search for it.
+    showTab('gateway');
+    setGwSub('requests');
+  };
+}
+
+// Wire indicator click + panel close button after DOM load.
+(function() {
+  const tryWire = () => {
+    const ind = document.getElementById('active-indicator');
+    const close = document.getElementById('active-panel-close');
+    if (!ind || !close) { setTimeout(tryWire, 50); return; }
+    ind.onclick = () => {
+      // Idle indicator is non-interactive.
+      if (ind.classList.contains('idle')) return;
+      toggleActivePanel(!activePanelOpen);
+    };
+    close.onclick = () => toggleActivePanel(false);
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', tryWire);
+  } else {
+    tryWire();
+  }
+})();
+
 // --- Visibility-aware polling ---
 let tickTimer = null;
 function startPolling() { if (!tickTimer) { tick(); tickTimer = setInterval(tick, 1000); } }
@@ -4959,9 +5213,11 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     stopPolling();
     closeSessionSSE();
+    closeActiveLiveSSE();
   } else {
     startPolling();
     if (gwSubview === 'sessions' && activeTab === 'gateway') refreshSessionsView();
+    if (activeModal.id) openActiveLiveView(activeModal.id); // reconnect modal SSE
   }
 });
 startPolling();

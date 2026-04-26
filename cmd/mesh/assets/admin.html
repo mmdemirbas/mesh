@@ -14,9 +14,22 @@ __MESH_CSS__</style>
 <header class="header">
   <div class="header-left">
     <div class="logo">mesh<span>__MESH_VERSION__</span></div>
+    <button type="button" class="active-indicator" id="active-indicator" aria-label="Active in-flight requests" aria-expanded="false" tabindex="0">
+      <span class="ai-label">Active</span>
+      <span class="ai-count" id="active-count">0</span>
+      <span class="ai-phases" id="active-phases"></span>
+    </button>
   </div>
   <div class="header-status" id="hdr-status" role="status" aria-live="polite">connecting...</div>
 </header>
+<aside class="active-panel" id="active-panel" aria-hidden="true" role="dialog" aria-label="Active in-flight requests">
+  <header class="active-panel-header">
+    <span><b id="active-panel-title">Active requests</b></span>
+    <button type="button" class="filter-btn" id="active-panel-close" aria-label="Close">&#10005;</button>
+  </header>
+  <div class="active-panel-body" id="active-panel-body"></div>
+</aside>
+<div class="active-modal" id="active-modal" aria-hidden="true" role="dialog" aria-label="Live request view"></div>
 
 <nav class="tabs" id="tabs" role="tablist" aria-label="Main navigation">
   <button class="tab active" role="tab" aria-selected="true" data-tab="dashboard" id="tab-dashboard" aria-controls="p-dashboard">Dashboard</button>
