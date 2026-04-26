@@ -3340,7 +3340,7 @@ function renderGatewayOverview() {
         '<td><code style="color:'+sessColor(s.key)+'">'+x(s.key)+'</code></td>' +
         '<td style="color:'+modelColor(s.first_model)+'">'+x(s.first_model||'-')+'</td>' +
         '<td>'+(s.turns||s.requests)+'</td>' +
-        '<td>'+fmtTokens(s.input_tokens)+' / '+fmtTokens(s.output_tokens)+'</td>' +
+        '<td>'+fmtTokensHtml(s.input_tokens)+' / '+fmtTokensHtml(s.output_tokens)+'</td>' +
         '<td style="color:var(--text-muted)">'+x(fmtAgo(s.last_seen||''))+'</td>' +
       '</tr>').join('');
 
@@ -3350,7 +3350,7 @@ function renderGatewayOverview() {
     : models.map(m => '<tr>' +
         '<td style="color:'+modelColor(m.key)+'">'+x(m.key||'-')+'</td>' +
         '<td>'+m.requests+'</td>' +
-        '<td>'+fmtTokens(m.input_tokens)+' / '+fmtTokens(m.output_tokens)+'</td>' +
+        '<td>'+fmtTokensHtml(m.input_tokens)+' / '+fmtTokensHtml(m.output_tokens)+'</td>' +
         '<td>'+fmtTokens(m.cache_read_tokens)+'</td>' +
       '</tr>').join('');
 
@@ -3366,7 +3366,7 @@ function renderGatewayOverview() {
         return '<tr>' +
           '<td><code style="'+style+'">'+x(k)+'</code></td>' +
           '<td>'+p.requests+'</td>' +
-          '<td>'+fmtTokens(p.input_tokens)+' / '+fmtTokens(p.output_tokens)+'</td>' +
+          '<td>'+fmtTokensHtml(p.input_tokens)+' / '+fmtTokensHtml(p.output_tokens)+'</td>' +
         '</tr>';
       }).join('');
 
@@ -3383,8 +3383,8 @@ function renderGatewayOverview() {
         '<td><code style="color:'+(r.session ? sessColor(r.session) : 'var(--text-muted)')+'">'+x(r.session||'-')+'</code></td>' +
         '<td style="color:var(--text-dim)">'+x(r.model||'-')+'</td>' +
         '<td style="color:var(--text-muted)">'+x(r.path||'-')+'</td>' +
-        '<td style="font-weight:600">'+fmtTokens(r.total_tokens)+'</td>' +
-        '<td>'+fmtTokens(r.input_tokens)+' / '+fmtTokens(r.output_tokens)+'</td>' +
+        '<td style="font-weight:600">'+fmtTokensHtml(r.total_tokens)+'</td>' +
+        '<td>'+fmtTokensHtml(r.input_tokens)+' / '+fmtTokensHtml(r.output_tokens)+'</td>' +
       '</tr>').join('');
 
   // B5 cache visibility — overview card section. gwStats.cache_stats
