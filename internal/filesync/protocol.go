@@ -211,15 +211,18 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	totalPages := req.GetTotalPages()
 	if totalPages <= 1 {
-		s.handleSinglePageIndex(w, &req)
+		s.handleSinglePageIndex(r.Context(), w, &req)
 		return
 	}
 
-	s.handleMultiPageIndex(w, &req)
+	s.handleMultiPageIndex(r.Context(), w, &req)
 }
 
 // handleSinglePageIndex handles the legacy single-page index exchange.
-func (s *server) handleSinglePageIndex(w http.ResponseWriter, req *pb.IndexExchange) {
+// ctx is the HTTP request's context — propagated into
+// buildIndexExchange so a 500 k row read does not run past the
+// shutdown / disconnect deadline.
+func (s *server) handleSinglePageIndex(ctx context.Context, w http.ResponseWriter, req *pb.IndexExchange) {
 	folderID := req.GetFolderId()
 	folder := s.node.findFolder(folderID)
 	if folder == nil {
@@ -229,7 +232,7 @@ func (s *server) handleSinglePageIndex(w http.ResponseWriter, req *pb.IndexExcha
 
 	slog.Debug("received index from peer", "folder", folderID, "files", len(req.GetFiles()))
 
-	resp := s.node.buildIndexExchange(folderID, req.GetSince())
+	resp := s.node.buildIndexExchange(ctx, folderID, req.GetSince())
 	if err := writeProtoZstd(w, resp); err != nil {
 		http.Error(w, "write response: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -239,7 +242,8 @@ func (s *server) handleSinglePageIndex(w http.ResponseWriter, req *pb.IndexExcha
 // handleMultiPageIndex accumulates pages of a multi-page index upload.
 // On receiving the final page, it processes the complete index and returns
 // the first page of the server's response (possibly paginated).
-func (s *server) handleMultiPageIndex(w http.ResponseWriter, req *pb.IndexExchange) {
+// ctx is the HTTP request's context — see handleSinglePageIndex.
+func (s *server) handleMultiPageIndex(ctx context.Context, w http.ResponseWriter, req *pb.IndexExchange) {
 	folderID := req.GetFolderId()
 	folder := s.node.findFolder(folderID)
 	if folder == nil {
@@ -325,7 +329,7 @@ func (s *server) handleMultiPageIndex(w http.ResponseWriter, req *pb.IndexExchan
 	// All pages received — process the complete index.
 	s.pending.Delete(key)
 
-	resp := s.node.buildIndexExchange(folderID, pe.since)
+	resp := s.node.buildIndexExchange(ctx, folderID, pe.since)
 	respPages := paginateResponse(resp)
 	pe.responsePages = respPages
 

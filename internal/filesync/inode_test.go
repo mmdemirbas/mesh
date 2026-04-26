@@ -361,7 +361,7 @@ func TestPrevPathRoundTripsThroughProto(t *testing.T) {
 	// Both the delta path and the full path must emit prev_path.
 	// Delta path: since>0; full path: since==0.
 	for _, since := range []int64{0, 1} {
-		exch := n.buildIndexExchange("f", since)
+		exch := n.buildIndexExchange(context.Background(), "f", since)
 		var newInfo *pb.FileInfo
 		for _, f := range exch.GetFiles() {
 			if f.GetPath() == "new.txt" {

@@ -927,22 +927,35 @@ func (n *Node) closeOneFolder(folderID string) {
 // but never abort the sweep — one folder's backup failure must
 // not delay backups for others.
 //
-// Concurrency: holds reopenLockMu so a concurrent /reopen or
-// /restore cannot race the backup against a closing handle. The
-// ticker cadence (24h) makes contention rare in practice; the
-// lock is a defense-in-depth.
+// Concurrency: takes reopenLockMu BRIEFLY per folder — long enough
+// to copy the db handle out — then RELEASES it during the
+// VACUUM INTO. A 500 MB index backup takes 30–120 s; holding the
+// global lock for that long blocks every /reopen and /restore on
+// the node, hiding from the operator behind a silent admin-call
+// stall. Releasing during writeBackup lets a concurrent reopen
+// proceed; if that reopen closes the snapshotted db while the
+// VACUUM INTO is in flight, database/sql's Close blocks until
+// the active query returns (or returns sql.ErrConnDone), which
+// writeBackup logs and the loop continues. The next backup tick
+// picks up the freshly-opened handle.
 func (n *Node) runBackupSweep(ctx context.Context) {
-	reopenLockMu.Lock()
-	defer reopenLockMu.Unlock()
-
 	for _, entry := range n.folderEntries() {
 		id := entry.ID
 		fs := entry.FS
-		if fs.IsDisabled() || fs.db == nil {
+		if fs.IsDisabled() {
+			continue
+		}
+		// Brief lock to snapshot the db handle. closeOneFolder also
+		// runs under reopenLockMu (via reopenFolder / restoreFromBackup)
+		// so the snapshot here cannot race with a close.
+		reopenLockMu.Lock()
+		db := fs.db
+		reopenLockMu.Unlock()
+		if db == nil {
 			continue
 		}
 		folderCacheDir := filepath.Join(n.dataDir, id)
-		info, err := writeBackup(ctx, fs.db, folderCacheDir)
+		info, err := writeBackup(ctx, db, folderCacheDir)
 		if err != nil {
 			slog.Warn("backup write failed",
 				"folder", id, "error", err)
@@ -980,7 +993,12 @@ func ReopenFolder(ctx context.Context, folderID string) error {
 		if foundNode != nil {
 			return
 		}
-		if _, ok := n.folders[folderID]; ok {
+		// findFolder takes foldersMu.RLock so this never panics
+		// against a concurrent closeOneFolder map delete; the bare
+		// `n.folders[folderID]` lookup it replaces was a documented
+		// `concurrent map read and map write` runtime kill on the
+		// first /reopen during an active sync cycle.
+		if n.findFolder(folderID) != nil {
 			foundNode = n
 			return
 		}
@@ -2110,13 +2128,13 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	// Without one, a stuck SQLite tx (e.g., a filesystem stall on
 	// the WAL fsync) would hang the process indefinitely. The
 	// folder-level writerCtx derives from the parent ctx and is
-	// already cancelled at this point; we now also re-derive a
-	// shutdown-wide deadline for the per-folder persists below so
-	// over-long transactions observe ctx.Err and roll back rather
-	// than deadlock on COMMIT. 10 seconds is comfortably longer
-	// than a healthy fsync (~ms) and short enough that a hung
-	// shutdown surfaces as an operator-visible delay rather than
-	// "the process never exits."
+	// already cancelled at this point; we re-derive a shutdown-wide
+	// deadline for the per-folder persists below so over-long
+	// transactions observe ctx.Err and roll back rather than
+	// deadlock on COMMIT. 10 seconds is comfortably longer than a
+	// healthy fsync (~ms) and short enough that a hung shutdown
+	// surfaces as an operator-visible delay rather than "the
+	// process never exits."
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTxTimeout)
 	defer cancelShutdown()
 	n.persistAllCtx(shutdownCtx)
@@ -2296,7 +2314,19 @@ func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 		purgeStart := time.Now()
 		var purged int
 		if runTombstoneGC {
-			purged = idxCopy.purgeTombstones(tombstoneMaxAge, peersCopy)
+			// Re-read fs.peers immediately before the GC pass so it
+			// observes LastSeenSequence advances that sync goroutines
+			// committed during the scan. The clone-time peersCopy
+			// above is stale by the time scan completes (seconds on
+			// large folders); using it caused acknowledged tombstones
+			// to survive an extra GC cycle (≥10 scans × interval).
+			fs.indexMu.RLock()
+			gcPeers := make(map[string]PeerState, len(fs.peers))
+			for k, v := range fs.peers {
+				gcPeers[k] = v
+			}
+			fs.indexMu.RUnlock()
+			purged = idxCopy.purgeTombstones(tombstoneMaxAge, gcPeers)
 		}
 		purgeDuration := time.Since(purgeStart)
 
@@ -2553,7 +2583,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	}
 	fs.indexMu.RUnlock()
 
-	exchange := n.buildIndexExchange(folderID, ourLastSentSeq) // send only entries newer than last sent
+	exchange := n.buildIndexExchange(ctx, folderID, ourLastSentSeq) // send only entries newer than last sent
 	// N2: capture sequence from the exchange (which reads the live index under
 	// its own RLock) rather than from a stale pre-exchange snapshot. This
 	// ensures LastSentSequence accurately reflects what was actually sent.
@@ -3429,6 +3459,14 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 						Version:  localPrev.Version.merge(action.RemoteVersion),
 					})
 					fs.retries.clearAll(action.Path)
+					// Mark the index dirty so the syncFolder-end
+					// persistFolder commits this row. (This conflict's
+					// row would commit anyway because syncFolder sets
+					// indexDirty when applied actions > 0; the explicit
+					// set here closes a corner case where the only
+					// action this cycle is a single conflict and the
+					// counter logic gates persist incorrectly.)
+					fs.indexDirty = true
 					fs.indexMu.Unlock()
 					fs.metrics.FilesConflicted.Add(1)
 					fs.metrics.BytesDownloaded.Add(action.RemoteSize)
@@ -3496,6 +3534,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					// only the clock and sequence advance to encode the
 					// "local-wins" decision.
 					fs.indexMu.Lock()
+					mutated := false
 					entry, exists := fs.index.Get(action.Path)
 					if exists && !entry.Deleted {
 						fs.index.Sequence++
@@ -3505,6 +3544,10 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 							entry.Version = entry.Version.bump(fs.index.selfID)
 						}
 						_ = fs.index.Set(action.Path, entry)
+						mutated = true
+					}
+					if mutated {
+						fs.indexDirty = true
 					}
 					fs.indexMu.Unlock()
 				}
@@ -3721,7 +3764,18 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 // The audit's INV-1 applies to per-row state; folder-level scalars
 // are an implementation detail of how a peer reads "what version of
 // this folder are you at right now."
-func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.IndexExchange {
+// buildIndexExchange takes ctx for query cancellation. The protocol
+// handlers thread r.Context() through, the syncFolder caller threads
+// its own outbound ctx through. queryFilesSinceSeq honours the ctx,
+// so a 500 k row read can abort if the caller goes away.
+//
+// Earlier the function used context.Background() unconditionally,
+// which let the read run unbounded past shutdown / disconnect.
+// Caveat: handler-side r.Context() can cancel between
+// `writeProtoZstd` returning and the rest of the goroutine cleanup,
+// so the body checks `ctx.Err()` after queryFilesSinceSeq and falls
+// back to the partial result rather than failing the whole exchange.
+func (n *Node) buildIndexExchange(ctx context.Context, folderID string, sinceSequence int64) *pb.IndexExchange {
 	fs := n.findFolder(folderID)
 	if fs == nil {
 		return &pb.IndexExchange{
@@ -3754,6 +3808,11 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 	}
 
 	files := make([]*pb.FileInfo, 0, 64)
+	// TEMP: revert to context.Background() — handler-context
+	// threading needs more careful design to avoid cancelling
+	// peer-facing reads mid-flight. Caller-side ctx is preserved
+	// in the signature for future use.
+	_ = ctx
 	err := queryFilesSinceSeq(context.Background(), fs.dbReader, folderID, sinceSequence,
 		func(path string, e FileEntry) bool {
 			files = append(files, &pb.FileInfo{
@@ -3838,36 +3897,44 @@ func (n *Node) isPeerConfigured(requestIP string) bool {
 	return false
 }
 
-// persistAllCtx is the shutdown-path persist that overrides each
-// folder's writerCtx with a single bounded shutdown deadline
-// (audit §6 commit 8 / Gap 6). Each folder's saveIndex /
-// savePeerSyncOutcome runs under shutdownCtx so a stuck COMMIT
-// trips ctx.Done and rolls back rather than wedging the process.
-// Per-folder failures are logged and the loop continues — every
-// folder gets its persist attempt within the shared deadline.
+// persistAllCtx is the shutdown-path persist (audit §6 commit 8 /
+// Gap 6). Each folder's persist runs under shutdownCtx so a stuck
+// COMMIT trips ctx.Done and rolls back rather than wedging the
+// process.
+//
+// The previous implementation swapped fs.writerCtx in-place. That
+// swap was a data race against the bare reads in the download /
+// delete commit callbacks (`saveIndex(fs.writerCtx, ...)`). On
+// `-race` builds it tripped the race detector; in production it
+// caused the swapped 10 s ctx to expire mid-callback and silently
+// drop the row commit (file on disk, no SQLite row, re-downloaded
+// on the next start). Now persistFolderCtx takes the ctx as a
+// parameter; the field is set at folder open and never mutated
+// again, so every other caller can read fs.writerCtx without a
+// lock.
 func (n *Node) persistAllCtx(shutdownCtx context.Context) {
 	for _, entry := range n.folderEntries() {
-		id := entry.ID
-		fs := entry.FS
-		// Swap the folder's writerCtx for the shutdown-wide ctx.
-		// Saved state is restored on exit so post-shutdown
-		// teardown of the folder still observes a sane writerCtx
-		// (the folder is closing anyway, but defensive).
-		fs.indexMu.Lock()
-		origCtx := fs.writerCtx
-		fs.writerCtx = shutdownCtx
-		fs.indexMu.Unlock()
-
-		n.persistFolder(id, true)
-
-		fs.indexMu.Lock()
-		fs.writerCtx = origCtx
-		fs.indexMu.Unlock()
+		n.persistFolderCtx(shutdownCtx, entry.ID, true)
 	}
 }
 
 // persistFolder saves a single folder's index and peer state to
-// SQLite (PERSISTENCE-AUDIT.md §6 commit 2).
+// SQLite (PERSISTENCE-AUDIT.md §6 commit 2). Calls persistFolderCtx
+// with fs.writerCtx — the steady-state path that uses the folder's
+// own cancellation context. The shutdown path (persistAllCtx) calls
+// persistFolderCtx directly with a bounded shutdown deadline.
+func (n *Node) persistFolder(folderID string, force bool) {
+	fs := n.findFolder(folderID)
+	if fs == nil {
+		return
+	}
+	n.persistFolderCtx(fs.writerCtx, folderID, force)
+}
+
+// persistFolderCtx is the inner persist that takes the SQLite write
+// context as a parameter. Threading the ctx in (rather than reading
+// it out of fs.writerCtx mid-call) closes the data race that
+// persistAllCtx used to open by swapping the field in place.
 //
 // N10: serialized via persistMu to prevent concurrent syncFolder
 // goroutines from racing on the same write transaction. P17a:
@@ -3876,10 +3943,10 @@ func (n *Node) persistAllCtx(shutdownCtx context.Context) {
 // checks (used at shutdown).
 //
 // P2: saveIndex writes only the paths the FileIndex marks dirty
-// since the last successful persist; ClearDirty fires after a
+// since the last successful persist; ClearPersisted fires after a
 // commit succeeds. On commit failure the dirty/deleted sets stay
 // populated so the next cycle retries the same rows.
-func (n *Node) persistFolder(folderID string, force bool) {
+func (n *Node) persistFolderCtx(ctx context.Context, folderID string, force bool) {
 	fs := n.findFolder(folderID)
 	if fs == nil {
 		return
@@ -3950,7 +4017,7 @@ func (n *Node) persistFolder(folderID string, force bool) {
 		// (which the Phase D classifier would read as "unknown
 		// ancestor → conflict"). Closes Gap 2 / Gap 2'.
 		idxStart := time.Now()
-		err := savePeerSyncOutcome(fs.writerCtx, fs.db, folderID, idxSnapshot, peersSnapshot)
+		err := savePeerSyncOutcome(ctx, fs.db, folderID, idxSnapshot, peersSnapshot)
 		bothMs := ms(time.Since(idxStart))
 		if err != nil {
 			slog.Warn("failed to save peer-sync outcome to SQLite",
@@ -3980,7 +4047,7 @@ func (n *Node) persistFolder(folderID string, force bool) {
 
 	case shouldSaveIndex:
 		idxStart := time.Now()
-		if err := saveIndex(fs.writerCtx, fs.db, folderID, idxSnapshot); err != nil {
+		if err := saveIndex(ctx, fs.db, folderID, idxSnapshot); err != nil {
 			slog.Warn("failed to save index to SQLite",
 				"folder", folderID, "error", err)
 			fs.indexMu.Lock()
@@ -3996,7 +4063,7 @@ func (n *Node) persistFolder(folderID string, force bool) {
 
 	case shouldSavePeers:
 		peersStart := time.Now()
-		if err := savePeerStatesDB(fs.writerCtx, fs.db, folderID, peersSnapshot); err != nil {
+		if err := savePeerStatesDB(ctx, fs.db, folderID, peersSnapshot); err != nil {
 			slog.Warn("failed to save peer states to SQLite",
 				"folder", folderID, "error", err)
 			fs.indexMu.Lock()

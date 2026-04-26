@@ -5101,19 +5101,19 @@ func TestBuildIndexExchange_DeltaFiltering(t *testing.T) {
 	}
 
 	// Full exchange.
-	full := n.buildIndexExchange("docs", 0)
+	full := n.buildIndexExchange(context.Background(), "docs", 0)
 	if len(full.GetFiles()) != 3 {
 		t.Errorf("full: expected 3 files, got %d", len(full.GetFiles()))
 	}
 
 	// Delta since=4: should get mid.txt (5) and new.txt (9).
-	delta := n.buildIndexExchange("docs", 4)
+	delta := n.buildIndexExchange(context.Background(), "docs", 4)
 	if len(delta.GetFiles()) != 2 {
 		t.Errorf("delta since=4: expected 2 files, got %d", len(delta.GetFiles()))
 	}
 
 	// Delta since=9: should get nothing (no entries > 9, only = 9).
-	delta2 := n.buildIndexExchange("docs", 9)
+	delta2 := n.buildIndexExchange(context.Background(), "docs", 9)
 	if len(delta2.GetFiles()) != 0 {
 		t.Errorf("delta since=9: expected 0 files, got %d", len(delta2.GetFiles()))
 	}
@@ -5608,7 +5608,7 @@ func TestTwoNodeSync(t *testing.T) {
 	defer srvA.Close()
 
 	// Node B exchanges index with node A via A's server.
-	exchangeB := nodeB.buildIndexExchange("test", 0)
+	exchangeB := nodeB.buildIndexExchange(context.Background(), "test", 0)
 	remoteIdx, err := sendIndex(t.Context(), srvA.Client(), srvA.Listener.Addr().String(), exchangeB)
 	if err != nil {
 		t.Fatal(err)
@@ -6270,13 +6270,13 @@ func TestBuildIndexExchange_StampsIndexModel(t *testing.T) {
 	}
 	attachSQLiteForTest(t, n.folders["test"], "test")
 
-	got := n.buildIndexExchange("test", 0).GetIndexModel()
+	got := n.buildIndexExchange(context.Background(), "test", 0).GetIndexModel()
 	if got != FILESYNC_INDEX_MODEL {
 		t.Errorf("buildIndexExchange.IndexModel=%q, want %q", got, FILESYNC_INDEX_MODEL)
 	}
 	// Also check the unknown-folder branch — must still stamp the
 	// model so a misrouted peer's handshake fails fast.
-	if got := n.buildIndexExchange("missing", 0).GetIndexModel(); got != FILESYNC_INDEX_MODEL {
+	if got := n.buildIndexExchange(context.Background(), "missing", 0).GetIndexModel(); got != FILESYNC_INDEX_MODEL {
 		t.Errorf("unknown-folder branch IndexModel=%q, want %q", got, FILESYNC_INDEX_MODEL)
 	}
 }
@@ -6300,13 +6300,13 @@ func TestBuildIndexExchange_StampsProtocolVersion(t *testing.T) {
 	}
 
 	// Full, delta, and unknown-folder paths all stamp the version.
-	if got := n.buildIndexExchange("test", 0).GetProtocolVersion(); got != protocolVersion {
+	if got := n.buildIndexExchange(context.Background(), "test", 0).GetProtocolVersion(); got != protocolVersion {
 		t.Errorf("full: got %d, want %d", got, protocolVersion)
 	}
-	if got := n.buildIndexExchange("test", 0).GetProtocolVersion(); got != protocolVersion {
+	if got := n.buildIndexExchange(context.Background(), "test", 0).GetProtocolVersion(); got != protocolVersion {
 		t.Errorf("delta: got %d, want %d", got, protocolVersion)
 	}
-	if got := n.buildIndexExchange("missing", 0).GetProtocolVersion(); got != protocolVersion {
+	if got := n.buildIndexExchange(context.Background(), "missing", 0).GetProtocolVersion(); got != protocolVersion {
 		t.Errorf("unknown folder: got %d, want %d", got, protocolVersion)
 	}
 }
