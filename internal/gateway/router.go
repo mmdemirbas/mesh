@@ -183,27 +183,54 @@ func (r *Router) Upstream(name string) *ResolvedUpstream {
 //     process restarts could route unknown models to different upstreams.
 //  3. nil when there are no rules at all.
 func (r *Router) DefaultUpstream() *ResolvedUpstream {
+	chain := r.DefaultChain()
+	if len(chain) == 0 {
+		return nil
+	}
+	return chain[0]
+}
+
+// DefaultChain is the chain-aware variant of DefaultUpstream. Per
+// the same resolution order, but returns every chain element so a
+// "*" rule using upstream_chain produces the configured fallback
+// list (not nil — fix for REVIEW #2). Used by buildRoutingHandler
+// when no rule matches the request's model.
+func (r *Router) DefaultChain() []*ResolvedUpstream {
+	pickChain := func(rule RoutingRule) []*ResolvedUpstream {
+		names := rule.resolvedUpstreamChain()
+		out := make([]*ResolvedUpstream, 0, len(names))
+		for _, n := range names {
+			if up := r.upstreams[n]; up != nil {
+				out = append(out, up)
+			}
+		}
+		return out
+	}
 	for _, rule := range r.rules {
 		for _, pattern := range rule.ClientModel {
 			if pattern == "*" {
-				return r.upstreams[rule.UpstreamName]
+				return pickChain(rule)
 			}
 		}
 	}
 	if len(r.rules) == 0 {
 		return nil
 	}
-	fallback := r.upstreams[r.rules[0].UpstreamName]
-	if fallback != nil && r.log != nil {
+	chain := pickChain(r.rules[0])
+	if len(chain) > 0 && r.log != nil {
 		r.fallbackOnce.Do(func() {
+			label := r.rules[0].UpstreamName
+			if label == "" && len(r.rules[0].UpstreamChain) > 0 {
+				label = r.rules[0].UpstreamChain[0]
+			}
 			r.log.Warn(
 				"routing: gateway has no '*' rule, defaulting to first rule's upstream",
 				"gateway", r.name,
-				"fallback_upstream", r.rules[0].UpstreamName,
+				"fallback_upstream", label,
 			)
 		})
 	}
-	return fallback
+	return chain
 }
 
 // matchesAnyPattern checks if model matches any of the given patterns.

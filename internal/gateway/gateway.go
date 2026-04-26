@@ -174,9 +174,7 @@ func buildRoutingHandler(cfg GatewayCfg, cl ClientCfg, router *Router, recorder 
 		// per-upstream failure.
 		chain := router.RouteChain(peek.Model)
 		if len(chain) == 0 {
-			if def := router.DefaultUpstream(); def != nil {
-				chain = []*ResolvedUpstream{def}
-			}
+			chain = router.DefaultChain()
 		}
 		if len(chain) == 0 {
 			writeClientError(cl.API, w, 404, "no upstream found for model: "+peek.Model)

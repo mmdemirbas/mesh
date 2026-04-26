@@ -97,6 +97,86 @@ func TestRouter_SingleKeyBackcompat(t *testing.T) {
 	}
 }
 
+// TestRouter_DefaultChainResolvesUpstreamChain is the post-batch-
+// review regression for finding #2: when the "*" catch-all rule
+// uses upstream_chain (not upstream_name), DefaultUpstream used
+// to read rule.UpstreamName — empty — and return nil, sending
+// every unmatched request to a 404. DefaultChain must return the
+// resolved chain for either form.
+func TestRouter_DefaultChainResolvesUpstreamChain(t *testing.T) {
+	t.Parallel()
+	cfg := &GatewayCfg{
+		Name:   "default-chain",
+		Client: []ClientCfg{{Bind: "127.0.0.1:3457", API: APIOpenAI}},
+		Upstream: []UpstreamCfg{
+			{Name: "specific", Target: "http://s.example/v1", API: APIOpenAI},
+			{Name: "primary", Target: "http://p.example/v1", API: APIOpenAI},
+			{Name: "fallback", Target: "http://f.example/v1", API: APIOpenAI},
+		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"specific-model"}, UpstreamName: "specific"},
+			{ClientModel: []string{"*"}, UpstreamChain: []string{"primary", "fallback"}},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	r, err := NewRouter(cfg, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	def := r.DefaultUpstream()
+	if def == nil {
+		t.Fatal("DefaultUpstream returned nil; should resolve via chain's first element")
+	}
+	if def.Cfg.Name != "primary" {
+		t.Errorf("DefaultUpstream = %q, want primary", def.Cfg.Name)
+	}
+	chain := r.DefaultChain()
+	if len(chain) != 2 {
+		t.Fatalf("DefaultChain len = %d, want 2", len(chain))
+	}
+	if chain[0].Cfg.Name != "primary" || chain[1].Cfg.Name != "fallback" {
+		t.Errorf("chain order: %v / %v", chain[0].Cfg.Name, chain[1].Cfg.Name)
+	}
+	// Sanity: an unmatched model goes through DefaultChain (Route
+	// returns nil for unmatched).
+	if got := r.Route("anything-else"); got == nil {
+		// Route doesn't fall back to DefaultUpstream — that's
+		// the caller's job. But its chain returns nothing.
+		if c := r.RouteChain("anything-else"); len(c) != 0 {
+			t.Errorf("RouteChain on unmatched should be empty")
+		}
+	}
+}
+
+// TestRouter_DefaultChainFallsBackToFirstRuleWhenNoCatchAll
+func TestRouter_DefaultChainFallsBackToFirstRuleWhenNoCatchAll(t *testing.T) {
+	t.Parallel()
+	cfg := &GatewayCfg{
+		Name:   "no-catch-all",
+		Client: []ClientCfg{{Bind: "127.0.0.1:3457", API: APIOpenAI}},
+		Upstream: []UpstreamCfg{
+			{Name: "a", Target: "http://a.example/v1", API: APIOpenAI},
+			{Name: "b", Target: "http://b.example/v1", API: APIOpenAI},
+		},
+		Routing: []RoutingRule{
+			{ClientModel: []string{"foo-*"}, UpstreamChain: []string{"a", "b"}},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	r, err := NewRouter(cfg, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	chain := r.DefaultChain()
+	if len(chain) != 2 || chain[0].Cfg.Name != "a" || chain[1].Cfg.Name != "b" {
+		t.Errorf("DefaultChain (no catch-all → first rule) = %+v", chain)
+	}
+}
+
 // TestRouter_PassthroughZeroKeys asserts the no-key passthrough
 // case (APIKeyEnv unset) produces a zero-length pool and an empty
 // APIKey, preserving the existing "client supplies its own auth"
