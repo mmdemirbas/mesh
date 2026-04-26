@@ -3381,7 +3381,7 @@ function renderGatewayOverview() {
     : topReqs.map(r => '<tr style="cursor:pointer" onclick="jumpToPair(\''+xj(r.run)+'\','+(Number(r.id)||0)+')">' +
         '<td style="color:var(--text-muted);white-space:nowrap">'+x(fmtAgo(r.ts))+'</td>' +
         '<td><code style="color:'+(r.session ? sessColor(r.session) : 'var(--text-muted)')+'">'+x(r.session||'-')+'</code></td>' +
-        '<td style="color:var(--text-dim)">'+x(r.model||'-')+'</td>' +
+        '<td style="color:'+(r.model ? modelColor(r.model) : 'var(--text-muted)')+'">'+x(r.model||'-')+'</td>' +
         '<td style="color:var(--text-muted)">'+x(r.path||'-')+'</td>' +
         '<td style="font-weight:600">'+fmtTokensHtml(r.total_tokens)+'</td>' +
         '<td>'+fmtTokensHtml(r.input_tokens)+' / '+fmtTokensHtml(r.output_tokens)+'</td>' +
@@ -4330,7 +4330,7 @@ function cacheBubbleNote(cs) {
 function bubbleMetaLine(n) {
   const rs = n.request_summary || {};
   const parts = [];
-  if (rs.model) parts.push(x(rs.model));
+  if (rs.model) parts.push('<span style="color:'+modelColor(rs.model)+'">'+x(rs.model)+'</span>');
   if (rs.stream) parts.push('streaming');
   if (n.ts) parts.push(x(timeAgo(n.ts)));
   return parts.join(' · ');
@@ -4651,7 +4651,8 @@ function renderSessionGraph() {
     const sub = inFlight ? 'in flight…' :
       (isErr ? 'status '+status+' '+(n.response_summary.outcome||'') :
        (tokensIn ? tokensIn+' → '+tokensOut+'t' : (n.response_summary.outcome||'ok')));
-    parts.push('<text class="graph-node-text" x="'+(p.w/2)+'" y="20" text-anchor="middle">'+x(truncForLabel(headline, 28))+'</text>');
+    const modelFill = rs.model ? modelColor(rs.model) : 'var(--text)';
+    parts.push('<text class="graph-node-text" x="'+(p.w/2)+'" y="20" text-anchor="middle" fill="'+modelFill+'">'+x(truncForLabel(headline, 28))+'</text>');
     parts.push('<text class="graph-node-text muted" x="'+(p.w/2)+'" y="36" text-anchor="middle">'+x(truncForLabel(sub, 32))+'</text>');
     // B5 per-node cache hit rate (third line). "no cache" suppressed.
     if (cs && cs.hit_rate >= 0) {
@@ -4815,7 +4816,8 @@ function showGraphTooltip(nodeID, e) {
   const userMsg = cached ? extractLastUserMessage(cached.request) : '';
   const lines = [];
   const turn = rs.message_count != null ? Math.ceil((rs.message_count + 1) / 2) : 0;
-  lines.push('<div class="tip-line"><b>'+x(rs.model || '(unknown model)')+'</b>'+(turn ? ' · turn '+turn : '')+'</div>');
+  const tipModelStyle = rs.model ? ' style="color:'+modelColor(rs.model)+'"' : '';
+  lines.push('<div class="tip-line"><b'+tipModelStyle+'>'+x(rs.model || '(unknown model)')+'</b>'+(turn ? ' · turn '+turn : '')+'</div>');
   if (n.ts) lines.push('<div class="tip-line">'+x(n.ts)+'</div>');
   if (ros.has_response) {
     const tokIn = ros.input_tokens || 0;
@@ -5161,8 +5163,8 @@ function renderActiveLiveModal() {
     '<div class="live-meta">' +
       '<span class="lm-key">gateway</span><span class="lm-val">'+x(s.gateway||'?')+'</span>' +
       (s.session_id ? '<span class="lm-key">session</span><span class="lm-val">'+x(s.session_id)+'</span>' : '') +
-      (s.client_model ? '<span class="lm-key">client model</span><span class="lm-val">'+x(s.client_model)+'</span>' : '') +
-      (s.upstream_model && s.upstream_model !== s.client_model ? '<span class="lm-key">upstream model</span><span class="lm-val">'+x(s.upstream_model)+'</span>' : '') +
+      (s.client_model ? '<span class="lm-key">client model</span><span class="lm-val" style="color:'+modelColor(s.client_model)+'">'+x(s.client_model)+'</span>' : '') +
+      (s.upstream_model && s.upstream_model !== s.client_model ? '<span class="lm-key">upstream model</span><span class="lm-val" style="color:'+modelColor(s.upstream_model)+'">'+x(s.upstream_model)+'</span>' : '') +
       '<span class="lm-key">started</span><span class="lm-val">'+x(s.started_at||'')+' ('+x(totalElapsed)+' ago)</span>' +
       '<span class="lm-key">streaming</span><span class="lm-val">'+(s.streaming?'yes':'no')+'</span>' +
     '</div>' +
