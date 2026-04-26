@@ -1,7 +1,25 @@
 # Plan — Workstream A: multi-upstream resilience
 
-Status: DRAFT. Date: 2026-04-25. Companion to MESH_VISION,
-PLAN_WORKSTREAM_B_observability, PLAN_WORKSTREAM_C_optimization.
+Status: COMPLETE. All A.0–A.7 items shipped plus the post-batch
+review fixes (REVIEW #1–#7) and four iterations of deep review
+(eight findings closed). Date: 2026-04-25. Companion to
+MESH_VISION, PLAN_WORKSTREAM_B_observability,
+PLAN_WORKSTREAM_C_optimization.
+
+Per-item status:
+
+| Item | Status | Notes |
+|---|---|---|
+| A.0 | shipped | Multi-key data model + rotation policy registry (no behavior change). |
+| A.1 | shipped | Multi-key upstream config + resolution. |
+| A.2 | shipped | Passive health config + outcome recording. |
+| A.3 | shipped | Active health probes (opt-in, per-upstream goroutine). |
+| A.4 | shipped | Rate-limit-aware dispatch with key rotation. |
+| A.5 | shipped | Upstream chain in routing rules. |
+| A.6 | shipped | Audit row records attempts + final_upstream + final_key_id. |
+| A.7 | shipped | Resilience-path column in requests table + detail-card attempts table. |
+| Review fixes #1–#7 | shipped | Streaming key pool integration, DefaultUpstream chain support, atomic check-and-degrade, audit final_* always emitted, sticky-session LRU cap. |
+| Deep-review iter 1–4 | shipped | Streaming records key state + audit attempts (B1/I1); ActiveRegistry race (B2); rotation_policy validation gap (I3); summarizer key pool integration (I4); active-probe WaitGroup (M1); streaming chain fallback (I2); time.Sleep in test helper (iter-2); APIKey degradation-bypass fallback (iter-3). |
 
 ## 1. Goal
 

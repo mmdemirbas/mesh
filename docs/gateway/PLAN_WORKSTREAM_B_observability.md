@@ -1,7 +1,33 @@
 # Plan — Workstream B: observability and UI overhaul
 
-Status: DRAFT. Date: 2026-04-25. Companion to MESH_VISION,
+Status: COMPLETE for items B1–B6 (commits 1–11 in §5). The
+documentation commit (§5 item 12) is the only outstanding piece
+and is ambient — the audit-row reference in CLAUDE.md plus this
+plan suffice. Date: 2026-04-25. Companion to MESH_VISION,
 PLAN_WORKSTREAM_A_resilience, PLAN_WORKSTREAM_C_optimization.
+
+Per-item status (matches the implementation sequence in §5):
+
+| Item | Status | Notes |
+|---|---|---|
+| B1.1–B1.3 | shipped | Six-segment timing partition; sum-to-total invariant tests pass for streaming and non-streaming. |
+| B1.4 | shipped | Stacked horizontal timing bar in request detail card; per-segment colour family (network / mesh / upstream / residual) and hover tooltips. |
+| B2.1 | shipped | Session DAG construction backend (hash, parents, branches, in-memory cache). |
+| B2.2 | shipped | SSE endpoint at `/api/gateway/sessions/<sid>/events` with reconnection. |
+| B2.3 | shipped | Four-pane detail layout. |
+| B2.4 | shipped | Frontend linear session view + branch strip + raw toggle. |
+| B2.5 | shipped | Graph view with hand-rolled layout + click-to-detail. |
+| B2.6 | shipped | Graph interactivity (pan/zoom, hover, edge-diff). |
+| B2.7 | shipped | Live-update polish (animation, new-message pill, fork toast). |
+| B3.1 | shipped | Anthropic-style chat rendering. |
+| B3.2 | shipped | OpenAI-style chat rendering. |
+| B3.3 | shipped | Gemini-style chat rendering. (The plan's original "timeline view per session" was redirected: chat-style variants gave more operator value than a separate timeline mode and the timing/attempts info already surfaces in the detail card.) |
+| B4.1 | shipped | Active-request registry + admin endpoints. |
+| B4.2 | shipped | Frontend chrome indicator + slide-in + per-request live view. |
+| B5.1 | shipped | `cache_control` extraction + aggregation backend. |
+| B5.2 | shipped | Frontend cache visibility (overview + table + sparkline). |
+| B6 | shipped | Inspection actions: view raw JSONL, copy as curl, diff vs another request. |
+| §5 #12 | absorbed | Plan + audit-row schema in this document; further docs land per-need. |
 
 ## 1. Goal
 

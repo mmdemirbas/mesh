@@ -1,8 +1,21 @@
 # Plan — Workstream D: admin UI polish
 
-Status: DRAFT. Date: 2026-04-25. Companion to MESH_VISION,
-PLAN_WORKSTREAM_A_resilience, PLAN_WORKSTREAM_B_observability,
-PLAN_WORKSTREAM_C_optimization.
+Status: COMPLETE (all D1–D8 items shipped). Date: 2026-04-25.
+Companion to MESH_VISION, PLAN_WORKSTREAM_A_resilience,
+PLAN_WORKSTREAM_B_observability, PLAN_WORKSTREAM_C_optimization.
+
+Per-item status:
+
+| Item | Status | Notes |
+|---|---|---|
+| D1 | shipped | Multi-select chip-bar filters with URL-encoded state. |
+| D2 | shipped | Gateway column added to requests table. |
+| D3 | shipped | Separate In / Out token columns. |
+| D4 | shipped | Headers abbreviated; Stream column dropped; Upstream column auto-hides when every visible row has upstream == client. |
+| D5 | shipped | Per-pane scrolling in the detail card. |
+| D6 | shipped | Multi-gateway aggregate stats render with a "Aggregated across N gateways" banner. The plan's original notice was obsolete once the stats-fetch path was generalized to merge across gateways. |
+| D7 | shipped | Custom-block TOC sidebar synthesized from top-level XML tags when no markdown headings exist. |
+| D8 | shipped | Investigation closed in code: streaming responses display an explanatory note in the upstream-response pane. |
 
 ## 1. Goal
 
