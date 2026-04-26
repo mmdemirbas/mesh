@@ -64,7 +64,7 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request, gwName, clientAPI
 
 	ctx := r.Context()
 	if au := getAuditUpstream(r); au != nil {
-		ctx = attachTimingTrace(ctx, au.Timer)
+		ctx = attachTimingTrace(ctx, au.Timer, au.ReqID)
 	}
 	ureq, err := http.NewRequestWithContext(ctx, r.Method, upURL, bytes.NewReader(body))
 	if err != nil {
@@ -126,8 +126,10 @@ func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *ht
 	// streaming-passthrough row in live audit logs, an instrumentation
 	// gap has opened up and needs investigation.
 	var timer *segmentTimer
+	var reqID uint64
 	if au := getAuditUpstream(r); au != nil {
 		timer = au.Timer
+		reqID = au.ReqID
 	}
 
 	tmp := make([]byte, 32*1024)
@@ -140,6 +142,7 @@ func streamPassthroughResponse(w http.ResponseWriter, r *http.Request, uresp *ht
 			timer.Add(segUpstreamProcessing, time.Since(readStart))
 		}
 		if n > 0 {
+			Active.AddBytesDownstream(reqID, int64(n))
 			if _, werr := w.Write(tmp[:n]); werr != nil {
 				log.Debug("Client write failed mid-stream", "error", werr)
 				break

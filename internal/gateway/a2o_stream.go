@@ -37,7 +37,7 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 
 	ctx := r.Context()
 	if au := getAuditUpstream(r); au != nil {
-		ctx = attachTimingTrace(ctx, au.Timer)
+		ctx = attachTimingTrace(ctx, au.Timer, au.ReqID)
 	}
 	upstreamReq, err := http.NewRequestWithContext(ctx, "POST", upstream.Cfg.Target, bytes.NewReader(oaiBody))
 	if err != nil {
@@ -103,8 +103,10 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 	// streaming row in live audit logs, the v1 limitation has started
 	// to bite and the deeper translate/write split needs to land.
 	var timer *segmentTimer
+	var reqID uint64
 	if st.au != nil {
 		timer = st.au.Timer
+		reqID = st.au.ReqID
 	}
 	scanner := bufio.NewScanner(upstreamResp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxSSELineSize)
@@ -120,6 +122,11 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 			timer.Add(segUpstreamProcessing, time.Since(scanStart))
 		}
 		line := scanner.Text()
+		// B4: count downstream bytes from upstream into the active
+		// registry. scanner.Bytes() length undercounts trailing
+		// newlines stripped by SplitFunc; close enough for an
+		// operator's "is data flowing" view.
+		Active.AddBytesDownstream(reqID, int64(len(line)+1))
 
 		if !strings.HasPrefix(line, "data: ") {
 			continue

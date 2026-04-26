@@ -312,7 +312,7 @@ func handleA2O(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 
 	ctx := r.Context()
 	if au := getAuditUpstream(r); au != nil {
-		ctx = attachTimingTrace(ctx, au.Timer)
+		ctx = attachTimingTrace(ctx, au.Timer, au.ReqID)
 	}
 	statusCode, respBody, err := doUpstreamRequest(ctx, upstream.Client, upstream.Cfg.Target, oaiBody, headers, log)
 	if err != nil {
@@ -408,7 +408,7 @@ func handleO2A(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 
 	ctx := r.Context()
 	if au := getAuditUpstream(r); au != nil {
-		ctx = attachTimingTrace(ctx, au.Timer)
+		ctx = attachTimingTrace(ctx, au.Timer, au.ReqID)
 	}
 	statusCode, respBody, err := doUpstreamRequest(ctx, upstream.Client, upstream.Cfg.Target, anthBody, headers, log)
 	if err != nil {

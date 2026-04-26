@@ -28,7 +28,7 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 
 	ctx := r.Context()
 	if au := getAuditUpstream(r); au != nil {
-		ctx = attachTimingTrace(ctx, au.Timer)
+		ctx = attachTimingTrace(ctx, au.Timer, au.ReqID)
 	}
 	upstreamReq, err := http.NewRequestWithContext(ctx, "POST", upstream.Cfg.Target, bytes.NewReader(anthBody))
 	if err != nil {
@@ -89,8 +89,10 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 	// the 5%-of-total `other`-bucket tripwire that signals when the
 	// deferred translate/write split needs to land.
 	var timer *segmentTimer
+	var reqID uint64
 	if st.au != nil {
 		timer = st.au.Timer
+		reqID = st.au.ReqID
 	}
 	scanner := bufio.NewScanner(upstreamResp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxSSELineSize)
@@ -108,6 +110,8 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 			timer.Add(segUpstreamProcessing, time.Since(scanStart))
 		}
 		line := scanner.Text()
+		// B4: bytes-from-upstream counter (see a2o_stream).
+		Active.AddBytesDownstream(reqID, int64(len(line)+1))
 
 		if after, ok0 := strings.CutPrefix(line, "event: "); ok0 {
 			eventType = after

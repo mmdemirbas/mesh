@@ -833,6 +833,14 @@ func buildAdminMux(ring *logRing, logFilePath, perfLogPath string) *http.ServeMu
 	// DESIGN_B2_live_session.local.md §4.
 	mux.HandleFunc("GET /api/gateway/sessions/{sid}/events", handleSessionEvents)
 
+	// GET /api/gateway/active — snapshot of in-flight requests.
+	// Polled at the existing 1s admin-UI tick. Per
+	// DESIGN_B4_live_tail.local.md §2.
+	mux.HandleFunc("GET /api/gateway/active", handleActiveSnapshot)
+	// GET /api/gateway/active/<id>/events — per-request SSE stream
+	// of phase + byte-counter changes; throttled at 4 Hz server-side.
+	mux.HandleFunc("GET /api/gateway/active/{id}/events", handleActiveEvents)
+
 	// pprof endpoints for runtime profiling (CPU, memory, goroutines).
 	// Only accessible on localhost via the admin server.
 	mux.HandleFunc("/debug/pprof/", pprof.Index)

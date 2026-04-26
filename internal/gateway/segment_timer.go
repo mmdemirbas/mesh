@@ -25,22 +25,29 @@ import (
 //
 // timer may be nil — the trace becomes a no-op and the function
 // returns ctx unchanged.
-func attachTimingTrace(ctx context.Context, timer *segmentTimer) context.Context {
+func attachTimingTrace(ctx context.Context, timer *segmentTimer, reqID uint64) context.Context {
 	if timer == nil {
 		return ctx
 	}
+	mark := func(seg timingSegment) {
+		now := time.Now()
+		timer.Mark(seg, now)
+		// B4 active-registry mirror. UpdatePhase with a zero reqID
+		// (e.g. tests bypassing wrapAuditing) is a no-op.
+		Active.UpdatePhase(reqID, string(seg), now)
+	}
 	trace := &httptrace.ClientTrace{
 		ConnectStart: func(_, _ string) {
-			timer.Mark(segMeshToUpstream, time.Now())
+			mark(segMeshToUpstream)
 		},
 		GotConn: func(_ httptrace.GotConnInfo) {
-			timer.Mark(segMeshToUpstream, time.Now())
+			mark(segMeshToUpstream)
 		},
 		WroteRequest: func(_ httptrace.WroteRequestInfo) {
-			timer.Mark(segUpstreamProcessing, time.Now())
+			mark(segUpstreamProcessing)
 		},
 		GotFirstResponseByte: func() {
-			timer.Mark(segMeshTranslationOut, time.Now())
+			mark(segMeshTranslationOut)
 		},
 	}
 	return httptrace.WithClientTrace(ctx, trace)

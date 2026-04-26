@@ -653,6 +653,11 @@ type AuditUpstream struct {
 	// streaming loops can call Mark / Pause / Add. nil-safe; tests
 	// that bypass wrapAuditing do not initialize it.
 	Timer *segmentTimer
+	// ReqID lets handlers and the httptrace callbacks update the
+	// B4 active registry alongside the timer. Zero when wrapAuditing
+	// did not run (no recorder), in which case Active.* calls are
+	// no-ops.
+	ReqID uint64
 }
 
 type auditUpstreamKey struct{}
@@ -692,6 +697,12 @@ type auditingWriter struct {
 	// text/event-stream) the Mark is suppressed — the streaming
 	// handler manages its own segment 5/6 split via Pause + Add.
 	timer *segmentTimer
+	// reqID lets the Write hook bump the B4 active-registry's
+	// per-request bytes_to_client counter and Mark its current
+	// segment without a separate plumbing layer. Zero when the
+	// recorder is nil (no audit), in which case registry calls are
+	// no-ops anyway.
+	reqID uint64
 }
 
 func (a *auditingWriter) WriteHeader(code int) {
@@ -719,6 +730,10 @@ func (a *auditingWriter) Write(p []byte) (int, error) {
 		if a.timer != nil {
 			a.timer.Pause(pre)
 		}
+		// B4: reflect the segment-6 transition in the active
+		// registry so the operator's chrome indicator and per-request
+		// view see the phase advance live.
+		Active.UpdatePhase(a.reqID, string(segMeshToClient), pre)
 	}
 	if !a.capped {
 		remain := int64(maxAuditBodyBytes) - int64(a.buf.Len())
@@ -737,6 +752,10 @@ func (a *auditingWriter) Write(p []byte) (int, error) {
 	if a.timer != nil {
 		a.timer.Add(segMeshToClient, time.Since(pre))
 	}
+	// B4: bytes-to-client counter — atomic, hot-path safe.
+	if n > 0 {
+		Active.AddBytesToClient(a.reqID, int64(n))
+	}
 	return n, err
 }
 
@@ -748,12 +767,6 @@ func (a *auditingWriter) Flush() {
 
 // recorderKey is a context key for carrying the recorder through to passthrough.
 type recorderKey struct{}
-
-// getRecorderFromContext retrieves the Recorder from the request context.
-func getRecorderFromContext(r *http.Request) *Recorder {
-	v, _ := r.Context().Value(recorderKey{}).(*Recorder)
-	return v
-}
 
 // wrapAuditing emits request/response audit rows around an existing handler.
 // It peeks model/stream from the client request body, replays the body into
@@ -813,11 +826,31 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 			StartTime:   start,
 		}, body)
 
+		// B4 active-registry lifecycle: register on entry, unregister
+		// in defer so panics can't leak entries. The defer runs
+		// after the audit row writes below, so the snapshot lifetime
+		// is "in-flight" from any operator's perspective.
+		Active.Register(&ActiveRequest{
+			ID:            uint64(reqID),
+			Gateway:       gwName,
+			SessionID:     sessionID,
+			ClientModel:   peek.Model,
+			UpstreamModel: mapped,
+			Streaming:     peek.Stream,
+			StartedAt:     start,
+		})
+		defer Active.Unregister(uint64(reqID))
+		// Bytes upstream is the request body size — fully buffered
+		// before the inner handler dispatches it.
+		Active.AddBytesUpstream(uint64(reqID), int64(len(body)))
+		Active.UpdatePhase(uint64(reqID), string(segClientToMesh), start)
+
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
 
 		upstream, r := WithAuditUpstream(r)
 		upstream.Timer = timer
+		upstream.ReqID = uint64(reqID)
 
 		// Walk the request body once for top_tool_result and
 		// repeat_reads. analyzeRequest returns nil for branches that
@@ -828,7 +861,7 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 		upstream.TopToolResult = topTR
 		upstream.RepeatReads = repeatRR
 
-		aw := &auditingWriter{ResponseWriter: w, timer: timer}
+		aw := &auditingWriter{ResponseWriter: w, timer: timer, reqID: uint64(reqID)}
 		// Close segment 1 (client_to_mesh) and open segment 2
 		// (mesh_translation_in) at the inner-handler entry boundary.
 		// Segments 3-5 are Marked from httptrace.ClientTrace
@@ -836,7 +869,9 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 		// Segment 6 opens at firstWriteAt for non-streaming; the
 		// streaming case manages its own boundary in subsequent
 		// commits.
-		timer.Mark(segMeshTranslationIn, time.Now())
+		now := time.Now()
+		timer.Mark(segMeshTranslationIn, now)
+		Active.UpdatePhase(uint64(reqID), string(segMeshTranslationIn), now)
 		inner(aw, r)
 
 		status := aw.status
