@@ -41,7 +41,18 @@ type Router struct {
 type ResolvedUpstream struct {
 	Cfg    UpstreamCfg
 	Client *http.Client
+	// APIKey is the legacy single-key value, preserved verbatim for
+	// every existing dispatch site that reads it. New code paths
+	// should consult Keys instead so multi-key configs (A.1) and
+	// rotation policies (A.0+) take effect.
 	APIKey string
+	// Keys is the per-upstream key pool. For single-key configs it
+	// wraps APIKey as a one-element pool whose Pick() returns the
+	// only key; the dispatch path stays behaviorally identical to
+	// the pre-A world. For multi-key configs (A.1+) Pick() rotates.
+	// Empty pool when APIKeyEnv is unset (passthrough mode where
+	// the client supplies its own auth).
+	Keys *KeyPool
 }
 
 // NewRouter builds a Router from the gateway configuration. It creates
@@ -70,6 +81,22 @@ func NewRouter(cfg *GatewayCfg, log *slog.Logger) (*Router, error) {
 			apiKey = os.Getenv(u.APIKeyEnv)
 		}
 
+		// Build the key pool. For the single-key (or zero-key
+		// passthrough) case, the pool is a one- or zero-element
+		// wrapper around the legacy APIKey/APIKeyEnv pair —
+		// behaviorally identical to the pre-A world. A.1 wires
+		// multi-key configs in here.
+		envVars := []string{}
+		values := []string{}
+		if u.APIKeyEnv != "" {
+			envVars = append(envVars, u.APIKeyEnv)
+			values = append(values, apiKey)
+		}
+		keys, err := NewKeyPool(envVars, values, "")
+		if err != nil {
+			return nil, fmt.Errorf("upstream %q: build key pool: %w", u.Name, err)
+		}
+
 		upstreams[u.Name] = &ResolvedUpstream{
 			Cfg: u,
 			Client: &http.Client{
@@ -77,6 +104,7 @@ func NewRouter(cfg *GatewayCfg, log *slog.Logger) (*Router, error) {
 				Timeout:   u.TimeoutDuration(),
 			},
 			APIKey: apiKey,
+			Keys:   keys,
 		}
 	}
 
