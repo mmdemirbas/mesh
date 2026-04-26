@@ -3154,6 +3154,138 @@ function closeCurlModal() {
 }
 function curlModalEscape(e) { if (e.key === 'Escape') closeCurlModal(); }
 
+// diffVsAnother opens a request-picker modal then renders a
+// messages-array diff between the current detail card's request
+// and the picked one. Reuses B2's diffSideHTML / messagesEqual /
+// closeEdgeDiffModal so the diff visualisation stays uniform
+// across surfaces (B2 edge clicks → diff modal; B6 here → same
+// diff modal).
+function diffVsAnother() {
+  const cur = gwDetailCache && gwDetailCache.req;
+  if (!cur) return;
+  const candidates = (gwRowsCache || []).filter(p => p && p.req && p.req !== cur);
+  if (candidates.length === 0) {
+    pushBriefToast('No other requests loaded to diff against.');
+    return;
+  }
+  // Same session first, then newest first across other sessions.
+  const curSid = cur.session_id || '';
+  candidates.sort((a, b) => {
+    const aSame = (a.req.session_id || '') === curSid && curSid;
+    const bSame = (b.req.session_id || '') === curSid && curSid;
+    if (aSame !== bSame) return aSame ? -1 : 1;
+    return (b.req.ts || '').localeCompare(a.req.ts || '');
+  });
+
+  let modal = document.getElementById('diff-pick-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'diff-pick-modal';
+    modal.className = 'sess-modal';
+    document.body.appendChild(modal);
+  }
+  const rows = candidates.slice(0, 200).map(p => {
+    const sid = p.req.session_id || '';
+    const sidShort = sid ? sid.slice(0, 8) : '-';
+    const sidClr = sid ? sessColor(sid) : 'var(--text-muted)';
+    const sameSession = sid && sid === curSid ? ' <span class="badge" style="background:var(--green-dim);color:var(--green);padding:0 6px;border-radius:8px;font-size:10px">same session</span>' : '';
+    const ts = p.req.ts || p.resp.ts || '';
+    const turn = p.req.turn_index ? 'turn ' + p.req.turn_index : '';
+    const model = p.req.model || '-';
+    const msgCount = (p.req.body && Array.isArray(p.req.body.messages)) ? p.req.body.messages.length : 0;
+    return '<button type="button" class="active-row" data-key="' + xa(p.key || '') + '">' +
+      '<div class="ar-line1">' + x(fmtLocalTime(ts)) + ' · ' +
+        '<code style="color:' + sidClr + '">' + x(sidShort) + '</code>' + sameSession +
+      '</div>' +
+      '<div class="ar-line2">' + x(turn) + (turn ? ' · ' : '') +
+        '<span style="color:' + modelColor(model) + '">' + x(model) + '</span>' +
+        ' · ' + msgCount + ' msg' + (msgCount === 1 ? '' : 's') +
+      '</div>' +
+    '</button>';
+  }).join('');
+  modal.innerHTML =
+    '<div class="sess-modal-bg"></div>' +
+    '<div class="sess-modal-card" style="max-width:720px">' +
+      '<div class="sess-modal-header">' +
+        '<span><b>Pick a request to diff against</b></span>' +
+        '<button class="filter-btn" id="diff-pick-close">&#10005;</button>' +
+      '</div>' +
+      '<div class="sess-modal-body" style="grid-template-columns:1fr;padding:0">' +
+        '<div style="max-height:62vh;overflow-y:auto">' + rows + '</div>' +
+      '</div>' +
+    '</div>';
+  modal.style.display = 'block';
+  document.getElementById('diff-pick-close').onclick = closeDiffPickModal;
+  modal.querySelector('.sess-modal-bg').onclick = closeDiffPickModal;
+  modal.querySelectorAll('button[data-key]').forEach(b => {
+    b.onclick = () => {
+      const key = b.dataset.key;
+      const target = (gwRowsCache || []).find(p => p && p.key === key);
+      closeDiffPickModal();
+      if (target) renderRequestDiff(cur, target.req);
+    };
+  });
+  document.addEventListener('keydown', diffPickEscape);
+}
+
+function closeDiffPickModal() {
+  const modal = document.getElementById('diff-pick-modal');
+  if (modal) modal.style.display = 'none';
+  document.removeEventListener('keydown', diffPickEscape);
+}
+function diffPickEscape(e) { if (e.key === 'Escape') closeDiffPickModal(); }
+
+// renderRequestDiff renders the same diff modal B2 uses for edge
+// clicks (parent vs child), repurposed for "this request vs that
+// one." Computes the longest common message-prefix and shows the
+// divergent tails side by side. No node IDs to display, so the
+// header just labels the two sides "current" and "target."
+function renderRequestDiff(curReq, targetReq) {
+  let modal = document.getElementById('sess-edge-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'sess-edge-modal';
+    modal.className = 'sess-modal';
+    document.body.appendChild(modal);
+  }
+  const aMsgs = (curReq && curReq.body && Array.isArray(curReq.body.messages)) ? curReq.body.messages : [];
+  const bMsgs = (targetReq && targetReq.body && Array.isArray(targetReq.body.messages)) ? targetReq.body.messages : [];
+  let lcp = 0;
+  while (lcp < aMsgs.length && lcp < bMsgs.length && messagesEqual(aMsgs[lcp], bMsgs[lcp])) lcp++;
+  const aTail = aMsgs.slice(lcp);
+  const bTail = bMsgs.slice(lcp);
+  const aLabel = 'current request (id ' + (curReq.id != null ? curReq.id : '?') + ')';
+  const bLabel = 'target request (id ' + (targetReq.id != null ? targetReq.id : '?') + ')';
+  const html = [
+    '<div class="sess-modal-bg"></div>',
+    '<div class="sess-modal-card">',
+      '<div class="sess-modal-header">',
+        '<span><b>request diff</b> · ' + lcp + ' shared message' + (lcp === 1 ? '' : 's') + '</span>',
+        '<button class="filter-btn" id="sess-modal-close">&#10005;</button>',
+      '</div>',
+      '<div class="sess-modal-body">',
+        diffSideHTML(aLabel, aTail, 'parent'),
+        diffSideHTML(bLabel, bTail, 'child'),
+      '</div>',
+    '</div>',
+  ].join('');
+  modal.innerHTML = html;
+  modal.style.display = 'block';
+  document.getElementById('sess-modal-close').onclick = closeEdgeDiffModal;
+  modal.querySelector('.sess-modal-bg').onclick = closeEdgeDiffModal;
+  document.addEventListener('keydown', edgeDiffEscape);
+}
+
+// pushBriefToast surfaces a transient feedback line at the bottom-
+// right corner. Reuses the B2.7 toast stack for consistency.
+function pushBriefToast(message) {
+  if (typeof pushSessionToast === 'function') {
+    pushSessionToast(message, null);
+    return;
+  }
+  console.log('[mesh] ' + message);
+}
+
 // buildCurlCommand assembles a multi-line curl invocation from a
 // req audit row. Output is shell-safe single-quoted; headers are
 // emitted with -H flags. Body is passed via --data-binary @- with
