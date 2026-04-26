@@ -123,6 +123,11 @@ func (h HealthCfg) validate(upstreamLabel string) error {
 			return fmt.Errorf("%s: invalid health.active.timeout %q: %w", upstreamLabel, h.Active.Timeout, err)
 		}
 	}
+	if h.Active.Enabled {
+		if h.Active.Payload == "" {
+			return fmt.Errorf("%s: health.active.enabled requires health.active.payload (mesh cannot pick a default model name across heterogeneous upstreams)", upstreamLabel)
+		}
+	}
 	return nil
 }
 
