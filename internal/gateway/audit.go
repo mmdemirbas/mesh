@@ -466,17 +466,22 @@ func (r *Recorder) Response(id RequestID, meta ResponseMeta, body []byte) {
 			row["upstream_resp"] = rawOrString(meta.UpstreamResp)
 		}
 	}
-	// A.6 resilience-path fields. Emitted only when more than one
-	// attempt happened — the dominant single-upstream / single-
-	// attempt path leaves the audit row unchanged.
+	// A.6 resilience-path fields. The `attempts` array is gated on
+	// >1 attempt — single-attempt rows would just repeat the upstream
+	// info. But `final_upstream` / `final_key_id` are always emitted
+	// when non-empty, so the operator can correlate every audit row
+	// with the (upstream, key) pair that served it without having to
+	// reconstruct it from headers. REVIEW #5: previously these were
+	// hidden behind the >1 gate so single-attempt rows had no key
+	// attribution at all.
 	if len(meta.Attempts) > 1 {
 		row["attempts"] = meta.Attempts
-		if meta.FinalUpstream != "" {
-			row["final_upstream"] = meta.FinalUpstream
-		}
-		if meta.FinalKeyID != "" {
-			row["final_key_id"] = meta.FinalKeyID
-		}
+	}
+	if meta.FinalUpstream != "" {
+		row["final_upstream"] = meta.FinalUpstream
+	}
+	if meta.FinalKeyID != "" {
+		row["final_key_id"] = meta.FinalKeyID
 	}
 	r.writeRow(row)
 }
