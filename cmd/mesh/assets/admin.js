@@ -195,6 +195,11 @@ function tick() {
           .then(r => ok(r)).then(r => r.json())
       )).then(results => {
         gwStats = results.length === 1 ? results[0] : mergeGwStats(results);
+        // D6: tag merged-stat sets so the operator sees they're
+        // looking at an aggregate, not a single-gateway view. Pre-fix
+        // the overview was blank for the all-selected case; now it
+        // renders aggregated stats and labels them.
+        gwStats._mergedFrom = statsGws.length > 1 ? statsGws.length : 0;
         if (gwSubview === 'overview') renderGatewayOverview();
       }).catch(fail('gw-stats'));
     }
@@ -3706,7 +3711,16 @@ function renderGatewayOverview() {
   const errPct = t.requests > 0 ? (100*t.errors/t.requests).toFixed(1)+'%' : '0%';
   const avgMs = t.requests > 0 ? Math.round(t.elapsed_sum_ms/t.requests)+'ms' : '-';
   const cacheRatio = (100*(t.cache_hit_ratio||0)).toFixed(1)+'%';
-  kpi.innerHTML =
+  // D6: when stats came from >1 gateway, label the KPI band so the
+  // operator knows the numbers are merged. Pre-fix the overview was
+  // blank when all-gateways was selected; now it renders the
+  // aggregate, and this banner makes the merge explicit.
+  const mergedBanner = (gwStats._mergedFrom > 0)
+    ? '<div style="grid-column:1/-1;color:var(--text-muted);font-size:11px;padding:4px 0;border-bottom:1px dashed var(--border);margin-bottom:4px">' +
+      'Aggregated across ' + gwStats._mergedFrom + ' gateways. Select a single gateway chip for per-gateway breakdown.' +
+      '</div>'
+    : '';
+  kpi.innerHTML = mergedBanner +
     statBox('Requests', fmtTokens(t.requests), gwStats.window) +
     statBox('Errors', fmtTokens(t.errors)+' ('+errPct+')', '', t.errors > 0 ? 'var(--red)' : '') +
     statBox('Input tokens'+info('Sum of fresh + cache_read + cache_write input tokens.'), totalIn.toLocaleString(), '(incl. cache)') +
