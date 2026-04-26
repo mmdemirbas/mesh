@@ -317,7 +317,18 @@ select option { background: var(--bg-card); color: var(--text); }
 .md-viewer .md-toc a:hover { color: var(--green); }
 .md-viewer .md-toc a.depth-2 { padding-left: 8px; }
 .md-viewer .md-toc a.depth-3 { padding-left: 16px; }
-.md-viewer .md-toc .toc-len { font-size: 9px; display: inline-block; width: 32px; text-align: right; margin-right: 4px; flex-shrink: 0; }
+.md-viewer .md-toc .toc-len {
+  font-size: 9px; display: inline-block; min-width: 32px; max-width: 32px;
+  text-align: center; margin-right: 6px; flex-shrink: 0;
+  padding: 0 4px; border-radius: 6px; border: 1px solid currentColor;
+  background: var(--bg-input); font-family: var(--mono);
+  letter-spacing: -0.3px; box-sizing: border-box;
+}
+.md-viewer .md-toc > div .toc-len {
+  /* Header total: wider, no border, just tinted text. */
+  border: none; background: transparent; min-width: 0; max-width: none;
+  text-align: left; padding: 0; color: var(--text-muted);
+}
 @media (max-width: 900px) { .md-viewer .md-toc { display: none; } }
 /* Constrain md-viewer height when nested inside detail panes so the
    scrollable body stays within the parent instead of overflowing. */
