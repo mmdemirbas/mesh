@@ -330,6 +330,10 @@
           "items": {
             "$ref": "#/$defs/GatewayUpstreamCfg"
           }
+        },
+        "response_model": {
+          "type": "string",
+          "description": "Optional. When set, the gateway replaces the model name in every client-facing response (non-streaming, SSE, passthrough) with this value before forwarding it to the client. Empty (default) preserves the existing behavior of echoing the original client model. Useful for visually distinguishing gateway-routed sessions from direct sessions in the LLM client UI. (PLAN_GATEWAY_SEPARATION Part 1.)"
         }
       },
       "additionalProperties": false,

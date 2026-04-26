@@ -126,6 +126,13 @@ my-vps-tunnel-service:
       # proxy: socks5://127.0.0.1:1081  # optional outbound proxy
       timeout: 600s
       default_max_tokens: 32768       # used when client omits max_tokens
+      # response_model: internal-glm  # optional: replace the model name in
+                                      #           every client-facing response
+                                      #           with this string. Lets the
+                                      #           operator distinguish two
+                                      #           Claude Code sessions
+                                      #           (one direct, one via mesh)
+                                      #           at a glance in the UI.
       model_map:                      # supports exact, glob (*, ?, [...]), and "*" catch-all
         claude-opus-4-6: glm-4.7     # exact match (highest priority)
         claude-sonnet-*: glm-4.7     # glob pattern (longer patterns match first)
