@@ -1867,7 +1867,7 @@ function renderGateway() {
 
     const body = document.getElementById('gw-body');
     if (!filtered.length) {
-      body.innerHTML = '<tr><td colspan="14" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
+      body.innerHTML = '<tr><td colspan="15" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
     } else {
     body.innerHTML = filtered.map(p => {
       const ts = p.resp.ts||p.req.ts||'';
@@ -1898,6 +1898,7 @@ function renderGateway() {
         '<td>'+fmtTokensHtml(u.input_tokens)+'</td>'+
         '<td>'+fmtTokensHtml(u.output_tokens)+'</td>'+
         '<td>'+renderCacheBadgeForPair(p)+'</td>'+
+        '<td>'+renderResiliencePathCell(p)+'</td>'+
         '<td>'+fmtElapsedHtml(p.resp.elapsed_ms)+'</td>'+
         '<td style="color:var(--cyan);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+xa(project)+'">'+x(project)+'</td>'+
         '<td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)">'+summary+'</td>'+
@@ -3989,6 +3990,11 @@ TF.reg('gw', {
       if (!cs) return -1;
       return cs.hit_rate >= 0 ? cs.hit_rate * 100 : -0.5;
     }},
+    {key:'path', label:'Path', type:'number', extract: p => {
+      // Sort by attempt count: 1 first (steady state), >1 later (fallback fired).
+      const attempts = Array.isArray(p.resp && p.resp.attempts) ? p.resp.attempts : [];
+      return attempts.length || 1;
+    }},
     {key:'elapsed', label:'Elapsed', type:'number', extract: p => p.resp.elapsed_ms||0},
     {key:'project', label:'Project', extract: p => extractProject(p.req)||p.req.path||''},
     {key:'summary', label:'Summary', extract: p => { const s=p.resp.stream_summary; return s&&s.content ? s.content.slice(0,120) : ''; }}
@@ -4175,6 +4181,36 @@ function cacheBadgeTooltip(cs) {
 // renderCacheBadgeForPair is the table-cell entry point.
 function renderCacheBadgeForPair(p) {
   return renderCacheBadge(extractClientCache(p));
+}
+
+// renderResiliencePathCell shows the dispatch path for one
+// pair. For single-attempt rows (the dominant case) it shows the
+// final upstream's name; for multi-attempt rows it shows
+// "primary → fallback" with each step colored by per-attempt
+// outcome. Workstream A.7 surface for A.5 + A.6.
+function renderResiliencePathCell(p) {
+  if (!p || !p.resp) return '<span style="color:var(--text-muted)">—</span>';
+  const finalUp = p.resp.final_upstream || p.resp.gateway || p.req.gateway || '';
+  const attempts = Array.isArray(p.resp.attempts) ? p.resp.attempts : [];
+  if (attempts.length <= 1) {
+    return finalUp ? '<span style="color:'+modelColor(finalUp)+'">'+x(finalUp)+'</span>' : '<span style="color:var(--text-muted)">—</span>';
+  }
+  // Multi-attempt: render each step.
+  const tooltip = attempts.map((a, i) => {
+    const dur = a.started_at && a.ended_at ? Math.max(0, new Date(a.ended_at).getTime() - new Date(a.started_at).getTime()) + 'ms' : '';
+    const reason = a.fallback_reason ? ' · ' + a.fallback_reason : '';
+    return (i+1)+'. ' + (a.upstream_name||'?') + ' [' + (a.key_id||'-') + '] · ' + (a.outcome||'?') + ' ' + (a.status_code||0) + ' ' + dur + reason;
+  }).join('\n');
+  const html = attempts.map((a, i) => {
+    const upName = a.upstream_name || '?';
+    const color = a.outcome === 'ok' ? modelColor(upName)
+                : a.outcome === 'rate_limited' ? 'var(--yellow)'
+                : (a.outcome === 'upstream_error' || a.outcome === 'network_error' || a.outcome === 'timeout') ? 'var(--red)'
+                : 'var(--text-muted)';
+    return (i > 0 ? '<span style="color:var(--text-muted)"> → </span>' : '') +
+      '<span style="color:'+color+'">'+x(upName)+'</span>';
+  }).join('');
+  return '<span title="'+xa(tooltip)+'">'+html+'</span>';
 }
 
 // --- B2 Live Session View ---
