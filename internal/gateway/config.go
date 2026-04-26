@@ -72,6 +72,11 @@ type UpstreamCfg struct {
 	// configs), "lru", "sticky_session". Ignored for single-key
 	// pools. See DESIGN_WORKSTREAM_A.local.md §2.
 	RotationPolicy string `yaml:"rotation_policy,omitempty"`
+	// Health controls passive (always-on by default) and active
+	// (opt-in, A.3) health checks. See DESIGN_WORKSTREAM_A.local.md
+	// §1.2 + §3. Zero value = passive enabled with default
+	// thresholds; active disabled.
+	Health HealthCfg `yaml:"health,omitempty"`
 	// Optional outbound proxy for upstream requests (e.g., "socks5://127.0.0.1:1081").
 	Proxy string `yaml:"proxy,omitempty"`
 	// Upstream request timeout (e.g., "600s"). Default: "600s".
@@ -263,6 +268,12 @@ func (c *GatewayCfg) Validate() error {
 			// "single"). Reject at config-time so the operator
 			// notices the unused field.
 			return fmt.Errorf("upstream[%d] %q: rotation_policy is set but api_key_envs is not (rotation only applies to multi-key pools; remove the policy or add a second key)", i, u.Name)
+		}
+		// Workstream A.2: health block validation. The block's own
+		// validate() handles the per-field shape; this returns the
+		// upstream-context error.
+		if err := u.Health.validate(fmt.Sprintf("upstream[%d] %q", i, u.Name)); err != nil {
+			return err
 		}
 		for pattern := range u.ModelMap {
 			if strings.ContainsAny(pattern, "*?[") && pattern != "*" {

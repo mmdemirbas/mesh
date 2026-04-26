@@ -48,7 +48,11 @@ type KeyState struct {
 	// here are the raw signal.
 	successes int64
 	failures  int64
-	lastUsed  time.Time
+	// consecFailures is "failures since the last success" — the
+	// signal passive health detection thresholds against (A.2).
+	// Reset to zero on MarkSuccess; incremented on MarkFailure.
+	consecFailures int64
+	lastUsed       time.Time
 }
 
 // NewKeyState constructs a KeyState from an env var name + resolved
@@ -101,27 +105,31 @@ func (k *KeyState) IsUsable(now time.Time) bool {
 }
 
 // MarkSuccess records a successful response and clears any
-// degradation state. Safe to call concurrently.
+// degradation state. Resets the consecutive-failure counter so the
+// next failure streak starts fresh. Safe to call concurrently.
 func (k *KeyState) MarkSuccess(now time.Time) {
 	if k == nil {
 		return
 	}
 	k.mu.Lock()
 	k.successes++
+	k.consecFailures = 0
 	k.degradedUntil = time.Time{}
 	k.lastUsed = now
 	k.mu.Unlock()
 }
 
-// MarkFailure increments the failure counter. The caller decides
-// whether to also degrade the key via MarkDegraded (e.g., a transient
-// 5xx might increment failures without immediate degradation).
+// MarkFailure increments both total and consecutive failure
+// counters. The caller decides whether to also degrade the key via
+// MarkDegraded (e.g., a transient 5xx might increment failures
+// without immediate degradation).
 func (k *KeyState) MarkFailure(now time.Time) {
 	if k == nil {
 		return
 	}
 	k.mu.Lock()
 	k.failures++
+	k.consecFailures++
 	k.lastUsed = now
 	k.mu.Unlock()
 }
@@ -156,12 +164,13 @@ func (k *KeyState) MarkUsed(now time.Time) {
 // builders, admin endpoints) can read without racing the dispatch
 // goroutines.
 type KeyStateSnapshot struct {
-	ID            string
-	EnvVar        string
-	DegradedUntil time.Time
-	Successes     int64
-	Failures      int64
-	LastUsed      time.Time
+	ID             string
+	EnvVar         string
+	DegradedUntil  time.Time
+	Successes      int64
+	Failures       int64
+	ConsecFailures int64
+	LastUsed       time.Time
 }
 
 // Snapshot returns a value copy of the runtime fields.
@@ -172,11 +181,12 @@ func (k *KeyState) Snapshot() KeyStateSnapshot {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return KeyStateSnapshot{
-		ID:            k.ID,
-		EnvVar:        k.EnvVar,
-		DegradedUntil: k.degradedUntil,
-		Successes:     k.successes,
-		Failures:      k.failures,
-		LastUsed:      k.lastUsed,
+		ID:             k.ID,
+		EnvVar:         k.EnvVar,
+		DegradedUntil:  k.degradedUntil,
+		Successes:      k.successes,
+		Failures:       k.failures,
+		ConsecFailures: k.consecFailures,
+		LastUsed:       k.lastUsed,
 	}
 }
