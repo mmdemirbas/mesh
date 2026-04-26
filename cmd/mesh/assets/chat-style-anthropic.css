@@ -1,0 +1,182 @@
+/* B3.1 — Anthropic-style chat rendering.
+ *
+ * Loose-familiar approximation of Claude.ai's main chat column.
+ * Active when #sess-bubbles carries .chat-style-anthropic. Native
+ * style is the default (no extra class); vendor styles override
+ * via this scoping prefix.
+ *
+ * Visual cues — see DESIGN_B3_chat_rendering.local.md §3:
+ *   - Centered ~760px column, serif body type.
+ *   - User bubbles right-aligned, warm-cream fill, asymmetric corners.
+ *   - Assistant messages flow without a bubble, "Claude" label above.
+ *   - Tool-call cards retain functional shape with thinner styling.
+ *   - Code blocks dark.
+ */
+
+.chat-style-anthropic {
+  --b3-text: #2a2520;
+  --b3-text-mute: #6b6253;
+  --b3-bubble-user: #f5e6d3;
+  --b3-bubble-user-text: #2a2520;
+  --b3-tool-bg: #fafaf6;
+  --b3-tool-bg-head: #f0ebe0;
+  --b3-tool-border: #e8e3d8;
+  --b3-accent: #c46f3a;
+  --b3-code-bg: #1f1f1f;
+  --b3-code-fg: #e8e8e8;
+  max-width: 760px;
+  margin: 0 auto;
+  font-family: 'Charter', 'Source Serif Pro', Georgia, 'Times New Roman', serif;
+  font-size: 16px;
+  line-height: 1.65;
+  color: var(--b3-text);
+}
+
+.chat-style-anthropic .chat-bubble.user {
+  align-self: flex-end;
+  max-width: 75%;
+  background: var(--b3-bubble-user);
+  border: 1px solid color-mix(in srgb, var(--b3-bubble-user) 80%, var(--b3-text) 20%);
+  border-radius: 18px 18px 4px 18px;
+  padding: 12px 18px;
+  color: var(--b3-bubble-user-text);
+  margin-left: 25%;
+  margin-right: 0;
+}
+
+.chat-style-anthropic .chat-bubble.assistant {
+  align-self: stretch;
+  max-width: none;
+  background: transparent;
+  border: none;
+  padding: 8px 0 16px;
+  color: var(--b3-text);
+}
+
+/* "Claude"-style label above each assistant turn. Pure pseudo so
+ * the HTML stays style-agnostic. */
+.chat-style-anthropic .chat-bubble.assistant .bubble-role {
+  display: block;
+  color: var(--b3-accent);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  margin-bottom: 6px;
+}
+.chat-style-anthropic .chat-bubble.assistant .bubble-role::before {
+  content: "Claude · ";
+  color: var(--b3-accent);
+}
+
+.chat-style-anthropic .chat-bubble.user .bubble-role {
+  display: none;
+}
+
+.chat-style-anthropic .bubble-content {
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1.65;
+  color: var(--b3-text);
+}
+
+.chat-style-anthropic .bubble-meta {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 11px;
+  color: var(--b3-text-mute);
+  margin-top: 6px;
+}
+
+.chat-style-anthropic .bubble-actions a {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 11px;
+  color: var(--b3-text-mute);
+}
+.chat-style-anthropic .bubble-actions a:hover {
+  color: var(--b3-accent);
+}
+
+/* Tool-use cards retain a clear visual shape but with quieter
+ * borders so they read as inline elements within the assistant
+ * column rather than separate boxes. */
+.chat-style-anthropic .bubble-tools {
+  border-top: none;
+  margin-top: 10px;
+  padding-top: 0;
+}
+.chat-style-anthropic .bubble-tools details {
+  background: var(--b3-tool-bg);
+  border: 1px solid var(--b3-tool-border);
+  border-radius: 10px;
+  padding: 0;
+  overflow: hidden;
+}
+.chat-style-anthropic .bubble-tools summary {
+  background: var(--b3-tool-bg-head);
+  padding: 8px 12px;
+  font-family: -apple-system, sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--b3-text);
+}
+.chat-style-anthropic .bubble-tools .tool-name {
+  color: var(--b3-accent);
+}
+.chat-style-anthropic .bubble-tools pre {
+  background: var(--b3-code-bg);
+  color: var(--b3-code-fg);
+  border-radius: 0;
+  margin: 0;
+  padding: 10px 14px;
+  font-size: 12px;
+}
+
+.chat-style-anthropic .chat-bubble.error {
+  background: #f8e6e0;
+  border: 1px solid #e0a89a;
+  color: #6b2a1a;
+  border-radius: 10px;
+}
+
+/* Cache pill: small, top-right of the bubble. Anthropic hides
+ * the mesh-native dominance but keeps the data accessible. */
+.chat-style-anthropic .bubble-cache {
+  font-size: 10px;
+  color: var(--b3-text-mute);
+  border-top: 1px dashed color-mix(in srgb, var(--b3-text-mute) 30%, transparent);
+  margin-top: 8px;
+  padding-top: 6px;
+}
+.chat-style-anthropic .bubble-cache .cache-badge {
+  font-size: 9px;
+}
+
+/* Branch fork markers in the timeline — keep the fork-detected
+ * affordance from native, recolored to the style palette. */
+.chat-style-anthropic .branch-strip {
+  border-color: color-mix(in srgb, var(--b3-text-mute) 40%, transparent);
+}
+.chat-style-anthropic .branch-strip .branch-chip.active {
+  border-color: var(--b3-accent);
+  color: var(--b3-accent);
+  background: color-mix(in srgb, var(--b3-accent) 12%, transparent);
+}
+
+/* Streaming indicator: three pulsing dots below the role label
+ * while assistant placeholder is visible. */
+.chat-style-anthropic .chat-bubble.assistant .placeholder {
+  color: var(--b3-text-mute);
+  font-style: normal;
+}
+.chat-style-anthropic .chat-bubble.assistant .placeholder::after {
+  content: " · · ·";
+  display: inline-block;
+  animation: b3aDots 1.4s ease-in-out infinite;
+  margin-left: 4px;
+  letter-spacing: 4px;
+}
+@keyframes b3aDots {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}

@@ -3466,6 +3466,7 @@ function writeGwHash() {
   if (gwSubview === 'sessions' && sessionView.currentBranchID) params.push('branch='+encodeURIComponent(sessionView.currentBranchID));
   if (gwSubview === 'sessions' && sessionView.currentNodeID) params.push('node='+encodeURIComponent(sessionView.currentNodeID));
   if (gwSubview === 'sessions' && sessionView.currentView === 'graph') params.push('view=graph');
+  if (gwSubview === 'sessions' && sessionView.currentStyle && sessionView.currentStyle !== 'native') params.push('style='+encodeURIComponent(sessionView.currentStyle));
   let h = '#' + parts[0] + (params.length ? '?' + params.join('&') : '');
   if (location.hash === h) return;
   const full = location.pathname + h;
@@ -3495,6 +3496,7 @@ function parseGwHash() {
     branch: p.branch ? decodeURIComponent(p.branch) : '',
     node: p.node ? decodeURIComponent(p.node) : '',
     view: p.view ? decodeURIComponent(p.view) : '',
+    style: p.style ? decodeURIComponent(p.style) : '',
   };
 }
 
@@ -3519,6 +3521,9 @@ function applyGwHash() {
     if (parsed.node) sessionView.pendingNodeID = parsed.node;
     if (parsed.view === 'graph' || parsed.view === 'linear') {
       sessionView.pendingView = parsed.view;
+    }
+    if (isValidChatStyle(parsed.style)) {
+      sessionView.pendingStyle = parsed.style;
     }
   }
   if (!parsed.detail) {
@@ -4191,9 +4196,11 @@ let sessionView = {
   currentBranchID: '',      // user-selected, persists in URL hash
   currentNodeID: '',        // highlighted node, persists in URL hash
   currentView: 'linear',    // 'linear' | 'graph', persists in URL hash
+  currentStyle: 'native',   // 'native' | 'anthropic' | 'openai' | 'gemini', persists in URL hash
   pendingBranchID: '',      // applied from URL on first dag_init
   pendingNodeID: '',
   pendingView: '',
+  pendingStyle: '',
   pairCache: new Map(),     // body_hash -> {request, response}
   pairFetching: new Set(),  // body_hashes with fetch in flight
   sse: null,                // EventSource handle
@@ -4329,6 +4336,12 @@ function onSessionDagInit(dag) {
     setSessView(sessionView.currentView || 'linear');
   }
   sessionView.pendingView = '';
+  if (isValidChatStyle(sessionView.pendingStyle)) {
+    setSessStyle(sessionView.pendingStyle);
+  } else {
+    setSessStyle(sessionView.currentStyle || 'native');
+  }
+  sessionView.pendingStyle = '';
   setSessStatus(dag.nodes && dag.nodes.length ? 'live' : 'live (no nodes yet)', 'live');
   renderSessionView();
 }
@@ -4814,6 +4827,43 @@ document.addEventListener('click', (e) => {
   const v = btn.dataset.view;
   if (v === sessionView.currentView) return;
   setSessView(v);
+  writeGwHash();
+});
+
+// --- B3 chat-style selector (linear view only) ---
+//
+// Single template, multi-CSS architecture per the design: HTML
+// stays identical; vendor CSS is scoped under .chat-style-* on
+// the bubble container; switching is one class swap. Loaded CSS
+// for inactive styles costs <5KB each — tiny compared to the
+// rendered chat content.
+
+function isValidChatStyle(s) {
+  return s === 'native' || s === 'anthropic' || s === 'openai' || s === 'gemini';
+}
+
+function setSessStyle(style) {
+  if (!isValidChatStyle(style)) style = 'native';
+  sessionView.currentStyle = style;
+  document.querySelectorAll('#sess-style-toggle .gw-sub-btn').forEach(el => {
+    el.classList.toggle('active', el.dataset.style === style);
+  });
+  // Apply the style scope to the bubble container. Native = no
+  // class so the existing native rules win unmodified.
+  const wrap = document.getElementById('sess-bubbles');
+  if (!wrap) return;
+  for (const s of ['native', 'anthropic', 'openai', 'gemini']) {
+    wrap.classList.remove('chat-style-' + s);
+  }
+  if (style !== 'native') wrap.classList.add('chat-style-' + style);
+}
+
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('#sess-style-toggle .gw-sub-btn');
+  if (!btn) return;
+  const s = btn.dataset.style;
+  if (!isValidChatStyle(s) || s === sessionView.currentStyle) return;
+  setSessStyle(s);
   writeGwHash();
 });
 

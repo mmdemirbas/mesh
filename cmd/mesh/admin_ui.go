@@ -24,11 +24,25 @@ var adminHTMLTemplate string
 //go:embed assets/admin.css
 var adminCSS string
 
+// chat-style-*.css carry B3 vendor-evocative chat rendering rules.
+// All four are loaded together; the active style is selected by a
+// class on the linear-view container. Switching styles is a
+// single class swap — no re-fetch.
+//
+//go:embed assets/chat-style-anthropic.css
+var chatStyleAnthropicCSS string
+
 //go:embed assets/admin.js
 var adminJS string
 
+// allCSS is the concatenated stylesheet served inline. Order:
+// base styles first, then per-style overrides scoped under their
+// .chat-style-* class. Keeping per-style CSS scoped means the
+// native style is unaffected when no class is set.
+var allCSS = adminCSS + "\n" + chatStyleAnthropicCSS
+
 var adminUI = strings.NewReplacer(
-	"__MESH_CSS__", adminCSS,
+	"__MESH_CSS__", allCSS,
 	"__MESH_JS__", adminJS,
 	"__MESH_VERSION__", version,
 ).Replace(adminHTMLTemplate)
