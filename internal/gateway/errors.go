@@ -121,4 +121,3 @@ func translatedUpstreamErrorMessage(body []byte) string {
 	}
 	return "upstream error: " + truncateBody(body, 4096)
 }
-

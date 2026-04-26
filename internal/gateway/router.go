@@ -183,9 +183,5 @@ func matchesAnyPattern(model string, patterns []string) bool {
 		}
 	}
 
-	if hasCatchAll {
-		return true
-	}
-
-	return false
+	return hasCatchAll
 }

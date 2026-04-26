@@ -1,3 +1,14 @@
+// This wrapper implements driver.Driver / Conn / Stmt / Tx by
+// forwarding to modernc.org/sqlite. The legacy driver.Conn.Begin
+// and driver.Stmt.Exec / Query methods are intentionally
+// implemented to preserve the full interface surface — newer
+// callers route through the Context variants below, but the
+// wrapper must accept either path because database/sql may pick
+// the legacy method when the inner driver does not implement
+// the Context variant. The deprecation warnings on those calls
+// are unavoidable side effects of the wrapper pattern.
+//lint:file-ignore SA1019 wrapping a database/sql/driver requires implementing the deprecated methods to preserve interface forwarding
+
 package filesync
 
 import (

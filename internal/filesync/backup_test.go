@@ -12,36 +12,6 @@ import (
 	"github.com/mmdemirbas/mesh/internal/config"
 )
 
-// backupTestDB seeds a folder DB with one row so the backup has
-// content; the backup file size is irrelevant for the lifecycle
-// tests but the DB must be valid SQLite for VACUUM INTO to
-// produce a clean output.
-func backupTestDB(t *testing.T) (string, string) {
-	t.Helper()
-	cacheDir := t.TempDir()
-	db, err := openFolderDB(cacheDir, "ABCDE12345")
-	if err != nil {
-		t.Fatalf("openFolderDB: %v", err)
-	}
-	idx := newFileIndex()
-	idx.Sequence = 7
-	idx.Set("doc.txt", FileEntry{Size: 1, MtimeNS: 1, SHA256: testHash("a"), Sequence: 7})
-	if err := saveIndex(context.Background(), db, "f", idx); err != nil {
-		_ = db.Close()
-		t.Fatalf("saveIndex: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close db: %v", err)
-	}
-	// Reopen for the backup test — VACUUM INTO needs an open DB.
-	dbBackup, err := openFolderDB(cacheDir, "ABCDE12345")
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	t.Cleanup(func() { _ = dbBackup.Close() })
-	return cacheDir, ""
-}
-
 // TestBackup_VacuumIntoAtomicRename pins audit §6 commit 9a /
 // iter-4 Z5: writeBackup writes to <name>.tmp first, runs
 // quick_check on the .tmp, atomically renames to <name> only on
@@ -292,6 +262,105 @@ func TestRetention_IdempotentOnExtraFile(t *testing.T) {
 	}
 }
 
+// TestBackupScheduler_RunBackupSweepInvokesWriteBackup pins the
+// scheduler's per-folder action: runBackupSweep walks every
+// active folder and calls writeBackup. Without this test, the
+// only assertion was "the constant is 24h" — the actual code
+// path that fires per tick was never exercised.
+//
+// Test shape: build a Node with one open folder, register in
+// activeNodes, call runBackupSweep directly (not via the
+// ticker), verify a backup file appears on disk.
+//
+// Mental mutation: a refactor that changes runBackupSweep to
+// skip non-disabled folders or short-circuit on
+// !shouldBackup would silence the file appearance and the
+// assertion catches it.
+func TestBackupScheduler_RunBackupSweepInvokesWriteBackup(t *testing.T) {
+	// Cannot use t.Parallel — registers a Node in activeNodes.
+	dataDir := t.TempDir()
+	folderRoot := t.TempDir()
+	const folderID = "test-scheduler"
+
+	cfg := config.FilesyncCfg{
+		ResolvedFolders: []config.FolderCfg{{
+			ID:        folderID,
+			Path:      folderRoot,
+			Direction: "send-receive",
+		}},
+	}
+	n := &Node{
+		cfg:      cfg,
+		dataDir:  dataDir,
+		folders:  make(map[string]*folderState),
+		deviceID: "TESTDEVICE",
+	}
+	activeNodes.Register(n)
+	t.Cleanup(func() { activeNodes.Unregister(n) })
+
+	target := n.openFolderInit(t.Context(), cfg.ResolvedFolders[0])
+	if target == nil {
+		t.Fatal("openFolderInit returned nil — folder failed to open")
+	}
+	t.Cleanup(func() { n.closeOneFolder(folderID) })
+
+	// Confirm no backups exist yet.
+	folderCacheDir := filepath.Join(dataDir, folderID)
+	pre, _ := listBackups(folderCacheDir)
+	if len(pre) != 0 {
+		t.Fatalf("pre-condition: listBackups=%d, want 0", len(pre))
+	}
+
+	// Fire one sweep cycle directly.
+	n.runBackupSweep(t.Context())
+
+	// One backup file should now be in the listing.
+	post, err := listBackups(folderCacheDir)
+	if err != nil {
+		t.Fatalf("listBackups: %v", err)
+	}
+	if len(post) != 1 {
+		t.Errorf("post-sweep listBackups=%d, want 1", len(post))
+	}
+	if len(post) > 0 && !post[0].QuickCheckOK {
+		t.Errorf("backup quick_check_ok=false after sweep")
+	}
+}
+
+// TestBackupScheduler_SkipsDisabledFolder pins the runBackupSweep
+// guard against firing writeBackup on a folder whose db is nil
+// (disabled). Without the guard, writeBackup would NPE on the
+// nil db.
+func TestBackupScheduler_SkipsDisabledFolder(t *testing.T) {
+	dataDir := t.TempDir()
+	const folderID = "disabled-folder"
+
+	n := &Node{
+		dataDir:  dataDir,
+		folders:  make(map[string]*folderState),
+		deviceID: "TESTDEVICE",
+	}
+	// Register a folderState with nil db (simulates
+	// FolderDisabled state).
+	fs := &folderState{
+		cfg:           config.FolderCfg{ID: folderID, Path: t.TempDir()},
+		pending:       make(map[string]PendingSummary),
+		peerLastError: make(map[string]string),
+		inFlight:      make(map[string]bool),
+	}
+	fs.disable(DisabledQuickCheck, "test", "")
+	n.folders[folderID] = fs
+
+	// Sweep must not panic, must not produce a backup file.
+	n.runBackupSweep(t.Context())
+
+	folderCacheDir := filepath.Join(dataDir, folderID)
+	got, _ := listBackups(folderCacheDir)
+	if len(got) != 0 {
+		t.Errorf("disabled folder produced backup: %v", got)
+	}
+}
+
 // TestBackupCadenceConstant pins the scheduler's interval —
 // must be positive (zero would tight-loop the goroutine) and
 // aligned with the GFS daily tier (24h matches the decision §5
@@ -305,6 +374,96 @@ func TestBackupCadenceConstant(t *testing.T) {
 	}
 	if backupCadence != 24*time.Hour {
 		t.Errorf("backupCadence=%v, want 24h (audit decision §5 #11 daily anchor)", backupCadence)
+	}
+}
+
+// TestZ8Recovery_OpenRunsSyncIntegrityCheck pins audit §6 commit
+// 10 / iter-4 Z8: when openFolderInit detects un-checkpointed
+// WAL frames, the synchronous integrity_check arm fires and
+// openFolderInit returns nil (meaning "no deferred async check
+// needed; the sync run already covered it"). Without this
+// signal, the deferred async path would also fire and either
+// produce duplicate work or — worse — race with sync mutations.
+//
+// Test shape:
+//  1. Create a folder cache dir.
+//  2. Open a DB once and write a single row so the file is a
+//     valid SQLite DB. Close cleanly.
+//  3. Manually create a non-zero `index.sqlite-wal` file —
+//     simulating a SIGKILL leftover (the WAL was not
+//     truncated at clean shutdown).
+//  4. Run openFolderInit.
+//  5. Assert: target == nil (sync ran, no deferred queue).
+//
+// Mental mutation: removing the `if sigKillLeftover { return
+// nil }` short-circuit at the end of openFolderInit would
+// return the integrityCheckTarget and the assertion catches it.
+func TestZ8Recovery_OpenRunsSyncIntegrityCheck(t *testing.T) {
+	// Cannot use t.Parallel — registers a Node in activeNodes.
+	dataDir := t.TempDir()
+	folderRoot := t.TempDir()
+	const folderID = "test-z8"
+
+	// Step 2: open + write + close (clean) so the .sqlite is a
+	// valid DB.
+	folderCacheDir := filepath.Join(dataDir, folderID)
+	if err := os.MkdirAll(folderCacheDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	{
+		db, err := openFolderDB(folderCacheDir, "TESTDEVICE")
+		if err != nil {
+			t.Fatalf("seed openFolderDB: %v", err)
+		}
+		idx := newFileIndex()
+		idx.Sequence = 1
+		_ = idx.Set("seed.txt", FileEntry{Size: 1, MtimeNS: 1, SHA256: testHash("a"), Sequence: 1})
+		if err := saveIndex(t.Context(), db, folderID, idx); err != nil {
+			_ = db.Close()
+			t.Fatalf("seed saveIndex: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("seed close: %v", err)
+		}
+	}
+
+	// Step 3: simulate SIGKILL leftover by writing a non-zero
+	// `-wal` file. The detector reads file size; we don't need
+	// the content to be valid WAL frames.
+	walPath := filepath.Join(folderCacheDir, folderDBFilename+"-wal")
+	if err := os.WriteFile(walPath, []byte("simulated un-checkpointed frame"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Step 4: open via openFolderInit.
+	cfg := config.FilesyncCfg{
+		ResolvedFolders: []config.FolderCfg{{
+			ID:        folderID,
+			Path:      folderRoot,
+			Direction: "send-receive",
+		}},
+	}
+	n := &Node{
+		cfg:      cfg,
+		dataDir:  dataDir,
+		folders:  make(map[string]*folderState),
+		deviceID: "TESTDEVICE",
+	}
+	activeNodes.Register(n)
+	t.Cleanup(func() { activeNodes.Unregister(n) })
+
+	target := n.openFolderInit(t.Context(), cfg.ResolvedFolders[0])
+	t.Cleanup(func() { n.closeOneFolder(folderID) })
+
+	// Step 5: target == nil signals "synchronous integrity_check
+	// already ran; no deferred async target needed." The folder
+	// is registered in n.folders regardless.
+	if target != nil {
+		t.Errorf("openFolderInit returned a non-nil integrityCheckTarget after Z8 recovery; want nil (sync arm consumed the deferred queue)")
+	}
+	// Folder is in n.folders post-open.
+	if _, ok := n.folders[folderID]; !ok {
+		t.Error("folder not registered in n.folders after Z8 recovery — folder did not open cleanly")
 	}
 }
 

@@ -929,6 +929,18 @@ func loadIndexDB(db *sql.DB, folderID string) (*FileIndex, error) {
 	}
 	idx.recomputeCache()
 	idx.rebuildSeqIndex()
+	// CRITICAL: Set() marks every reloaded path dirty as a side
+	// effect (the dirty-set bookkeeping is meant to track
+	// post-load mutations). Without this clear, the FileIndex
+	// returned by loadIndexDB carries every loaded path in its
+	// dirty set; the next persistFolder snapshots that set and
+	// re-UPSERTs every row — converting a ≤50ms target commit
+	// into a 168k-row full-rewrite on every first-after-open
+	// persist. The WHERE excluded.sequence > files.sequence
+	// guard makes the UPSERTs no-ops for unchanged rows but the
+	// 168k SQL statements still execute. Audit P2 / commit 2
+	// per-path delta architecture depends on this clear.
+	idx.ClearDirty()
 	return idx, nil
 }
 

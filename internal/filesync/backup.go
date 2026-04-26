@@ -3,6 +3,7 @@ package filesync
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -91,13 +92,28 @@ func writeBackup(ctx context.Context, db *sql.DB, folderCacheDir string) (Backup
 	// any concurrent commit only bumps it; the backup will reflect
 	// the post-VACUUM state with a slightly older filename, which
 	// is safe (the sequence is a lower bound on what's inside).
+	//
+	// Missing-sequence-row case: seedFolderMeta does NOT insert a
+	// sequence row at folder open; the first saveIndex call does.
+	// A backup taken on a fresh folder before any scan / sync has
+	// committed sees sql.ErrNoRows. Treat as sequence=0 — the
+	// backup is still valid (an empty index is a real state) and
+	// the filename will sort-first under listBackups' sequence-
+	// descending order, which is correct.
 	var seqStr string
-	if err := db.QueryRowContext(ctx, `SELECT value FROM folder_meta WHERE key='sequence'`).Scan(&seqStr); err != nil {
-		return info, fmt.Errorf("read folder_meta.sequence: %w", err)
-	}
-	seq, err := parseInt64(seqStr)
-	if err != nil {
-		return info, fmt.Errorf("parse folder_meta.sequence: %w", err)
+	queryErr := db.QueryRowContext(ctx, `SELECT value FROM folder_meta WHERE key='sequence'`).Scan(&seqStr)
+	var seq int64
+	switch {
+	case errors.Is(queryErr, sql.ErrNoRows):
+		seq = 0
+	case queryErr != nil:
+		return info, fmt.Errorf("read folder_meta.sequence: %w", queryErr)
+	default:
+		s, err := parseInt64(seqStr)
+		if err != nil {
+			return info, fmt.Errorf("parse folder_meta.sequence: %w", err)
+		}
+		seq = s
 	}
 	startedAt := time.Now().UTC()
 

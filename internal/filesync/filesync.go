@@ -1102,11 +1102,25 @@ func (n *Node) reopenFolder(ctx context.Context, folderID string) error {
 		return fmt.Errorf("folder %s reopen failed", folderID)
 	}
 
-	// Fire the deferred integrity check inline; caller's lifetime
-	// is the admin endpoint's request, which already has its own
-	// goroutine in net/http's handler pool.
+	// Fire the deferred integrity check on a DETACHED context.
+	// CRITICAL: the caller's ctx in /reopen and /restore is the
+	// HTTP request's context (r.Context()), which is cancelled
+	// by net/http when ServeHTTP returns. The handler returns as
+	// soon as reopenFolder returns — so a goroutine that
+	// inherits ctx would see context.Canceled on its first
+	// db.QueryContext call inside runIntegrityCheck and exit
+	// silently, completely skipping the integrity check that
+	// the audit's Z8 contract requires post-recovery.
+	// context.WithoutCancel keeps the value chain (deadline,
+	// values) but detaches the cancellation signal so the check
+	// runs to completion. The folder's writerCtx (cancelled by
+	// closeOneFolder during a subsequent reopen or shutdown) is
+	// the actual lifetime bound; runIntegrityCheck inherits the
+	// db handle's context behavior from the *sql.DB pool, which
+	// is closed via fs.db.Close() at folder shutdown.
+	checkCtx := context.WithoutCancel(ctx)
 	go func() {
-		if err := runIntegrityCheck(ctx, target.db); err != nil {
+		if err := runIntegrityCheck(checkCtx, target.db); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
@@ -1200,8 +1214,12 @@ func (n *Node) restoreFromBackup(ctx context.Context, folderID, backupPath strin
 		}
 		return fmt.Errorf("restore: openFolderInit failed for %s", folderID)
 	}
+	// Detach from the caller's request ctx — see reopenFolder
+	// for the full rationale. The integrity check must outlive
+	// the admin endpoint's request lifetime.
+	checkCtx := context.WithoutCancel(ctx)
 	go func() {
-		if err := runIntegrityCheck(ctx, target.db); err != nil {
+		if err := runIntegrityCheck(checkCtx, target.db); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
@@ -3685,16 +3703,6 @@ func (n *Node) isPeerConfigured(requestIP string) bool {
 		}
 	}
 	return false
-}
-
-// persistAll saves all folder indices and peer states to disk
-// using each folder's writerCtx. Used by hot-path persists where
-// the writer has its own folder-level ctx that disable() can
-// cancel.
-func (n *Node) persistAll() {
-	for id := range n.folders {
-		n.persistFolder(id, true)
-	}
 }
 
 // persistAllCtx is the shutdown-path persist that overrides each
