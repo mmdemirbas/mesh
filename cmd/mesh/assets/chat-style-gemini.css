@@ -1,0 +1,179 @@
+/* B3.3 — Gemini-style chat rendering.
+ *
+ * Loose-familiar approximation of Gemini's main column. Active
+ * when #sess-bubbles carries .chat-style-gemini.
+ *
+ * Visual cues — see DESIGN_B3_chat_rendering.local.md §5:
+ *   - ~768px centered column, sans-serif, generous vertical
+ *     spacing (Gemini's UI breathes more than ChatGPT's).
+ *   - Light-blue tint on right-aligned user bubbles, Google-blue
+ *     foreground.
+ *   - Assistant flows on the left with a sparkle (✦) avatar in a
+ *     four-color gradient circle.
+ *   - Tool-call cards with a left blue accent strip.
+ *   - Code blocks dark with rounded corners.
+ *
+ * Trademark margin (§5.4): "Gemini" / "Google" never appear in
+ * the UI. The four-color gradient is a generic technique; the
+ * individual colors are common.
+ */
+
+.chat-style-gemini {
+  --b3g-text: #202124;
+  --b3g-text-mute: #5f6368;
+  --b3g-bubble-user-bg: #e8f0fe;
+  --b3g-bubble-user-fg: #1a73e8;
+  --b3g-blue: #4285f4;
+  --b3g-tool-bg: #f8f9fa;
+  --b3g-tool-border: #dadce0;
+  --b3g-code-bg: #202124;
+  --b3g-code-fg: #e8eaed;
+  max-width: 768px;
+  margin: 0 auto;
+  font-family: -apple-system, BlinkMacSystemFont, 'Roboto', 'Google Sans',
+    'Segoe UI', system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--b3g-text);
+}
+
+/* Right-aligned user bubble in light blue. */
+.chat-style-gemini .chat-bubble.user {
+  align-self: flex-end;
+  max-width: 80%;
+  background: var(--b3g-bubble-user-bg);
+  border: none;
+  color: var(--b3g-bubble-user-fg);
+  border-radius: 18px;
+  padding: 14px 20px;
+  margin: 12px 0 12px 20%;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+.chat-style-gemini .chat-bubble.user .bubble-role { display: none; }
+
+/* Assistant flows on the left, no bubble; the sparkle avatar
+ * floats absolute next to it. The bubble itself becomes a
+ * positioning context. */
+.chat-style-gemini .chat-bubble.assistant {
+  align-self: stretch;
+  max-width: none;
+  background: transparent;
+  border: none;
+  padding: 16px 0 24px 44px;
+  position: relative;
+  color: var(--b3g-text);
+}
+.chat-style-gemini .chat-bubble.assistant::before {
+  content: '✦';
+  position: absolute;
+  left: 0;
+  top: 16px;
+  width: 32px;
+  height: 32px;
+  background: linear-gradient(135deg, #4285f4 0%, #ea4335 33%, #fbbc04 66%, #34a853 100%);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 16px;
+  font-weight: 600;
+}
+.chat-style-gemini .chat-bubble.assistant .bubble-role {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--b3g-blue);
+  margin-bottom: 6px;
+}
+.chat-style-gemini .chat-bubble.assistant .bubble-role::before {
+  content: "Gemini · ";
+  color: var(--b3g-blue);
+}
+
+.chat-style-gemini .bubble-content {
+  font-size: 15px;
+  line-height: 1.7;
+  color: inherit;
+}
+.chat-style-gemini .bubble-meta {
+  font-size: 11px;
+  color: var(--b3g-text-mute);
+  margin-top: 8px;
+}
+.chat-style-gemini .bubble-actions a {
+  font-size: 11px;
+  color: var(--b3g-text-mute);
+}
+.chat-style-gemini .bubble-actions a:hover { color: var(--b3g-blue); }
+
+.chat-style-gemini .bubble-tools {
+  border-top: none;
+  margin-top: 12px;
+  padding-top: 0;
+}
+.chat-style-gemini .bubble-tools details {
+  background: var(--b3g-tool-bg);
+  border: 1px solid var(--b3g-tool-border);
+  border-left: 3px solid var(--b3g-blue);
+  border-radius: 0 8px 8px 0;
+  margin: 12px 0;
+  overflow: hidden;
+}
+.chat-style-gemini .bubble-tools summary {
+  background: transparent;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--b3g-text);
+}
+.chat-style-gemini .bubble-tools .tool-name { color: var(--b3g-blue); }
+.chat-style-gemini .bubble-tools pre {
+  background: var(--b3g-code-bg);
+  color: var(--b3g-code-fg);
+  border-radius: 0;
+  margin: 0;
+  padding: 10px 14px;
+  font-size: 12px;
+}
+
+.chat-style-gemini .bubble-cache {
+  font-size: 10px;
+  color: var(--b3g-text-mute);
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--b3g-tool-border);
+}
+.chat-style-gemini .bubble-cache .cache-badge { font-size: 9px; }
+
+.chat-style-gemini .chat-bubble.error {
+  background: #fce8e6;
+  border: 1px solid #f6aea9;
+  color: #c5221f;
+  border-radius: 12px;
+  padding: 14px 20px;
+}
+
+/* Branch chips: Gemini-blue accent on active. */
+.chat-style-gemini .branch-strip {
+  border-color: var(--b3g-tool-border);
+}
+.chat-style-gemini .branch-strip .branch-chip.active {
+  border-color: var(--b3g-blue);
+  color: var(--b3g-blue);
+  background: var(--b3g-bubble-user-bg);
+}
+
+/* Streaming indicator: pulsing sparkle on the assistant avatar. */
+.chat-style-gemini .chat-bubble.assistant:has(.placeholder)::before {
+  animation: b3gPulse 1.6s ease-in-out infinite;
+}
+@keyframes b3gPulse {
+  0%, 100% { transform: scale(1); filter: brightness(1); }
+  50%      { transform: scale(1.1); filter: brightness(1.3); }
+}
+.chat-style-gemini .chat-bubble.assistant .placeholder {
+  color: var(--b3g-text-mute);
+  font-style: normal;
+}

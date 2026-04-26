@@ -35,6 +35,9 @@ var chatStyleAnthropicCSS string
 //go:embed assets/chat-style-openai.css
 var chatStyleOpenAICSS string
 
+//go:embed assets/chat-style-gemini.css
+var chatStyleGeminiCSS string
+
 //go:embed assets/admin.js
 var adminJS string
 
@@ -42,7 +45,7 @@ var adminJS string
 // base styles first, then per-style overrides scoped under their
 // .chat-style-* class. Keeping per-style CSS scoped means the
 // native style is unaffected when no class is set.
-var allCSS = adminCSS + "\n" + chatStyleAnthropicCSS + "\n" + chatStyleOpenAICSS
+var allCSS = adminCSS + "\n" + chatStyleAnthropicCSS + "\n" + chatStyleOpenAICSS + "\n" + chatStyleGeminiCSS
 
 var adminUI = strings.NewReplacer(
 	"__MESH_CSS__", allCSS,
