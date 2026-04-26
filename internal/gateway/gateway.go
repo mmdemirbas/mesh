@@ -249,11 +249,22 @@ func writeClientError(clientAPI string, w http.ResponseWriter, status int, msg s
 }
 
 // doUpstreamRequest sends body to upstreamURL via POST, applying Content-Type and
-// any extra headers, and returns the response body.
+// any extra headers, and returns the response body. Thin shim over
+// doUpstreamRequestFull that drops the response headers; preserved
+// for the dispatch sites that don't need rate-limit parsing.
 func doUpstreamRequest(ctx context.Context, client *http.Client, upstreamURL string, body []byte, extraHeaders map[string]string, log *slog.Logger) (statusCode int, respBody []byte, err error) {
+	statusCode, _, respBody, err = doUpstreamRequestFull(ctx, client, upstreamURL, body, extraHeaders, log)
+	return
+}
+
+// doUpstreamRequestFull is the rate-limit-aware variant: returns
+// the response headers alongside the status and body so callers can
+// parse Retry-After / x-ratelimit-* / anthropic-ratelimit-* hints
+// (A.4). Behaviorally identical to doUpstreamRequest otherwise.
+func doUpstreamRequestFull(ctx context.Context, client *http.Client, upstreamURL string, body []byte, extraHeaders map[string]string, log *slog.Logger) (statusCode int, respHeaders http.Header, respBody []byte, err error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", upstreamURL, bytes.NewReader(body))
 	if err != nil {
-		return 0, nil, fmt.Errorf("cannot create upstream request: %w", err)
+		return 0, nil, nil, fmt.Errorf("cannot create upstream request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range extraHeaders {
@@ -263,15 +274,15 @@ func doUpstreamRequest(ctx context.Context, client *http.Client, upstreamURL str
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Error("Upstream request failed", "error", err)
-		return 0, nil, fmt.Errorf("upstream request failed: %w", err)
+		return 0, nil, nil, fmt.Errorf("upstream request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err = io.ReadAll(io.LimitReader(resp.Body, maxUpstreamResponseSize))
 	if err != nil {
-		return 0, nil, fmt.Errorf("cannot read upstream response: %w", err)
+		return 0, resp.Header, nil, fmt.Errorf("cannot read upstream response: %w", err)
 	}
-	return resp.StatusCode, respBody, nil
+	return resp.StatusCode, resp.Header, respBody, nil
 }
 
 // handleA2O handles client=Anthropic, upstream=OpenAI translation.
@@ -310,16 +321,24 @@ func handleA2O(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 		au.ReqBody = oaiBody
 	}
 
-	headers := map[string]string{}
-	if upstream.APIKey != "" {
-		headers["Authorization"] = "Bearer " + upstream.APIKey
-	}
-
 	ctx := r.Context()
-	if au := getAuditUpstream(r); au != nil {
+	au := getAuditUpstream(r)
+	sessionID := ""
+	if au != nil {
 		ctx = attachTimingTrace(ctx, au.Timer, au.ReqID)
+		sessionID = au.SessionID
 	}
-	statusCode, respBody, err := doUpstreamRequest(ctx, upstream.Client, upstream.Cfg.Target, oaiBody, headers, log)
+	// A.4 — dispatch with multi-key rotation. For single-key /
+	// passthrough upstreams the wrapper makes a single attempt
+	// equivalent to the legacy doUpstreamRequest call.
+	res := dispatchWithKeyRotation(ctx, upstream, oaiBody, dispatchOpts{
+		UpstreamName: upstream.Cfg.Name,
+		SessionID:    sessionID,
+	}, log)
+	if au != nil {
+		au.Attempts = res.Attempts
+	}
+	statusCode, respBody, err := res.StatusCode, res.Body, res.Err
 	if err != nil {
 		writeAnthropicError(w, 502, err.Error())
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
@@ -327,7 +346,7 @@ func handleA2O(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 	}
 
 	// Record the raw upstream response body for the audit log.
-	if au := getAuditUpstream(r); au != nil {
+	if au != nil {
 		au.RespBody = respBody
 	}
 
@@ -405,17 +424,21 @@ func handleO2A(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 		au.ReqBody = anthBody
 	}
 
-	headers := map[string]string{}
-	if upstream.APIKey != "" {
-		headers["x-api-key"] = upstream.APIKey
-		headers["anthropic-version"] = "2023-06-01"
-	}
-
 	ctx := r.Context()
-	if au := getAuditUpstream(r); au != nil {
+	au := getAuditUpstream(r)
+	sessionID := ""
+	if au != nil {
 		ctx = attachTimingTrace(ctx, au.Timer, au.ReqID)
+		sessionID = au.SessionID
 	}
-	statusCode, respBody, err := doUpstreamRequest(ctx, upstream.Client, upstream.Cfg.Target, anthBody, headers, log)
+	res := dispatchWithKeyRotation(ctx, upstream, anthBody, dispatchOpts{
+		UpstreamName: upstream.Cfg.Name,
+		SessionID:    sessionID,
+	}, log)
+	if au != nil {
+		au.Attempts = res.Attempts
+	}
+	statusCode, respBody, err := res.StatusCode, res.Body, res.Err
 	if err != nil {
 		writeOpenAIError(w, 502, err.Error())
 		log.Error("Upstream request failed", "error", err, "elapsed", time.Since(start))
@@ -423,7 +446,7 @@ func handleO2A(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 	}
 
 	// Record the raw upstream response body for the audit log.
-	if au := getAuditUpstream(r); au != nil {
+	if au != nil {
 		au.RespBody = respBody
 	}
 

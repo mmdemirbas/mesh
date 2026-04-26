@@ -658,6 +658,16 @@ type AuditUpstream struct {
 	// did not run (no recorder), in which case Active.* calls are
 	// no-ops.
 	ReqID uint64
+	// SessionID is the request's session id (captured by
+	// extractSessionInfo) plumbed through here so the dispatch
+	// wrapper can consult it for sticky_session rotation. Empty
+	// when no session header was set and no fingerprint fallback
+	// applied.
+	SessionID string
+	// Attempts is the per-attempt history A.4's dispatch wrapper
+	// records. Surfaced into the audit row by A.6 (the row writer
+	// reads this field after the handler returns).
+	Attempts []Attempt
 }
 
 type auditUpstreamKey struct{}
@@ -851,6 +861,7 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 		upstream, r := WithAuditUpstream(r)
 		upstream.Timer = timer
 		upstream.ReqID = uint64(reqID)
+		upstream.SessionID = sessionID
 
 		// Walk the request body once for top_tool_result and
 		// repeat_reads. analyzeRequest returns nil for branches that
