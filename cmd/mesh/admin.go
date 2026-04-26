@@ -210,10 +210,9 @@ func buildAdminMux(ring *logRing, logFilePath, perfLogPath string) *http.ServeMu
 	mux.HandleFunc("/api/metrics", func(w http.ResponseWriter, r *http.Request) {
 		const cacheTTL = 5 * time.Second
 
-		// Hold the lock for the entire handler to prevent duplicate computation
-		// when concurrent requests arrive after cache expiry.
-		mCacheMu.Lock()
+		// Cache hit: short critical section, return cached body.
 		now := time.Now()
+		mCacheMu.Lock()
 		if now.Sub(mCacheTime) < cacheTTL {
 			body := mCacheBody
 			mCacheMu.Unlock()
@@ -221,6 +220,17 @@ func buildAdminMux(ring *logRing, logFilePath, perfLogPath string) *http.ServeMu
 			_, _ = io.WriteString(w, body)
 			return
 		}
+		mCacheMu.Unlock()
+
+		// Cache miss: compute WITHOUT holding mCacheMu so concurrent
+		// scrapers do not serialize behind the snapshot + openFDCount
+		// work. openFDCount reads /proc/self/fd or the macOS getdirentries
+		// equivalent and can stall under filesystem pressure; if it ever
+		// hangs, holding the cache lock would lock out every other
+		// /api/metrics request indefinitely. The price for releasing the
+		// lock is duplicate computation across concurrent expiries —
+		// bounded by cacheTTL, idempotent, and small relative to the
+		// scrape interval.
 
 		// SnapshotFull takes components and metrics under the same lock to avoid
 		// cardinality divergence. Auth failures are snapshot separately; a brief
@@ -466,6 +476,7 @@ func buildAdminMux(ring *logRing, logFilePath, perfLogPath string) *http.ServeMu
 		fmt.Fprintf(&b, "mesh_state_metrics %d\n", len(metrics))
 
 		body := b.String()
+		mCacheMu.Lock()
 		mCacheBody = body
 		mCacheTime = now
 		mCacheMu.Unlock()
