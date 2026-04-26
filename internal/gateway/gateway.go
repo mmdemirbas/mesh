@@ -193,9 +193,13 @@ func buildRoutingHandler(cfg GatewayCfg, cl ClientCfg, router *Router, recorder 
 		// The inner handler runs after wrapAuditing has captured the original
 		// body, so summarization here does not affect what the audit log records.
 		innerHandler := func(w http.ResponseWriter, r *http.Request) {
-			// A.5: stash the chain on the audit upstream so
-			// handleA2O / handleO2A can walk it via
-			// dispatchAcrossChain.
+			// A.5: stash the chain on the request context so
+			// handleA2O / handleO2A and the streaming handlers can
+			// walk it via dispatchAcrossChain or per-step chain
+			// loops. Pre-fix this rode on au.Chain only, so
+			// streaming gateways without a recorder silently lost
+			// chain semantics (deep-review I2).
+			r = withChain(r, chain)
 			if au := getAuditUpstream(r); au != nil {
 				au.Chain = chain
 			}
@@ -336,13 +340,14 @@ func handleA2O(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 	ctx := r.Context()
 	au := getAuditUpstream(r)
 	sessionID := ""
-	chain := []*ResolvedUpstream{upstream}
 	if au != nil {
 		ctx = attachTimingTrace(ctx, au.Timer, au.ReqID)
 		sessionID = au.SessionID
-		if len(au.Chain) > 0 {
-			chain = au.Chain
-		}
+	}
+	// I2: read chain from request context (independent of audit).
+	chain := chainFromRequest(r)
+	if len(chain) == 0 {
+		chain = []*ResolvedUpstream{upstream}
 	}
 	// A.4/A.5 — dispatch with multi-key rotation across the
 	// configured chain. For single-key single-upstream configs
@@ -443,13 +448,14 @@ func handleO2A(w http.ResponseWriter, r *http.Request, gwName string, upstream *
 	ctx := r.Context()
 	au := getAuditUpstream(r)
 	sessionID := ""
-	chain := []*ResolvedUpstream{upstream}
 	if au != nil {
 		ctx = attachTimingTrace(ctx, au.Timer, au.ReqID)
 		sessionID = au.SessionID
-		if len(au.Chain) > 0 {
-			chain = au.Chain
-		}
+	}
+	// I2: read chain from request context (independent of audit).
+	chain := chainFromRequest(r)
+	if len(chain) == 0 {
+		chain = []*ResolvedUpstream{upstream}
 	}
 	res := dispatchAcrossChain(ctx, chain, anthBody, dispatchOpts{
 		SessionID: sessionID,

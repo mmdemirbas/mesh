@@ -42,58 +42,121 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 		ctx = attachTimingTrace(ctx, au.Timer, au.ReqID)
 		sessionID = au.SessionID
 	}
-	// A.4/A.5: pick a key from the pool for this streaming attempt.
-	// Per design D7, mid-stream errors don't fall back, so this is
-	// a single Pick — no retry across keys mid-stream. But the
-	// rotation policy (round_robin / lru / sticky_session) does
-	// govern which key gets the streaming traffic.
-	streamKey := upstream.Keys.Pick(ctx, RequestContext{Now: time.Now(), SessionID: sessionID})
-	upstreamReq, err := http.NewRequestWithContext(ctx, "POST", upstream.Cfg.Target, bytes.NewReader(oaiBody))
-	if err != nil {
-		writeAnthropicError(w, 500, "cannot create upstream request")
-		return
+	// deep-review I2: read the chain from the request context (set
+	// by buildRoutingHandler) — independent of audit so chain
+	// semantics work even on gateways without a recorder.
+	chain := chainFromRequest(r)
+	if len(chain) == 0 {
+		chain = []*ResolvedUpstream{upstream}
 	}
-	upstreamReq.Header.Set("Content-Type", "application/json")
-	if streamKey != nil && streamKey.Value != "" {
-		hdr := map[string]string{}
-		applyAuthHeaders(hdr, upstream.Cfg.API, streamKey.Value)
-		for k, v := range hdr {
-			upstreamReq.Header.Set(k, v)
+	// Walk the chain. On 200, break and proceed to SSE scan with
+	// that upstream's response. On a chain-advance-eligible error
+	// (429/5xx/network), record the attempt and try the next
+	// element. On 4xx other than 429, fail immediately (request
+	// shape problem; advancing the chain doesn't help).
+	var (
+		streamUpstream *ResolvedUpstream
+		streamKey      *KeyState
+		attemptStart   time.Time
+		upstreamResp   *http.Response
+	)
+	for chainIdx, up := range chain {
+		// A.4/A.5: pick a key from the pool. Per design D7,
+		// mid-stream errors don't fall back — that's enforced by
+		// keeping this a single Pick per chain step (no intra-step
+		// key rotation for streaming).
+		key := up.Keys.Pick(ctx, RequestContext{Now: time.Now(), SessionID: sessionID})
+		upstreamReq, err := http.NewRequestWithContext(ctx, "POST", up.Cfg.Target, bytes.NewReader(oaiBody))
+		if err != nil {
+			// Local request-construction error — not an upstream
+			// signal. Don't advance, just fail. (Marshal-target
+			// is a programming error, not a runtime upstream
+			// problem.)
+			writeAnthropicError(w, 500, "cannot create upstream request")
+			return
 		}
-	} else if upstream.APIKey != "" {
-		// Passthrough fallback: no pool, but legacy single key
-		// configured. Use applyAuthHeaders for API-shape correctness.
-		hdr := map[string]string{}
-		applyAuthHeaders(hdr, upstream.Cfg.API, upstream.APIKey)
-		for k, v := range hdr {
-			upstreamReq.Header.Set(k, v)
+		upstreamReq.Header.Set("Content-Type", "application/json")
+		switch {
+		case key != nil && key.Value != "":
+			hdr := map[string]string{}
+			applyAuthHeaders(hdr, up.Cfg.API, key.Value)
+			for k, v := range hdr {
+				upstreamReq.Header.Set(k, v)
+			}
+		case up.APIKey != "":
+			hdr := map[string]string{}
+			applyAuthHeaders(hdr, up.Cfg.API, up.APIKey)
+			for k, v := range hdr {
+				upstreamReq.Header.Set(k, v)
+			}
 		}
-	}
 
-	upstreamResp, err := upstream.Client.Do(upstreamReq)
-	if err != nil {
-		// REVIEW B1/I1: streaming used to skip key state + audit
-		// attempts entirely. Record a network-error attempt so the
-		// passive health machinery sees this failure and the audit
-		// row carries the upstream/key that was tried.
-		recordStreamAttempt(au, upstream, streamKey, start, 0, nil, nil, err)
+		stepStart := time.Now()
+		resp, err := up.Client.Do(upstreamReq)
+		if err != nil {
+			// Network error before any response. Record + advance
+			// chain if more steps remain.
+			recordStreamAttempt(au, up, key, stepStart, 0, nil, nil, err)
+			if chainIdx < len(chain)-1 {
+				if au != nil && len(au.Attempts) > 0 {
+					au.Attempts[len(au.Attempts)-1].FallbackReason = "chain_advance:network_error"
+				}
+				log.Warn("streaming upstream network error, advancing chain", "upstream", up.Cfg.Name, "error", err)
+				continue
+			}
+			writeAnthropicError(w, 502, "upstream request failed")
+			log.Error("upstream stream request failed", "error", err)
+			return
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			streamUpstream = up
+			streamKey = key
+			attemptStart = stepStart
+			upstreamResp = resp
+			break
+		}
+
+		// Non-200. Read body for audit + translation.
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		recordStreamAttempt(au, up, key, stepStart, resp.StatusCode, resp.Header, errBody, nil)
+
+		outcome := classifyOutcome(resp.StatusCode, nil)
+		if !shouldAdvanceChain(outcome) {
+			// 4xx other than 429 — request shape problem; trying
+			// another upstream won't help.
+			if au != nil {
+				au.RespBody = errBody
+			}
+			status := translateUpstreamErrorStatus(resp.StatusCode, DirA2O)
+			writeAnthropicError(w, status, translatedUpstreamErrorMessage(errBody))
+			log.Warn("upstream stream client error", "status", resp.StatusCode, "body", string(errBody))
+			return
+		}
+		if chainIdx >= len(chain)-1 {
+			// Chain exhausted — return the last error.
+			if au != nil {
+				au.RespBody = errBody
+			}
+			status := translateUpstreamErrorStatus(resp.StatusCode, DirA2O)
+			writeAnthropicError(w, status, translatedUpstreamErrorMessage(errBody))
+			log.Warn("upstream stream error, chain exhausted", "status", resp.StatusCode, "body", string(errBody))
+			return
+		}
+		if au != nil && len(au.Attempts) > 0 {
+			au.Attempts[len(au.Attempts)-1].FallbackReason = "chain_advance:" + string(outcome)
+		}
+		log.Warn("streaming upstream error, advancing chain", "upstream", up.Cfg.Name, "status", resp.StatusCode)
+	}
+	if upstreamResp == nil {
+		// Should be unreachable — every loop branch either breaks
+		// with upstreamResp set, returns to the client, or
+		// continues to the next iteration. Defensive: emit a 502.
 		writeAnthropicError(w, 502, "upstream request failed")
-		log.Error("Upstream stream request failed", "error", err)
 		return
 	}
 	defer func() { _ = upstreamResp.Body.Close() }()
-
-	if upstreamResp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(io.LimitReader(upstreamResp.Body, 4096))
-		if au := getAuditUpstream(r); au != nil {
-			au.RespBody = errBody
-		}
-		recordStreamAttempt(au, upstream, streamKey, start, upstreamResp.StatusCode, upstreamResp.Header, errBody, nil)
-		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, DirA2O)
-		writeAnthropicError(w, status, translatedUpstreamErrorMessage(errBody))
-		log.Warn("Upstream stream error", "status", upstreamResp.StatusCode, "body", string(errBody))
-		return
-	}
 
 	// Set SSE headers.
 	flusher, ok := w.(http.Flusher)
@@ -184,7 +247,9 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 	// REVIEW B1/I1: record stream completion outcome. Mid-stream
 	// scanner errors classify as network errors (not OK); clean
 	// termination classifies as OK and resets consec failures.
-	recordStreamAttempt(au, upstream, streamKey, start, http.StatusOK, upstreamResp.Header, nil, scanErr)
+	// I2: use the upstream/key that the chain settled on (may
+	// not be chain[0] when fallback occurred).
+	recordStreamAttempt(au, streamUpstream, streamKey, attemptStart, http.StatusOK, upstreamResp.Header, nil, scanErr)
 
 	log.Info("Stream completed", "model", clientModel, "elapsed", time.Since(start))
 }

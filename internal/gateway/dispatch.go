@@ -157,6 +157,27 @@ type dispatchError string
 func (e dispatchError) Error() string           { return string(e) }
 func newDispatchError(msg string) dispatchError { return dispatchError(msg) }
 
+// chainContextKey identifies the upstream chain stashed on the
+// request context by buildRoutingHandler. Both streaming and
+// non-streaming handlers consult it so chain fallback works
+// regardless of whether audit recording is enabled — pre-fix the
+// chain rode on the audit upstream, so a gateway without a recorder
+// silently lost chain semantics for streaming (deep-review I2).
+type chainContextKey struct{}
+
+// withChain stashes the resolved upstream chain on the request
+// context.
+func withChain(r *http.Request, chain []*ResolvedUpstream) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), chainContextKey{}, chain))
+}
+
+// chainFromRequest retrieves the resolved upstream chain from the
+// request context, or nil if none was set.
+func chainFromRequest(r *http.Request) []*ResolvedUpstream {
+	v, _ := r.Context().Value(chainContextKey{}).([]*ResolvedUpstream)
+	return v
+}
+
 // recordStreamAttempt mirrors dispatchWithKeyRotation's per-attempt
 // bookkeeping for the streaming path. The streaming handlers cannot
 // reuse dispatchWithKeyRotation directly because that helper buffers

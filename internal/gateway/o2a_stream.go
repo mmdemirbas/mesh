@@ -33,53 +33,99 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 		ctx = attachTimingTrace(ctx, au.Timer, au.ReqID)
 		sessionID = au.SessionID
 	}
-	// A.4/A.5: pick a key from the pool. Single Pick — D7 forbids
-	// mid-stream fallback.
-	streamKey := upstream.Keys.Pick(ctx, RequestContext{Now: time.Now(), SessionID: sessionID})
-	upstreamReq, err := http.NewRequestWithContext(ctx, "POST", upstream.Cfg.Target, bytes.NewReader(anthBody))
-	if err != nil {
-		writeOpenAIError(w, 500, "cannot create upstream request")
-		return
+	// deep-review I2: chain fallback for pre-stream errors. See
+	// a2o_stream.go for the rationale (read from request context so
+	// chain semantics work even without an audit recorder).
+	chain := chainFromRequest(r)
+	if len(chain) == 0 {
+		chain = []*ResolvedUpstream{upstream}
 	}
-	upstreamReq.Header.Set("Content-Type", "application/json")
-	keyValue := ""
-	if streamKey != nil {
-		keyValue = streamKey.Value
-	} else if upstream.APIKey != "" {
-		keyValue = upstream.APIKey
-	}
-	if keyValue != "" {
-		hdr := map[string]string{}
-		applyAuthHeaders(hdr, upstream.Cfg.API, keyValue)
-		for k, v := range hdr {
-			upstreamReq.Header.Set(k, v)
+	var (
+		streamUpstream *ResolvedUpstream
+		streamKey      *KeyState
+		attemptStart   time.Time
+		upstreamResp   *http.Response
+	)
+	for chainIdx, up := range chain {
+		key := up.Keys.Pick(ctx, RequestContext{Now: time.Now(), SessionID: sessionID})
+		upstreamReq, err := http.NewRequestWithContext(ctx, "POST", up.Cfg.Target, bytes.NewReader(anthBody))
+		if err != nil {
+			writeOpenAIError(w, 500, "cannot create upstream request")
+			return
 		}
-	}
+		upstreamReq.Header.Set("Content-Type", "application/json")
+		keyValue := ""
+		switch {
+		case key != nil && key.Value != "":
+			keyValue = key.Value
+		case up.APIKey != "":
+			keyValue = up.APIKey
+		}
+		if keyValue != "" {
+			hdr := map[string]string{}
+			applyAuthHeaders(hdr, up.Cfg.API, keyValue)
+			for k, v := range hdr {
+				upstreamReq.Header.Set(k, v)
+			}
+		}
 
-	upstreamResp, err := upstream.Client.Do(upstreamReq)
-	if err != nil {
-		// REVIEW B1/I1: streaming used to skip key state + audit
-		// attempts entirely. Record a network-error attempt so the
-		// passive health machinery sees this failure and the audit
-		// row carries the upstream/key that was tried.
-		recordStreamAttempt(au, upstream, streamKey, start, 0, nil, nil, err)
+		stepStart := time.Now()
+		resp, err := up.Client.Do(upstreamReq)
+		if err != nil {
+			recordStreamAttempt(au, up, key, stepStart, 0, nil, nil, err)
+			if chainIdx < len(chain)-1 {
+				if au != nil && len(au.Attempts) > 0 {
+					au.Attempts[len(au.Attempts)-1].FallbackReason = "chain_advance:network_error"
+				}
+				log.Warn("streaming upstream network error, advancing chain", "upstream", up.Cfg.Name, "error", err)
+				continue
+			}
+			writeOpenAIError(w, 502, "upstream request failed")
+			log.Error("upstream stream request failed", "error", err)
+			return
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			streamUpstream = up
+			streamKey = key
+			attemptStart = stepStart
+			upstreamResp = resp
+			break
+		}
+
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		recordStreamAttempt(au, up, key, stepStart, resp.StatusCode, resp.Header, errBody, nil)
+
+		outcome := classifyOutcome(resp.StatusCode, nil)
+		if !shouldAdvanceChain(outcome) {
+			if au != nil {
+				au.RespBody = errBody
+			}
+			status := translateUpstreamErrorStatus(resp.StatusCode, DirO2A)
+			writeOpenAIError(w, status, translatedUpstreamErrorMessage(errBody))
+			log.Warn("upstream stream client error", "status", resp.StatusCode, "body", string(errBody))
+			return
+		}
+		if chainIdx >= len(chain)-1 {
+			if au != nil {
+				au.RespBody = errBody
+			}
+			status := translateUpstreamErrorStatus(resp.StatusCode, DirO2A)
+			writeOpenAIError(w, status, translatedUpstreamErrorMessage(errBody))
+			log.Warn("upstream stream error, chain exhausted", "status", resp.StatusCode, "body", string(errBody))
+			return
+		}
+		if au != nil && len(au.Attempts) > 0 {
+			au.Attempts[len(au.Attempts)-1].FallbackReason = "chain_advance:" + string(outcome)
+		}
+		log.Warn("streaming upstream error, advancing chain", "upstream", up.Cfg.Name, "status", resp.StatusCode)
+	}
+	if upstreamResp == nil {
 		writeOpenAIError(w, 502, "upstream request failed")
-		log.Error("Upstream stream request failed", "error", err)
 		return
 	}
 	defer func() { _ = upstreamResp.Body.Close() }()
-
-	if upstreamResp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(io.LimitReader(upstreamResp.Body, 4096))
-		if au := getAuditUpstream(r); au != nil {
-			au.RespBody = errBody
-		}
-		recordStreamAttempt(au, upstream, streamKey, start, upstreamResp.StatusCode, upstreamResp.Header, errBody, nil)
-		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, DirO2A)
-		writeOpenAIError(w, status, translatedUpstreamErrorMessage(errBody))
-		log.Warn("Upstream stream error", "status", upstreamResp.StatusCode, "body", string(errBody))
-		return
-	}
 
 	// Set SSE headers.
 	flusher, ok := w.(http.Flusher)
@@ -161,10 +207,12 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 	// Finalize.
 	st.finalize()
 
-	// REVIEW B1/I1: record stream completion outcome (mid-stream
-	// scanner errors classify as network errors; clean termination
-	// resets consec failures via AttemptOK).
-	recordStreamAttempt(au, upstream, streamKey, start, http.StatusOK, upstreamResp.Header, nil, scanErr)
+	// REVIEW B1/I1/I2: record stream completion outcome on the
+	// upstream/key the chain settled on (may not be chain[0] when
+	// fallback occurred). Mid-stream scanner errors classify as
+	// network errors; clean termination resets consec failures
+	// via AttemptOK.
+	recordStreamAttempt(au, streamUpstream, streamKey, attemptStart, http.StatusOK, upstreamResp.Header, nil, scanErr)
 
 	log.Info("Stream completed", "model", clientModel, "elapsed", time.Since(start))
 }

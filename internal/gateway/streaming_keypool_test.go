@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -166,6 +167,157 @@ func TestRecordStreamAttempt_NilKeyAndAuditSafe(t *testing.T) {
 		t.Errorf("nil-key audit attempt missing upstream_name: %+v", au.Attempts)
 	}
 }
+
+// TestStreamingChainFallback_A2O is the deep-review I2 regression.
+// Pre-fix: streaming dispatch consulted upstream alone; if a `*` rule
+// configured upstream_chain: [primary, secondary] and primary returned
+// 429, the request failed with no attempt at secondary. The fix
+// advances the chain on pre-stream errors. We assert: with primary
+// always returning 429 and secondary returning a valid SSE stream,
+// the client receives the secondary's stream.
+func TestStreamingChainFallback_A2O(t *testing.T) {
+	t.Setenv("CHAIN_TEST_PRIMARY_KEY", "primary-key")
+	t.Setenv("CHAIN_TEST_SECONDARY_KEY", "secondary-key")
+
+	var primaryHits, secondaryHits int64
+	primarySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomicAddInt64(&primaryHits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(429)
+		_, _ = w.Write([]byte(`{"error":{"message":"rate limited"}}`))
+	}))
+	defer primarySrv.Close()
+
+	secondarySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomicAddInt64(&secondaryHits, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		f := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"))
+		f.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		f.Flush()
+	}))
+	defer secondarySrv.Close()
+
+	cfg := GatewayCfg{
+		Name:   "stream-chain-a2o",
+		Client: []ClientCfg{{Bind: pickListenerAddr(t), API: APIAnthropic}},
+		Upstream: []UpstreamCfg{
+			{Name: "primary", Target: primarySrv.URL, API: APIOpenAI, APIKeyEnv: "CHAIN_TEST_PRIMARY_KEY"},
+			{Name: "secondary", Target: secondarySrv.URL, API: APIOpenAI, APIKeyEnv: "CHAIN_TEST_SECONDARY_KEY"},
+		},
+		Routing: []RoutingRule{{ClientModel: []string{"*"}, UpstreamChain: []string{"primary", "secondary"}}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_ = Start(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		close(done)
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+	waitForListenerReady(t, cfg.Client[0].Bind)
+
+	body := `{"model":"claude","stream":true,"max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`
+	resp, err := http.Post("http://"+cfg.Client[0].Bind+"/v1/messages", "application/json", bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	respBytes, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200 (chain fallback should hide primary's 429)", resp.StatusCode)
+	}
+	if !bytes.Contains(respBytes, []byte("hello")) {
+		t.Errorf("response missing secondary's content; got %q", respBytes)
+	}
+	if atomicLoadInt64(&primaryHits) == 0 {
+		t.Errorf("primary should have received the first attempt")
+	}
+	if atomicLoadInt64(&secondaryHits) == 0 {
+		t.Errorf("secondary should have received the fallback attempt; got %d", atomicLoadInt64(&secondaryHits))
+	}
+}
+
+// TestStreamingChainFallback_O2A mirrors the A2O test for the
+// OpenAI→Anthropic streaming direction. Same regression scope:
+// pre-stream 5xx on chain[0] should advance to chain[1] silently.
+func TestStreamingChainFallback_O2A(t *testing.T) {
+	t.Setenv("CHAIN_TEST_O2A_PRIMARY", "primary")
+	t.Setenv("CHAIN_TEST_O2A_SECONDARY", "secondary")
+
+	var primaryHits, secondaryHits int64
+	primarySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomicAddInt64(&primaryHits, 1)
+		w.WriteHeader(503)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"message":"upstream down"}}`))
+	}))
+	defer primarySrv.Close()
+
+	secondarySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomicAddInt64(&secondaryHits, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		f := w.(http.Flusher)
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"claude\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"))
+		f.Flush()
+		_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		f.Flush()
+	}))
+	defer secondarySrv.Close()
+
+	cfg := GatewayCfg{
+		Name:   "stream-chain-o2a",
+		Client: []ClientCfg{{Bind: pickListenerAddr(t), API: APIOpenAI}},
+		Upstream: []UpstreamCfg{
+			{Name: "primary", Target: primarySrv.URL, API: APIAnthropic, APIKeyEnv: "CHAIN_TEST_O2A_PRIMARY"},
+			{Name: "secondary", Target: secondarySrv.URL, API: APIAnthropic, APIKeyEnv: "CHAIN_TEST_O2A_SECONDARY"},
+		},
+		Routing: []RoutingRule{{ClientModel: []string{"*"}, UpstreamChain: []string{"primary", "secondary"}}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_ = Start(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		close(done)
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+	waitForListenerReady(t, cfg.Client[0].Bind)
+
+	body := `{"model":"gpt","stream":true,"max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`
+	resp, err := http.Post("http://"+cfg.Client[0].Bind+"/v1/chat/completions", "application/json", bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200 (chain fallback should hide primary's 503)", resp.StatusCode)
+	}
+	if atomicLoadInt64(&primaryHits) == 0 {
+		t.Errorf("primary should have received the first attempt")
+	}
+	if atomicLoadInt64(&secondaryHits) == 0 {
+		t.Errorf("secondary should have received the fallback attempt")
+	}
+}
+
+// atomicAddInt64 / atomicLoadInt64 wrap atomic.AddInt64 / atomic.LoadInt64
+// so the test stays readable above without an explicit import alias.
+// The Go race detector catches misuse if any caller forgets to use
+// these wrappers.
+func atomicAddInt64(p *int64, n int64) int64 { return atomic.AddInt64(p, n) }
+func atomicLoadInt64(p *int64) int64         { return atomic.LoadInt64(p) }
 
 // TestStreamingPicksFromKeyPool is the post-batch-review regression
 // for finding #1: streaming handlers used to read upstream.APIKey
