@@ -327,13 +327,12 @@ Summarization fires render as a dedicated event line:
 `summarize: removed 94200 → added 2100 bytes  turns_collapsed=8`.
 
 **Cross-reference.** B3 is partially adjacent to
-PLAN_GATEWAY_SEPARATION.local.md, which proposes a
+`archive/PLAN_GATEWAY_SEPARATION.local.md`, which proposed a
 `response_model` config field for visually distinguishing
-gateway-routed sessions inside the LLM client itself. The
-`response_model` design lives in PLAN_GATEWAY_SEPARATION;
-Workstream B3 covers only the admin-UI rendering of the same
-sessions across three view modes. The two efforts are
-independent and can land in either order.
+gateway-routed sessions inside the LLM client itself. Both Parts
+of that plan have shipped (Part 1: `response_model` field; Part
+2: content-breakdown card on the overview tab); Workstream B3
+covers only the admin-UI rendering across the three view modes.
 
 ### B4 — Live request tail at top of admin UI
 

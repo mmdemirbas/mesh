@@ -253,7 +253,8 @@ Each lands as its own commit. `FAST=1 task check` after each.
 ## 5. Source
 
 The substance of this workstream is distilled from
-`PLAN_UX.local.md`, the gitignored personal backlog that
+`PLAN_UX.local.md` (now at `archive/PLAN_UX.local.md` since all
+items are absorbed), the gitignored personal backlog that
 informed Workstream B's UI item references. Items absorbed by
 Workstream B are listed in `PLAN_WORKSTREAM_B_observability.md`
 under the per-item PLAN_UX cross-references; this document
