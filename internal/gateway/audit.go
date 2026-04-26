@@ -88,6 +88,17 @@ type ResponseMeta struct {
 	Headers                      map[string][]string
 	UpstreamReq                  []byte // translated request body sent upstream (set by handler)
 	UpstreamResp                 []byte // raw upstream response body (non-streaming; set by handler)
+	// Workstream A.6 — resilience-path forensics. Attempts is the
+	// per-attempt history dispatchAcrossChain produced; FinalUpstream
+	// and FinalKeyID name the (upstream, key) pair that served the
+	// successful final response, or are empty when every attempt
+	// failed. Empty across the board for legacy / non-chain configs
+	// where dispatch made a single attempt — the row writer omits
+	// Attempts when it has only one entry to keep audit rows tidy
+	// for the dominant single-upstream case.
+	Attempts       []Attempt
+	FinalUpstream  string
+	FinalKeyID     string
 }
 
 // TimingInfo is the §B1 six-segment timing partition. Always emitted
@@ -453,6 +464,18 @@ func (r *Recorder) Response(id RequestID, meta ResponseMeta, body []byte) {
 		}
 		if len(meta.UpstreamResp) > 0 {
 			row["upstream_resp"] = rawOrString(meta.UpstreamResp)
+		}
+	}
+	// A.6 resilience-path fields. Emitted only when more than one
+	// attempt happened — the dominant single-upstream / single-
+	// attempt path leaves the audit row unchanged.
+	if len(meta.Attempts) > 1 {
+		row["attempts"] = meta.Attempts
+		if meta.FinalUpstream != "" {
+			row["final_upstream"] = meta.FinalUpstream
+		}
+		if meta.FinalKeyID != "" {
+			row["final_key_id"] = meta.FinalKeyID
 		}
 	}
 	r.writeRow(row)
@@ -974,6 +997,9 @@ func wrapAuditing(gwName string, upstreamCfg *UpstreamCfg, clientAPI string, rec
 			Headers:                      aw.Header(),
 			UpstreamReq:                  upstream.ReqBody,
 			UpstreamResp:                 upstream.RespBody,
+			Attempts:                     upstream.Attempts,
+			FinalUpstream:                deriveFinalUpstream(upstream.Attempts),
+			FinalKeyID:                   deriveFinalKeyID(upstream.Attempts),
 		}, auditBody)
 	}
 }

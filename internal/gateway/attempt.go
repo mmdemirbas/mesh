@@ -66,3 +66,26 @@ func (a Attempt) Duration() time.Duration {
 	}
 	return a.EndedAt.Sub(a.StartedAt)
 }
+
+// deriveFinalUpstream returns the upstream name of the attempt
+// that produced the final response (success or final failure).
+// The last attempt in the slice is by construction the one that
+// the dispatcher returned with — earlier ones triggered chain
+// advance or key rotation. Empty string when the slice is empty.
+func deriveFinalUpstream(attempts []Attempt) string {
+	if len(attempts) == 0 {
+		return ""
+	}
+	return attempts[len(attempts)-1].UpstreamName
+}
+
+// deriveFinalKeyID returns the key id of the attempt that produced
+// the final response. Same semantics as deriveFinalUpstream;
+// returns the empty string for passthrough (no-key) attempts and
+// for empty slices.
+func deriveFinalKeyID(attempts []Attempt) string {
+	if len(attempts) == 0 {
+		return ""
+	}
+	return attempts[len(attempts)-1].KeyID
+}
