@@ -29,6 +29,7 @@ import (
 
 	"github.com/mmdemirbas/mesh/internal/config"
 	"github.com/mmdemirbas/mesh/internal/netutil"
+	"github.com/mmdemirbas/mesh/internal/nodeutil"
 	"github.com/mmdemirbas/mesh/internal/proxy"
 	"github.com/mmdemirbas/mesh/internal/state"
 )
@@ -1461,6 +1462,7 @@ func handleTCPIPForward(ctx context.Context, req *ssh.Request, sshConn *ssh.Serv
 		go func() {
 			defer wg.Done()
 			defer func() { _ = conn.Close() }()
+			defer nodeutil.RecoverPanic("ssh.handleTCPIPForward connection")
 			origin, ok := conn.RemoteAddr().(*net.TCPAddr)
 			if !ok {
 				return
@@ -1594,6 +1596,7 @@ func acceptAndForward(ctx context.Context, listener net.Listener, dialer func() 
 		go func() {
 			defer wg.Done()
 			defer func() { _ = conn.Close() }()
+			defer nodeutil.RecoverPanic("ssh.acceptAndForward connection")
 			target, err := dialer()
 			if err != nil {
 				log.Debug("Forward dial failed", "error", err)

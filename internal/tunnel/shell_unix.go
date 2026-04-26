@@ -18,6 +18,8 @@ import (
 	"github.com/creack/pty"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/mmdemirbas/mesh/internal/nodeutil"
 )
 
 // sshSignalNumber maps an SSH signal name (RFC 4254 section 6.9) to a Unix signal.
@@ -334,15 +336,18 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 				}
 
 				go func() {
+					defer nodeutil.RecoverPanic("ssh.handleSession.shell-wait (unix)")
 					var wg sync.WaitGroup
 					if ptm != nil {
 						wg.Add(2)
 						go func() {
 							defer wg.Done()
+							defer nodeutil.RecoverPanic("ssh.handleSession.pty-out copy")
 							_, _ = io.Copy(ch, ptm)
 						}()
 						go func() {
 							defer wg.Done()
+							defer nodeutil.RecoverPanic("ssh.handleSession.pty-in copy")
 							_, _ = io.Copy(ptm, ch)
 						}()
 					}
@@ -535,6 +540,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 				// Serve in a goroutine so the request drain loop continues
 				// processing window-change, signal, and other channel requests.
 				go func() {
+					defer nodeutil.RecoverPanic("ssh.handleSession.sftp serve")
 					if err := server.Serve(); err != nil && err != io.EOF {
 						log.Warn("SFTP session error", "error", err)
 					}

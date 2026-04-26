@@ -255,13 +255,28 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 
 	n.purgeFilesDir() // remove any files left over from a previous session
 
-	go n.runHTTPServer(ctx)
+	go func() {
+		defer nodeutil.RecoverPanic("clipsync.runHTTPServer")
+		n.runHTTPServer(ctx)
+	}()
 
 	if len(cfg.LANDiscoveryGroup) > 0 {
-		go n.runUDPServer(ctx, magicHeader, port)
-		go n.runUDPBeacon(ctx, magicHeader, port)
-		go n.cleanupPeers(ctx)
-		go n.refreshHTTPRegistration(ctx)
+		go func() {
+			defer nodeutil.RecoverPanic("clipsync.runUDPServer")
+			n.runUDPServer(ctx, magicHeader, port)
+		}()
+		go func() {
+			defer nodeutil.RecoverPanic("clipsync.runUDPBeacon")
+			n.runUDPBeacon(ctx, magicHeader, port)
+		}()
+		go func() {
+			defer nodeutil.RecoverPanic("clipsync.cleanupPeers")
+			n.cleanupPeers(ctx)
+		}()
+		go func() {
+			defer nodeutil.RecoverPanic("clipsync.refreshHTTPRegistration")
+			n.refreshHTTPRegistration(ctx)
+		}()
 	}
 
 	m := state.Global.GetMetrics("clipsync", cfg.Bind)
@@ -277,7 +292,10 @@ func Start(ctx context.Context, cfg config.ClipsyncCfg) (*Node, error) {
 	activeNodes.Register(n)
 	context.AfterFunc(ctx, func() { activeNodes.Unregister(n) })
 
-	go n.pollClipboard(ctx, pollInterval)
+	go func() {
+		defer nodeutil.RecoverPanic("clipsync.pollClipboard")
+		n.pollClipboard(ctx, pollInterval)
+	}()
 	return n, nil
 }
 
@@ -630,6 +648,7 @@ func isEchoOrigin(addr, origin string) bool {
 }
 
 func (n *Node) postHTTP(addr string, data []byte) {
+	defer nodeutil.RecoverPanic("clipsync.postHTTP")
 	// Scale timeout with payload size: 5s base + 1s per 5 MB.
 	timeout := 5*time.Second + time.Duration(len(data)/(5<<20))*time.Second
 	ctx, cancel := context.WithTimeout(n.ctx, timeout)
@@ -737,6 +756,7 @@ func (n *Node) processPayload(p *pb.SyncPayload, bodySize int, peerHostPort stri
 }
 
 func (n *Node) pullHTTP(peerAddr string) {
+	defer nodeutil.RecoverPanic("clipsync.pullHTTP")
 	slog.Debug("Making outbound HTTP GET pull request", "peer", cleanLogStr(peerAddr)) //nolint:gosec // G706: sanitized via cleanLogStr
 	ctx, cancel := context.WithTimeout(n.ctx, 5*time.Second)
 	defer cancel()
@@ -1690,6 +1710,7 @@ func (n *Node) registerPeer(peerAddr, hash, source string) (isNew, needsPull boo
 // so the peer registers us as a discovered node. This is a firewall-safe
 // fallback for networks where UDP unicast replies are blocked.
 func (n *Node) registerPeerHTTP(peerAddr string) {
+	defer nodeutil.RecoverPanic("clipsync.registerPeerHTTP")
 	n.stateMu.Lock()
 	h := n.lastHash
 	n.stateMu.Unlock()

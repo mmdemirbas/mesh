@@ -16,6 +16,8 @@ import (
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/mmdemirbas/mesh/internal/nodeutil"
 )
 
 // defaultShell returns the Windows shell, preferring modern PowerShell (pwsh.exe).
@@ -89,6 +91,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 	}
 
 	go func() {
+		defer nodeutil.RecoverPanic("ssh.handleSession.session-loop (windows)")
 		defer closeCh()
 		for req := range reqs {
 			switch req.Type {
@@ -205,6 +208,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					}
 
 					go func() {
+						defer nodeutil.RecoverPanic("ssh.handleSession.shell-wait (windows)")
 						err := cmd.Wait()
 						status := uint32(0)
 						if err != nil {
@@ -296,6 +300,7 @@ func handleSession(ctx context.Context, newChan ssh.NewChannel, shellCommand []s
 					}
 					log.Info("SFTP session started", "root", root)
 					go func() {
+						defer nodeutil.RecoverPanic("ssh.handleSession.sftp serve (windows)")
 						if err := server.Serve(); err != nil && err != io.EOF {
 							log.Warn("SFTP session error", "error", err)
 						}

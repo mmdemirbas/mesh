@@ -6,6 +6,8 @@ import (
 	"math/rand/v2"
 	"sync"
 	"time"
+
+	"github.com/mmdemirbas/mesh/internal/nodeutil"
 )
 
 // Workstream A.3 — active health probes.
@@ -64,6 +66,7 @@ func probeLoop(ctx context.Context, wg *sync.WaitGroup, upstreamName string, up 
 	if wg != nil {
 		defer wg.Done()
 	}
+	defer nodeutil.RecoverPanic("gateway.probeLoop")
 	interval := activeInterval(up.Cfg.Health.Active)
 	timeout := activeTimeout(up.Cfg.Health.Active)
 	payload := []byte(up.Cfg.Health.Active.Payload)

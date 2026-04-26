@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/mmdemirbas/mesh/internal/nodeutil"
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
@@ -579,6 +580,10 @@ func (r *Recorder) nextPathLocked(date string) string {
 }
 
 func (r *Recorder) cleanupLoop() {
+	// `defer close(r.cleanupDone)` MUST stay at the top so it fires
+	// on every exit path including a deferred-recover return — Close
+	// blocks on this channel and a never-closed channel turns a
+	// graceful shutdown into a hang requiring SIGKILL.
 	defer close(r.cleanupDone)
 	t := time.NewTicker(24 * time.Hour)
 	defer t.Stop()
@@ -587,7 +592,15 @@ func (r *Recorder) cleanupLoop() {
 		case <-r.stopCleanup:
 			return
 		case <-t.C:
-			r.cleanupOldFiles()
+			// Per-tick recovery: a panic inside cleanupOldFiles
+			// (rare filesystem race, NFS quirk, future code change)
+			// must not end the loop AND must not break the
+			// cleanupDone close above. The closure scopes the
+			// recovery to one tick.
+			func() {
+				defer nodeutil.RecoverPanic("gateway.audit.cleanupOldFiles")
+				r.cleanupOldFiles()
+			}()
 		}
 	}
 }

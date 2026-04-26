@@ -1122,6 +1122,7 @@ func (n *Node) reopenFolder(ctx context.Context, folderID string) error {
 	// is closed via fs.db.Close() at folder shutdown.
 	checkCtx := context.WithoutCancel(ctx)
 	go func() {
+		defer recoverPanic("filesync.runIntegrityCheck (reopen)")
 		if err := runIntegrityCheck(checkCtx, target.db); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
@@ -1221,6 +1222,7 @@ func (n *Node) restoreFromBackup(ctx context.Context, folderID, backupPath strin
 	// the admin endpoint's request lifetime.
 	checkCtx := context.WithoutCancel(ctx)
 	go func() {
+		defer recoverPanic("filesync.runIntegrityCheck (restore)")
 		if err := runIntegrityCheck(checkCtx, target.db); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
@@ -1953,6 +1955,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 		wg.Add(1)
 		go func(fs *folderState, db *sql.DB) {
 			defer wg.Done()
+			defer recoverPanic("filesync.runIntegrityCheck (startup)")
 			if err := runIntegrityCheck(ctx, db); err != nil {
 				if errors.Is(err, context.Canceled) {
 					return
@@ -2494,6 +2497,7 @@ func (n *Node) syncAllPeers(ctx context.Context) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				defer recoverPanic("filesync.syncFolder")
 				n.syncFolder(ctx, fs, peer, sem)
 			}()
 		}
@@ -3086,6 +3090,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				// Pinned by TestDownload_HoldsClaimUntilTxCommit.
 				defer wg.Done()
 				defer fs.releasePath(action.Path)
+				defer recoverPanic("filesync.ActionDownload")
 				select {
 				case sem <- struct{}{}:
 				case <-ctx.Done():
@@ -3259,6 +3264,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			go func() {
 				defer wg.Done()
 				defer fs.releasePath(action.Path)
+				defer recoverPanic("filesync.ActionConflict")
 				select {
 				case sem <- struct{}{}:
 				case <-ctx.Done():
@@ -3522,6 +3528,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 			go func() {
 				defer wg.Done()
 				defer fs.releasePath(action.Path)
+				defer recoverPanic("filesync.ActionDelete")
 				select {
 				case sem <- struct{}{}:
 				case <-ctx.Done():

@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/mmdemirbas/mesh/internal/nodeutil"
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
@@ -19,6 +20,7 @@ const (
 // startSelfMonitor periodically checks process-level metrics and logs warnings
 // when thresholds are exceeded. Runs until ctx is cancelled.
 func startSelfMonitor(ctx context.Context, log *slog.Logger) {
+	defer nodeutil.RecoverPanic("cmd/mesh.startSelfMonitor")
 	ticker := time.NewTicker(selfMonInterval)
 	defer ticker.Stop()
 	for {
