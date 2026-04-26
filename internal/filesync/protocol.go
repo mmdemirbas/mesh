@@ -429,6 +429,14 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown folder", http.StatusNotFound)
 		return
 	}
+	// Runtime-disabled folders (open failed, integrity check failed,
+	// legacy index refused) carry a nil folder.root / folder.dbReader,
+	// so any handler that dereferences those would panic. The check
+	// covers every state the audit's R8 / Z6 lifecycle can leave.
+	if folder.IsDisabled() {
+		http.Error(w, "folder disabled", http.StatusServiceUnavailable)
+		return
+	}
 
 	// Validate direction: only serve files if we're allowed to send.
 	switch folder.cfg.Direction {
@@ -523,6 +531,10 @@ func (s *server) handleBundle(w http.ResponseWriter, r *http.Request) {
 	folder := s.node.findFolder(req.FolderId)
 	if folder == nil {
 		http.Error(w, "unknown folder", http.StatusNotFound)
+		return
+	}
+	if folder.IsDisabled() {
+		http.Error(w, "folder disabled", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -647,6 +659,10 @@ func (s *server) handleDelta(w http.ResponseWriter, r *http.Request) {
 	folder := s.node.findFolder(req.GetFolderId())
 	if folder == nil {
 		http.Error(w, "unknown folder", http.StatusNotFound)
+		return
+	}
+	if folder.IsDisabled() {
+		http.Error(w, "folder disabled", http.StatusServiceUnavailable)
 		return
 	}
 	switch folder.cfg.Direction {
@@ -778,6 +794,10 @@ func (s *server) handleBlockSigs(w http.ResponseWriter, r *http.Request) {
 	folder := s.node.findFolder(folderID)
 	if folder == nil {
 		http.Error(w, "unknown folder", http.StatusNotFound)
+		return
+	}
+	if folder.IsDisabled() {
+		http.Error(w, "folder disabled", http.StatusServiceUnavailable)
 		return
 	}
 	switch folder.cfg.Direction {

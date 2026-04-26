@@ -339,6 +339,60 @@ func TestPerfSnapshot_EmitsFolderStats(t *testing.T) {
 	}
 }
 
+// TestPerfSnapshot_DisabledFolderDoesNotPanic pins the production
+// crash signature reported in /Users/md/.mesh/log/client.log:
+//
+//	panic: runtime error: invalid memory address or nil pointer dereference
+//	github.com/mmdemirbas/mesh/internal/filesync.perfSnapshotEvent
+//	    perflog.go:328 +0x18c
+//
+// fired every time the once-a-minute perfSnapshot ticker landed on a
+// folder whose open path failed (legacy index refused, integrity
+// check failed, etc.) — fs.index is nil for those folders, but
+// perfSnapshotEvent dereferenced it unconditionally. The folder must
+// still appear in the snapshot output (operators rely on it to spot
+// stuck folders) so the fix carries the disabled state through, not
+// a skip.
+func TestPerfSnapshot_DisabledFolderDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	disabled := &folderState{}
+	disabled.disabled.Store(&DisabledState{Reason: "legacy_index_refused"})
+	folders := map[string]*folderState{"broken": disabled}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("perfSnapshotEvent panicked on disabled folder: %v", r)
+		}
+	}()
+	got := perfSnapshotEvent(folders)
+	fs, ok := got["folders"].([]map[string]any)
+	if !ok || len(fs) != 1 {
+		t.Fatalf("expected 1 folder entry, got %+v", got["folders"])
+	}
+	if fs[0]["disabled"] != true {
+		t.Errorf("expected disabled=true, got %+v", fs[0])
+	}
+	if fs[0]["disabled_reason"] != "legacy_index_refused" {
+		t.Errorf("expected reason carried, got %+v", fs[0])
+	}
+}
+
+// TestPerfSnapshot_NilIndexDoesNotPanic covers the narrower case
+// where a folder is technically not flagged disabled but its index
+// has not yet been populated (open in flight, race window between
+// folder registration and openFolderInit). The metrics map is
+// always non-nil because folderState's metrics is a value type.
+func TestPerfSnapshot_NilIndexDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	folders := map[string]*folderState{"empty": {}}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("perfSnapshotEvent panicked on nil-index folder: %v", r)
+		}
+	}()
+	_ = perfSnapshotEvent(folders)
+}
+
 func TestPerfDownload_EmitsExpectedFields(t *testing.T) {
 	t.Parallel()
 	got := perfDownloadEvent(DownloadPerfSummary{

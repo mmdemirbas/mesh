@@ -397,7 +397,7 @@ func GetFolderPath(folderID string) (string, bool) {
 		if found {
 			return
 		}
-		if fs, ok := n.folders[folderID]; ok {
+		if fs := n.findFolder(folderID); fs != nil {
 			path = fs.cfg.Path
 			found = true
 		}
@@ -416,7 +416,7 @@ func folderCacheDirFor(folderID string) (string, bool) {
 		if found {
 			return
 		}
-		if _, ok := n.folders[folderID]; ok {
+		if n.findFolder(folderID) != nil {
 			dir = filepath.Join(n.dataDir, folderID)
 			found = true
 		}
@@ -935,7 +935,9 @@ func (n *Node) runBackupSweep(ctx context.Context) {
 	reopenLockMu.Lock()
 	defer reopenLockMu.Unlock()
 
-	for id, fs := range n.folders {
+	for _, entry := range n.folderEntries() {
+		id := entry.ID
+		fs := entry.FS
 		if fs.IsDisabled() || fs.db == nil {
 			continue
 		}
@@ -1976,6 +1978,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer recoverPanic("filesync.evictStalePending loop")
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -1983,7 +1986,10 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				srv.evictStalePending()
+				func() {
+					defer recoverPanic("filesync.evictStalePending tick")
+					srv.evictStalePending()
+				}()
 			}
 		}
 	}()
@@ -2024,6 +2030,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer recoverPanic("filesync.scanLoop")
 		n.scanLoop(ctx, scanInterval, watcher)
 	}()
 
@@ -2031,6 +2038,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer recoverPanic("filesync.syncLoop")
 		n.syncLoop(ctx)
 	}()
 
@@ -2038,6 +2046,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer recoverPanic("filesync.perfSnapshot loop")
 		snapTicker := time.NewTicker(1 * time.Minute)
 		defer snapTicker.Stop()
 		for {
@@ -2045,7 +2054,20 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			case <-ctx.Done():
 				return
 			case <-snapTicker.C:
-				perfSnapshot(n.folders)
+				// Per-iteration recover: a panic in a single tick
+				// (e.g. nil-deref against a freshly-disabled folder)
+				// must not kill the loop. The outer defer recovers
+				// only if the tick logic re-panics during recovery.
+				func() {
+					defer recoverPanic("filesync.perfSnapshot tick")
+					// folderEntries() takes foldersMu.RLock so a concurrent
+					// reopen / restore can never race the snapshot reader.
+					snap := make(map[string]*folderState)
+					for _, e := range n.folderEntries() {
+						snap[e.ID] = e.FS
+					}
+					perfSnapshot(snap)
+				}()
 			}
 		}
 	}()
@@ -2059,6 +2081,7 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer recoverPanic("filesync.runBackupSweep loop")
 		t := time.NewTicker(backupCadence)
 		defer t.Stop()
 		for {
@@ -2066,7 +2089,10 @@ func Start(ctx context.Context, cfg config.FilesyncCfg) error {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				n.runBackupSweep(ctx)
+				func() {
+					defer recoverPanic("filesync.runBackupSweep tick")
+					n.runBackupSweep(ctx)
+				}()
 			}
 		}
 	}()
@@ -2161,11 +2187,17 @@ func (n *Node) scanLoop(ctx context.Context, interval time.Duration, watcher *fo
 			return
 		case <-ticker.C:
 			// Periodic: scan all folders as a safety net.
-			n.runScan(ctx, nil)
+			func() {
+				defer recoverPanic("filesync.scanLoop periodic tick")
+				n.runScan(ctx, nil)
+			}()
 		case <-dirtyCh:
 			// Targeted: only scan the folders whose roots received events.
-			dirtyRoots := watcher.drainDirtyRoots()
-			n.runScan(ctx, dirtyRoots)
+			func() {
+				defer recoverPanic("filesync.scanLoop dirty tick")
+				dirtyRoots := watcher.drainDirtyRoots()
+				n.runScan(ctx, dirtyRoots)
+			}()
 		}
 	}
 }
@@ -2423,7 +2455,10 @@ func (n *Node) syncLoop(ctx context.Context) {
 	defer ticker.Stop()
 
 	for {
-		n.syncAllPeers(ctx)
+		func() {
+			defer recoverPanic("filesync.syncAllPeers tick")
+			n.syncAllPeers(ctx)
+		}()
 
 		select {
 		case <-ctx.Done():
@@ -3680,8 +3715,8 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 // are an implementation detail of how a peer reads "what version of
 // this folder are you at right now."
 func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.IndexExchange {
-	fs, ok := n.folders[folderID]
-	if !ok {
+	fs := n.findFolder(folderID)
+	if fs == nil {
 		return &pb.IndexExchange{
 			ProtocolVersion: protocolVersion,
 			IndexModel:      FILESYNC_INDEX_MODEL,
@@ -3804,7 +3839,9 @@ func (n *Node) isPeerConfigured(requestIP string) bool {
 // Per-folder failures are logged and the loop continues — every
 // folder gets its persist attempt within the shared deadline.
 func (n *Node) persistAllCtx(shutdownCtx context.Context) {
-	for id, fs := range n.folders {
+	for _, entry := range n.folderEntries() {
+		id := entry.ID
+		fs := entry.FS
 		// Swap the folder's writerCtx for the shutdown-wide ctx.
 		// Saved state is restored on exit so post-shutdown
 		// teardown of the folder still observes a sane writerCtx
@@ -3836,8 +3873,8 @@ func (n *Node) persistAllCtx(shutdownCtx context.Context) {
 // commit succeeds. On commit failure the dirty/deleted sets stay
 // populated so the next cycle retries the same rows.
 func (n *Node) persistFolder(folderID string, force bool) {
-	fs, ok := n.folders[folderID]
-	if !ok {
+	fs := n.findFolder(folderID)
+	if fs == nil {
 		return
 	}
 	if fs.db == nil {

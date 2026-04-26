@@ -317,16 +317,45 @@ func perfDownload(s DownloadPerfSummary) {
 // perfSnapshot emits a periodic process-level snapshot.
 // perfSnapshotEvent builds the snapshot event map. Split out so tests can
 // assert on field shape without touching the global logger.
+//
+// Disabled folders (open failed, integrity check failed, legacy index
+// refused) carry a nil fs.index / fs.peers — surfacing them with the
+// metrics-only attributes plus a "disabled" flag avoids the per-minute
+// nil-pointer panic the periodic snapshot used to fire on a node with
+// any disabled folder. The crash signature was reproducible: SIGSEGV
+// at perflog.go in `fs.index.Sequence` whenever the snapshot ticker
+// landed on a disabled folder.
 func perfSnapshotEvent(folders map[string]*folderState) map[string]any {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 
 	folderStats := make([]map[string]any, 0, len(folders))
 	for id, fs := range folders {
+		if fs == nil {
+			continue
+		}
+		if disabled := fs.disabled.Load(); disabled != nil {
+			folderStats = append(folderStats, map[string]any{
+				"id":               id,
+				"disabled":         true,
+				"disabled_reason":  string(disabled.Reason),
+				"bytes_downloaded": fs.metrics.BytesDownloaded.Load(),
+				"bytes_uploaded":   fs.metrics.BytesUploaded.Load(),
+				"files_downloaded": fs.metrics.FilesDownloaded.Load(),
+				"sync_errors":      fs.metrics.SyncErrors.Load(),
+			})
+			continue
+		}
 		fs.indexMu.RLock()
-		count, size := fs.index.activeCountAndSize()
-		seq := fs.index.Sequence
-		mapLen := fs.index.Len()
+		var count int
+		var size int64
+		var seq int64
+		var mapLen int
+		if fs.index != nil {
+			count, size = fs.index.activeCountAndSize()
+			seq = fs.index.Sequence
+			mapLen = fs.index.Len()
+		}
 		peerCount := len(fs.peers)
 		pendingCount := len(fs.pending)
 		fs.indexMu.RUnlock()
