@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -163,6 +164,54 @@ func TestSummarizeMessages_WithMockSummarizer(t *testing.T) {
 	}
 	if !strings.Contains(firstContent, "file operations") {
 		t.Errorf("summary content not found in first message: %s", firstContent[:minInt(len(firstContent), 100)])
+	}
+}
+
+// TestSummarizerCall_PicksFromKeyPool is the deep-review I4
+// regression. Pre-fix summarizerCall read summarizer.APIKey
+// (= values[0]) directly, so a multi-key summarizer pool always
+// used the first key regardless of rotation_policy. With round_robin
+// across two keys we should see both keys receive traffic.
+func TestSummarizerCall_PicksFromKeyPool(t *testing.T) {
+	t.Parallel()
+	var hits sync.Map // bearer string -> count
+	sumServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if v, ok := hits.LoadOrStore(auth, 1); ok {
+			hits.Store(auth, v.(int)+1)
+		}
+		_ = json.NewEncoder(w).Encode(ChatCompletionResponse{
+			ID: "x", Model: "m",
+			Choices: []OpenAIChoice{{
+				Message:      OpenAIMsg{Role: "assistant", Content: json.RawMessage(`"summary"`)},
+				FinishReason: "stop",
+			}},
+			Usage: &OpenAIUsage{PromptTokens: 1, CompletionTokens: 1},
+		})
+	}))
+	defer sumServer.Close()
+
+	pool, err := NewKeyPool([]string{"SUM_A", "SUM_B"}, []string{"sum-aaa", "sum-bbb"}, "round_robin")
+	if err != nil {
+		t.Fatalf("NewKeyPool: %v", err)
+	}
+	summarizer := &ResolvedUpstream{
+		Cfg:    UpstreamCfg{Name: "sum", Target: sumServer.URL, API: APIOpenAI},
+		Client: http.DefaultClient,
+		APIKey: "sum-aaa", // legacy field — should NOT be the only key used
+		Keys:   pool,
+	}
+
+	prefix := []AnthropicMsg{{Role: "user", Content: json.RawMessage(`"hi"`)}}
+	for i := 0; i < 4; i++ {
+		if _, err := summarizerCall(context.Background(), prefix, summarizer, silentLogger()); err != nil {
+			t.Fatalf("summarizerCall iter %d: %v", i, err)
+		}
+	}
+	a, _ := hits.Load("Bearer sum-aaa")
+	b, _ := hits.Load("Bearer sum-bbb")
+	if a == nil || b == nil {
+		t.Errorf("expected both keys to receive traffic; sum-aaa=%v sum-bbb=%v", a, b)
 	}
 }
 

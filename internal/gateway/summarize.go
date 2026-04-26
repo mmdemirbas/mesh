@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"strings"
+	"time"
 )
 
 // defaultKeepRecent is the number of trailing messages preserved verbatim
@@ -152,9 +153,23 @@ func summarizerCall(
 	if err != nil {
 		return "", fmt.Errorf("marshal summarizer request: %w", err)
 	}
+	// deep-review I4: pick from the summarizer's key pool instead of
+	// reading the legacy APIKey field directly. Pre-fix the
+	// summarizer always used values[0] regardless of pool size or
+	// rotation policy — the second key in a multi-key summarizer
+	// upstream was never used, so the first key hit its rate limit
+	// first and summarization failed while headroom existed.
 	headers := map[string]string{}
-	if summarizer.APIKey != "" {
-		headers["Authorization"] = "Bearer " + summarizer.APIKey
+	summaryKey := summarizer.Keys.Pick(ctx, RequestContext{Now: time.Now()})
+	switch {
+	case summaryKey != nil && summaryKey.Value != "":
+		applyAuthHeaders(headers, summarizer.Cfg.API, summaryKey.Value)
+	case summarizer.APIKey != "":
+		// Legacy fallback: pool empty (passthrough config) but a
+		// literal API key is set. Use applyAuthHeaders for
+		// API-shape correctness even though validation enforces
+		// summarizer.API == APIOpenAI.
+		applyAuthHeaders(headers, summarizer.Cfg.API, summarizer.APIKey)
 	}
 	statusCode, respBody, err := doUpstreamRequest(ctx, summarizer.Client, summarizer.Cfg.Target, oaiBody, headers, log)
 	if err != nil {
