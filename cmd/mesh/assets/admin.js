@@ -2210,7 +2210,55 @@ function renderTurnDetails(req, resp) {
   if (u && (u.input_tokens || u.output_tokens || u.cache_read_input_tokens || u.cache_creation_input_tokens)) {
     html += renderTokenBar(u);
   }
+  // A.7: resilience-path forensics. Only present on multi-attempt
+  // rows (A.6 omits the field for single-attempt steady-state
+  // requests).
+  html += renderAttemptsSection(resp);
   return html;
+}
+
+// renderAttemptsSection renders the resilience-path forensics — one
+// row per attempt with upstream, key id, outcome, status, duration,
+// and the fallback reason that triggered the next step. Empty when
+// the audit row has no attempts (the dominant single-attempt case).
+function renderAttemptsSection(resp) {
+  const attempts = Array.isArray(resp && resp.attempts) ? resp.attempts : [];
+  if (attempts.length < 2) return '';
+  const finalUp = resp.final_upstream || '';
+  const finalKey = resp.final_key_id || '';
+  const headline = '<div class="section-title" style="margin-top:12px">' +
+    'Resilience path · ' + attempts.length + ' attempts' +
+    (finalUp ? ' · final: <span style="color:'+modelColor(finalUp)+'">'+x(finalUp)+'</span>' : '') +
+    (finalKey ? ' <code style="color:var(--text-muted);font-size:11px">['+x(finalKey)+']</code>' : '') +
+    '</div>';
+  const rows = attempts.map((a, i) => {
+    const upName = a.upstream_name || '?';
+    const key = a.key_id || '-';
+    const status = a.status_code || 0;
+    const outcome = a.outcome || 'unknown';
+    const reason = a.fallback_reason || '';
+    const dur = (a.started_at && a.ended_at) ?
+      Math.max(0, new Date(a.ended_at).getTime() - new Date(a.started_at).getTime()) + 'ms' : '';
+    const outColor = outcome === 'ok' ? 'var(--green)'
+                   : outcome === 'rate_limited' ? 'var(--yellow)'
+                   : (outcome === 'upstream_error' || outcome === 'network_error' || outcome === 'timeout') ? 'var(--red)'
+                   : 'var(--text-dim)';
+    return '<tr>' +
+      '<td class="mk" style="width:24px;text-align:right">'+(i+1)+'.</td>' +
+      '<td class="mv" style="color:'+modelColor(upName)+'">'+x(upName)+'</td>' +
+      '<td class="mv" style="color:var(--text-muted);font-size:11px">'+x(key)+'</td>' +
+      '<td class="mv" style="color:'+outColor+'">'+x(outcome)+'</td>' +
+      '<td class="mv" style="color:var(--text-dim)">'+(status||'')+'</td>' +
+      '<td class="mv" style="color:var(--text-dim)">'+x(dur)+'</td>' +
+      '<td class="mv" style="color:var(--text-muted);font-size:11px">'+x(reason)+'</td>' +
+    '</tr>';
+  }).join('');
+  return headline +
+    '<table class="meta-tbl" style="font-size:12px"><thead><tr style="color:var(--text-muted);font-size:10px;text-transform:uppercase">' +
+      '<th></th><th style="text-align:left">upstream</th><th style="text-align:left">key</th>' +
+      '<th style="text-align:left">outcome</th><th style="text-align:left">status</th>' +
+      '<th style="text-align:left">elapsed</th><th style="text-align:left">fallback reason</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
 // renderTokenBar draws the four-segment horizontal stack used by both the
@@ -5241,6 +5289,15 @@ function showGraphTooltip(nodeID, e) {
     // Schedule a fetch so subsequent hovers carry the snippet.
     maybeFetchPair(n);
     lines.push('<div class="tip-quote" style="color:var(--text-muted)">(loading turn…)</div>');
+  }
+  // A.7: resilience path. When the audit row carries multiple
+  // attempts (chain fallback or key rotation fired), surface the
+  // path summary in the tooltip — operator sees fallback events
+  // without leaving the graph.
+  const pathAttempts = (cached && cached.response && Array.isArray(cached.response.attempts)) ? cached.response.attempts : [];
+  if (pathAttempts.length > 1) {
+    const path = pathAttempts.map(a => a.upstream_name || '?').join(' → ');
+    lines.push('<div class="tip-line" style="color:var(--text-dim);margin-top:4px">path: '+x(path)+'</div>');
   }
   tip.innerHTML = lines.join('');
   tip.style.display = 'block';
