@@ -3383,13 +3383,57 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					// lastSeenSeq below RemoteSequence, re-triggering
 					// the same conflict every cycle indefinitely.
 					//
+					// H8: preserve the remote's bytes as a sibling
+					// .sync-conflict-* file. R11 below merges and bumps
+					// the local clock so it dominates the peer's, which
+					// means the peer will overwrite its own losing copy
+					// with our merged version on the next sync. Without
+					// this preservation step, those bytes are gone from
+					// every peer in the cluster — silent data loss for
+					// concurrent edits. Download failures are non-fatal:
+					// local still wins, we just lose the snapshot.
+					if !action.RemoteHash.IsZero() && conflictRelPath != "" {
+						func() {
+							tmpRelPath, err := downloadToVerifiedTemp(ctx, n.clientForPeer(peerAddr), peerAddr, folderID, action.Path, action.RemoteHash, fs.root, n.rateLimiter)
+							if err != nil {
+								slog.Warn("local-wins conflict snapshot failed",
+									"folder", folderID, "path", action.Path, "error", err)
+								return
+							}
+							if dir := filepath.Dir(conflictRelPath); dir != "." {
+								if err := fs.root.MkdirAll(dir, 0750); err != nil {
+									slog.Warn("create conflict dir failed",
+										"folder", folderID, "path", conflictRelPath, "error", err)
+									_ = fs.root.Remove(tmpRelPath)
+									return
+								}
+							}
+							if err := fs.root.Rename(tmpRelPath, conflictRelPath); err != nil {
+								slog.Warn("rename conflict snapshot failed",
+									"folder", folderID, "path", conflictRelPath, "error", err)
+								_ = fs.root.Remove(tmpRelPath)
+								return
+							}
+							if action.RemoteMtime > 0 {
+								mt := time.Unix(0, action.RemoteMtime)
+								_ = fs.root.Chtimes(conflictRelPath, mt, mt)
+							}
+							cfMode := os.FileMode(action.RemoteMode)
+							if cfMode == 0 {
+								cfMode = 0644
+							}
+							_ = fs.root.Chmod(conflictRelPath, cfMode)
+							pruneConflicts(fs.root, conflictRelPath)
+						}()
+					}
+
 					// R11: merge remote's clock components into local and
 					// bump self so the resolved entry dominates what we saw
 					// from the peer. Without this, the next time the peer
 					// pushes the same (or any concurrent) state, our clock
 					// will still be concurrent with theirs and we'll enter
-					// conflict again. File contents are unchanged — only
-					// the clock and sequence advance to encode the
+					// conflict again. Local file contents are unchanged —
+					// only the clock and sequence advance to encode the
 					// "local-wins" decision.
 					fs.indexMu.Lock()
 					entry, exists := fs.index.Get(action.Path)

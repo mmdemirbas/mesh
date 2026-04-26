@@ -3456,11 +3456,14 @@ func TestResolveConflict_LocalWins(t *testing.T) {
 	if winner != "local" {
 		t.Errorf("expected local to win, got %q", winner)
 	}
-	if conflictPath != "" {
-		t.Errorf("expected empty conflict path for local winner, got %q", conflictPath)
+	// H8: a conflict path is returned for the local-wins branch too so
+	// the caller can preserve the remote's bytes as a sibling. Without
+	// this, divergent remote edits are silently discarded.
+	if conflictPath == "" {
+		t.Error("expected non-empty conflict path for local winner (remote bytes preservation)")
 	}
 
-	// Original should still exist.
+	// Original should still exist (resolveConflict must not rename).
 	if _, err := os.Stat(filepath.Join(dir, "file.txt")); err != nil {
 		t.Error("original file should still exist")
 	}

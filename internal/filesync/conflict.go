@@ -21,15 +21,25 @@ const maxConflictsPerFile = 10
 
 // resolveConflict determines which version of a file wins (local vs remote)
 // and returns the winner ("local" or "remote") along with the conflict file
-// relative path for the loser. Does NOT rename or modify any files — the
-// caller handles the file operations (B13: download must succeed before any
-// rename).
+// relative path. The conflict path always names the loser:
+//
+//   - winner=remote: caller renames the local file to conflictRelPath, then
+//     installs the downloaded remote at the original path (B13: download-
+//     first invariant).
+//   - winner=local: caller writes the remote bytes to conflictRelPath; the
+//     local file is untouched. Without this branch the remote bytes would
+//     be silently discarded — once the local-wins peer's clock-merged
+//     update propagates back, the remote peer also overwrites its own copy
+//     with no record kept (silent data loss in concurrent edits).
+//
+// resolveConflict does NOT touch the filesystem — the caller performs all
+// file operations.
 //
 // L5: uses os.Root for stat operations to prevent symlink TOCTOU.
 //
 // Strategy: newer mtime wins. The loser is saved as:
 //
-//	<name>.sync-conflict-<YYYYMMDD-HHMMSS>-<deviceShort>.<ext>
+//	<name>.sync-conflict-<YYYYMMDD-HHMMSS>-<deviceShort>-<rand>.<ext>
 func resolveConflict(root *os.Root, relPath string, localMtimeNS, remoteMtimeNS int64, remoteDeviceID string) (winner, conflictRelPath string) {
 	// Use the file's current on-disk mtime rather than the scan-time value —
 	// the user may have edited the file between scan and resolution, and
@@ -40,12 +50,6 @@ func resolveConflict(root *os.Root, relPath string, localMtimeNS, remoteMtimeNS 
 		localMtimeNS = info.ModTime().UnixNano()
 	}
 
-	// Determine winner by mtime. If equal, remote wins to avoid data loss.
-	if localMtimeNS > remoteMtimeNS {
-		return "local", ""
-	}
-
-	// Remote wins — compute conflict name for the local file.
 	// F13: unconditionally append a random suffix to prevent TOCTOU
 	// races. Without it, two goroutines resolving the same conflict
 	// can both Stat (see no collision), produce the same name, and one
@@ -57,6 +61,10 @@ func resolveConflict(root *os.Root, relPath string, localMtimeNS, remoteMtimeNS 
 	_, _ = rand.Read(b)
 	conflictName = stem + "-" + hex.EncodeToString(b) + ext
 
+	// Determine winner by mtime. If equal, remote wins to avoid data loss.
+	if localMtimeNS > remoteMtimeNS {
+		return "local", conflictName
+	}
 	return "remote", conflictName
 }
 
