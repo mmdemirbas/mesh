@@ -576,6 +576,11 @@ select option { background: var(--bg-card); color: var(--text); }
 .gw-scroll { max-height: 65vh; overflow: auto; }
 .gw-scroll table thead th { position: sticky; top: 0; background: var(--bg-card); z-index: 1; }
 
+/* D4: auto-hide the Upstream column when every visible row has
+ * upstream model == client model. Toggled in JS via the
+ * `hide-upstream` class on the surrounding <table>. */
+table.hide-upstream .gw-col-upstream { display: none; }
+
 .gw-turn {
   display: grid; grid-template-columns: 60px 1fr auto; gap: 8px;
   padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px;

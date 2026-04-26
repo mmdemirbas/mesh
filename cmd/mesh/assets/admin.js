@@ -1866,6 +1866,14 @@ function renderGateway() {
     const filtered = TF.apply('gw', preFiltered);
 
     const body = document.getElementById('gw-body');
+    // D4: auto-hide the Upstream column when no row in the visible
+    // set has upstream != client. CSS rule on `.hide-upstream
+    // .gw-col-upstream` collapses both header and cells. Empty
+    // filter set (no rows) defaults to collapsed.
+    const hideUpstream = filtered.every(p => {
+      const upM = p.req.mapped_model || (p.resp.stream_summary || {}).model || '';
+      return !upM || upM === (p.req.model || '');
+    });
     if (!filtered.length) {
       body.innerHTML = '<tr><td colspan="15" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
     } else {
@@ -1892,7 +1900,7 @@ function renderGateway() {
         '<td><code style="color:'+sidClr+';font-size:11px" title="'+xa(sid)+'">'+x(sidShort)+'</code></td>'+
         '<td style="color:'+dirColor(dir)+'">'+x(dir)+'</td>'+
         '<td style="color:'+modelColor(model)+'">'+x(model)+'</td>'+
-        '<td style="color:'+(upModel && upModel !== model ? modelColor(upModel) : 'var(--text-muted)')+'">'+(upModel && upModel !== model ? x(upModel) : '-')+'</td>'+
+        '<td class="gw-col-upstream" style="color:'+(upModel && upModel !== model ? modelColor(upModel) : 'var(--text-muted)')+'">'+(upModel && upModel !== model ? x(upModel) : '-')+'</td>'+
         '<td style="color:'+statusColor+'">'+status+'</td>'+
         '<td style="color:'+outcomeColor+'">'+x(outcome)+'</td>'+
         '<td>'+fmtTokensHtml(u.input_tokens)+'</td>'+
@@ -1905,6 +1913,10 @@ function renderGateway() {
         '</tr>';
     }).join('');
     }
+    // Toggle the auto-hide class on the surrounding table. The CSS
+    // rule on `.hide-upstream .gw-col-upstream` collapses the column.
+    const tbl = document.getElementById('gw-body')?.parentElement;
+    if (tbl) tbl.classList.toggle('hide-upstream', hideUpstream);
   }
   // If a detail card is open, re-resolve it against the new data so the copy
   // buttons reflect the current req/resp and not the stale snapshot from
