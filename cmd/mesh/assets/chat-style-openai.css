@@ -1,0 +1,182 @@
+/* B3.2 — OpenAI-style chat rendering.
+ *
+ * Loose-familiar approximation of ChatGPT's main column. Active
+ * when #sess-bubbles carries .chat-style-openai. Avatar squares
+ * are rendered as ::before pseudo-elements so the bubble HTML
+ * stays unchanged from the native shape.
+ *
+ * Visual cues — see DESIGN_B3_chat_rendering.local.md §4:
+ *   - ~860px max-width, sans-serif throughout.
+ *   - Alternating row tints: user transparent, assistant subtly tinted.
+ *   - 36px rounded-square avatar on the left of each row.
+ *   - Code blocks dark with header bar (existing markdown rules
+ *     fit naturally; nothing to change in the highlighter).
+ *
+ * Trademark margin (§4.4): user-green and assistant-purple are
+ * vendor-evocative but not exact brand colors. The "OpenAI" name
+ * appears nowhere in the UI.
+ */
+
+.chat-style-openai {
+  --b3o-text: #1f2328;
+  --b3o-text-mute: #656d76;
+  --b3o-row-divider: #e5e7eb;
+  --b3o-row-tint: #f7f7f8;
+  --b3o-avatar-user: #19c37d;
+  --b3o-avatar-assistant: #ab68ff;
+  --b3o-code-bg: #161618;
+  --b3o-code-fg: #e8e8e8;
+  --b3o-code-head: #2d2d30;
+  max-width: 860px;
+  margin: 0 auto;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter',
+    'Helvetica Neue', system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--b3o-text);
+}
+
+/* Each bubble becomes a row with [avatar | content] grid. The
+ * existing children (.bubble-role, .bubble-content, .bubble-meta,
+ * etc.) are placed in column 2 by margin manipulation; the avatar
+ * is a pseudo-element in column 1. */
+.chat-style-openai .chat-bubble {
+  display: grid;
+  grid-template-columns: 36px 1fr;
+  gap: 14px;
+  padding: 18px 12px;
+  border-bottom: 1px solid var(--b3o-row-divider);
+  max-width: none;
+  margin: 0;
+  align-self: stretch;
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+}
+.chat-style-openai .chat-bubble.user { background: transparent; }
+.chat-style-openai .chat-bubble.assistant { background: var(--b3o-row-tint); }
+
+/* Avatar squares with rounded corners. Color codes role; user
+ * row gets the green-ish square, assistant gets the generic-AI
+ * purple-ish square. */
+.chat-style-openai .chat-bubble::before {
+  content: '';
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  grid-column: 1;
+  grid-row: 1 / 99;
+  align-self: start;
+}
+.chat-style-openai .chat-bubble.user::before {
+  background: var(--b3o-avatar-user);
+}
+.chat-style-openai .chat-bubble.assistant::before {
+  background: var(--b3o-avatar-assistant);
+}
+.chat-style-openai .chat-bubble.error::before {
+  background: var(--red);
+}
+
+/* Each child cell sits in column 2. */
+.chat-style-openai .chat-bubble > * {
+  grid-column: 2;
+}
+
+.chat-style-openai .bubble-role {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: capitalize;
+  letter-spacing: 0;
+  color: var(--b3o-text);
+  margin-bottom: 4px;
+}
+.chat-style-openai .bubble-content {
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--b3o-text);
+}
+.chat-style-openai .bubble-meta {
+  font-size: 11px;
+  color: var(--b3o-text-mute);
+  margin-top: 8px;
+}
+
+.chat-style-openai .bubble-actions a {
+  font-size: 11px;
+  color: var(--b3o-text-mute);
+}
+.chat-style-openai .bubble-actions a:hover { color: var(--b3o-avatar-assistant); }
+
+.chat-style-openai .bubble-tools {
+  border-top: 1px solid var(--b3o-row-divider);
+  margin-top: 12px;
+  padding-top: 10px;
+}
+.chat-style-openai .bubble-tools details {
+  background: white;
+  border: 1px solid var(--b3o-row-divider);
+  border-radius: 6px;
+  margin-top: 6px;
+}
+.chat-style-openai .bubble-tools summary {
+  background: var(--b3o-row-tint);
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--b3o-text);
+}
+.chat-style-openai .bubble-tools .tool-name { color: var(--b3o-avatar-assistant); }
+.chat-style-openai .bubble-tools pre {
+  background: var(--b3o-code-bg);
+  color: var(--b3o-code-fg);
+  border-radius: 0 0 6px 6px;
+  margin: 0;
+  padding: 10px 14px;
+  font-size: 12px;
+}
+
+.chat-style-openai .bubble-cache {
+  font-size: 10px;
+  color: var(--b3o-text-mute);
+  margin-top: 8px;
+  padding-top: 6px;
+}
+.chat-style-openai .bubble-cache .cache-badge { font-size: 9px; }
+
+.chat-style-openai .chat-bubble.error {
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+/* Branch chips: subtle, sans-serif, color-coded by activity. */
+.chat-style-openai .branch-strip {
+  border-color: var(--b3o-row-divider);
+}
+.chat-style-openai .branch-strip .branch-chip {
+  background: white;
+  color: var(--b3o-text-mute);
+}
+.chat-style-openai .branch-strip .branch-chip.active {
+  border-color: var(--b3o-avatar-assistant);
+  color: var(--b3o-avatar-assistant);
+  background: color-mix(in srgb, var(--b3o-avatar-assistant) 10%, white);
+}
+
+/* Streaming indicator: blinking cursor character after the last
+ * word of the in-flight assistant placeholder. */
+.chat-style-openai .chat-bubble.assistant .placeholder {
+  color: var(--b3o-text-mute);
+  font-style: normal;
+}
+.chat-style-openai .chat-bubble.assistant .placeholder::after {
+  content: "▌";
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--b3o-avatar-assistant);
+  animation: b3oCursor 1s steps(2, jump-none) infinite;
+}
+@keyframes b3oCursor {
+  50% { opacity: 0; }
+}
