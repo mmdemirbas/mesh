@@ -76,16 +76,19 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 			return
 		}
 		upstreamReq.Header.Set("Content-Type", "application/json")
-		switch {
-		case key != nil && key.Value != "":
+		// Apply auth from the picked key only. Pre-fix this had a
+		// fall-through to up.APIKey when Pick returned nil, but
+		// that branch only fired when keys were configured AND all
+		// of them were degraded — i.e., it sent traffic to a key
+		// the pool had explicitly marked as not-usable, defeating
+		// the degradation invariant. (For genuine passthrough
+		// upstreams, len(values)==0 means APIKey is also empty, so
+		// the old fallback never fired in the legitimate case.)
+		// Mirrors dispatchWithKeyRotation which has no APIKey
+		// fallback (deep-review iter-3).
+		if key != nil && key.Value != "" {
 			hdr := map[string]string{}
 			applyAuthHeaders(hdr, up.Cfg.API, key.Value)
-			for k, v := range hdr {
-				upstreamReq.Header.Set(k, v)
-			}
-		case up.APIKey != "":
-			hdr := map[string]string{}
-			applyAuthHeaders(hdr, up.Cfg.API, up.APIKey)
 			for k, v := range hdr {
 				upstreamReq.Header.Set(k, v)
 			}

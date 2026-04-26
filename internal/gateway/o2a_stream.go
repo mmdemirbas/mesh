@@ -54,16 +54,13 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 			return
 		}
 		upstreamReq.Header.Set("Content-Type", "application/json")
-		keyValue := ""
-		switch {
-		case key != nil && key.Value != "":
-			keyValue = key.Value
-		case up.APIKey != "":
-			keyValue = up.APIKey
-		}
-		if keyValue != "" {
+		// Apply auth from the picked key only — see a2o_stream.go's
+		// matching comment for the deep-review iter-3 rationale
+		// (no fall-through to up.APIKey, which would dispatch
+		// traffic on a key already marked degraded).
+		if key != nil && key.Value != "" {
 			hdr := map[string]string{}
-			applyAuthHeaders(hdr, up.Cfg.API, keyValue)
+			applyAuthHeaders(hdr, up.Cfg.API, key.Value)
 			for k, v := range hdr {
 				upstreamReq.Header.Set(k, v)
 			}
