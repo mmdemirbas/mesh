@@ -2227,6 +2227,10 @@ function renderTurnDetails(req, resp) {
   if (u && (u.input_tokens || u.output_tokens || u.cache_read_input_tokens || u.cache_creation_input_tokens)) {
     html += renderTokenBar(u);
   }
+  // B1.4 timing partition bar.
+  if (resp.timing_ms && resp.timing_ms.total > 0) {
+    html += renderTimingBar(resp.timing_ms);
+  }
   // A.7: resilience-path forensics. Only present on multi-attempt
   // rows (A.6 omits the field for single-attempt steady-state
   // requests).
@@ -2307,6 +2311,40 @@ function renderTokenBar(u) {
       seg('seg-input', 'fresh input', fresh) +
       seg('seg-output', 'output', out) +
     '</div>';
+}
+
+// renderTimingBar draws the B1.4 seven-segment horizontal timing
+// stack. Segments partition the request's wall-clock with no gap and
+// no overlap (Other absorbs residual). Colors group by domain:
+// blue-ish for network transit, green for mesh translation work,
+// red for upstream-side wait, grey for unaccounted residual.
+function renderTimingBar(t) {
+  const total = t.total || 0;
+  if (total <= 0) return '';
+  const pct = n => total === 0 ? 0 : (n / total * 100).toFixed(1);
+  const seg = (cls, label, n) => {
+    if (!n || n <= 0) return '';
+    return '<div class="' + cls + '" style="flex:' + n + '" title="' + label + ': ' + n + ' ms (' + pct(n) + '%)">' +
+      (n / total > 0.10 ? n + 'ms' : '') + '</div>';
+  };
+  const segments = [
+    {key: 'client_to_mesh',       label: 'client → mesh',       cls: 'seg-net-in',     hint: 'Network: client request bytes arriving at mesh.'},
+    {key: 'mesh_translation_in',  label: 'mesh translate (in)', cls: 'seg-mesh-in',    hint: 'Mesh-side: parse + translate the client body for the upstream API shape.'},
+    {key: 'mesh_to_upstream',     label: 'mesh → upstream',     cls: 'seg-net-out',    hint: 'Network: connect, TLS, write request body to the upstream.'},
+    {key: 'upstream_processing',  label: 'upstream processing', cls: 'seg-upstream',   hint: 'Upstream-side: time waiting for the upstream to produce response bytes.'},
+    {key: 'mesh_translation_out', label: 'mesh translate (out)', cls: 'seg-mesh-out',   hint: 'Mesh-side: translate response back to the client API shape (per-event for streams).'},
+    {key: 'mesh_to_client',       label: 'mesh → client',       cls: 'seg-net-back',   hint: 'Network: send the (translated) response bytes back to the client.'},
+    {key: 'other',                label: 'other',               cls: 'seg-other',      hint: 'Residual time the partition could not attribute. Usually <5% of total.'},
+  ];
+  const legend = segments.map(s => {
+    const v = t[s.key] || 0;
+    return '<span><i class="' + s.cls + '"></i>' + s.label + ' ' + v + 'ms' + info(s.hint) + '</span>';
+  }).join('');
+  const bar = segments.map(s => seg(s.cls, s.label, t[s.key] || 0)).join('');
+  return '<div class="section-title">timing (total ' + total + 'ms)' +
+    info('Six-segment timing partition (B1). Sum equals total wall-clock; Other absorbs residual.') + '</div>' +
+    '<div class="token-legend">' + legend + '</div>' +
+    '<div class="token-bar">' + bar + '</div>';
 }
 
 // --- Structured request view ---

@@ -610,6 +610,23 @@ table.hide-upstream .gw-col-upstream { display: none; }
 .token-bar .seg-cache-create { background: var(--purple); }
 .token-bar .seg-input { background: var(--cyan); }
 .token-bar .seg-output { background: var(--yellow); }
+/* B1.4 timing-bar segment colors. Network transit = blue family;
+ * mesh translation = green family; upstream = red; residual = grey.
+ * Light/dark variants distinguish in/out for the same domain. */
+.token-bar .seg-net-in    { background: var(--cyan); }
+.token-bar .seg-mesh-in   { background: var(--green); }
+.token-bar .seg-net-out   { background: var(--blue, #4c8bf5); }
+.token-bar .seg-upstream  { background: var(--red); }
+.token-bar .seg-mesh-out  { background: var(--green); opacity: 0.7; }
+.token-bar .seg-net-back  { background: var(--cyan); opacity: 0.7; }
+.token-bar .seg-other     { background: var(--text-muted); }
+.token-legend i.seg-net-in   { background: var(--cyan); }
+.token-legend i.seg-mesh-in  { background: var(--green); }
+.token-legend i.seg-net-out  { background: var(--blue, #4c8bf5); }
+.token-legend i.seg-upstream { background: var(--red); }
+.token-legend i.seg-mesh-out { background: var(--green); opacity: 0.7; }
+.token-legend i.seg-net-back { background: var(--cyan); opacity: 0.7; }
+.token-legend i.seg-other    { background: var(--text-muted); }
 .token-legend { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
 .token-legend span { display: inline-flex; align-items: center; gap: 4px; }
 .token-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
