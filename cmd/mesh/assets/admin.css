@@ -854,6 +854,49 @@ select option { background: var(--bg-card); color: var(--text); }
 .diff-msg.diff-child .diff-msg-content { color: var(--green); }
 .diff-msg.diff-parent .diff-msg-content { color: var(--text-dim); }
 
+/* B5 cache visibility */
+.cache-badge {
+  display: inline-block; padding: 1px 7px; border-radius: 10px;
+  font-size: 11px; font-family: var(--mono);
+  border: 1px solid transparent; white-space: nowrap;
+  cursor: help;
+}
+.cache-badge.high { background: var(--green-dim); color: var(--green); border-color: var(--green); }
+.cache-badge.low { background: var(--yellow-dim); color: var(--yellow); border-color: var(--yellow); }
+.cache-badge.zero { background: var(--red-dim); color: var(--yellow); border-color: var(--yellow); }
+.cache-badge.openai { background: transparent; color: var(--blue); border-color: var(--blue); }
+.cache-badge.none { color: var(--text-muted); border-color: transparent; cursor: default; }
+.cache-badge .badge-tip { display: none; }
+
+.cache-tooltip-content { font-family: var(--mono); font-size: 11px; line-height: 1.5; white-space: pre; }
+
+/* Cache overview card body */
+#gw-cache-content { font-size: 13px; line-height: 1.6; }
+.cache-stat-row { display: flex; align-items: baseline; justify-content: space-between; padding: 4px 0; gap: 12px; }
+.cache-stat-row.headline { font-size: 14px; padding: 8px 0; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+.cache-stat-row .label { color: var(--text-dim); }
+.cache-stat-row .value { font-family: var(--mono); color: var(--text); }
+.cache-stat-row .value.headline-val { font-size: 22px; font-weight: 700; }
+.cache-stat-row .indent { padding-left: 18px; color: var(--text-muted); font-size: 12px; }
+.cache-section-divider { border-top: 1px dashed var(--border); margin: 12px 0 8px; padding-top: 8px; }
+.cache-empty { color: var(--text-muted); padding: 12px 0; }
+
+/* B5 session-view cache indicators */
+.session-header .session-cache-summary {
+  font-size: 12px; padding: 2px 8px; border-radius: 10px;
+  background: var(--bg-input); border: 1px solid var(--border);
+  font-family: var(--mono);
+}
+.session-header .session-cache-summary.high { color: var(--green); border-color: var(--green); }
+.session-header .session-cache-summary.low { color: var(--yellow); border-color: var(--yellow); }
+.session-header .session-cache-summary.zero { color: var(--yellow); border-color: var(--yellow); background: var(--red-dim); }
+
+.bubble-cache { font-size: 11px; padding-top: 4px; color: var(--text-muted); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.bubble-cache .cache-badge { font-size: 10px; }
+
+.graph-node-rect.cache-zero { stroke: var(--yellow); }
+.graph-node-rect.cache-high { stroke: var(--green); }
+
 /* B2.7 polish */
 .graph-node { transition: transform 300ms ease; }
 .graph-node.fresh .graph-node-rect { animation: graphNodeFadeIn 360ms ease; }

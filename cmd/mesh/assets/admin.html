@@ -301,6 +301,15 @@ __MESH_CSS__</style>
           </div>
         </div>
       </div>
+      <div class="card" id="gw-cache-card">
+        <div class="card-header">
+          <span>Cache</span>
+          <span class="help" data-help="Prompt-cache hit rate and cache_control marker presence across the window. Hit rate denominator includes cache_creation tokens so the metric reflects the real cost of cache builds; markers are Anthropic-style cache_control directives, OpenAI-side caching is reflected in hit rate but not markers.">?</span>
+        </div>
+        <div class="card-body padded">
+          <div id="gw-cache-content"></div>
+        </div>
+      </div>
       <div class="card">
         <div class="card-header">
           <span>Biggest single requests</span>
@@ -341,7 +350,7 @@ __MESH_CSS__</style>
             <thead id="gw-thead"><tr>
               <th>Time</th><th>Gateway</th><th>Session</th><th>Dir</th>
               <th>Client model</th><th>Upstream model</th><th>Status</th>
-              <th>Outcome</th><th>In</th><th>Out</th><th>Elapsed</th>
+              <th>Outcome</th><th>In</th><th>Out</th><th>Cache</th><th>Elapsed</th>
               <th>Project</th><th>Summary</th>
             </tr></thead>
             <tbody id="gw-body"></tbody>

@@ -1860,7 +1860,7 @@ function renderGateway() {
 
     const body = document.getElementById('gw-body');
     if (!filtered.length) {
-      body.innerHTML = '<tr><td colspan="13" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
+      body.innerHTML = '<tr><td colspan="14" style="color:var(--text-muted);padding:20px">No rows match the current filter.</td></tr>';
     } else {
     body.innerHTML = filtered.map(p => {
       const ts = p.resp.ts||p.req.ts||'';
@@ -1890,6 +1890,7 @@ function renderGateway() {
         '<td style="color:'+outcomeColor+'">'+x(outcome)+'</td>'+
         '<td>'+fmtTokensHtml(u.input_tokens)+'</td>'+
         '<td>'+fmtTokensHtml(u.output_tokens)+'</td>'+
+        '<td>'+renderCacheBadgeForPair(p)+'</td>'+
         '<td>'+fmtElapsedHtml(p.resp.elapsed_ms)+'</td>'+
         '<td style="color:var(--cyan);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+xa(project)+'">'+x(project)+'</td>'+
         '<td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim)">'+summary+'</td>'+
@@ -3372,6 +3373,12 @@ function renderGatewayOverview() {
         '<td>'+fmtTokens(r.input_tokens)+' / '+fmtTokens(r.output_tokens)+'</td>' +
       '</tr>').join('');
 
+  // B5 cache visibility — overview card section. gwStats.cache_stats
+  // is the AggregateCacheStats payload from the backend
+  // (cache_stats.go). Empty (HitRate = -1, RowsTotal = 0) renders as
+  // "no cache data."
+  renderCacheOverview(gwStats.cache_stats || null);
+
   // Biggest preamble blocks: the "what injected block is costing me the
   // most" table. key is already "<tag> first-60-chars".
   const pre = (gwStats.preamble_blocks || []).slice(0, 15);
@@ -3633,12 +3640,200 @@ TF.reg('gw', {
     {key:'outcome', label:'Outcome', extract: p => p.resp.outcome||''},
     {key:'in', label:'In', type:'number', extract: p => (p.resp.usage||{}).input_tokens||0},
     {key:'out', label:'Out', type:'number', extract: p => (p.resp.usage||{}).output_tokens||0},
+    {key:'cache', label:'Cache', type:'number', extract: p => {
+      const cs = extractClientCache(p);
+      // Sort key: hit_rate scaled to 0..100, with -1 (no data) sorted last.
+      // Marker-present-zero-hit gets 0 (still sorts above no-data).
+      if (!cs) return -1;
+      return cs.hit_rate >= 0 ? cs.hit_rate * 100 : -0.5;
+    }},
     {key:'elapsed', label:'Elapsed', type:'number', extract: p => p.resp.elapsed_ms||0},
     {key:'project', label:'Project', extract: p => extractProject(p.req)||p.req.path||''},
     {key:'summary', label:'Summary', extract: p => { const s=p.resp.stream_summary; return s&&s.content ? s.content.slice(0,120) : ''; }}
   ],
   onUpdate: () => renderGateway()
 });
+
+// --- B5 cache visibility ---
+//
+// Three surfaces. Backend extracts CacheMarkers + CacheUsage per row
+// (cache_stats.go) and folds them into:
+//   - audit_stats response → gwStats.cache_stats (overview card).
+//   - sessionNode.cache_summary (session view bubbles + graph nodes).
+// The requests table is the only surface where the backend does NOT
+// pre-compute cache_summary; we extract client-side from the row's
+// already-fetched body. extractClientCache mirrors the Go extractor
+// in cache_stats.go for the simpler Anthropic shape.
+
+function renderCacheOverview(s) {
+  const el = document.getElementById('gw-cache-content');
+  if (!el) return;
+  if (!s || (s.rows_with_cache_data === 0 && s.rows_with_markers === 0)) {
+    el.innerHTML = '<div class="cache-empty">No cache data available in this window. Upstream may not support prompt caching, or no requests carried cache_control markers.</div>';
+    return;
+  }
+  const parts = [];
+  // Headline hit rate.
+  if (s.hit_rate >= 0) {
+    const pct = (100 * s.hit_rate).toFixed(1) + '%';
+    const color = s.hit_rate >= 0.5 ? 'var(--green)' : s.hit_rate >= 0.2 ? 'var(--yellow)' : 'var(--red)';
+    parts.push('<div class="cache-stat-row headline">' +
+      '<span class="label">Hit rate</span>' +
+      '<span class="value headline-val" style="color:'+color+'">'+pct+'</span></div>');
+  }
+  // Token breakdown.
+  const totalIn = (s.total_standard_input_tokens || 0) + (s.total_cache_creation_tokens || 0) + (s.total_cache_read_tokens || 0);
+  if (totalIn > 0) {
+    const pct = n => totalIn > 0 ? ' ('+(100*n/totalIn).toFixed(0)+'%)' : '';
+    parts.push('<div class="cache-stat-row"><span class="label">Cached read</span><span class="value">'+
+      fmtTokens(s.total_cache_read_tokens)+' tokens'+pct(s.total_cache_read_tokens)+'</span></div>');
+    parts.push('<div class="cache-stat-row"><span class="label">Cache creation</span><span class="value">'+
+      fmtTokens(s.total_cache_creation_tokens)+' tokens'+pct(s.total_cache_creation_tokens)+'</span></div>');
+    parts.push('<div class="cache-stat-row"><span class="label">Standard input</span><span class="value">'+
+      fmtTokens(s.total_standard_input_tokens)+' tokens'+pct(s.total_standard_input_tokens)+'</span></div>');
+    parts.push('<div class="cache-stat-row"><span class="label" style="color:var(--text-muted)">Total input</span><span class="value" style="color:var(--text-muted)">'+fmtTokens(totalIn)+' tokens</span></div>');
+  }
+  // Marker presence stats.
+  const eligible = s.rows_total || 0;
+  if (eligible > 0) {
+    const mPct = eligible > 0 ? Math.round(100*s.rows_with_markers/eligible)+'%' : '0%';
+    parts.push('<div class="cache-section-divider"></div>');
+    parts.push('<div class="cache-stat-row"><span class="label">Marker presence</span><span class="value">'+
+      s.rows_with_markers+' of '+eligible+' requests ('+mPct+')</span></div>');
+    if (s.rows_with_markers > 0) {
+      parts.push('<div class="cache-stat-row indent"><span>on system prompt</span><span>'+s.rows_with_system_marker+'</span></div>');
+      parts.push('<div class="cache-stat-row indent"><span>on tools</span><span>'+s.rows_with_tool_marker+'</span></div>');
+      parts.push('<div class="cache-stat-row indent"><span>on messages</span><span>'+s.rows_with_message_marker+'</span></div>');
+    } else {
+      parts.push('<div class="cache-stat-row indent" style="color:var(--text-muted);font-style:italic">No requests in this window carried Anthropic-style cache_control markers. (OpenAI-style automatic caching is reflected in the hit rate above.)</div>');
+    }
+  }
+  el.innerHTML = parts.join('');
+}
+
+// extractClientCache mirrors the Go cachedCacheMarkers + cachedCacheUsage
+// for the requests table. The pair p has p.req.body and p.resp.body
+// already fetched. Returns a CacheSummary-shaped object or null when
+// there's nothing to surface.
+function extractClientCache(p) {
+  if (!p) return null;
+  const reqBody = p.req && p.req.body;
+  const respBody = p.resp && p.resp.body;
+  let markerPresent = false;
+  let onSystem = false, onToolCount = 0, toolTotal = 0, onMessageCount = 0;
+  if (reqBody && typeof reqBody === 'object') {
+    if (Array.isArray(reqBody.system)) {
+      for (const b of reqBody.system) {
+        if (b && b.cache_control) { onSystem = true; break; }
+      }
+    }
+    if (Array.isArray(reqBody.tools)) {
+      toolTotal = reqBody.tools.length;
+      for (const t of reqBody.tools) {
+        if (t && t.cache_control) onToolCount++;
+      }
+    }
+    if (Array.isArray(reqBody.messages)) {
+      for (const m of reqBody.messages) {
+        if (Array.isArray(m && m.content)) {
+          for (const b of m.content) if (b && b.cache_control) onMessageCount++;
+        }
+      }
+    }
+    markerPresent = onSystem || onToolCount > 0 || onMessageCount > 0;
+  }
+  // Determine source from direction (a* anthropic, o* openai).
+  const dir = (p.req && p.req.direction) || '';
+  const source = dir.charAt(0) === 'a' ? 'anthropic' : dir.charAt(0) === 'o' ? 'openai' : 'unknown';
+  let hitRate = -1, cacheRead = 0, cacheCreate = 0, stdInput = 0;
+  if (respBody && typeof respBody === 'object' && respBody.usage) {
+    const u = respBody.usage;
+    if (source === 'anthropic') {
+      const hasCache = u.cache_read_input_tokens !== undefined || u.cache_creation_input_tokens !== undefined;
+      cacheRead = u.cache_read_input_tokens || 0;
+      cacheCreate = u.cache_creation_input_tokens || 0;
+      stdInput = u.input_tokens || 0;
+      if (hasCache) {
+        const denom = stdInput + cacheRead + cacheCreate;
+        hitRate = denom > 0 ? cacheRead / denom : 0;
+      }
+    } else if (source === 'openai') {
+      if (u.prompt_cache_hit_tokens !== undefined) {
+        cacheRead = u.prompt_cache_hit_tokens || 0;
+        const pt = u.prompt_tokens || 0;
+        stdInput = Math.max(0, pt - cacheRead);
+        hitRate = pt > 0 ? cacheRead / pt : 0;
+      }
+    }
+  }
+  if (!markerPresent && hitRate < 0) return null;
+  return {
+    marker_present: markerPresent,
+    hit_rate: hitRate,
+    source: source,
+    cache_read: cacheRead,
+    cache_creation: cacheCreate,
+    standard_input: stdInput,
+    on_system: onSystem,
+    on_tool_count: onToolCount,
+    tool_total: toolTotal,
+    on_message_count: onMessageCount,
+  };
+}
+
+// renderCacheBadge produces a small status pill for the requests
+// table column. cs is either a CacheSummary from the backend or one
+// produced client-side via extractClientCache. Returns the dim dash
+// for null.
+function renderCacheBadge(cs) {
+  if (!cs) return '<span class="cache-badge none">—</span>';
+  const tooltip = cacheBadgeTooltip(cs);
+  let cls, text;
+  if (cs.hit_rate >= 0) {
+    const pct = Math.round(100 * cs.hit_rate);
+    if (cs.marker_present) {
+      cls = pct >= 50 ? 'high' : pct > 0 ? 'low' : 'zero';
+    } else {
+      cls = 'openai';
+    }
+    text = pct + '% hit';
+  } else if (cs.marker_present) {
+    cls = 'low';
+    text = 'mark';
+  } else {
+    return '<span class="cache-badge none">—</span>';
+  }
+  return '<span class="cache-badge '+cls+'" title="'+xa(tooltip)+'">'+text+'</span>';
+}
+
+function cacheBadgeTooltip(cs) {
+  const lines = [];
+  if (cs.marker_present) {
+    lines.push('cache_control markers:');
+    lines.push('  system: ' + (cs.on_system ? 'yes' : 'no'));
+    if (cs.tool_total !== undefined) {
+      lines.push('  tools: ' + (cs.on_tool_count || 0) + '/' + (cs.tool_total || 0));
+    } else {
+      lines.push('  tools: ' + (cs.on_tool_count || 0));
+    }
+    lines.push('  messages: ' + (cs.on_message_count || 0));
+  } else {
+    lines.push('cache_control markers: (none)');
+  }
+  if (cs.hit_rate >= 0) {
+    lines.push('usage:');
+    lines.push('  cache_read: ' + (cs.cache_read || 0).toLocaleString());
+    if (cs.cache_creation) lines.push('  cache_creation: ' + cs.cache_creation.toLocaleString());
+    lines.push('  standard input: ' + (cs.standard_input || 0).toLocaleString());
+    lines.push('  source: ' + (cs.source || 'unknown'));
+  }
+  return lines.join('\n');
+}
+
+// renderCacheBadgeForPair is the table-cell entry point.
+function renderCacheBadgeForPair(p) {
+  return renderCacheBadge(extractClientCache(p));
+}
 
 // --- B2 Live Session View ---
 //
@@ -3902,9 +4097,41 @@ function renderSessionHeader() {
   const sid = sessionView.sid;
   const total = sessionView.nodesByID.size;
   const branches = sessionView.branchesByID.size;
+  // B5 per-session cache aggregate. Sum CacheRead /
+  // (CacheRead + CacheCreation + StandardInput) across nodes that
+  // carry a CacheSummary with hit_rate ≥ 0.
+  const agg = aggregateSessionCache();
+  let cacheBlurb = '';
+  if (agg) {
+    const pct = Math.round(100 * agg.hitRate);
+    const cls = pct >= 50 ? 'high' : pct > 0 ? 'low' : 'zero';
+    cacheBlurb =
+      '<span class="session-cache-summary '+cls+'" title="cache_read '+agg.read.toLocaleString()+
+      ' / cache_creation '+agg.creation.toLocaleString()+' / standard input '+agg.std.toLocaleString()+'">' +
+      'cache: '+pct+'% across '+agg.rows+' turn'+(agg.rows===1?'':'s')+'</span>';
+  }
   el.innerHTML =
     '<span class="sess-id" title="'+xa(sid)+'">'+x(sid.slice(0, 12))+(sid.length > 12 ? '…' : '')+'</span>' +
-    '<span class="sess-meta">'+total+' node'+(total===1?'':'s')+' · '+branches+' branch'+(branches===1?'':'es')+'</span>';
+    '<span class="sess-meta">'+total+' node'+(total===1?'':'s')+' · '+branches+' branch'+(branches===1?'':'es')+'</span>' +
+    cacheBlurb;
+}
+
+function aggregateSessionCache() {
+  let read = 0, creation = 0, std = 0, rows = 0;
+  for (const n of sessionView.nodesByID.values()) {
+    const cs = n.cache_summary;
+    if (!cs || cs.hit_rate < 0) continue;
+    rows++;
+    read += cs.cache_read || 0;
+    creation += cs.cache_creation || 0;
+    std += cs.standard_input || 0;
+  }
+  if (rows === 0) return null;
+  const denom = read + creation + std;
+  return {
+    hitRate: denom > 0 ? read / denom : 0,
+    read, creation, std, rows,
+  };
 }
 
 function renderBranchStrip() {
@@ -4054,8 +4281,36 @@ function bubbleHTMLForNode(n) {
         (n.response_summary.output_tokens ? n.response_summary.output_tokens+' out · ' : '') +
         (n.response_summary.elapsed_ms ? n.response_summary.elapsed_ms+' ms' : '') +
       '</div>' +
+      bubbleCacheLine(n) +
       bubbleActions(n) +
     '</div>';
+}
+
+// bubbleCacheLine renders the B5 per-node cache badge inside an
+// assistant bubble. Empty when the node has no CacheSummary.
+function bubbleCacheLine(n) {
+  const cs = n && n.cache_summary;
+  if (!cs) return '';
+  return '<div class="bubble-cache">' + renderCacheBadge(cs) + cacheBubbleNote(cs) + '</div>';
+}
+
+function cacheBubbleNote(cs) {
+  if (!cs) return '';
+  const parts = [];
+  if (cs.marker_present) {
+    const bits = [];
+    if (cs.on_system) bits.push('system');
+    if (cs.on_tool_count) bits.push(cs.on_tool_count + (cs.tool_total ? '/'+cs.tool_total : '') + ' tools');
+    if (cs.on_message_count) bits.push(cs.on_message_count + ' msg' + (cs.on_message_count === 1 ? '' : 's'));
+    if (bits.length) parts.push(bits.join(' + '));
+  }
+  if (cs.cache_read || cs.cache_creation) {
+    const t = [];
+    if (cs.cache_read) t.push((cs.cache_read).toLocaleString()+' read');
+    if (cs.cache_creation) t.push((cs.cache_creation).toLocaleString()+' written');
+    parts.push(t.join(', '));
+  }
+  return parts.length ? '<span style="color:var(--text-dim)">'+parts.join(' · ')+'</span>' : '';
 }
 
 function bubbleMetaLine(n) {
@@ -4360,6 +4615,15 @@ function renderSessionGraph() {
     if (isErr) cls.push('error');
     if (inFlight) cls.push('in-flight');
     if (highlighted) cls.push('highlighted');
+    // B5: color the border by cache state when a cache summary is
+    // present. Zero-hit-with-markers (the actionable case) goes
+    // yellow; high-hit goes green; no marker / no data leaves the
+    // base stroke alone.
+    const cs = n.cache_summary;
+    if (cs && cs.hit_rate >= 0) {
+      if (cs.marker_present && cs.hit_rate < 0.01) cls.push('cache-zero');
+      else if (cs.hit_rate >= 0.5) cls.push('cache-high');
+    }
     const fresh = sessionView.freshNodeIDs && sessionView.freshNodeIDs.has(n.id);
     parts.push('<g class="graph-node'+(fresh ? ' fresh' : '')+
       '" data-node-id="'+xa(n.id)+
@@ -4373,8 +4637,13 @@ function renderSessionGraph() {
     const sub = inFlight ? 'in flight…' :
       (isErr ? 'status '+status+' '+(n.response_summary.outcome||'') :
        (tokensIn ? tokensIn+' → '+tokensOut+'t' : (n.response_summary.outcome||'ok')));
-    parts.push('<text class="graph-node-text" x="'+(p.w/2)+'" y="22" text-anchor="middle">'+x(truncForLabel(headline, 28))+'</text>');
-    parts.push('<text class="graph-node-text muted" x="'+(p.w/2)+'" y="40" text-anchor="middle">'+x(truncForLabel(sub, 32))+'</text>');
+    parts.push('<text class="graph-node-text" x="'+(p.w/2)+'" y="20" text-anchor="middle">'+x(truncForLabel(headline, 28))+'</text>');
+    parts.push('<text class="graph-node-text muted" x="'+(p.w/2)+'" y="36" text-anchor="middle">'+x(truncForLabel(sub, 32))+'</text>');
+    // B5 per-node cache hit rate (third line). "no cache" suppressed.
+    if (cs && cs.hit_rate >= 0) {
+      const cacheLine = 'cache: ' + Math.round(100 * cs.hit_rate) + '%' + (cs.marker_present ? '' : ' · auto');
+      parts.push('<text class="graph-node-text muted" x="'+(p.w/2)+'" y="52" text-anchor="middle">'+x(truncForLabel(cacheLine, 32))+'</text>');
+    }
     parts.push('</g>');
   }
   parts.push('</g>');
