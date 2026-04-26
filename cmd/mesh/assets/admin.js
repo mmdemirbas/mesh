@@ -2742,12 +2742,19 @@ function renderPlainText(s) {
 // The TOC is built from Markdown headings (# / ## / ###). Each heading
 // gets an anchor that scrolls the body pane on click.
 // _mdScroll scrolls to a heading anchor inside the .md-body container
-// without scrolling the page itself.
+// without scrolling the page itself. Uses bounding-rect deltas (not
+// offsetTop) so the math is correct regardless of whether .md-body
+// is the anchor's offsetParent — `.md-body` is `position: static`
+// by default, so offsetTop reads relative to a further ancestor and
+// produces the wrong scroll target.
 function _mdScroll(anchorId) {
   const el = document.getElementById(anchorId);
   if (!el) return;
   const body = el.closest('.md-body');
-  if (body) body.scrollTop = el.offsetTop - body.offsetTop;
+  if (!body) return;
+  const elRect = el.getBoundingClientRect();
+  const bodyRect = body.getBoundingClientRect();
+  body.scrollTop += elRect.top - bodyRect.top;
 }
 
 function renderMdViewer(s) {
