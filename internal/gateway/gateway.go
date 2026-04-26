@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mmdemirbas/mesh/internal/nodeutil"
 	"github.com/mmdemirbas/mesh/internal/state"
 )
 
@@ -68,6 +69,7 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer nodeutil.RecoverPanic("gateway.startClientListener")
 			if err := startClientListener(ctx, cfg, cl, router, recorder, emptyKeyWarnings, log); err != nil {
 				errMu.Lock()
 				if firstErr == nil {
