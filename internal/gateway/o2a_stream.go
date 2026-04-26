@@ -27,18 +27,33 @@ func handleO2AStream(w http.ResponseWriter, r *http.Request, anthReq *MessagesRe
 	}
 
 	ctx := r.Context()
-	if au := getAuditUpstream(r); au != nil {
+	au := getAuditUpstream(r)
+	sessionID := ""
+	if au != nil {
 		ctx = attachTimingTrace(ctx, au.Timer, au.ReqID)
+		sessionID = au.SessionID
 	}
+	// A.4/A.5: pick a key from the pool. Single Pick — D7 forbids
+	// mid-stream fallback.
+	streamKey := upstream.Keys.Pick(ctx, RequestContext{Now: time.Now(), SessionID: sessionID})
 	upstreamReq, err := http.NewRequestWithContext(ctx, "POST", upstream.Cfg.Target, bytes.NewReader(anthBody))
 	if err != nil {
 		writeOpenAIError(w, 500, "cannot create upstream request")
 		return
 	}
 	upstreamReq.Header.Set("Content-Type", "application/json")
-	if upstream.APIKey != "" {
-		upstreamReq.Header.Set("x-api-key", upstream.APIKey)
-		upstreamReq.Header.Set("anthropic-version", "2023-06-01")
+	keyValue := ""
+	if streamKey != nil {
+		keyValue = streamKey.Value
+	} else if upstream.APIKey != "" {
+		keyValue = upstream.APIKey
+	}
+	if keyValue != "" {
+		hdr := map[string]string{}
+		applyAuthHeaders(hdr, upstream.Cfg.API, keyValue)
+		for k, v := range hdr {
+			upstreamReq.Header.Set(k, v)
+		}
 	}
 
 	upstreamResp, err := upstream.Client.Do(upstreamReq)

@@ -91,7 +91,13 @@ func runOneProbe(ctx context.Context, _ string, up *ResolvedUpstream, payload []
 	defer cancel()
 	headers := map[string]string{}
 	if key.Value != "" {
-		headers["Authorization"] = "Bearer " + key.Value
+		// Use the same auth-shape branching as real dispatch so
+		// Anthropic probes get x-api-key + anthropic-version, not
+		// the (silently 401-rejected) Bearer header. Without this,
+		// every Anthropic-upstream probe was misclassified as
+		// AttemptClientError and did not contribute to passive
+		// health detection.
+		applyAuthHeaders(headers, up.Cfg.API, key.Value)
 	}
 	start := time.Now()
 	status, _, err := doUpstreamRequest(probeCtx, up.Client, up.Cfg.Target, payload, headers, log)

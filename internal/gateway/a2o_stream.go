@@ -36,17 +36,38 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 	}
 
 	ctx := r.Context()
-	if au := getAuditUpstream(r); au != nil {
+	au := getAuditUpstream(r)
+	sessionID := ""
+	if au != nil {
 		ctx = attachTimingTrace(ctx, au.Timer, au.ReqID)
+		sessionID = au.SessionID
 	}
+	// A.4/A.5: pick a key from the pool for this streaming attempt.
+	// Per design D7, mid-stream errors don't fall back, so this is
+	// a single Pick — no retry across keys mid-stream. But the
+	// rotation policy (round_robin / lru / sticky_session) does
+	// govern which key gets the streaming traffic.
+	streamKey := upstream.Keys.Pick(ctx, RequestContext{Now: time.Now(), SessionID: sessionID})
 	upstreamReq, err := http.NewRequestWithContext(ctx, "POST", upstream.Cfg.Target, bytes.NewReader(oaiBody))
 	if err != nil {
 		writeAnthropicError(w, 500, "cannot create upstream request")
 		return
 	}
 	upstreamReq.Header.Set("Content-Type", "application/json")
-	if upstream.APIKey != "" {
-		upstreamReq.Header.Set("Authorization", "Bearer "+upstream.APIKey)
+	if streamKey != nil && streamKey.Value != "" {
+		hdr := map[string]string{}
+		applyAuthHeaders(hdr, upstream.Cfg.API, streamKey.Value)
+		for k, v := range hdr {
+			upstreamReq.Header.Set(k, v)
+		}
+	} else if upstream.APIKey != "" {
+		// Passthrough fallback: no pool, but legacy single key
+		// configured. Use applyAuthHeaders for API-shape correctness.
+		hdr := map[string]string{}
+		applyAuthHeaders(hdr, upstream.Cfg.API, upstream.APIKey)
+		for k, v := range hdr {
+			upstreamReq.Header.Set(k, v)
+		}
 	}
 
 	upstreamResp, err := upstream.Client.Do(upstreamReq)
