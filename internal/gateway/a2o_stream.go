@@ -72,6 +72,11 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 
 	upstreamResp, err := upstream.Client.Do(upstreamReq)
 	if err != nil {
+		// REVIEW B1/I1: streaming used to skip key state + audit
+		// attempts entirely. Record a network-error attempt so the
+		// passive health machinery sees this failure and the audit
+		// row carries the upstream/key that was tried.
+		recordStreamAttempt(au, upstream, streamKey, start, 0, nil, nil, err)
 		writeAnthropicError(w, 502, "upstream request failed")
 		log.Error("Upstream stream request failed", "error", err)
 		return
@@ -83,6 +88,7 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 		if au := getAuditUpstream(r); au != nil {
 			au.RespBody = errBody
 		}
+		recordStreamAttempt(au, upstream, streamKey, start, upstreamResp.StatusCode, upstreamResp.Header, errBody, nil)
 		status := translateUpstreamErrorStatus(upstreamResp.StatusCode, DirA2O)
 		writeAnthropicError(w, status, translatedUpstreamErrorMessage(errBody))
 		log.Warn("Upstream stream error", "status", upstreamResp.StatusCode, "body", string(errBody))
@@ -167,12 +173,18 @@ func handleA2OStream(w http.ResponseWriter, r *http.Request, oaiReq *ChatComplet
 		st.processChunk(&chunk)
 	}
 
-	if err := scanner.Err(); err != nil {
-		log.Warn("SSE scanner error", "error", err)
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		log.Warn("SSE scanner error", "error", scanErr)
 	}
 
 	// Finalize.
 	st.finalize()
+
+	// REVIEW B1/I1: record stream completion outcome. Mid-stream
+	// scanner errors classify as network errors (not OK); clean
+	// termination classifies as OK and resets consec failures.
+	recordStreamAttempt(au, upstream, streamKey, start, http.StatusOK, upstreamResp.Header, nil, scanErr)
 
 	log.Info("Stream completed", "model", clientModel, "elapsed", time.Since(start))
 }

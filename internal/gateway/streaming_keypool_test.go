@@ -40,6 +40,133 @@ func waitForListenerReady(t *testing.T, bind string) {
 	t.Fatalf("gateway at %s did not start in time", bind)
 }
 
+// TestRecordStreamAttempt_DegradesKeyOn429 is a unit-level regression
+// for REVIEW B1: streaming used to skip recordPassiveOutcome entirely.
+// The helper now records the per-key state transition the same way
+// dispatchWithKeyRotation does. This test pins:
+//   - 429 → MarkDegraded with Retry-After window
+//   - consec failures incremented on AttemptRateLimited
+//   - audit Attempt entry appended with the right fields
+func TestRecordStreamAttempt_DegradesKeyOn429(t *testing.T) {
+	t.Parallel()
+	key := NewKeyState("E", "secret")
+	au := &AuditUpstream{}
+	up := &ResolvedUpstream{
+		Cfg: UpstreamCfg{
+			Name:   "panshi",
+			API:    APIOpenAI,
+			Health: HealthCfg{Passive: PassiveHealthCfg{FailureThreshold: 1, Backoff: "30s"}},
+		},
+	}
+	respHeaders := http.Header{"Retry-After": []string{"60"}}
+
+	recordStreamAttempt(au, up, key, time.Now().Add(-50*time.Millisecond), 429, respHeaders, nil, nil)
+
+	if key.IsUsable(time.Now()) {
+		t.Errorf("key should be degraded after 429")
+	}
+	// Retry-After: 60 → degradedUntil should be ~60s from now.
+	if !key.IsUsable(time.Now().Add(61 * time.Second)) {
+		t.Errorf("key should recover after Retry-After window")
+	}
+	if len(au.Attempts) != 1 {
+		t.Fatalf("attempts = %d, want 1", len(au.Attempts))
+	}
+	att := au.Attempts[0]
+	if att.UpstreamName != "panshi" {
+		t.Errorf("upstream_name = %q, want panshi", att.UpstreamName)
+	}
+	if att.KeyID != key.ID {
+		t.Errorf("key_id = %q, want %q", att.KeyID, key.ID)
+	}
+	if att.Outcome != AttemptRateLimited {
+		t.Errorf("outcome = %q, want rate_limited", att.Outcome)
+	}
+	if att.StatusCode != 429 {
+		t.Errorf("status = %d, want 429", att.StatusCode)
+	}
+}
+
+// TestRecordStreamAttempt_NetworkErrorIncrementsConsec pins the
+// AttemptNetworkError path: scanner failed mid-stream OR transport
+// error before the response. consec_failures bumps; threshold-hit
+// degrades.
+func TestRecordStreamAttempt_NetworkErrorIncrementsConsec(t *testing.T) {
+	t.Parallel()
+	key := NewKeyState("E", "secret")
+	au := &AuditUpstream{}
+	up := &ResolvedUpstream{
+		Cfg: UpstreamCfg{
+			Name:   "panshi",
+			API:    APIOpenAI,
+			Health: HealthCfg{Passive: PassiveHealthCfg{FailureThreshold: 2, Backoff: "30s"}},
+		},
+	}
+
+	// One failure: not yet degraded.
+	recordStreamAttempt(au, up, key, time.Now(), 0, nil, nil, io.EOF)
+	if !key.IsUsable(time.Now()) {
+		t.Errorf("one failure should not degrade (threshold=2)")
+	}
+	// Second failure: hits threshold.
+	recordStreamAttempt(au, up, key, time.Now(), 0, nil, nil, io.EOF)
+	if key.IsUsable(time.Now()) {
+		t.Errorf("second failure should degrade key (threshold=2)")
+	}
+	if len(au.Attempts) != 2 {
+		t.Errorf("attempts = %d, want 2", len(au.Attempts))
+	}
+	if au.Attempts[0].Outcome != AttemptNetworkError {
+		t.Errorf("outcome = %q, want network_error", au.Attempts[0].Outcome)
+	}
+}
+
+// TestRecordStreamAttempt_OkResetsConsec pins that AttemptOK clears
+// consec_failures and lets a previously-failing key recover.
+func TestRecordStreamAttempt_OkResetsConsec(t *testing.T) {
+	t.Parallel()
+	key := NewKeyState("E", "secret")
+	au := &AuditUpstream{}
+	up := &ResolvedUpstream{
+		Cfg: UpstreamCfg{
+			Name:   "panshi",
+			API:    APIOpenAI,
+			Health: HealthCfg{Passive: PassiveHealthCfg{FailureThreshold: 2, Backoff: "30s"}},
+		},
+	}
+	recordStreamAttempt(au, up, key, time.Now(), 0, nil, nil, io.EOF)
+	if key.Snapshot().ConsecFailures != 1 {
+		t.Errorf("consec = %d, want 1", key.Snapshot().ConsecFailures)
+	}
+	recordStreamAttempt(au, up, key, time.Now(), 200, nil, nil, nil)
+	if key.Snapshot().ConsecFailures != 0 {
+		t.Errorf("AttemptOK should reset consec; got %d", key.Snapshot().ConsecFailures)
+	}
+	if au.Attempts[1].Outcome != AttemptOK {
+		t.Errorf("outcome = %q, want ok", au.Attempts[1].Outcome)
+	}
+}
+
+// TestRecordStreamAttempt_NilKeyAndAuditSafe pins the no-op branches:
+// passthrough upstreams pick nil keys, and audit-disabled requests
+// have nil au. Helper must not panic.
+func TestRecordStreamAttempt_NilKeyAndAuditSafe(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("panic: %v", r)
+		}
+	}()
+	up := &ResolvedUpstream{Cfg: UpstreamCfg{Name: "x", API: APIOpenAI}}
+	recordStreamAttempt(nil, up, nil, time.Now(), 200, nil, nil, nil)
+	au := &AuditUpstream{}
+	recordStreamAttempt(au, up, nil, time.Now(), 200, nil, nil, nil)
+	// Even with nil key, the audit attempt still records the upstream.
+	if len(au.Attempts) != 1 || au.Attempts[0].UpstreamName != "x" {
+		t.Errorf("nil-key audit attempt missing upstream_name: %+v", au.Attempts)
+	}
+}
+
 // TestStreamingPicksFromKeyPool is the post-batch-review regression
 // for finding #1: streaming handlers used to read upstream.APIKey
 // directly and ignore the multi-key pool entirely. After the fix

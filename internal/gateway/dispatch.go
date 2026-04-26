@@ -157,6 +157,55 @@ type dispatchError string
 func (e dispatchError) Error() string           { return string(e) }
 func newDispatchError(msg string) dispatchError { return dispatchError(msg) }
 
+// recordStreamAttempt mirrors dispatchWithKeyRotation's per-attempt
+// bookkeeping for the streaming path. The streaming handlers cannot
+// reuse dispatchWithKeyRotation directly because that helper buffers
+// the entire response body (incompatible with SSE), but the side-
+// effects on the picked key and the audit row's Attempts slice need
+// to match. This was REVIEW B1/I1: pre-fix the streaming path never
+// updated key health and produced audit rows with no upstream/key
+// attribution.
+//
+// Call once per upstream interaction:
+//   - On request-level failure (transport error before any response):
+//     status=0, headers/body nil, err non-nil.
+//   - On non-200 response (incl. 429 / 5xx): pass status, response
+//     headers, response body, err=nil.
+//   - On scanner-level error mid-stream after a 200: status=200, err
+//     non-nil (treated as AttemptNetworkError).
+//   - On clean stream completion: status=200, err=nil.
+//
+// respHeaders / respBody are only consulted for 429 → Retry-After
+// parsing; they may be nil for other paths.
+func recordStreamAttempt(au *AuditUpstream, upstream *ResolvedUpstream, key *KeyState, start time.Time, status int, respHeaders http.Header, respBody []byte, err error) {
+	end := time.Now()
+	outcome := classifyOutcome(status, err)
+	if key != nil {
+		if outcome == AttemptRateLimited {
+			retryAfter, _ := parseRetryAfter(respHeaders, respBody, upstream.Cfg.API, end)
+			key.MarkDegraded(end.Add(retryAfter))
+		}
+		recordPassiveOutcome(key, upstream.Cfg.Health, outcome, end)
+	}
+	if au == nil {
+		return
+	}
+	att := Attempt{
+		UpstreamName: upstream.Cfg.Name,
+		StartedAt:    start,
+		EndedAt:      end,
+		Outcome:      outcome,
+		StatusCode:   status,
+	}
+	if key != nil {
+		att.KeyID = key.ID
+	}
+	if err != nil {
+		att.Error = err.Error()
+	}
+	au.Attempts = append(au.Attempts, att)
+}
+
 // applyAuthHeaders writes the upstream's expected auth header(s)
 // for the given API shape. Anthropic uses x-api-key + a required
 // anthropic-version header; OpenAI uses Authorization: Bearer.
