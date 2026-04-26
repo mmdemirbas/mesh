@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
+	"sync"
 	"time"
 )
 
@@ -25,12 +26,14 @@ import (
 
 // runActiveProbes starts one probe goroutine per upstream that has
 // Health.Active.Enabled set. The goroutine runs until ctx.Done() is
-// signaled (gateway shutdown). Returns immediately; the goroutines
-// own their own lifecycle.
+// signaled (gateway shutdown). Each launched goroutine adds itself
+// to the supplied WaitGroup so gateway.Start can wait for clean
+// shutdown — pre-fix the goroutines were fire-and-forget, violating
+// the project rule "every `go f()` needs an owner."
 //
 // Caller is gateway.Start. Empty router or router with no
 // active-probe upstreams is a no-op.
-func runActiveProbes(ctx context.Context, router *Router, log *slog.Logger) {
+func runActiveProbes(ctx context.Context, router *Router, wg *sync.WaitGroup, log *slog.Logger) {
 	if router == nil {
 		return
 	}
@@ -47,14 +50,20 @@ func runActiveProbes(ctx context.Context, router *Router, log *slog.Logger) {
 				"upstream", name)
 			continue
 		}
-		go probeLoop(ctx, name, up, log.With("upstream", name))
+		if wg != nil {
+			wg.Add(1)
+		}
+		go probeLoop(ctx, wg, name, up, log.With("upstream", name))
 	}
 }
 
 // probeLoop is the per-upstream goroutine. Wakes on the configured
 // interval, fires the probe, classifies the outcome, and updates
 // the chosen key's state via recordPassiveOutcome.
-func probeLoop(ctx context.Context, upstreamName string, up *ResolvedUpstream, log *slog.Logger) {
+func probeLoop(ctx context.Context, wg *sync.WaitGroup, upstreamName string, up *ResolvedUpstream, log *slog.Logger) {
+	if wg != nil {
+		defer wg.Done()
+	}
 	interval := activeInterval(up.Cfg.Health.Active)
 	timeout := activeTimeout(up.Cfg.Health.Active)
 	payload := []byte(up.Cfg.Health.Active.Payload)

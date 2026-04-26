@@ -53,14 +53,15 @@ func Start(ctx context.Context, cfg GatewayCfg, log *slog.Logger) error {
 	}
 	defer func() { _ = recorder.Close() }()
 
-	// Workstream A.3: launch active health probes for every
-	// upstream that opted in. Goroutines own their lifecycle
-	// against ctx — no separate WaitGroup needed.
-	runActiveProbes(ctx, router, log)
-
 	var wg sync.WaitGroup
 	var firstErr error
 	var errMu sync.Mutex
+
+	// Workstream A.3: launch active health probes for every
+	// upstream that opted in. Goroutines join the same WaitGroup
+	// as the client listeners so Start blocks on their exit too —
+	// pre-fix they were fire-and-forget (deep-review M1).
+	runActiveProbes(ctx, router, &wg, log)
 
 	for _, cl := range cfg.Client {
 		cl := cl

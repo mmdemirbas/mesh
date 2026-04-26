@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -180,13 +181,15 @@ func TestRunActiveProbes_StartsOnePerEnabledUpstream(t *testing.T) {
 		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	runActiveProbes(ctx, router, silentProbeLogger())
+	var wg sync.WaitGroup
+	runActiveProbes(ctx, router, &wg, silentProbeLogger())
 	// Wait for a few intervals to fire.
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) && hits.Load() < 2 {
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
+	wg.Wait() // M1 regression: WaitGroup must drain when ctx is cancelled.
 	if hits.Load() < 2 {
 		t.Errorf("expected ≥2 probe hits, got %d", hits.Load())
 	}
@@ -215,7 +218,10 @@ func TestRunActiveProbes_NilRouter(t *testing.T) {
 			t.Errorf("nil router panicked: %v", r)
 		}
 	}()
-	runActiveProbes(context.Background(), nil, silentProbeLogger())
+	var wg sync.WaitGroup
+	runActiveProbes(context.Background(), nil, &wg, silentProbeLogger())
+	// nil-router branch must not Add to wg, so Wait returns instantly.
+	wg.Wait()
 }
 
 // pin imports the test binary needs
