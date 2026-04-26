@@ -76,6 +76,47 @@ func TestKeyPool_PickRotatesAndSkipsDegraded(t *testing.T) {
 	}
 }
 
+// TestKeyPool_RoundRobinDistributesEvenlyWithDegraded pins the
+// fairness contract of round_robin under a partially-degraded pool.
+// REVIEW #7 suggested switching the cursor to a single-advance-per-
+// call model; analysis showed that change biases distribution toward
+// keys that sit after degraded slots (single-advance produces a 1/3
+// vs 2/3 split; the existing per-skip advance produces 1/2 vs 1/2).
+// This test pins the existing — and correct — behavior so the next
+// reviewer doesn't re-open the issue.
+func TestKeyPool_RoundRobinDistributesEvenlyWithDegraded(t *testing.T) {
+	t.Parallel()
+	p, _ := NewKeyPool([]string{"A", "B", "C"}, []string{"a", "b", "c"}, "round_robin")
+	now := time.Date(2026, 4, 26, 10, 0, 0, 0, time.UTC)
+	rc := RequestContext{Now: now}
+	// Degrade the middle key.
+	p.Keys[1].MarkDegraded(now.Add(time.Hour))
+
+	hits := map[string]int{}
+	const calls = 60
+	for i := 0; i < calls; i++ {
+		k := p.Pick(context.Background(), rc)
+		if k == nil {
+			t.Fatalf("pick %d nil", i)
+		}
+		hits[k.ID]++
+	}
+	// Two usable keys; under a single-cursor-advance policy each
+	// should receive ~half the calls. Exact split depends on cursor
+	// start position; allow ±5 around 30.
+	a := hits[p.Keys[0].ID]
+	c := hits[p.Keys[2].ID]
+	if a < calls/2-5 || a > calls/2+5 {
+		t.Errorf("key A got %d/%d picks; expected ~%d (uneven distribution = REVIEW #7 regression)", a, calls, calls/2)
+	}
+	if c < calls/2-5 || c > calls/2+5 {
+		t.Errorf("key C got %d/%d picks; expected ~%d (uneven distribution = REVIEW #7 regression)", c, calls, calls/2)
+	}
+	if hits[p.Keys[1].ID] != 0 {
+		t.Errorf("degraded key got %d picks; should be 0", hits[p.Keys[1].ID])
+	}
+}
+
 func TestKeyPool_PickAllDegradedReturnsNil(t *testing.T) {
 	t.Parallel()
 	p, _ := NewKeyPool([]string{"A", "B"}, []string{"a", "b"}, "round_robin")

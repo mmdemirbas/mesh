@@ -148,6 +148,29 @@ func (k *KeyState) MarkDegraded(until time.Time) {
 	}
 }
 
+// MarkDegradedIfConsecFailures atomically degrades the key when its
+// consecutive-failure counter is at or above the threshold. The
+// read-and-degrade decision happens under a single lock, so a racing
+// MarkSuccess that resets consecFailures to zero between a Snapshot
+// and a MarkDegraded cannot produce a "degrade despite the streak
+// just ended" outcome. Returns true when the key was actually
+// degraded by this call (caller can use this for telemetry).
+func (k *KeyState) MarkDegradedIfConsecFailures(threshold int64, until time.Time) bool {
+	if k == nil || threshold <= 0 {
+		return false
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.consecFailures < threshold {
+		return false
+	}
+	if k.degradedUntil.IsZero() || until.After(k.degradedUntil) {
+		k.degradedUntil = until
+		return true
+	}
+	return false
+}
+
 // MarkUsed updates the lastUsed clock without changing success/failure
 // counters. Used by sticky_session and LRU policies that need a
 // "this key was just dispatched to" signal independent of outcome.

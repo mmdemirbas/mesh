@@ -77,6 +77,16 @@ func (r *roundRobinPolicy) Next(pool []*KeyState, rc RequestContext) *KeyState {
 		return nil
 	}
 	n := uint64(len(pool))
+	// Advance cursor on every scan step (not just once per call).
+	// This is intentional: a degraded slot's "turn" must be consumed
+	// so the next call lands on a different usable key. Switching to
+	// a single advance + scan-forward biases distribution toward keys
+	// that sit after degraded slots (the analysis: with [A,Bdeg,C]
+	// single-advance gives A C C A C C — 1/3, 2/3 — versus the
+	// per-skip-advance A C A C — 50/50). REVIEW #7 was reported as a
+	// minor issue but the analysis showed the existing semantics are
+	// the correct fairness model; documented here so the next
+	// reviewer doesn't re-open it.
 	for i := uint64(0); i < n; i++ {
 		idx := (r.cursor.Add(1) - 1) % n
 		if pool[idx].IsUsable(rc.Now) {

@@ -196,7 +196,9 @@ func recordPassiveOutcome(key *KeyState, hc HealthCfg, outcome AttemptOutcome, n
 	if threshold <= 0 {
 		return
 	}
-	if key.Snapshot().ConsecFailures >= int64(threshold) {
-		key.MarkDegraded(now.Add(hc.PassiveBackoffDuration()))
-	}
+	// Atomic check-and-degrade. Must happen under a single lock,
+	// otherwise a racing MarkSuccess between Snapshot and MarkDegraded
+	// could degrade the key after its consecutive-failure streak just
+	// ended. See REVIEW_WORKSTREAM_A.local.md #3.
+	key.MarkDegradedIfConsecFailures(int64(threshold), now.Add(hc.PassiveBackoffDuration()))
 }

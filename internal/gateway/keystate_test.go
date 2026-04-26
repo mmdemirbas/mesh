@@ -120,6 +120,114 @@ func TestKeyState_SnapshotIsCopy(t *testing.T) {
 	}
 }
 
+// TestKeyState_MarkDegradedIfConsecFailures_Atomicity is the
+// REVIEW #3 regression. The previous recordPassiveOutcome did
+// Snapshot().ConsecFailures + MarkDegraded as two separate locks; a
+// racing MarkSuccess between them could clear consecFailures to zero
+// yet still be degraded based on the stale snapshot. The atomic
+// helper performs the read-and-degrade decision under a single lock,
+// so a MarkSuccess that lands first wins.
+func TestKeyState_MarkDegradedIfConsecFailures_Atomicity(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 4, 26, 11, 0, 0, 0, time.UTC)
+	k := NewKeyState("E", "v")
+
+	// Build up to threshold-1 failures, then a success → consec=0.
+	k.MarkFailure(now)
+	k.MarkFailure(now)
+	k.MarkSuccess(now)
+	if k.Snapshot().ConsecFailures != 0 {
+		t.Fatalf("setup invariant: success should reset consec, got %d", k.Snapshot().ConsecFailures)
+	}
+	// At consec=0, threshold=3 must NOT degrade.
+	if k.MarkDegradedIfConsecFailures(3, now.Add(60*time.Second)) {
+		t.Errorf("MarkDegradedIfConsecFailures must not degrade when consec < threshold")
+	}
+	if !k.IsUsable(now) {
+		t.Errorf("key was wrongly degraded under threshold")
+	}
+
+	// Push consec back up to threshold and confirm it does degrade.
+	k.MarkFailure(now)
+	k.MarkFailure(now)
+	k.MarkFailure(now)
+	if !k.MarkDegradedIfConsecFailures(3, now.Add(60*time.Second)) {
+		t.Errorf("MarkDegradedIfConsecFailures should degrade at threshold")
+	}
+	if k.IsUsable(now) {
+		t.Errorf("key should be degraded after threshold crossed")
+	}
+}
+
+// TestKeyState_MarkDegradedIfConsecFailures_NilOrZeroThreshold pins
+// the no-op branches: nil receiver and threshold<=0.
+func TestKeyState_MarkDegradedIfConsecFailures_NilOrZeroThreshold(t *testing.T) {
+	t.Parallel()
+	var nilK *KeyState
+	if nilK.MarkDegradedIfConsecFailures(1, time.Now()) {
+		t.Errorf("nil receiver must return false")
+	}
+	k := NewKeyState("E", "v")
+	for i := 0; i < 5; i++ {
+		k.MarkFailure(time.Now())
+	}
+	if k.MarkDegradedIfConsecFailures(0, time.Now().Add(time.Minute)) {
+		t.Errorf("threshold=0 must return false (operator opt-out)")
+	}
+}
+
+// TestKeyState_RaceSuccessVsDegradeCheck stresses the read-and-degrade
+// path under concurrent MarkSuccess to catch the original TOCTOU. The
+// invariant: if at the moment of the threshold check consec is below
+// threshold, the key must NOT end up degraded by that call.
+//
+// Run with the race detector. With the pre-fix code (Snapshot +
+// MarkDegraded under two locks) this test reliably trips even without
+// -race because a success can land between the two acquisitions and
+// still leave the key degraded. With the atomic helper, the
+// invariant holds.
+func TestKeyState_RaceSuccessVsDegradeCheck(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	const goroutines = 32
+	const iterations = 500
+	var wg sync.WaitGroup
+	for trial := 0; trial < iterations; trial++ {
+		k := NewKeyState("E", "v")
+		k.MarkFailure(now)
+		k.MarkFailure(now)
+		k.MarkFailure(now) // consec=3 = threshold
+		wg.Add(goroutines)
+		// Half the goroutines try to degrade; half mark success
+		// concurrently.
+		for i := 0; i < goroutines; i++ {
+			i := i
+			go func() {
+				defer wg.Done()
+				if i%2 == 0 {
+					k.MarkSuccess(now)
+				} else {
+					k.MarkDegradedIfConsecFailures(3, now.Add(60*time.Second))
+				}
+			}()
+		}
+		wg.Wait()
+		// Final invariant: if any MarkSuccess landed last, consec is 0
+		// and the key must be usable. We don't know who landed last,
+		// so just assert internal consistency: degraded => consec >=
+		// threshold at the moment of the degrade decision (which is
+		// what the atomic helper guarantees).
+		s := k.Snapshot()
+		if s.ConsecFailures < 3 && !s.DegradedUntil.IsZero() {
+			// This is only legal if a MarkSuccess landed AFTER the
+			// degrade was committed (which is fine — it can't undo a
+			// past degrade). But MarkSuccess clears degradedUntil, so
+			// if degradedUntil is non-zero with consec=0, that's a bug.
+			t.Errorf("trial %d: degraded with consec=%d (expected MarkSuccess to clear degradedUntil)", trial, s.ConsecFailures)
+		}
+	}
+}
+
 func TestKeyState_ConcurrentMarks(t *testing.T) {
 	t.Parallel()
 	k := NewKeyState("E", "v")
