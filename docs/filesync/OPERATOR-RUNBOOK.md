@@ -16,13 +16,13 @@
 
 | §   | Title                                  | v1-ship | Status      |
 |-----|----------------------------------------|---------|-------------|
-| §1  | Before First Run                       | Block   | Skeleton    |
-| §2  | First Real-Data Run (Dry-Run → Real)   | Block   | Skeleton    |
-| §3  | Dashboard Triage                       | Block   | Skeleton    |
-| §4  | Recovery by Disabled Reason            | Block   | Skeleton    |
-| §5  | Backup Restore                         | Block   | Skeleton    |
-| §6  | Peer-State vs File-State Divergence    | Block   | Skeleton    |
-| §7  | Per-Folder Reload (`/reopen` endpoint) | Block   | Skeleton    |
+| §1  | Before First Run                       | Block   | Ready       |
+| §2  | First Real-Data Run (Dry-Run → Real)   | Block   | Ready       |
+| §3  | Dashboard Triage                       | Block   | Ready       |
+| §4  | Recovery by Disabled Reason            | Block   | Ready       |
+| §5  | Backup Restore                         | Block   | Ready       |
+| §6  | Peer-State vs File-State Divergence    | Block   | Ready       |
+| §7  | Per-Folder Reload (`/reopen` endpoint) | Block   | Ready       |
 | §8  | Build-Time Decisions for Operators     | Follow  | Pending     |
 | §9  | Known Limits                           | Follow  | Pending     |
 | §10 | Escalation                             | Follow  | Pending     |
@@ -81,7 +81,12 @@ mode `0600`. GFS retention keeps 5 daily + 4 weekly + 1 monthly
 per folder. Estimate worst case: `10 × <DB size>` per folder.
 Provision accordingly.
 
-> Populated in audit commit 9.
+The scheduler fires every **24 hours** after `mesh up`. The
+first backup is `backupCadence` (24 h) AFTER the daemon
+starts — there is no startup-time backup. Operators who need
+an immediate snapshot can run `VACUUM INTO` manually via
+`sqlite3` against the folder's `index.sqlite`, but the daily
+cadence is the audit-prescribed contract.
 
 ---
 
@@ -231,7 +236,38 @@ the enum to bound cardinality.
 
 > Populated in audit commit 3.
 
-### §3.4 Process-level peer-session warnings (iter-4 Z10)
+### §3.4 The `recovering` state — SIGKILL recovery (iter-4 Z8)
+
+When a folder shows `status: recovering` in the dashboard, the
+process detected un-checkpointed WAL frames at folder open
+(audit §6 commit 10 / iter-4 Z8) — the previous run did not
+shut down cleanly. The folder is running a synchronous
+`PRAGMA integrity_check` BEFORE going live; the silent
+live-but-corrupt window between `quick_check` and the
+deferred `integrity_check` is closed during this state.
+
+Expected behavior:
+- `status: recovering` shows for tens of seconds on a large DB
+  (~10 MB/s scan; a 200 MB DB takes ~20 s).
+- The folder transitions to `status: connected` (or `scanning`)
+  when `integrity_check` passes.
+- If `integrity_check` fails, the folder transitions to
+  `status: disabled, reason: integrity_check_failed`
+  → §4.2.
+
+When to investigate:
+- `recovering` persisting past one minute on a small DB
+  → suspect a stuck PRAGMA or filesystem stall.
+- `recovering` followed by `integrity_check_failed` on a
+  folder that previously passed → the SIGKILL'd write left
+  irrecoverable corruption; restore from backup per §5.
+
+This state cannot be triggered by an operator on a healthy
+folder. It only fires when WAL frames were left
+un-checkpointed at the previous shutdown — typically a
+process kill, OS panic, or power loss.
+
+### §3.5 Process-level peer-session warnings (iter-4 Z10)
 
 Beyond per-folder `FolderDisabled` rows, watch the
 process-level metric:
@@ -278,14 +314,27 @@ until the restore lands cleanly.
 
 **Action:** restore from the most recent quick_check_ok backup; writes after the failure are lost; see runbook §4.2 + §5
 
-`PRAGMA integrity_check` runs asynchronously after folder open
-and catches subtle corruption that `quick_check` misses (~10 MB/s,
-tens of seconds on a large DB). The folder was live during the
-window between open and the integrity_check completion; writes
-that committed in that window are in the DB but will be lost on
-restore — this is expected. The disabled-state JSON carries
-`tx_in_flight_rolled_back: true` if a writer transaction was
-running at integrity_check failure time (iter-4 Z6).
+`PRAGMA integrity_check` catches subtle corruption that
+`quick_check` misses (~10 MB/s, tens of seconds on a large DB).
+The check fires in one of two arms:
+
+- **Async arm (clean shutdown).** `integrity_check` runs in the
+  background after folder open; the folder is live during the
+  check window. Writes that committed during this window are
+  in the DB but will be lost on restore — this is expected.
+  The disabled-state JSON carries `tx_in_flight_rolled_back: true`
+  if a writer transaction was running at integrity_check failure
+  time (iter-4 Z6).
+
+- **Sync arm (SIGKILL recovery, iter-4 Z8).** When the previous
+  shutdown left un-checkpointed WAL frames, the open path runs
+  `integrity_check` synchronously BEFORE going live (status
+  shows `recovering` per §3.4). No writes happen during the
+  recovery check; if it fails, no live state needs unwinding.
+  This closes the silent live-but-corrupt window the async
+  arm would otherwise open on SIGKILL recovery.
+
+In both arms, recovery is restore-from-backup per §5.
 
 ### §4.3 `device_id_mismatch`
 
