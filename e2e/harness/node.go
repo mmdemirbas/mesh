@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/moby/moby/api/types/container"
 	"github.com/testcontainers/testcontainers-go"
 	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -77,6 +78,14 @@ type NodeOptions struct {
 	SkipConfig bool
 	// StartupTimeout bounds the readiness wait. Defaults to 60s.
 	StartupTimeout time.Duration
+	// Binds defines host-to-container bind mounts in Docker shorthand
+	// ("host:container" or "host:container:ro"). Use this when a path
+	// inside the container must keep a stable filesystem device ID
+	// across Stop/Start — Docker's overlay rootfs gets a new device id
+	// on restart, but a bind-mounted host path does not. Required for
+	// any filesync scenario that exercises peer.Stop/peer.Start with a
+	// folder root that mesh has already scanned (G3 device-id guard).
+	Binds []string
 }
 
 // Node wraps a running mesh (or stub) container on a Network and exposes the
@@ -153,6 +162,12 @@ func StartNode(ctx context.Context, t testing.TB, net *Network, opts NodeOptions
 		Entrypoint:     opts.Entrypoint,
 		WaitingFor:     waitStrategy,
 	}
+	if len(opts.Binds) > 0 {
+		binds := append([]string(nil), opts.Binds...)
+		req.HostConfigModifier = func(hc *container.HostConfig) {
+			hc.Binds = append(hc.Binds, binds...)
+		}
+	}
 
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
@@ -214,11 +229,29 @@ func (n *Node) MustExec(ctx context.Context, cmd ...string) string {
 
 // WriteFile copies content into the container at path with the given mode
 // (0600 when zero).
+//
+// CopyToContainer's tar archive sets a zero ModTime header, which docker
+// applies to the extracted file as the Unix epoch. Filesync's scan
+// fast-path skips re-hashing when (size, mtime) match the indexed entry —
+// rewriting the same path with same-size content would silently leave the
+// old hash in the index. WriteFile follows the copy with `touch` to advance
+// mtime to "now" inside the container so subsequent scans pick up the
+// content change.
 func (n *Node) WriteFile(ctx context.Context, path string, content []byte, mode int64) error {
 	if mode == 0 {
 		mode = 0o600
 	}
-	return n.container.CopyToContainer(ctx, content, path, mode)
+	if err := n.container.CopyToContainer(ctx, content, path, mode); err != nil {
+		return err
+	}
+	code, out, err := n.Exec(ctx, "touch", path)
+	if err != nil {
+		return fmt.Errorf("touch %s: %w", path, err)
+	}
+	if code != 0 {
+		return fmt.Errorf("touch %s: exit=%d output=%q", path, code, out)
+	}
+	return nil
 }
 
 // ReadFile reads a file from inside the container. Returns an empty slice
