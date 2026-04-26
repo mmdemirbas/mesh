@@ -285,10 +285,12 @@ func (idx *FileIndex) DirtyPaths() (dirty, deleted map[string]struct{}) {
 	return dirty, deleted
 }
 
-// ClearDirty empties both dirty- and deleted-set, called after a
-// successful persist commit. On commit failure the caller MUST NOT call
-// this — the sets stay populated so the next cycle retries the same
-// rows.
+// ClearDirty empties both dirty- and deleted-set. Use this only at
+// startup (loadIndexDB) and in tests where the caller controls the
+// index in isolation — every path observed under the live indexMu is
+// presumed to be already in SQLite. Production persist paths must call
+// ClearPersisted instead so paths added between snapshot and commit do
+// not lose their dirty markers.
 func (idx *FileIndex) ClearDirty() {
 	if len(idx.dirty) > 0 {
 		clear(idx.dirty)
@@ -296,6 +298,63 @@ func (idx *FileIndex) ClearDirty() {
 	if len(idx.deleted) > 0 {
 		clear(idx.deleted)
 	}
+}
+
+// ClearPersisted removes the dirty/deleted markers for paths that were
+// just committed, comparing the live entry against the snapshotted
+// entry (snap.files[path]) so a path that was BOTH in the snapshot
+// AND mutated between snapshot and commit stays dirty — its new in-
+// memory value has not yet reached SQLite. The caller passes the same
+// (dirty, deleted) maps DirtyPaths returned and the snapshot the
+// commit wrote.
+//
+// Persist must call this rather than ClearDirty: a blanket clear can
+// silently drop a path that another goroutine marked dirty during the
+// commit, leading to a permanent SQLite-vs-memory divergence; a naïve
+// "remove every snapshotted path" clear can drop a path whose value
+// changed during the commit, leaving the new value un-persisted until
+// some future mutation re-marks the path.
+func (idx *FileIndex) ClearPersisted(snap *FileIndex, dirty, deleted map[string]struct{}) {
+	for p := range dirty {
+		live, liveExists := idx.files[p]
+		snapEntry, snapExists := snap.files[p]
+		// A path is "settled" — committed value matches live value —
+		// when both sides agree on existence and the FileEntry value
+		// is unchanged. FileEntry is shallow-comparable: SHA256, size,
+		// mtime, sequence, mode are scalars; VectorClock is shared by
+		// reference (production paths allocate new maps on bump/merge),
+		// so pointer equality of the map header is the right test.
+		if liveExists == snapExists && entriesEqual(live, snapEntry) {
+			delete(idx.dirty, p)
+		}
+	}
+	for p := range deleted {
+		live, liveExists := idx.files[p]
+		snapEntry, snapExists := snap.files[p]
+		if liveExists == snapExists && entriesEqual(live, snapEntry) {
+			delete(idx.deleted, p)
+		}
+	}
+}
+
+// entriesEqual compares two FileEntry values by their persisted fields.
+// VectorClock equality uses pointer-of-map identity since production
+// paths replace the whole map on mutation.
+func entriesEqual(a, b FileEntry) bool {
+	if a.Size != b.Size || a.MtimeNS != b.MtimeNS || a.SHA256 != b.SHA256 ||
+		a.Deleted != b.Deleted || a.Sequence != b.Sequence || a.Mode != b.Mode ||
+		a.Inode != b.Inode || a.PrevPath != b.PrevPath {
+		return false
+	}
+	if len(a.Version) != len(b.Version) {
+		return false
+	}
+	for k, va := range a.Version {
+		if vb, ok := b.Version[k]; !ok || va != vb {
+			return false
+		}
+	}
+	return true
 }
 
 // MarkAllDirty stamps every current path as dirty. Used by the

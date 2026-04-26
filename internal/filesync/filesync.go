@@ -261,13 +261,10 @@ const activityHistorySize = 50
 func GetFolderStatuses() []FolderStatus {
 	var result []FolderStatus
 	activeNodes.ForEach(func(n *Node) {
-		ids := make([]string, 0, len(n.folders))
-		for id := range n.folders {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
-		for _, id := range ids {
-			fs := n.folders[id]
+		entries := n.folderEntries()
+		for _, entry := range entries {
+			id := entry.ID
+			fs := entry.FS
 
 			// PERSISTENCE-AUDIT.md §6 commit 3: a disabled folder may
 			// have nil fs.index / fs.peers if it failed before the
@@ -364,16 +361,11 @@ func GetFolderStatuses() []FolderStatus {
 func GetConflicts() []ConflictInfo {
 	var result []ConflictInfo
 	activeNodes.ForEach(func(n *Node) {
-		ids := make([]string, 0, len(n.folders))
-		for id := range n.folders {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
-		for _, id := range ids {
-			fs := n.folders[id]
+		for _, entry := range n.folderEntries() {
+			fs := entry.FS
 			fs.indexMu.RLock()
 			for _, c := range fs.conflicts {
-				result = append(result, ConflictInfo{FolderID: id, Path: c})
+				result = append(result, ConflictInfo{FolderID: entry.ID, Path: c})
 			}
 			fs.indexMu.RUnlock()
 		}
@@ -545,7 +537,9 @@ func SnapshotPeerSessionDropped() map[string]int64 {
 func GetFolderMetrics() []FolderMetricsSnapshot {
 	var result []FolderMetricsSnapshot
 	activeNodes.ForEach(func(n *Node) {
-		for id, fs := range n.folders {
+		for _, entry := range n.folderEntries() {
+			id := entry.ID
+			fs := entry.FS
 			snap := FolderMetricsSnapshot{
 				FolderID:           id,
 				PeerSyncs:          fs.metrics.PeerSyncs.Load(),
@@ -731,7 +725,9 @@ func (n *Node) openFolderInit(ctx context.Context, fcfg config.FolderCfg) *integ
 	}
 	fs.writerCtx = writerCtx
 	fs.writerCancel = writerCancel
+	n.foldersMu.Lock()
 	n.folders[fcfg.ID] = fs
+	n.foldersMu.Unlock()
 
 	if err := refuseLegacyIndex(folderCacheDir); err != nil {
 		fs.disable(DisabledLegacyIndex, err.Error(), "")
@@ -891,7 +887,9 @@ func (n *Node) openFolderInit(ctx context.Context, fcfg config.FolderCfg) *integ
 // In-flight scan / sync goroutines on this folder's writerCtx
 // observe ctx.Done from the writerCancel and exit.
 func (n *Node) closeOneFolder(folderID string) {
+	n.foldersMu.RLock()
 	fs, ok := n.folders[folderID]
+	n.foldersMu.RUnlock()
 	if !ok {
 		return
 	}
@@ -917,7 +915,9 @@ func (n *Node) closeOneFolder(folderID string) {
 		_ = fs.root.Close()
 		fs.root = nil
 	}
+	n.foldersMu.Lock()
 	delete(n.folders, folderID)
+	n.foldersMu.Unlock()
 }
 
 // runBackupSweep walks every folder on the node, calls
@@ -1693,9 +1693,16 @@ type Node struct {
 	deviceID string
 	dataDir  string // ~/.mesh/filesync/
 
-	// folders is populated once in Start() before any goroutine launches
-	// and is never modified after that — no lock needed for map reads.
-	folders map[string]*folderState
+	// folders is populated in Start() before goroutines launch, and is
+	// mutated afterwards only by /reopen and /restore (closeOneFolder
+	// + openFolderInit) under reopenLockMu. Hot paths (sync/scan) that
+	// look up by ID can rely on n.folders[id] returning a stable
+	// *folderState — once registered, the entry is never replaced
+	// in-place. Code that ITERATES n.folders (admin status reads,
+	// scan loop, runBackupSweep) must hold foldersMu.RLock to avoid a
+	// runtime panic against a concurrent reopen's delete.
+	folders   map[string]*folderState
+	foldersMu sync.RWMutex
 
 	// tlsFingerprint is the SHA-256 fingerprint of this node's server cert.
 	tlsFingerprint string
@@ -2173,7 +2180,9 @@ func (n *Node) scanLoop(ctx context.Context, interval time.Duration, watcher *fo
 // multi-minute WalkDirs over huge folders (m2 repo, build outputs).
 func (n *Node) runScan(ctx context.Context, dirtyRoots map[string]bool) {
 	anyChanged := false
-	for id, fs := range n.folders {
+	for _, entry := range n.folderEntries() {
+		id := entry.ID
+		fs := entry.FS
 		if ctx.Err() != nil {
 			return
 		}
@@ -2433,7 +2442,8 @@ func (n *Node) syncAllPeers(ctx context.Context) {
 	sem := make(chan struct{}, n.cfg.MaxConcurrent)
 
 	var wg sync.WaitGroup
-	for _, fs := range n.folders {
+	for _, entry := range n.folderEntries() {
+		fs := entry.FS
 		if fs.cfg.Direction == "disabled" {
 			continue
 		}
@@ -2565,10 +2575,19 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 	// reset that drops BaseHashes and resets LastSeenSequence so the
 	// next cycle does a full exchange. Audit §6 commit 7 phase B /
 	// iter-4 Z2: see classifyPeerResetTrigger for the full contract.
+	//
+	// fs.peers is mutated under indexMu by sibling syncFolder
+	// goroutines (one per peer) and by the scan-swap path's
+	// markRemovedPeers / gcRemovedPeers, so this read needs the
+	// short RLock; without it Go's runtime panics with "concurrent
+	// map read and map write" the first time two peers' sync cycles
+	// land in the same window.
+	fs.indexMu.RLock()
 	currentLastEpoch := ""
 	if old, ok := fs.peers[peerAddr]; ok {
 		currentLastEpoch = old.LastEpoch
 	}
+	fs.indexMu.RUnlock()
 	remoteEpoch := remoteIdx.GetEpoch()
 	if trigger := classifyPeerResetTrigger(remoteIdx.GetSequence(), peerLastSeq, remoteEpoch, currentLastEpoch); trigger != "" {
 		slog.Info("peer reset detected, will do full exchange next cycle",
@@ -2795,7 +2814,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 				if fileMode == 0 {
 					fileMode = 0644
 				}
-				_ = fs.root.Chmod(rp.NewPath, fileMode)
+				_ = chmodFileRoot(fs.root, rp.NewPath, fileMode)
 
 				fs.indexMu.Lock()
 				// Tombstone the old path.
@@ -3110,7 +3129,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					if fileMode == 0 {
 						fileMode = 0644
 					}
-					_ = fs.root.Chmod(action.Path, fileMode)
+					_ = chmodFileRoot(fs.root, action.Path, fileMode)
 
 					// C2: post-write verification on network filesystems.
 					// Returning an error here triggers the .bak restore
@@ -3353,7 +3372,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 					if cfMode == 0 {
 						cfMode = 0644
 					}
-					_ = fs.root.Chmod(action.Path, cfMode)
+					_ = chmodFileRoot(fs.root, action.Path, cfMode)
 
 					fs.indexMu.Lock()
 					fs.index.Sequence++
@@ -3422,7 +3441,7 @@ func (n *Node) syncFolder(ctx context.Context, fs *folderState, peerAddr string,
 							if cfMode == 0 {
 								cfMode = 0644
 							}
-							_ = fs.root.Chmod(conflictRelPath, cfMode)
+							_ = chmodFileRoot(fs.root, conflictRelPath, cfMode)
 							pruneConflicts(fs.root, conflictRelPath)
 						}()
 					}
@@ -3729,9 +3748,37 @@ func (n *Node) buildIndexExchange(folderID string, sinceSequence int64) *pb.Inde
 }
 
 // findFolder returns the folder state for the given ID, or nil.
-// n.folders is immutable after Start() — no lock needed.
+// reopen / restore can delete and re-add an entry while peer-facing
+// handlers are running, so the lookup itself goes through foldersMu.
+// The returned *folderState is then stable for the caller's lifetime
+// (closeOneFolder closes the underlying handles but never reuses the
+// pointer).
 func (n *Node) findFolder(folderID string) *folderState {
+	n.foldersMu.RLock()
+	defer n.foldersMu.RUnlock()
 	return n.folders[folderID]
+}
+
+// folderEntries returns a snapshot of folder ID → state pairs, sorted
+// by ID. Iterators that walk every folder (admin status reads, scan
+// loops, periodic sweeps) call this rather than ranging n.folders
+// directly — the snapshot is taken under foldersMu.RLock and held by
+// the caller, so reopen / restore is free to mutate the live map
+// while the iteration runs.
+func (n *Node) folderEntries() []folderEntry {
+	n.foldersMu.RLock()
+	out := make([]folderEntry, 0, len(n.folders))
+	for id, fs := range n.folders {
+		out = append(out, folderEntry{ID: id, FS: fs})
+	}
+	n.foldersMu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+type folderEntry struct {
+	ID string
+	FS *folderState
 }
 
 // isPeerConfigured checks if the given IP is a configured peer for any folder.
@@ -3739,8 +3786,8 @@ func (n *Node) findFolder(folderID string) *folderState {
 // been expanded via DNS; the request IP is compared against each entry via
 // peerMatchesAddr which handles IPv6 canonicalization and loopback variants.
 func (n *Node) isPeerConfigured(requestIP string) bool {
-	for _, fs := range n.folders {
-		for _, host := range fs.cfg.AllowedPeerHosts {
+	for _, entry := range n.folderEntries() {
+		for _, host := range entry.FS.cfg.AllowedPeerHosts {
 			if peerMatchesAddr(host, requestIP) {
 				return true
 			}
@@ -3826,15 +3873,19 @@ func (n *Node) persistFolder(folderID string, force bool) {
 	// allocate new VectorClock maps). The dirty/deleted sets ride
 	// with the clone.
 	var idxSnapshot *FileIndex
+	var snapshotDirty, snapshotDeleted map[string]struct{}
 	var peersSnapshot map[string]PeerState
 	fs.indexMu.RLock()
 	if shouldSaveIndex {
 		idxSnapshot = fs.index.clone()
 		// clone() does NOT copy the dirty/deleted sets; carry them
-		// explicitly so saveIndex sees what's pending.
-		dirty, deleted := fs.index.DirtyPaths()
-		idxSnapshot.dirty = dirty
-		idxSnapshot.deleted = deleted
+		// explicitly so saveIndex sees what's pending. Hold the
+		// caller-side handles too so the post-commit clear knows
+		// exactly which paths were committed (any path added to
+		// fs.index.dirty after this snapshot must NOT be cleared).
+		snapshotDirty, snapshotDeleted = fs.index.DirtyPaths()
+		idxSnapshot.dirty = snapshotDirty
+		idxSnapshot.deleted = snapshotDeleted
 	}
 	if shouldSavePeers {
 		peersSnapshot = make(map[string]PeerState, len(fs.peers))
@@ -3866,7 +3917,7 @@ func (n *Node) persistFolder(folderID string, force bool) {
 			fs.indexMu.Unlock()
 		} else {
 			fs.indexMu.Lock()
-			fs.index.ClearDirty()
+			fs.index.ClearPersisted(idxSnapshot, snapshotDirty, snapshotDeleted)
 			fs.indexMu.Unlock()
 		}
 		// Both halves rode one tx; the perf log keeps two columns for
@@ -3893,7 +3944,7 @@ func (n *Node) persistFolder(folderID string, force bool) {
 			fs.indexMu.Unlock()
 		} else {
 			fs.indexMu.Lock()
-			fs.index.ClearDirty()
+			fs.index.ClearPersisted(idxSnapshot, snapshotDirty, snapshotDeleted)
 			fs.indexMu.Unlock()
 		}
 		indexMs = ms(time.Since(idxStart))
