@@ -96,10 +96,20 @@ func TestGatewayCfg_Validate(t *testing.T) {
 			c.Upstream[0].APIKeyEnvs = []string{"K1", "K2"}
 			c.Upstream[0].RotationPolicy = "magic"
 		}, "invalid rotation_policy"},
-		{"rotation_policy_without_multi_key", func(c *GatewayCfg) {
+		{"rotation_policy_with_legacy_single_key", func(c *GatewayCfg) {
 			c.Upstream[0].APIKeyEnv = "K1"
 			c.Upstream[0].RotationPolicy = "round_robin"
-		}, "rotation_policy is set but api_key_envs is not"},
+		}, "fewer than 2 keys"},
+		// deep-review I3: pre-fix the validation only fired when
+		// APIKeyEnv was set; the passthrough case (no env at all)
+		// passed validation while silently dropping rotation_policy.
+		{"rotation_policy_on_passthrough", func(c *GatewayCfg) {
+			c.Upstream[0].RotationPolicy = "round_robin"
+		}, "passthrough upstream uses client auth"},
+		{"rotation_policy_with_single_apikeyenvs", func(c *GatewayCfg) {
+			c.Upstream[0].APIKeyEnvs = []string{"ONLY_KEY"}
+			c.Upstream[0].RotationPolicy = "lru"
+		}, "fewer than 2 keys"},
 		{"valid_lru", func(c *GatewayCfg) {
 			c.Upstream[0].APIKeyEnvs = []string{"K1", "K2"}
 			c.Upstream[0].RotationPolicy = "lru"

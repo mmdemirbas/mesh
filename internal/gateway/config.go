@@ -291,12 +291,21 @@ func (c *GatewayCfg) Validate() error {
 		if !IsValidRotationPolicy(u.RotationPolicy) {
 			return fmt.Errorf("upstream[%d] %q: invalid rotation_policy %q (valid: round_robin, lru, sticky_session)", i, u.Name, u.RotationPolicy)
 		}
-		if u.RotationPolicy != "" && len(u.APIKeyEnvs) == 0 && u.APIKeyEnv != "" {
-			// Configured policy on a single-key pool is silently
-			// ignored at runtime (single-key pools always use
+		if u.RotationPolicy != "" && (u.APIKeyEnv != "" || len(u.APIKeyEnvs) < 2) {
+			// Configured policy on a single-key or passthrough pool
+			// is silently ignored at runtime (such pools always use
 			// "single"). Reject at config-time so the operator
-			// notices the unused field.
-			return fmt.Errorf("upstream[%d] %q: rotation_policy is set but api_key_envs is not (rotation only applies to multi-key pools; remove the policy or add a second key)", i, u.Name)
+			// notices the unused field. Pre-fix the guard only fired
+			// for the single-key case (APIKeyEnv set, APIKeyEnvs
+			// empty), so a passthrough upstream with rotation_policy
+			// set passed validation and silently dropped the
+			// directive (deep-review I3).
+			switch {
+			case u.APIKeyEnv == "" && len(u.APIKeyEnvs) == 0:
+				return fmt.Errorf("upstream[%d] %q: rotation_policy is set but no api_key_env(s) configured (passthrough upstream uses client auth — remove the policy)", i, u.Name)
+			default:
+				return fmt.Errorf("upstream[%d] %q: rotation_policy is set but the pool has fewer than 2 keys (rotation only applies to multi-key pools; remove the policy or add a second key via api_key_envs)", i, u.Name)
+			}
 		}
 		// Workstream A.2: health block validation. The block's own
 		// validate() handles the per-field shape; this returns the
